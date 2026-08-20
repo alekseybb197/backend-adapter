@@ -1,0 +1,18 @@
+[Unit]
+Description=Claude Code <-> OpenAI Backend Adapter
+After=network.target
+
+[Service]
+Type=simple
+User=barabanov
+WorkingDirectory=/home/username/tmp
+EnvironmentFile=/home/username/tmp/backend-adapter.env
+ExecStart=/usr/bin/python3 /home/username/tmp/backend-adapter.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backend-adapter
+
+[Install]
+WantedBy=default.target

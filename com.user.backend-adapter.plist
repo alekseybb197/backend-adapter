@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.backend-adapter</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/username/tmp/backend-adapter.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/username/tmp</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ADAPTER_BACKEND_BASE</key>
+        <string>https://llm.service.example.com</string>
+        <key>ADAPTER_BACKEND_KEY</key>
+        <string>your-api-key-here</string>
+        <key>ADAPTER_PROXY_PORT</key>
+        <string>9999</string>
+        <key>ADAPTER_DEBUG_ENABLE</key>
+        <string>1</string>
+        <key>ADAPTER_DETACH_ENABLE</key>
+        <string>0</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/username/tmp/adapter.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/username/tmp/adapter.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
