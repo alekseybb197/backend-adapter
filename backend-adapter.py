@@ -410,7 +410,7 @@ def _write_pidfile() -> None:
 
 if __name__ == "__main__":
     if ADAPTER_DETACH:
-        print(f"[\DETACH] Starting as background service...")
+        print(f"[DETACH] Starting as background service...")
         print(f"Backend:  {BACKEND_BASE}/v1/chat/completions")
         print(f"PID file: {os.environ.get('ADAPTER_PIDFILE', '/tmp/adapter.pid')}")
         _detach()
