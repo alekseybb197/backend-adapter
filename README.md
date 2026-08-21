@@ -180,6 +180,13 @@ tail -f ~/tmp/adapter.log
 | ADAPTER_BACKEND_KEY | (empty) | yes | API key / Bearer token для бэкенда |
 | ADAPTER_PROXY_PORT | 9999 | no | Порт, на котором слушает адаптер |
 
+### Таймаут и повторы
+
+| Variable | Default | Required | Description |
+|---|---|---|---|
+| ADAPTER_TIMEOUT | 300 | no | Таймаут запроса к бэкенду, сек. Превышен при превышении времени ожидания |
+| ADAPTER_RETRY_COUNT | 3 | no | Число повторов (retry) запроса при таймауте или ошибках 429/502/503/504. Retry не делается для других HTTP-ошибок (4xx) и при 429/502/503/504 повтор делается с экспоненциальной задержкой `2 ** attempt` |
+
 ### Отладка
 
 | Variable | Default | Required | Description |

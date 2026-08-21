@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Claude Code <-> OpenAI-backend adapter v4 (env-based config)
-Fix: ALL system messages collected at the beginning
+Claude Code <-> OpenAI-backend adapter v5 (env-based config)
+Fix: timeout + retry, ALL system messages at the beginning
 Supports: tools, tool_choice, tool_use, tool_result, tool_calls fallback
 
 Конфигурация:
-  ADAPTER_BACKEND_BASE   — URL бэкенда (по умолч. https://llm.service.example.com)
+  ADAPTER_BACKEND_BASE   — URL бэкенда
   ADAPTER_BACKEND_KEY    — API-ключ бэкенда
-  ADAPTER_PROXY_PORT     — порт прокси-сервера (по умолч. 9999)
-  ADAPTER_DEBUG_ENABLE   — включить логирование (1/true=yes по умолч., 0/false/no отключить)
-  ADAPTER_DEBUG_LOGFILE  — путь к файлу для логирования (если задан, логи идут в файл вместо консоли)
-  ADAPTER_DETACH_ENABLE  — отпустить от консоли (1/true=yes = фоновый процесс, 0/false/no = текущее поведение)
+  ADAPTER_PROXY_PORT     — порт прокси (по умолч. 9999)
+  ADAPTER_DEBUG_ENABLE   — логирование (1/true=yes)
+  ADAPTER_DEBUG_LOGFILE  — файл для логов
+  ADAPTER_DETACH_ENABLE  — фоновый режим (1/true=yes)
+  ADAPTER_TIMEOUT        — таймаут к бэкенду в сек (по умолч. 300)
+  ADAPTER_RETRY_COUNT    — число retry (по умолч. 3)
 """
 import http.server
 import socketserver
@@ -24,23 +26,27 @@ import sys
 import time
 
 # ==================== НАСТРОЙКИ ====================
-BACKEND_BASE    = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
-BACKEND_KEY     = os.environ.get("ADAPTER_BACKEND_KEY", "")
-PROXY_PORT      = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
+BACKEND_BASE      = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
+BACKEND_KEY       = os.environ.get("ADAPTER_BACKEND_KEY", "")
+PROXY_PORT        = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 ADAPTER_DEBUG     = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_LOGFILE = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
 ADAPTER_DETACH    = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
+ADAPTER_TIMEOUT   = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
+ADAPTER_RETRY     = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
 # ===================================================
 
 def _d(msg: str) -> None:
     """Вывод лога: в консоль (если ADAPTER_DEBUG) или в файл (если задан ADAPTER_DEBUG_LOGFILE)."""
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    line = f"[{ts}] {msg}"
     if ADAPTER_DEBUG_LOGFILE:
         # Логируем в файл
         with open(ADAPTER_DEBUG_LOGFILE, "a") as f:
-            f.write(msg + "\n")
+            f.write(line + "\n")
     elif ADAPTER_DEBUG:
         # Логируем в консоль
-        print(msg)
+        print(line)
 
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
@@ -127,7 +133,6 @@ def convert_messages_anthropic_to_openai(messages, system):
                         })
                     elif block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
-
                 if text_parts:
                     other_msgs.append({"role": "user", "content": "\n".join(text_parts)})
                 other_msgs.extend(tool_results)
@@ -150,7 +155,6 @@ def convert_messages_anthropic_to_openai(messages, system):
                                 "arguments": json.dumps(block.get("input", {}))
                             }
                         })
-
                 assistant_msg = {"role": "assistant"}
                 if text_parts:
                     assistant_msg["content"] = "\n".join(text_parts)
@@ -174,7 +178,6 @@ def parse_tool_calls_from_text(text):
     tool_calls = []
     pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
     matches = re.findall(pattern, text, re.DOTALL)
-
     for match in matches:
         try:
             data = json.loads(match)
@@ -206,7 +209,6 @@ def parse_tool_calls_from_text(text):
                 })
         except Exception:
             pass
-
     return tool_calls
 
 
@@ -220,7 +222,6 @@ def convert_openai_to_anthropic(o, model):
     usage = o.get("usage", {})
 
     content = []
-
     if not tool_calls and text:
         parsed = parse_tool_calls_from_text(text)
         if parsed:
@@ -315,7 +316,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         if "tools" in anthropic_req:
             openai_body["tools"] = convert_tools_anthropic_to_openai(anthropic_req["tools"])
-            _d(f"[TOOLS] Passed {len(openai_body['tools'])} tools to backend")
+            _d(f"[TOOLS] Passed {len(openai_body['tools'])} tools")
 
         if "tool_choice" in anthropic_req:
             openai_body["tool_choice"] = convert_tool_choice_anthropic_to_openai(anthropic_req["tool_choice"])
@@ -337,33 +338,71 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {BACKEND_KEY}",
+                "Connection": "keep-alive",
             },
             method="POST"
         )
 
-        try:
-            _d("[FETCH] Sending to backend...")
-            resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=120)
-            raw = resp.read()
-            _d(f"[FETCH] {resp.status}, {len(raw)} bytes")
-            _d(f"[FETCH_RAW] {raw.decode()[:3000]}")
+        # === Retry loop ===
+        last_error = None
+        for attempt in range(1, ADAPTER_RETRY + 1):
+            try:
+                _d(f"[FETCH] Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s")
+                t0 = time.time()
+                resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
+                raw = resp.read()
+                elapsed = time.time() - t0
+                _d(f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
+                _d(f"[FETCH_RAW] {raw.decode()[:3000]}")
 
-            o = json.loads(raw)
-            anthropic_resp = convert_openai_to_anthropic(o, model)
+                o = json.loads(raw)
+                anthropic_resp = convert_openai_to_anthropic(o, model)
 
-            _d(f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)[:800]}")
-            self._send_json(200, anthropic_resp)
-            _d("[OK] Done")
+                _d(f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)[:800]}")
+                self._send_json(200, anthropic_resp)
+                _d("[OK] Done")
+                return  # Успех — выходим
 
-        except urllib.error.HTTPError as e:
-            err = e.read().decode()
-            _d(f"[BACKEND_ERR] {e.code}: {err[:1500]}")
-            self._send_json(e.code, {"error": f"Backend error: {err}"})
-        except Exception as e:
-            _d(f"[PROXY_ERR] {e}")
-            import traceback
-            traceback.print_exc()
-            self._send_json(500, {"error": str(e)})
+            except urllib.error.HTTPError as e:
+                err = e.read().decode()
+                _d(f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
+                last_error = (e.code, err)
+                # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
+                if e.code not in (429, 502, 503, 504):
+                    break
+                if attempt < ADAPTER_RETRY:
+                    delay = 2 ** attempt
+                    _d(f"[RETRY] Waiting {delay}s...")
+                    time.sleep(delay)
+
+            except TimeoutError as e:
+                _d(f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after {ADAPTER_TIMEOUT}s")
+                last_error = ("timeout", str(e))
+                if attempt < ADAPTER_RETRY:
+                    delay = 2 ** attempt
+                    _d(f"[RETRY] Waiting {delay}s before next attempt...")
+                    time.sleep(delay)
+
+            except Exception as e:
+                _d(f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}")
+                last_error = ("error", str(e))
+                if attempt < ADAPTER_RETRY:
+                    delay = 2 ** attempt
+                    _d(f"[RETRY] Waiting {delay}s...")
+                    time.sleep(delay)
+
+        # Все попытки исчерпаны
+        if last_error:
+            code, msg = last_error
+            if code == "timeout":
+                _d(f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504.")
+                self._send_json(504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"})
+            elif isinstance(code, int):
+                _d(f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
+                self._send_json(code, {"error": f"Backend error: {msg}"})
+            else:
+                _d(f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
+                self._send_json(502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"})
 
 
 def _detach() -> None:
@@ -412,14 +451,17 @@ if __name__ == "__main__":
     if ADAPTER_DETACH:
         print(f"[DETACH] Starting as background service...")
         print(f"Backend:  {BACKEND_BASE}/v1/chat/completions")
-        print(f"PID file: {os.environ.get('ADAPTER_PIDFILE', '/tmp/adapter.pid')}")
+        print(f"Timeout:  {ADAPTER_TIMEOUT}s")
+        print(f"Retries:  {ADAPTER_RETRY}")
         _detach()
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v4 (env-based config)")
+    print(f"Claude Code Adapter v5 (timeout+retry)")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
+    print(f"Timeout:    {ADAPTER_TIMEOUT}s")
+    print(f"Retries:    {ADAPTER_RETRY}")
     print(f"{'='*70}\n")
     with socketserver.TCPServer(("", PROXY_PORT), Adapter) as httpd:
         try:
