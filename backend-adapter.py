@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude Code <-> OpenAI-backend adapter v5 (env-based config)
+Claude Code <-> OpenAI-backend adapter v6 (env-based config)
 Fix: timeout + retry, ALL system messages at the beginning
 Supports: tools, tool_choice, tool_use, tool_result, tool_calls fallback
 
@@ -269,17 +269,54 @@ def convert_openai_to_anthropic(o, model):
     }
 
 
+class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer, который не сыплет полным traceback в лог, если
+    клиент (Claude Code) уже закрыл соединение раньше, чем адаптер успел
+    ответить. Это перехватывает обрыв на уровне socketserver.handle_error,
+    поэтому работает для ЛЮБОЙ точки записи в ответ — не только для нашего
+    _send_json, но и, например, для встроенного BaseHTTPRequestHandler
+    .send_error() (он вызывается для неподдерживаемых методов вроде HEAD,
+    как в случае с 'HEAD /api/hello' в логе)."""
+
+    def handle_error(self, request, client_address):
+        exc_type, exc_value, _ = sys.exc_info()
+        if isinstance(exc_value, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            _d(f"[CLIENT_GONE] {client_address}: {exc_type.__name__ if exc_type else '?'}: {exc_value}")
+            return
+        # Любая другая ошибка — стандартное поведение (полный traceback в лог)
+        super().handle_error(request, client_address)
+
+
 class Adapter(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         _d(f"[HTTP] {fmt % args}")
 
     def _send_json(self, status, data):
         body = json.dumps(data, ensure_ascii=False).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+            # Клиент (Claude Code) уже закрыл соединение — обычно это значит,
+            # что он не дождался ответа (свой таймаут короче, чем наш
+            # ADAPTER_TIMEOUT * ADAPTER_RETRY_COUNT + backoff). Это не ошибка
+            # адаптера, поэтому просто логируем и выходим, не роняя процесс.
+            _d(f"[CLIENT_GONE] {type(e).__name__} during sending status={status}: client disconnected before response could be sent")
+        except Exception as e:
+            _d(f"[WARN] Error sending response: {type(e).__name__}: {e}")
+
+    def do_HEAD(self):
+        # Кто-то (health-check / сетевой пробник) стучится HEAD-запросами на
+        # произвольные пути вроде /api/hello. Базовый BaseHTTPRequestHandler
+        # не умеет HEAD и отвечает 501 через send_error(), что и породило
+        # второй BrokenPipeError в логе. Отвечаем простым 200 без тела —
+        # этого достаточно для любого health-check'а.
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
         self.end_headers()
-        self.wfile.write(body)
 
     def do_POST(self):
         _d(f"\n{'='*70}")
@@ -457,13 +494,20 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v5 (timeout+retry)")
+    print(f"Claude Code Adapter v6 (timeout+retry)")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
     print(f"Timeout:    {ADAPTER_TIMEOUT}s")
     print(f"Retries:    {ADAPTER_RETRY}")
     print(f"{'='*70}\n")
-    with socketserver.TCPServer(("", PROXY_PORT), Adapter) as httpd:
+    # ThreadingHTTPServer вместо socketserver.TCPServer: Claude Code может
+    # открывать несколько параллельных запросов (конкурентные tool calls),
+    # а однопоточный сервер обрабатывает их строго последовательно — пока
+    # первый запрос ждёт ADAPTER_TIMEOUT секунд от бэкенда, остальные
+    # соединения простаивают в очереди accept() и клиент рвёт их по своему
+    # таймауту. Это и есть основной источник BrokenPipeError в логе.
+    Adapter.daemon_threads = True
+    with QuietThreadingHTTPServer(("", PROXY_PORT), Adapter) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
