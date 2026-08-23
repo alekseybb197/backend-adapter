@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Claude Code <-> OpenAI-backend adapter v6 (env-based config)
+Claude Code <-> OpenAI-backend adapter v0.1.7 (env-based config)
 Fix: timeout + retry, ALL system messages at the beginning
 Supports: tools, tool_choice, tool_use, tool_result, tool_calls fallback
 
@@ -37,16 +37,14 @@ ADAPTER_RETRY     = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
 # ===================================================
 
 def _d(msg: str) -> None:
-    """Вывод лога: в консоль (если ADAPTER_DEBUG) или в файл (если задан ADAPTER_DEBUG_LOGFILE)."""
+    """Вывод лога: в консоль всегда (если ADAPTER_DEBUG), в файл — только если задан ADAPTER_DEBUG_LOGFILE."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     line = f"[{ts}] {msg}"
+    if ADAPTER_DEBUG:
+        print(line)
     if ADAPTER_DEBUG_LOGFILE:
-        # Логируем в файл
         with open(ADAPTER_DEBUG_LOGFILE, "a") as f:
             f.write(line + "\n")
-    elif ADAPTER_DEBUG:
-        # Логируем в консоль
-        print(line)
 
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
@@ -494,7 +492,7 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v6 (timeout+retry)")
+    print(f"Claude Code Adapter v0.1.7")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
     print(f"Timeout:    {ADAPTER_TIMEOUT}s")
