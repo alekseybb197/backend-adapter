@@ -1,18 +1,34 @@
 #!/usr/bin/env python3
 """
-Claude Code <-> OpenAI-backend adapter v0.1.7 (env-based config)
-Fix: timeout + retry, ALL system messages at the beginning
-Supports: tools, tool_choice, tool_use, tool_result, tool_calls fallback
+Claude Code <-> OpenAI-backend adapter v0.2.0 (timeout+retry+trace)
 
-Конфигурация:
-  ADAPTER_BACKEND_BASE   — URL бэкенда
-  ADAPTER_BACKEND_KEY    — API-ключ бэкенда
-  ADAPTER_PROXY_PORT     — порт прокси (по умолч. 9999)
-  ADAPTER_DEBUG_ENABLE   — логирование (1/true=yes)
-  ADAPTER_DEBUG_LOGFILE  — файл для логов
-  ADAPTER_DETACH_ENABLE  — фоновый режим (1/true=yes)
-  ADAPTER_TIMEOUT        — таймаут к бэкенду в сек (по умолч. 300)
-  ADAPTER_RETRY_COUNT    — число retry (по умолч. 3)
+Отличия от v6:
+  - Добавлен структурированный JSONL trace-лог (ADAPTER_TRACE_LOGFILE),
+    отдельный от человекочитаемого debug-лога. Одна строка = одно событие.
+    Формат рассчитан на последующий парсинг trace_analyze.py.
+  - Трассируются: какие инструменты харнесс предложил модели, что модель
+    реально выбрала (tool_use), какие скиллы это затронуло (detect_skill),
+    и внутренние ветвления самого адаптера (fallback-парсинг tool_call из
+    текста, проверка позиции system-сообщения, маппинг finish_reason,
+    retry-цепочка).
+  - Из ответа бэкенда теперь извлекается reasoning_content (chain-of-thought
+    провайдера, если он его отдаёт) — раньше он тихо терялся при конвертации
+    в Anthropic-формат. Это единственное место, где видно, ПОЧЕМУ модель
+    выбрала тот или иной инструмент/скилл, поэтому для целей трассировки
+    он критичен, даже если наружу (клиенту Claude Code) он не идёт.
+  - Секреты (Authorization, PAT/KEY/TOKEN-подобные значения) редактируются
+    перед записью в ЛЮБОЙ лог — и debug, и trace. Это относится и к текущей
+    сырой записи заголовков/тела, которая раньше писалась как есть.
+
+Конфигурация (в дополнение к переменным v6):
+  ADAPTER_TRACE_LOGFILE   — путь к JSONL trace-логу (если не задан — трассировка
+                             событий harness/skill не пишется, но redaction
+                             всё равно применяется к debug-логу)
+  ADAPTER_SKILL_PATTERNS  — путь к JSON-файлу с описанием паттернов скиллов
+                             (см. skill_patterns.json). Если не задан —
+                             используется встроенный дефолт под текущий
+                             CLAUDE.md (devtools, frontmatter, klast,
+                             mytasks, prreview; и .claude/.qwen варианты).
 """
 import http.server
 import socketserver
@@ -24,6 +40,8 @@ import re
 import os
 import sys
 import time
+import uuid
+import threading
 
 # ==================== НАСТРОЙКИ ====================
 BACKEND_BASE      = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
@@ -31,24 +49,168 @@ BACKEND_KEY       = os.environ.get("ADAPTER_BACKEND_KEY", "")
 PROXY_PORT        = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 ADAPTER_DEBUG     = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_LOGFILE = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
+ADAPTER_TRACE_LOGFILE = os.environ.get("ADAPTER_TRACE_LOGFILE", "")
 ADAPTER_DETACH    = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
 ADAPTER_TIMEOUT   = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY     = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
+ADAPTER_SKILL_PATTERNS = os.environ.get("ADAPTER_SKILL_PATTERNS", "")
+ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
+ADAPTER_DEBUG_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG_OPENAI_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_OPENAI_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG_FETCH_RAW_FULL = os.environ.get("ADAPTER_DEBUG_FETCH_RAW_FULL", "0").lower() not in ("0", "false", "no", "")
 # ===================================================
 
+SSL_CTX = ssl.create_default_context()
+SSL_CTX.check_hostname = False
+SSL_CTX.verify_mode = ssl.CERT_NONE
+
+
+# ==================== REDACTION ====================
+# Секреты, которые нельзя писать в лог целиком ни при каких условиях:
+# - значение Authorization: Bearer <...>
+# - переменные вида *_PAT / *_KEY / *_TOKEN / *_SECRET = <значение>
+# - длинные base64/hex-подобные строки (часто это и есть токены),
+#   встреченные после характерных ключевых слов
+_SECRET_PATTERNS = [
+    (re.compile(r'(Bearer\s+)([A-Za-z0-9\-_\.=/+]{6,})', re.IGNORECASE),
+     lambda m: m.group(1) + _mask(m.group(2))),
+    (re.compile(r'((?:[A-Z0-9_]*(?:_PAT|_KEY|_TOKEN|_SECRET|API_KEY)[A-Z0-9_]*)\s*[:=]\s*["\']?)([A-Za-z0-9\-_\.\/+=]{8,})',
+                re.IGNORECASE),
+     lambda m: m.group(1) + _mask(m.group(2))),
+]
+
+
+def _mask(value: str) -> str:
+    if len(value) <= 8:
+        return "***REDACTED***"
+    return f"{value[:4]}***REDACTED***{value[-4:]}"
+
+
+def redact(text: str) -> str:
+    """Применяет все паттерны редактирования секретов к произвольной строке."""
+    if not text:
+        return text
+    for pattern, repl in _SECRET_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def redact_headers(headers) -> dict:
+    out = {}
+    for k, v in headers.items():
+        if k.lower() == "authorization":
+            out[k] = redact(v)
+        else:
+            out[k] = v
+    return out
+
+
+# ==================== ЧЕЛОВЕКОЧИТАЕМЫЙ ЛОГ (как в v6, + redaction) ====================
 def _d(msg: str) -> None:
-    """Вывод лога: в консоль всегда (если ADAPTER_DEBUG), в файл — только если задан ADAPTER_DEBUG_LOGFILE."""
+    """Вывод лога: в консоль (если ADAPTER_DEBUG) и/или в файл (если задан ADAPTER_DEBUG_LOGFILE).
+    Оба канала независимы — можно писать одновременно и в файл, и в консоль."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    line = f"[{ts}] {msg}"
+    line = f"[{ts}] {redact(msg)}"
     if ADAPTER_DEBUG:
         print(line)
     if ADAPTER_DEBUG_LOGFILE:
         with open(ADAPTER_DEBUG_LOGFILE, "a") as f:
             f.write(line + "\n")
 
-SSL_CTX = ssl.create_default_context()
-SSL_CTX.check_hostname = False
-SSL_CTX.verify_mode = ssl.CERT_NONE
+
+# ==================== СТРУКТУРИРОВАННЫЙ TRACE-ЛОГ (JSONL) ====================
+# Один JSON-объект на строку. Поля, общие для всех событий:
+#   ts        — ISO8601 с миллисекундами
+#   session_id— из заголовка X-Claude-Code-Session-Id (или "unknown")
+#   req_id    — уникальный id конкретного HTTP-запроса к адаптеру (не сессии)
+#   seq       — монотонный счётчик событий ВНУТРИ сессии (не внутри запроса!),
+#               позволяет восстановить полный таймлайн сессии из многих
+#               последовательных запросов Claude Code
+#   event     — тип события (см. ниже по коду)
+_trace_lock = threading.Lock()
+_session_seq = {}  # session_id -> next seq number
+
+
+def _next_seq(session_id: str) -> int:
+    with _trace_lock:
+        n = _session_seq.get(session_id, 0)
+        _session_seq[session_id] = n + 1
+        return n
+
+
+def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
+    if not ADAPTER_TRACE_LOGFILE:
+        return
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z",
+        "session_id": session_id,
+        "req_id": req_id,
+        "seq": _next_seq(session_id),
+        "event": event,
+    }
+    record.update(fields)
+    line = json.dumps(record, ensure_ascii=False, default=str)
+    line = redact(line)
+    with _trace_lock:
+        with open(ADAPTER_TRACE_LOGFILE, "a") as f:
+            f.write(line + "\n")
+
+
+# ==================== SKILL DETECTION ====================
+DEFAULT_SKILL_PATTERNS = {
+    # skill_name -> список regex, которым может соответствовать
+    # содержимое Bash-команды / путь к файлу в Read/Grep/Glob,
+    # сигнализирующее об обращении к данному скиллу.
+    "devtools":    [r'\.claude/skills/devtools', r'\.qwen/skills/devtools', r'chrome-devtools'],
+    "frontmatter": [r'\.claude/skills/frontmatter', r'\.qwen/skills/frontmatter'],
+    "klast":       [r'\.claude/skills/klast', r'\.qwen/skills/klast', r'\.klast/'],
+    "mytasks":     [r'\.claude/skills/mytasks', r'\.qwen/skills/mytasks'],
+    "prreview":    [r'\.claude/skills/prreview', r'\.qwen/skills/prreview'],
+}
+
+
+def _load_skill_patterns():
+    if ADAPTER_SKILL_PATTERNS and os.path.isfile(ADAPTER_SKILL_PATTERNS):
+        try:
+            with open(ADAPTER_SKILL_PATTERNS) as f:
+                raw = json.load(f)
+            return {name: [re.compile(p, re.IGNORECASE) for p in pats] for name, pats in raw.items()}
+        except Exception as e:
+            _d(f"[SKILL_PATTERNS] Failed to load {ADAPTER_SKILL_PATTERNS}: {e}")
+    return {name: [re.compile(p, re.IGNORECASE) for p in pats] for name, pats in DEFAULT_SKILL_PATTERNS.items()}
+
+
+SKILL_PATTERNS = _load_skill_patterns()
+
+
+def detect_skill(tool_name: str, tool_input: dict):
+    """Пытается определить, к какому скиллу относится вызов инструмента.
+    Возвращает (skill_name, evidence) или (None, None).
+    Эвристика основана на путях/командах, а не на имени инструмента —
+    харнесс обращается к скиллам через обычные Bash/Read/Grep/Glob,
+    отдельного tool "Skill" в текущей связке не наблюдается (см. лог)."""
+    haystack_parts = []
+    if isinstance(tool_input, dict):
+        for key in ("command", "file_path", "path", "pattern", "notebook_path"):
+            v = tool_input.get(key)
+            if isinstance(v, str):
+                haystack_parts.append(v)
+    haystack = " ".join(haystack_parts)
+    if not haystack:
+        return None, None
+    for skill_name, patterns in SKILL_PATTERNS.items():
+        for pat in patterns:
+            m = pat.search(haystack)
+            if m:
+                return skill_name, m.group(0)
+    # Отдельно отмечаем именно чтение SKILL.md — это явный сигнал того,
+    # что харнесс/модель обнаружила и загружает описание скилла, даже если
+    # это скилл, не описанный в SKILL_PATTERNS (новый / незарегистрированный).
+    if re.search(r'SKILL\.md', haystack, re.IGNORECASE):
+        m = re.search(r'skills/([^/]+)/SKILL\.md', haystack, re.IGNORECASE)
+        name = m.group(1) if m else "unknown"
+        return f"unregistered:{name}", haystack
+    return None, None
 
 
 def extract_text(content):
@@ -101,7 +263,6 @@ def convert_messages_anthropic_to_openai(messages, system):
     system_parts = []
     other_msgs = []
 
-    # 1. System из отдельного поля Anthropic
     if system:
         if isinstance(system, str):
             system_parts.append(system)
@@ -110,7 +271,6 @@ def convert_messages_anthropic_to_openai(messages, system):
                 if block.get("type") == "text":
                     system_parts.append(block.get("text", ""))
 
-    # 2. Проходим по messages: system -> в system_parts, остальное -> в other_msgs
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
@@ -163,7 +323,6 @@ def convert_messages_anthropic_to_openai(messages, system):
             else:
                 other_msgs.append({"role": "assistant", "content": extract_text(content)})
 
-    # Собираем результат: ОДИН system message в начале, потом всё остальное
     result = []
     if system_parts:
         result.append({"role": "system", "content": "\n".join(system_parts)})
@@ -210,26 +369,43 @@ def parse_tool_calls_from_text(text):
     return tool_calls
 
 
-def convert_openai_to_anthropic(o, model):
-    """OpenAI response -> Anthropic response."""
+def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"):
+    """OpenAI response -> Anthropic response.
+    Дополнительно (по сравнению с v6): извлекает reasoning_content и
+    трассирует ветвления (fallback-парсинг, маппинг finish_reason,
+    skill-детекцию по каждому tool_use)."""
     choice = o.get("choices", [{}])[0]
     message = choice.get("message", {}) or {}
     text = message.get("content") or ""
     tool_calls = message.get("tool_calls", [])
     finish_reason = choice.get("finish_reason", "stop")
     usage = o.get("usage", {})
+    reasoning = message.get("reasoning_content", "") or ""
 
-    content = []
+    used_text_fallback = False
     if not tool_calls and text:
         parsed = parse_tool_calls_from_text(text)
         if parsed:
+            used_text_fallback = True
             tool_calls = parsed
             clean_text = re.sub(r'<tool_call>\s*\{.*?\}\s*</tool_call>', '', text, flags=re.DOTALL).strip()
             text = clean_text if clean_text else ""
 
+    if used_text_fallback:
+        # ВАЖНО для оценки качества следования скиллам: модель не смогла
+        # (или харнесс не смог) использовать нативный tool-calling формат
+        # backend'а и адаптеру пришлось парсить JSON из текста руками.
+        # Это деградация, повышающая риск некорректного вызова инструмента
+        # скилла (обрезанный JSON, лишний текст рядом и т.п.).
+        _trace(session_id, req_id, "harness_branch",
+               check="text_tool_call_fallback", triggered=True,
+               parsed_count=len(tool_calls))
+
+    content = []
     if text and text.strip():
         content.append({"type": "text", "text": text})
 
+    tool_use_summaries = []
     for tc in tool_calls:
         if tc.get("type") == "function":
             func = tc.get("function", {})
@@ -237,12 +413,21 @@ def convert_openai_to_anthropic(o, model):
                 input_data = json.loads(func.get("arguments", "{}"))
             except (json.JSONDecodeError, TypeError):
                 input_data = {}
+            name = func.get("name", "")
             content.append({
                 "type": "tool_use",
                 "id": tc.get("id", ""),
-                "name": func.get("name", ""),
+                "name": name,
                 "input": input_data
             })
+            skill, evidence = detect_skill(name, input_data)
+            tool_use_summaries.append({
+                "id": tc.get("id", ""), "name": name, "skill": skill,
+            })
+            if skill:
+                _trace(session_id, req_id, "skill_signal",
+                       tool_id=tc.get("id", ""), tool_name=name,
+                       skill=skill, evidence=evidence[:200])
 
     if not content:
         content = [{"type": "text", "text": " "}]
@@ -252,6 +437,15 @@ def convert_openai_to_anthropic(o, model):
         stop_reason = "tool_use"
     elif finish_reason not in ("stop", "length"):
         stop_reason = "end_turn"
+
+    _trace(session_id, req_id, "harness_branch",
+           check="finish_reason_map",
+           openai_finish_reason=finish_reason, anthropic_stop_reason=stop_reason)
+
+    _trace(session_id, req_id, "response_content",
+           text_len=len(text), tool_uses=tool_use_summaries,
+           reasoning_present=bool(reasoning.strip()), reasoning_len=len(reasoning),
+           reasoning_preview=reasoning[:500])
 
     return {
         "id": f"msg_{o.get('id', 'local')}",
@@ -317,9 +511,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        req_t0 = time.time()
+        session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
+        req_id = uuid.uuid4().hex[:12]
+
         _d(f"\n{'='*70}")
         _d(f"[REQ] {self.command} {self.path}")
-        for k, v in self.headers.items():
+        for k, v in redact_headers(self.headers).items():
             _d(f"  {k}: {v}")
 
         if not self.path.startswith("/v1/messages"):
@@ -328,7 +526,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length)
-        _d(f"[BODY] {body.decode()[:3000]}")
+        _body = body.decode()
+        _d(f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_DEBUG_TRIM])}")
 
         try:
             anthropic_req = json.loads(body)
@@ -338,6 +537,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         model = anthropic_req.get("model", "qwen3.6-35b-a3b")
         max_tokens = anthropic_req.get("max_tokens", 4096)
+        in_tools = anthropic_req.get("tools", [])
+        in_tool_names = [t.get("name", "?") for t in in_tools]
+
+        _trace(session_id, req_id, "request_start",
+               path=self.path, model=model, max_tokens=max_tokens,
+               msg_count=len(anthropic_req.get("messages", [])),
+               tool_count=len(in_tools), tool_names=in_tool_names,
+               tool_choice=anthropic_req.get("tool_choice"))
 
         openai_body = {
             "model": model,
@@ -359,12 +566,16 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         # Проверяем, что system действительно в начале
         msgs = openai_body["messages"]
-        if msgs and msgs[0]["role"] == "system":
+        system_ok = bool(msgs) and msgs[0]["role"] == "system"
+        _trace(session_id, req_id, "harness_branch",
+               check="system_first", passed=system_ok,
+               first_role=(msgs[0]["role"] if msgs else None))
+        if system_ok:
             _d(f"[CHECK] First message is system, OK")
         else:
             _d(f"[WARN] First message is NOT system: {msgs[0]['role'] if msgs else 'empty'}")
 
-        _d(f"[OPENAI_BODY] {json.dumps(openai_body, ensure_ascii=False)[:2500]}")
+        _d(f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
 
         backend_url = BACKEND_BASE.rstrip('/') + "/v1/chat/completions"
         req = urllib.request.Request(
@@ -383,24 +594,32 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         for attempt in range(1, ADAPTER_RETRY + 1):
             try:
                 _d(f"[FETCH] Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s")
+                _trace(session_id, req_id, "backend_attempt", attempt=attempt, timeout=ADAPTER_TIMEOUT)
                 t0 = time.time()
                 resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
                 raw = resp.read()
                 elapsed = time.time() - t0
                 _d(f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
-                _d(f"[FETCH_RAW] {raw.decode()[:3000]}")
+                _d(f"[FETCH_RAW] {(raw.decode() if ADAPTER_DEBUG_FETCH_RAW_FULL else raw.decode()[:ADAPTER_DEBUG_TRIM])}")
+                _trace(session_id, req_id, "backend_result", attempt=attempt,
+                       ok=True, status=resp.status, elapsed_ms=int(elapsed * 1000))
 
                 o = json.loads(raw)
-                anthropic_resp = convert_openai_to_anthropic(o, model)
+                anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
                 _d(f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)[:800]}")
                 self._send_json(200, anthropic_resp)
                 _d("[OK] Done")
+                _trace(session_id, req_id, "request_end",
+                       http_status=200, retries_used=attempt - 1,
+                       total_elapsed_ms=int((time.time() - req_t0) * 1000))
                 return  # Успех — выходим
 
             except urllib.error.HTTPError as e:
                 err = e.read().decode()
                 _d(f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
+                _trace(session_id, req_id, "backend_result", attempt=attempt,
+                       ok=False, status=e.code, error=redact(err[:500]))
                 last_error = (e.code, err)
                 # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
                 if e.code not in (429, 502, 503, 504):
@@ -412,6 +631,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             except TimeoutError as e:
                 _d(f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after {ADAPTER_TIMEOUT}s")
+                _trace(session_id, req_id, "backend_result", attempt=attempt,
+                       ok=False, status="timeout", error=str(e))
                 last_error = ("timeout", str(e))
                 if attempt < ADAPTER_RETRY:
                     delay = 2 ** attempt
@@ -420,6 +641,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             except Exception as e:
                 _d(f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}")
+                _trace(session_id, req_id, "backend_result", attempt=attempt,
+                       ok=False, status="error", error=f"{type(e).__name__}: {e}")
                 last_error = ("error", str(e))
                 if attempt < ADAPTER_RETRY:
                     delay = 2 ** attempt
@@ -432,12 +655,18 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             if code == "timeout":
                 _d(f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504.")
                 self._send_json(504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"})
+                final_status = 504
             elif isinstance(code, int):
                 _d(f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
                 self._send_json(code, {"error": f"Backend error: {msg}"})
+                final_status = code
             else:
                 _d(f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
                 self._send_json(502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"})
+                final_status = 502
+            _trace(session_id, req_id, "request_end",
+                   http_status=final_status, retries_used=ADAPTER_RETRY,
+                   total_elapsed_ms=int((time.time() - req_t0) * 1000), failed=True)
 
 
 def _detach() -> None:
@@ -492,11 +721,12 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v0.1.7")
+    print(f"Claude Code Adapter v0.2.0 (timeout+retry+trace)")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
     print(f"Timeout:    {ADAPTER_TIMEOUT}s")
     print(f"Retries:    {ADAPTER_RETRY}")
+    print(f"Trace log:  {ADAPTER_TRACE_LOGFILE or '(disabled)'}")
     print(f"{'='*70}\n")
     # ThreadingHTTPServer вместо socketserver.TCPServer: Claude Code может
     # открывать несколько параллельных запросов (конкурентные tool calls),
