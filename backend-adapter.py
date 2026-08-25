@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.3.2 (timeout+retry+trace+causality + per-session log files)
+"""Claude Code <-> OpenAI-backend adapter v0.3.3 (timeout+retry+trace+causality + per-session logs + model probe/validation)
 — changelog: ../changelog.md"""
 import http.server
 import socketserver
@@ -32,6 +32,15 @@ ADAPTER_DEBUG_OPENAI_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_OPENAI_BODY_FUL
 ADAPTER_DEBUG_FETCH_RAW_FULL = os.environ.get("ADAPTER_DEBUG_FETCH_RAW_FULL", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
+ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
+# ===================================================
+
+# ====================================================
+# СПИСОК ДОСТУПНЫХ МОДЕЛЕЙ (заполняется при старте)
+# key = model id (строка), value = dict с полями из
+#   v1/models ответа (id, object, created, owned_by и т.д.)
+# Пустой словарь = проб не был выполнен или провалён.
+_AVAILABLE_MODELS: dict[str, dict] = {}
 # ===================================================
 
 
@@ -690,6 +699,23 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def do_GET(self):
+        if self.path == "/v1/models":
+            # Возвращаем список моделей, полученный от бэкенда.
+            # Формат — OpenAI-совместимый: {object: "list", data: [...]}.
+            if not _AVAILABLE_MODELS:
+                self._send_json(501, {
+                    "error": "Model list not yet available. "
+                             "Backend models have not been probed successfully yet."
+                })
+                return
+            self._send_json(200, {
+                "object": "list",
+                "data": list(_AVAILABLE_MODELS.values()),
+            })
+        else:
+            self._send_json(404, {"error": f"Unknown GET path: {self.path}"})
+
     def do_POST(self):
         req_t0 = time.time()
         session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
@@ -721,6 +747,17 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             return
 
         model = anthropic_req.get("model", "qwen3.6-35b-a3b")
+
+        # Валидация имени модели: если бэкенд список загружен и строгий
+        # режим включён — проверяем что модель допустима.
+        if ADAPTER_STRICT_MODELS and _AVAILABLE_MODELS:
+            if model not in _AVAILABLE_MODELS:
+                available = list(_AVAILABLE_MODELS.keys())
+                msg = (f"Model '{model}' is not available. "
+                       f"Allowed models: {', '.join(available)}")
+                _dr(req_id, f"[ERROR] {msg}")
+                self._send_json(400, {"error": msg})
+                return
         max_tokens = anthropic_req.get("max_tokens", 4096)
         in_tools = anthropic_req.get("tools", [])
         in_tool_names = [t.get("name", "?") for t in in_tools]
@@ -954,6 +991,32 @@ def _write_pidfile() -> None:
         f.write(str(os.getpid()))
 
 
+# ==================== ПРОБА СПИСКА МОДЕЛЕЙ ====================
+def _probe_models() -> list[dict]:
+    """При старте запрашивает GET /v1/models у бэкенда, возвращает
+    список dict с полями из ответа. Формат — как в OpenAI API:
+    [ {id, object, created, owned_by, ...}, ... ]
+    Бросает исключение если бэкенд недоступен — это блокирует старт."""
+    url = BACKEND_BASE.rstrip("/") + "/v1/models"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {BACKEND_KEY}",
+            "Connection": "keep-alive",
+        },
+        method="GET",
+    )
+    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
+    raw = resp.read()
+    data = json.loads(raw)
+    models = data if isinstance(data, list) else data.get("data", [])
+    _d(f"[INIT] Fetched {len(models)} models from backend {url}")
+    for m in models:
+        _d(f"  model={m.get('id')}, object={m.get('object')}, "
+           f"owned_by={m.get('owned_by')}")
+    return models
+
+
 if __name__ == "__main__":
     if ADAPTER_DETACH:
         print(f"[DETACH] Starting as background service...")
@@ -964,13 +1027,35 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v0.2.0 (timeout+retry+trace)")
+    print(f"Claude Code Adapter v0.3.2 (timeout+retry+trace + per-session logs + models probe)")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
     print(f"Timeout:    {ADAPTER_TIMEOUT}s")
     print(f"Retries:    {ADAPTER_RETRY}")
     print(f"Trace log:  {ADAPTER_TRACE_LOGFILE or '(disabled)'}")
+    print(f"Models:     {'strict' if ADAPTER_STRICT_MODELS else 'permissive'} validation")
     print(f"{'='*70}\n")
+
+    # === Проба списка моделей от бэкенда ===
+    # Пробуем GET /v1/models — результат ложится в глобальный
+    # _AVAILABLE_MODELS (str → dict). При failure — fatal: не стартуем,
+    # чтобы пользователь сразу увидел проблему.
+    try:
+        backend_models = _probe_models()
+        if backend_models:
+            for m in backend_models:
+                mid = m.get("id", "unknown")
+                _AVAILABLE_MODELS[mid] = m
+            print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from backend:")
+            for m in backend_models:
+                print(f"  - {m.get('id', '?')}")
+        else:
+            print("[WARN] Backend returned empty model list — models validation disabled.")
+    except Exception as e:
+        print(f"[FATAL] Failed to probe backend models at startup: {e}")
+        print("Adapter cannot start without knowing available models. Exiting.")
+        sys.exit(1)
+
     # ThreadingHTTPServer вместо socketserver.TCPServer: Claude Code может
     # открывать несколько параллельных запросов (конкурентные tool calls),
     # а однопоточный сервер обрабатывает их строго последовательно — пока
