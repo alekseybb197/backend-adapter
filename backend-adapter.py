@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
-"""
-Claude Code <-> OpenAI-backend adapter v0.2.0 (timeout+retry+trace)
-
-Отличия от v6:
-  - Добавлен структурированный JSONL trace-лог (ADAPTER_TRACE_LOGFILE),
-    отдельный от человекочитаемого debug-лога. Одна строка = одно событие.
-    Формат рассчитан на последующий парсинг trace_analyze.py.
-  - Трассируются: какие инструменты харнесс предложил модели, что модель
-    реально выбрала (tool_use), какие скиллы это затронуло (detect_skill),
-    и внутренние ветвления самого адаптера (fallback-парсинг tool_call из
-    текста, проверка позиции system-сообщения, маппинг finish_reason,
-    retry-цепочка).
-  - Из ответа бэкенда теперь извлекается reasoning_content (chain-of-thought
-    провайдера, если он его отдаёт) — раньше он тихо терялся при конвертации
-    в Anthropic-формат. Это единственное место, где видно, ПОЧЕМУ модель
-    выбрала тот или иной инструмент/скилл, поэтому для целей трассировки
-    он критичен, даже если наружу (клиенту Claude Code) он не идёт.
-  - Секреты (Authorization, PAT/KEY/TOKEN-подобные значения) редактируются
-    перед записью в ЛЮБОЙ лог — и debug, и trace. Это относится и к текущей
-    сырой записи заголовков/тела, которая раньше писалась как есть.
-
-Конфигурация (в дополнение к переменным v6):
-  ADAPTER_TRACE_LOGFILE   — путь к JSONL trace-логу (если не задан — трассировка
-                             событий harness/skill не пишется, но redaction
-                             всё равно применяется к debug-логу)
-  ADAPTER_SKILL_PATTERNS  — путь к JSON-файлу с описанием паттернов скиллов
-                             (см. skill_patterns.json). Если не задан —
-                             используется встроенный дефолт под текущий
-                             CLAUDE.md (devtools, frontmatter, klast,
-                             mytasks, prreview; и .claude/.qwen варианты).
-"""
+"""Claude Code <-> OpenAI-backend adapter v0.3.2 (timeout+retry+trace+causality + per-session log files)
+— changelog: ../changelog.md"""
 import http.server
 import socketserver
 import urllib.request
@@ -42,6 +13,7 @@ import sys
 import time
 import uuid
 import threading
+from collections import OrderedDict
 
 # ==================== НАСТРОЙКИ ====================
 BACKEND_BASE      = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
@@ -58,7 +30,20 @@ ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
 ADAPTER_DEBUG_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_OPENAI_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_OPENAI_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_FETCH_RAW_FULL = os.environ.get("ADAPTER_DEBUG_FETCH_RAW_FULL", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
+ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 # ===================================================
+
+
+def _cap(text: str, max_chars: int) -> str:
+    """Обрезает text до max_chars, если max_chars > 0. 0/не задано — без
+    ограничения (используется по умолчанию для reasoning/tool-полей trace,
+    в отличие от старого поведения, которое обрезало их безусловно)."""
+    if not text or max_chars <= 0:
+        return text
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"...[TRUNCATED {len(text) - max_chars} chars]"
 
 SSL_CTX = ssl.create_default_context()
 SSL_CTX.check_hostname = False
@@ -105,17 +90,115 @@ def redact_headers(headers) -> dict:
     return out
 
 
-# ==================== ЧЕЛОВЕКОЧИТАЕМЫЙ ЛОГ (как в v6, + redaction) ====================
+# ==================== СЕССИОННЫЕ ЛОГ-ФАЙЫ ====================
+# ADAPTER_DEBUG_LOGFILE / ADAPTER_TRACE_LOGFILE могут задаваться как:
+#   1) Полный путь к файлу     — старое поведение, файл используется всегда
+#   2) Путь к директории       — создаётся отдельный файл для каждой
+#      сессии: session-<date_time>-<sessionID>.log (debug) или
+#      session-<date_time>-<sessionID>.jsonl (trace). Файлы с одинаковым
+#      session_id переоткрываются (append).
+#
+# Открываемые дескрипторы хранятся в _session_logs (session_id → handle),
+# с защитой от бесконечного роста по FIFO.
+
+_LOG_FILES_PER_SESSION = 5000
+_session_logs: dict[str, dict] = {}  # session_id -> {abspath: file_handle}
+_session_file_ts: dict[str, str] = {}  # session_id -> stable timestamp (first-use)
+_last_log_session_id: str = ""  # глобальный fallback для _d()
+
+
+def _resolve_log_base():
+    """Прочитать env-переменные и вернуть (debug_is_dir, debug_path,
+    trace_is_dir, trace_path)."""
+    dbg = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
+    trc = os.environ.get("ADAPTER_TRACE_LOGFILE", "")
+    return (
+        os.path.isdir(dbg) if dbg else False, dbg,
+        os.path.isdir(trc) if trc else False, trc,
+    )
+
+
+_DEBUG_IS_DIR, _DEBUG_PATH, _TRACE_IS_DIR, _TRACE_PATH = _resolve_log_base()
+
+
+def _make_session_file(base_path: str, session_id: str, ext: str):
+    """Возвращает путь к файлу сессии (вызывается только при is_dir=True).
+    Формат имени: session-<YYYYMMDD-HHMMSS>-<sessionID>.<ext>.
+    Timestamp фиксируется при первом обращении к сессии и переиспользуется,
+    чтобы весь трафик сессии шёл в один файл."""
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', session_id)
+    if session_id not in _session_file_ts:
+        _session_file_ts[session_id] = time.strftime("%Y%m%d-%H%M%S")
+    ts = _session_file_ts[session_id]
+    return os.path.join(base_path, f"session-{ts}-{safe}.{ext}")
+
+
+def _open_session_file(kind: str, session_id: str):
+    """Открыть дескриптор для session_id (создать или вернуть существующий).
+    Returns open file handle (binary, "ab") или None, если режим «файл»."""
+    if kind == "debug":
+        is_dir, path = _DEBUG_IS_DIR, _DEBUG_PATH
+        ext = "log"
+    else:
+        is_dir, path = _TRACE_IS_DIR, _TRACE_PATH
+        ext = "jsonl"
+    if not is_dir or not path:
+        return None
+    target = _make_session_file(path, session_id, ext)
+    logs = _session_logs.setdefault(session_id, {})
+    if target in logs:
+        return logs[target]
+    # Превысили лимит? Вытесняем самые старые сессии.
+    while len(logs) > _LOG_FILES_PER_SESSION:
+        _session_logs.popitem(last=False)
+    fd = open(target, "ab")
+    logs[target] = fd
+    return fd
+
+
+def _close_session_file(session_id: str) -> None:
+    """Закрыть все открытые дескрипторы сессии (для чистоты при завершении)."""
+    logs = _session_logs.pop(session_id, None)
+    if logs:
+        for f in logs.values():
+            try:
+                f.close()
+            except Exception:
+                pass
+
+
+# ==================== ЧЕЛОВЕКОЧИТАЕМЫЙ ЛОГ ====================
 def _d(msg: str) -> None:
-    """Вывод лога: в консоль (если ADAPTER_DEBUG) и/или в файл (если задан ADAPTER_DEBUG_LOGFILE).
-    Оба канала независимы — можно писать одновременно и в файл, и в консоль."""
+    """Вывод лога: в консоль (если ADAPTER_DEBUG) и/или в файл (если задан
+    ADAPTER_DEBUG_LOGFILE).
+    Если ADAPTER_DEBUG_LOGFILE указывает на директорию — запись идёт в
+    сессионный файл session-<sessionID>.log (см. _open_session_file).
+    Если это полный путь — пишется в один файл (старое поведение)."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     line = f"[{ts}] {redact(msg)}"
     if ADAPTER_DEBUG:
         print(line)
-    if ADAPTER_DEBUG_LOGFILE:
-        with open(ADAPTER_DEBUG_LOGFILE, "a") as f:
+    # Писать в сессионный файл?
+    if _DEBUG_IS_DIR and _DEBUG_PATH:
+        sid = _last_log_session_id or "unknown"
+        if sid == "unknown":
+            return  # сессия ещё не установлена — не создаём пустой файл
+        fd = _open_session_file("debug", sid)
+        if fd:
+            fd.write((line + "\n").encode())
+    elif not _DEBUG_IS_DIR and _DEBUG_PATH:
+        # Режим «один файл» (старое поведение)
+        with open(_DEBUG_PATH, "a") as f:
             f.write(line + "\n")
+
+
+def _dr(req_id: str, msg: str) -> None:
+    """Как _d(), но с префиксом [req_id] на каждой строке. Добавлено, чтобы
+    при параллельных запросах (см. request_kind) строки разных req_id можно
+    было различить в человекочитаемом логе, не сверяясь с JSON trace —
+    раньше строки заголовков/тела разных одновременных запросов
+    перемежались без какой-либо метки принадлежности."""
+    _d(f"[{req_id}] {msg}")
 
 
 # ==================== СТРУКТУРИРОВАННЫЙ TRACE-ЛОГ (JSONL) ====================
@@ -138,9 +221,56 @@ def _next_seq(session_id: str) -> int:
         return n
 
 
-def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
-    if not ADAPTER_TRACE_LOGFILE:
+# ==================== TOOL-USE ПРИЧИННОСТЬ (родитель -> потомок) ====================
+# Один агентный цикл в рамках одной X-Claude-Code-Session-Id порождает много
+# отдельных HTTP-запросов к адаптеру (req_id), причём часть из них может идти
+# параллельно (см. request_kind: "structured_output" сайдкар для заголовка
+# сессии обычно летит одновременно с основным "agent_turn"). Обычная
+# сортировка по времени/msg_count для восстановления связки
+# "какой запрос породил tool_use, а какой принёс его tool_result" ненадёжна
+# именно в параллельном случае.
+#
+# Вместо этого используем tool_use_id как естественный, гарантированно
+# уникальный ключ: он присваивается моделью/адаптером один раз на конкретный
+# вызов инструмента (см. convert_openai_to_anthropic) и возвращается харнессом
+# обратно в следующем запросе внутри tool_result-блока (см.
+# convert_messages_anthropic_to_openai). Отображение "кто породил"
+# храним per-session, с ограничением размера (на случай очень долгих
+# сессий) — вытесняем самые старые записи по FIFO.
+_TOOL_USE_INDEX_MAX_PER_SESSION = 2000
+_tool_use_producers = {}  # session_id -> OrderedDict(tool_use_id -> req_id)
+
+
+def _register_tool_use(session_id: str, tool_use_id: str, req_id: str) -> None:
+    if not tool_use_id:
         return
+    with _trace_lock:
+        idx = _tool_use_producers.setdefault(session_id, OrderedDict())
+        idx[tool_use_id] = req_id
+        while len(idx) > _TOOL_USE_INDEX_MAX_PER_SESSION:
+            idx.popitem(last=False)
+
+
+def _lookup_tool_use_producer(session_id: str, tool_use_id: str):
+    with _trace_lock:
+        idx = _tool_use_producers.get(session_id)
+        if not idx:
+            return None
+        return idx.get(tool_use_id)
+
+
+def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
+    # Если база — директория, пишем в сессионный файл; если полный путь —
+    # в один файл (старое поведение).
+    if _TRACE_IS_DIR and _TRACE_PATH:
+        fd = _open_session_file("trace", session_id)
+        if not fd:
+            return
+    elif not _TRACE_IS_DIR and not _TRACE_PATH:
+        return
+    else:
+        fd = None  # режим «один файл» — ниже open() на _TRACE_PATH
+
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z",
         "session_id": session_id,
@@ -152,8 +282,11 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     line = json.dumps(record, ensure_ascii=False, default=str)
     line = redact(line)
     with _trace_lock:
-        with open(ADAPTER_TRACE_LOGFILE, "a") as f:
-            f.write(line + "\n")
+        if fd:
+            fd.write((line + "\n").encode())
+        else:
+            with open(_TRACE_PATH, "a") as f:
+                f.write(line + "\n")
 
 
 # ==================== SKILL DETECTION ====================
@@ -255,6 +388,29 @@ def convert_tool_choice_anthropic_to_openai(tc):
     if t == "tool":
         return {"type": "function", "function": {"name": tc.get("name", "")}}
     return "auto"
+
+
+def extract_tool_results(messages):
+    """Достаёт все tool_result-блоки из входящих Anthropic messages "как есть",
+    отдельно от convert_messages_anthropic_to_openai (которая тоже их видит,
+    но для целей конвертации, а не трассировки). Возвращает список
+    {tool_use_id, content, is_error}. Используется в do_POST, чтобы
+    эмитить событие "tool_result" ПЕРЕД конвертацией в OpenAI-формат."""
+    results = []
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") == "tool_result":
+                results.append({
+                    "tool_use_id": block.get("tool_use_id", ""),
+                    "content": extract_text(block.get("content")),
+                    "is_error": bool(block.get("is_error", False)),
+                })
+    return results
 
 
 def convert_messages_anthropic_to_openai(messages, system):
@@ -396,10 +552,12 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
         # (или харнесс не смог) использовать нативный tool-calling формат
         # backend'а и адаптеру пришлось парсить JSON из текста руками.
         # Это деградация, повышающая риск некорректного вызова инструмента
-        # скилла (обрезанный JSON, лишний текст рядом и т.п.).
-        _trace(session_id, req_id, "harness_branch",
-               check="text_tool_call_fallback", triggered=True,
-               parsed_count=len(tool_calls))
+        # скилла (обрезанный JSON, лишний текст рядом и т.п.). Это реальное
+        # ветвление поведения адаптера с последствиями — поэтому у него
+        # собственное событие, а не общий "harness_branch".
+        _trace(session_id, req_id, "tool_call_fallback",
+               parsed_count=len(tool_calls),
+               raw_text_len=len(text))
 
     content = []
     if text and text.strip():
@@ -414,19 +572,37 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
             except (json.JSONDecodeError, TypeError):
                 input_data = {}
             name = func.get("name", "")
+            tool_use_id = tc.get("id", "")
             content.append({
                 "type": "tool_use",
-                "id": tc.get("id", ""),
+                "id": tool_use_id,
                 "name": name,
                 "input": input_data
             })
+            # Регистрируем, что ИМЕННО ЭТОТ запрос (req_id) породил данный
+            # tool_use_id — это и есть узел "родитель" для последующей
+            # причинной связи, когда где-то в будущем запросе придёт
+            # соответствующий tool_result (см. do_POST/extract_tool_results
+            # и событие "tool_result" ниже).
+            _register_tool_use(session_id, tool_use_id, req_id)
             skill, evidence = detect_skill(name, input_data)
+            traced_input = input_data
+            if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
+                serialized = json.dumps(input_data, ensure_ascii=False, default=str)
+                if len(serialized) > ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
+                    traced_input = _cap(serialized, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
             tool_use_summaries.append({
-                "id": tc.get("id", ""), "name": name, "skill": skill,
+                "id": tool_use_id, "name": name, "skill": skill,
+                # Полные аргументы вызова, не только имя — без них нельзя
+                # отличить содержательно разные вызовы одного инструмента
+                # (см. пример с двумя разными "ls" из параллельных веток).
+                # Секреты вычищаются позже, при записи всей trace-строки
+                # (см. _trace -> redact(line)).
+                "input": traced_input,
             })
             if skill:
                 _trace(session_id, req_id, "skill_signal",
-                       tool_id=tc.get("id", ""), tool_name=name,
+                       tool_id=tool_use_id, tool_name=name,
                        skill=skill, evidence=evidence[:200])
 
     if not content:
@@ -438,14 +614,18 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
     elif finish_reason not in ("stop", "length"):
         stop_reason = "end_turn"
 
-    _trace(session_id, req_id, "harness_branch",
-           check="finish_reason_map",
-           openai_finish_reason=finish_reason, anthropic_stop_reason=stop_reason)
-
+    # Маппинг finish_reason -> stop_reason — детерминированная функция
+    # одного значения в другое, а не решение/ветвление; раньше под неё
+    # заводилось отдельное событие "harness_branch". Теперь это просто два
+    # поля внутри response_content, где и так уже есть остальной результат
+    # этого же ответа модели.
     _trace(session_id, req_id, "response_content",
            text_len=len(text), tool_uses=tool_use_summaries,
+           finish_reason_raw=finish_reason, stop_reason_mapped=stop_reason,
            reasoning_present=bool(reasoning.strip()), reasoning_len=len(reasoning),
-           reasoning_preview=reasoning[:500])
+           # Полный reasoning, а не reasoning[:500] — обрезка убивала как
+           # раз ту часть рассуждения, где объясняется выбор ветки/тула.
+           reasoning=_cap(reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS))
 
     return {
         "id": f"msg_{o.get('id', 'local')}",
@@ -515,10 +695,15 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
         req_id = uuid.uuid4().hex[:12]
 
+        # Обновляем глобальный fallback для _d(), чтобы человекочитаемый
+        # лог тоже писался в правильный сессионный файл.
+        global _last_log_session_id
+        _last_log_session_id = session_id
+
         _d(f"\n{'='*70}")
-        _d(f"[REQ] {self.command} {self.path}")
+        _dr(req_id, f"[REQ] {self.command} {self.path} session={session_id}")
         for k, v in redact_headers(self.headers).items():
-            _d(f"  {k}: {v}")
+            _dr(req_id, f"  {k}: {v}")
 
         if not self.path.startswith("/v1/messages"):
             self._send_json(404, {"error": "Expected /v1/messages"})
@@ -527,7 +712,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(length)
         _body = body.decode()
-        _d(f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_DEBUG_TRIM])}")
+        _dr(req_id, f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_DEBUG_TRIM])}")
 
         try:
             anthropic_req = json.loads(body)
@@ -539,12 +724,67 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         max_tokens = anthropic_req.get("max_tokens", 4096)
         in_tools = anthropic_req.get("tools", [])
         in_tool_names = [t.get("name", "?") for t in in_tools]
+        in_messages = anthropic_req.get("messages", [])
+        has_structured_output = bool(
+            (anthropic_req.get("output_config") or {}).get("format")
+        )
+
+        # request_kind — СТРУКТУРНЫЙ (не по содержимому промпта) признак
+        # того, к какому потоку в рамках сессии относится запрос:
+        #   agent_turn        — обычный ход основного агентного цикла
+        #                        (есть хотя бы один tool)
+        #   structured_output — сайдкар-вызов вроде генерации заголовка
+        #                        сессии: 0 tools + output_config.format
+        #                        задан. Идёт параллельно основному циклу,
+        #                        НЕ является его веткой, хотя делит тот же
+        #                        session_id.
+        #   plain              — ни тулов, ни structured output (редкий
+        #                        случай, например самый первый system-title
+        #                        запрос без tools).
+        if in_tools:
+            request_kind = "agent_turn"
+        elif has_structured_output:
+            request_kind = "structured_output"
+        else:
+            request_kind = "plain"
+
+        # Требовал ли исходный запрос стриминг — адаптер всегда шлёт
+        # backend'у stream=False (см. openai_body ниже) независимо от этого
+        # значения; раньше расхождение нигде не логировалось.
+        _dr(req_id, f"[STREAM_REQUESTED] anthropic_stream={anthropic_req.get('stream')} -> backend_stream=False")
 
         _trace(session_id, req_id, "request_start",
                path=self.path, model=model, max_tokens=max_tokens,
-               msg_count=len(anthropic_req.get("messages", [])),
+               msg_count=len(in_messages),
                tool_count=len(in_tools), tool_names=in_tool_names,
-               tool_choice=anthropic_req.get("tool_choice"))
+               tool_choice=anthropic_req.get("tool_choice"),
+               request_kind=request_kind,
+               stream_requested=anthropic_req.get("stream"))
+
+        # === Трассировка исполнения инструмента (tool_result) ===
+        # Делается ДО конвертации в OpenAI-формат и ДО отправки бэкенду —
+        # это чисто наблюдение за тем, что харнесс уже прислал нам в этом
+        # запросе. Каждый tool_result связывается с req_id запроса, который
+        # породил соответствующий tool_use (см. _register_tool_use в
+        # convert_openai_to_anthropic), через уникальный tool_use_id.
+        for tr in extract_tool_results(in_messages):
+            parent_req_id = _lookup_tool_use_producer(session_id, tr["tool_use_id"])
+            traced_content = tr["content"]
+            if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
+                traced_content = _cap(traced_content, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
+            _trace(session_id, req_id, "tool_result",
+                   tool_use_id=tr["tool_use_id"],
+                   # parent_req_id=None означает, что производитель этого
+                   # tool_use не найден в индексе данной сессии — либо он
+                   # был вытеснен по FIFO (см. _TOOL_USE_INDEX_MAX_PER_SESSION),
+                   # либо tool_use случился до перезапуска адаптера/вне
+                   # трассировки. Само по себе это не ошибка, но означает,
+                   # что причинная связь для данного узла восстановить
+                   # нельзя — только его содержимое.
+                   parent_req_id=parent_req_id,
+                   is_error=tr["is_error"],
+                   content=traced_content)
+            _dr(req_id, f"[TOOL_RESULT] tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}")
 
         openai_body = {
             "model": model,
@@ -558,24 +798,27 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         if "tools" in anthropic_req:
             openai_body["tools"] = convert_tools_anthropic_to_openai(anthropic_req["tools"])
-            _d(f"[TOOLS] Passed {len(openai_body['tools'])} tools")
+            _dr(req_id, f"[TOOLS] Passed {len(openai_body['tools'])} tools")
 
         if "tool_choice" in anthropic_req:
             openai_body["tool_choice"] = convert_tool_choice_anthropic_to_openai(anthropic_req["tool_choice"])
-            _d(f"[TOOL_CHOICE] {openai_body['tool_choice']}")
+            _dr(req_id, f"[TOOL_CHOICE] {openai_body['tool_choice']}")
 
-        # Проверяем, что system действительно в начале
+        # Проверяем, что system действительно в начале. Это диагностика
+        # ИНВАРИАНТА КОНВЕРТАЦИИ самого адаптера (Anthropic->OpenAI), а не
+        # решение модели или харнесса — раньше это писалось под общим,
+        # вводящим в заблуждение именем "harness_branch".
         msgs = openai_body["messages"]
         system_ok = bool(msgs) and msgs[0]["role"] == "system"
-        _trace(session_id, req_id, "harness_branch",
-               check="system_first", passed=system_ok,
+        _trace(session_id, req_id, "adapter_invariant_check",
+               check="system_message_first", passed=system_ok,
                first_role=(msgs[0]["role"] if msgs else None))
         if system_ok:
-            _d(f"[CHECK] First message is system, OK")
+            _dr(req_id, f"[CHECK] First message is system, OK")
         else:
-            _d(f"[WARN] First message is NOT system: {msgs[0]['role'] if msgs else 'empty'}")
+            _dr(req_id, f"[WARN] First message is NOT system: {msgs[0]['role'] if msgs else 'empty'}")
 
-        _d(f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
+        _dr(req_id, f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
 
         backend_url = BACKEND_BASE.rstrip('/') + "/v1/chat/completions"
         req = urllib.request.Request(
@@ -593,23 +836,23 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         last_error = None
         for attempt in range(1, ADAPTER_RETRY + 1):
             try:
-                _d(f"[FETCH] Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s")
+                _dr(req_id, f"[FETCH] Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s")
                 _trace(session_id, req_id, "backend_attempt", attempt=attempt, timeout=ADAPTER_TIMEOUT)
                 t0 = time.time()
                 resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
                 raw = resp.read()
                 elapsed = time.time() - t0
-                _d(f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
-                _d(f"[FETCH_RAW] {(raw.decode() if ADAPTER_DEBUG_FETCH_RAW_FULL else raw.decode()[:ADAPTER_DEBUG_TRIM])}")
+                _dr(req_id, f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
+                _dr(req_id, f"[FETCH_RAW] {(raw.decode() if ADAPTER_DEBUG_FETCH_RAW_FULL else raw.decode()[:ADAPTER_DEBUG_TRIM])}")
                 _trace(session_id, req_id, "backend_result", attempt=attempt,
                        ok=True, status=resp.status, elapsed_ms=int(elapsed * 1000))
 
                 o = json.loads(raw)
                 anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
-                _d(f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)[:800]}")
+                _dr(req_id, f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)[:800]}")
                 self._send_json(200, anthropic_resp)
-                _d("[OK] Done")
+                _dr(req_id, "[OK] Done")
                 _trace(session_id, req_id, "request_end",
                        http_status=200, retries_used=attempt - 1,
                        total_elapsed_ms=int((time.time() - req_t0) * 1000))
@@ -617,7 +860,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             except urllib.error.HTTPError as e:
                 err = e.read().decode()
-                _d(f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
+                _dr(req_id, f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
                 _trace(session_id, req_id, "backend_result", attempt=attempt,
                        ok=False, status=e.code, error=redact(err[:500]))
                 last_error = (e.code, err)
@@ -626,42 +869,42 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     break
                 if attempt < ADAPTER_RETRY:
                     delay = 2 ** attempt
-                    _d(f"[RETRY] Waiting {delay}s...")
+                    _dr(req_id, f"[RETRY] Waiting {delay}s...")
                     time.sleep(delay)
 
             except TimeoutError as e:
-                _d(f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after {ADAPTER_TIMEOUT}s")
+                _dr(req_id, f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after {ADAPTER_TIMEOUT}s")
                 _trace(session_id, req_id, "backend_result", attempt=attempt,
                        ok=False, status="timeout", error=str(e))
                 last_error = ("timeout", str(e))
                 if attempt < ADAPTER_RETRY:
                     delay = 2 ** attempt
-                    _d(f"[RETRY] Waiting {delay}s before next attempt...")
+                    _dr(req_id, f"[RETRY] Waiting {delay}s before next attempt...")
                     time.sleep(delay)
 
             except Exception as e:
-                _d(f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}")
+                _dr(req_id, f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}")
                 _trace(session_id, req_id, "backend_result", attempt=attempt,
                        ok=False, status="error", error=f"{type(e).__name__}: {e}")
                 last_error = ("error", str(e))
                 if attempt < ADAPTER_RETRY:
                     delay = 2 ** attempt
-                    _d(f"[RETRY] Waiting {delay}s...")
+                    _dr(req_id, f"[RETRY] Waiting {delay}s...")
                     time.sleep(delay)
 
         # Все попытки исчерпаны
         if last_error:
             code, msg = last_error
             if code == "timeout":
-                _d(f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504.")
+                _dr(req_id, f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504.")
                 self._send_json(504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"})
                 final_status = 504
             elif isinstance(code, int):
-                _d(f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
+                _dr(req_id, f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
                 self._send_json(code, {"error": f"Backend error: {msg}"})
                 final_status = code
             else:
-                _d(f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
+                _dr(req_id, f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
                 self._send_json(502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"})
                 final_status = 502
             _trace(session_id, req_id, "request_end",
