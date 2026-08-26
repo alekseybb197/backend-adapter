@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.3.3 (timeout+retry+trace+causality + per-session logs + model probe/validation)
+"""Claude Code <-> OpenAI-backend adapter v0.3.4 (timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O)
 — changelog: ../changelog.md"""
 import http.server
 import socketserver
@@ -195,6 +195,7 @@ def _d(msg: str) -> None:
         fd = _open_session_file("debug", sid)
         if fd:
             fd.write((line + "\n").encode())
+            fd.flush()
     elif not _DEBUG_IS_DIR and _DEBUG_PATH:
         # Режим «один файл» (старое поведение)
         with open(_DEBUG_PATH, "a") as f:
@@ -293,9 +294,11 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     with _trace_lock:
         if fd:
             fd.write((line + "\n").encode())
+            fd.flush()
         else:
             with open(_TRACE_PATH, "a") as f:
                 f.write(line + "\n")
+                f.flush()
 
 
 # ==================== SKILL DETECTION ====================
@@ -1027,7 +1030,7 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v0.3.2 (timeout+retry+trace + per-session logs + models probe)")
+    print(f"Claude Code Adapter v0.3.4 (timeout+retry+trace + per-session logs + models probe + unbuffered I/O)")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
     print(f"Timeout:    {ADAPTER_TIMEOUT}s")
