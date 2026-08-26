@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.4.0 (streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O)
+"""Claude Code <-> OpenAI-backend adapter v0.4.1
 — changelog: ../changelog.md"""
+__version__ = "0.4.1"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O"
+
 import http.server
-import socketserver
 import urllib.request
 import urllib.error
 import json
@@ -172,7 +174,7 @@ def _make_session_file(base_path: str, session_id: str, ext: str):
     Формат имени: session-<YYYYMMDD-HHMMSS>-<sessionID>.<ext>.
     Timestamp фиксируется при первом обращении к сессии и переиспользуется,
     чтобы весь трафик сессии шёл в один файл."""
-    safe = re.sub(r'[^A-Za-z0-9._-]', '_', session_id)
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', session_id[:8])
     if session_id not in _session_file_ts:
         _session_file_ts[session_id] = time.strftime("%Y%m%d-%H%M%S")
     ts = _session_file_ts[session_id]
@@ -1013,7 +1015,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             self._send_json(400, {"error": f"Invalid JSON: {e}"})
             return
 
-        model = anthropic_req.get("model", "qwen3.6-35b-a3b")
+        model = anthropic_req.get("model")
+        if not model:
+            self._send_json(400, {"error": "Missing required field: model"})
+            return
 
         # === Модельный маппинг (agent-facing name → backend name) ===
         original_model = model
@@ -1435,7 +1440,7 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'='*70}")
-    print(f"Claude Code Adapter v0.3.4 (timeout+retry+trace + per-session logs + models probe + unbuffered I/O)")
+    print(f"Claude Code Adapter v{__version__} ({__comment__})")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
     print(f"Timeout:    {ADAPTER_TIMEOUT}s")

@@ -1,5 +1,19 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.4.1 (log-filename-fix)
+
+### Исправление именования сессионных логов
+
+**Проблема:** в `_make_session_file()` весь `session_id` подставлялся в безопасное имя файла через `re.sub(r'[^A-Za-z0-9._-]', '_', session_id)`. Длинные session IDs (UUID-подобные) порождали слишком длинные и неуклюжие имена файлов сессий.
+
+**Решение:** обрезка `session_id` до первых 8 символов перед безопасным преобразованием: `re.sub(r'[^A-Za-z0-9._-]', '_', session_id[:8])`.
+
+### Прочее
+
+- Удалён неиспользуемый `import socketserver`.
+- Убран хардкод fallback модели `"qwen3.6-35b-a3b"` — теперь при отсутствии `model` в запросе возвращается 400 "Missing required field: model".
+- Заведены `__version__` и `__comment__` для единого управления версией и комментариями в заголовке запуска.
+
 ## v0.4.0 (streaming SSE passthrough + HTTP/1.0 keep-alive fix)
 
 ### Стриминг (SSE passthrough)
