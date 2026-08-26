@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.3.4 (timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O)
+"""Claude Code <-> OpenAI-backend adapter v0.4.0 (streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O)
 — changelog: ../changelog.md"""
 import http.server
 import socketserver
@@ -33,7 +33,44 @@ ADAPTER_DEBUG_FETCH_RAW_FULL = os.environ.get("ADAPTER_DEBUG_FETCH_RAW_FULL", "0
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
+# Управляющий флаг для двух режимов работы адаптера:
+#   1 (по умолчанию) — "потоковый" режим: если клиент (Claude Code) просит
+#     stream=true, адаптер честно пробрасывает это бэкенду и стримит SSE
+#     построчно (см. stream_openai_to_anthropic) — это и есть исправление
+#     первопричины BrokenPipeError, разобранное выше.
+#   0/false/no — "совместимый" режим: полный откат к старому поведению —
+#     адаптер ВСЕГДА шлёт бэкенду stream=False и ждёт ответ целиком,
+#     независимо от того, что просил клиент. Оставлено как аварийный
+#     рубильник — например, если конкретный backend плохо/нестандартно
+#     стримит SSE и надёжнее временно вернуться к нестриминговому пути,
+#     не откатывая сам файл адаптера.
+ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower() not in ("0", "false", "no", "")
 # ===================================================
+
+# ==================== МАППИНГ МОДЕЛЕЙ (agent -> backend) ====================
+ADAPTER_MODELS_MAPPING = os.environ.get("ADAPTER_MODELS_MAPPING", "")
+# ===================================================
+
+
+def _parse_models_mapping(raw: str) -> dict[str, str]:
+    """Разбирает строку вида ``a:b,c:d`` в {a: b, c: d}.
+    Пустая строка → пустой словарь (маппинг отключён)."""
+    if not raw or not raw.strip():
+        return {}
+    result: dict[str, str] = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        agent_model, backend_model = pair.split(":", 1)
+        agent_model = agent_model.strip()
+        backend_model = backend_model.strip()
+        if agent_model and backend_model:
+            result[agent_model] = backend_model
+    return result
+
+
+_MAP: dict[str, str] = _parse_models_mapping(ADAPTER_MODELS_MAPPING)
 
 # ====================================================
 # СПИСОК ДОСТУПНЫХ МОДЕЛЕЙ (заполняется при старте)
@@ -653,6 +690,199 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
     }
 
 
+# ==================== SSE-СТРИМИНГ (OpenAI backend -> Anthropic client) ====================
+# Раньше адаптер всегда ждал от backend'а ПОЛНЫЙ ответ (stream=False) и
+# только потом целиком сериализовал его клиенту через _send_json. Пока
+# backend "думает" (иногда десятки секунд), клиент (Claude Code) не видит
+# ни одного байта и рвёт соединение по собственному таймауту — на выходе
+# BrokenPipeError при попытке записать уже готовый ответ (см. do_POST).
+# Функции ниже читают SSE-поток backend'а построчно и немедленно
+# транслируют каждый его чанк в соответствующее Anthropic streaming-событие,
+# так что клиент получает первые байты почти сразу после старта генерации,
+# а не после её завершения.
+
+def _sse_write(wfile, event: str, data: dict) -> None:
+    """Записывает один SSE-event в поток клиента и сразу флашит буфер —
+    без flush() событие может застрять в буфере сокета и не дойти до
+    клиента вовремя, что свело бы на нет весь смысл стриминга."""
+    chunk = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+    wfile.write(chunk)
+    wfile.flush()
+
+
+def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id):
+    """Построчно читает SSE-ответ backend'а (OpenAI chat.completions
+    streaming формат: строки ``data: {...}``, завершается ``data: [DONE]``)
+    и на лету конвертирует каждый чанк в поток Anthropic-событий
+    (message_start / content_block_start / content_block_delta /
+    content_block_stop / message_delta / message_stop), записывая их в
+    wfile сразу по мере поступления.
+
+    Логика конвертации структуры контента (text / tool_use, fallback
+    tool-call'ов из текста, skill-детекция, trace) намеренно повторяет
+    convert_openai_to_anthropic — просто по кусочкам, а не одним объектом
+    в конце. Бросает исключение наружу при обрыве соединения — вызывающий
+    код (do_POST) решает, можно ли ещё retry или поток уже начался и надо
+    сообщить об ошибке SSE-событием "error"."""
+    message_id = f"msg_stream_{req_id}"
+    _sse_write(wfile, "message_start", {
+        "type": "message_start",
+        "message": {
+            "id": message_id, "type": "message", "role": "assistant",
+            "model": model, "content": [],
+            "usage": {"input_tokens": 0, "output_tokens": 0},
+        },
+    })
+
+    block_index = -1
+    block_open = None  # "text" | "tool_use" | None — тип текущего открытого content_block
+    text_buf = []
+    reasoning_buf = []
+    # OpenAI delta.tool_calls[].index -> {"anthropic_index", "id", "name", "args_buf"}
+    # (у OpenAI streaming один tool_call собирается из нескольких чанков:
+    # id/name обычно в первом, arguments — фрагментами в последующих)
+    tool_state: dict[int, dict] = {}
+    finish_reason = "stop"
+    usage = {}
+
+    def _close_current_block():
+        nonlocal block_open
+        if block_open is not None:
+            _sse_write(wfile, "content_block_stop", {"type": "content_block_stop", "index": block_index})
+            block_open = None
+
+    for raw_line in resp:
+        line = raw_line.decode("utf-8", errors="replace").strip("\n").strip("\r")
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            _dr(req_id, f"[STREAM_WARN] Не удалось распарсить SSE-чанк backend'а: {payload[:200]}")
+            continue
+
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        if choice.get("finish_reason"):
+            finish_reason = choice["finish_reason"]
+
+        # reasoning_content не является отдельным Anthropic content-block'ом
+        # (харнесс его не ждёт в этом протоколе) — только копим для trace,
+        # как и в нестриминговом convert_openai_to_anthropic.
+        if delta.get("reasoning_content"):
+            reasoning_buf.append(delta["reasoning_content"])
+
+        text_piece = delta.get("content")
+        if text_piece:
+            if block_open != "text":
+                _close_current_block()
+                block_index += 1
+                block_open = "text"
+                _sse_write(wfile, "content_block_start", {
+                    "type": "content_block_start", "index": block_index,
+                    "content_block": {"type": "text", "text": ""},
+                })
+            text_buf.append(text_piece)
+            _sse_write(wfile, "content_block_delta", {
+                "type": "content_block_delta", "index": block_index,
+                "delta": {"type": "text_delta", "text": text_piece},
+            })
+
+        for tc in (delta.get("tool_calls") or []):
+            oi = tc.get("index", 0)
+            func = tc.get("function", {}) or {}
+            st = tool_state.get(oi)
+            if st is None:
+                _close_current_block()
+                block_index += 1
+                block_open = "tool_use"
+                tool_use_id = tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                name = func.get("name", "")
+                st = {"anthropic_index": block_index, "id": tool_use_id,
+                      "name": name, "args_buf": []}
+                tool_state[oi] = st
+                # Регистрируем производителя tool_use_id сразу, как и в
+                # нестриминговом пути (см. convert_openai_to_anthropic) —
+                # причинность tool_use -> tool_result не должна зависеть от
+                # того, стримился ответ или нет.
+                _register_tool_use(session_id, tool_use_id, req_id)
+                _sse_write(wfile, "content_block_start", {
+                    "type": "content_block_start", "index": block_index,
+                    "content_block": {"type": "tool_use", "id": tool_use_id,
+                                       "name": name, "input": {}},
+                })
+            elif func.get("name") and not st["name"]:
+                st["name"] = func["name"]
+
+            args_piece = func.get("arguments")
+            if args_piece:
+                st["args_buf"].append(args_piece)
+                # partial_json конкатенируется клиентом точно так же, как
+                # OpenAI конкатенирует фрагменты arguments — реконструкция
+                # полного JSON на стороне адаптера не нужна, пробрасываем
+                # фрагмент как есть.
+                _sse_write(wfile, "content_block_delta", {
+                    "type": "content_block_delta", "index": st["anthropic_index"],
+                    "delta": {"type": "input_json_delta", "partial_json": args_piece},
+                })
+
+    _close_current_block()
+
+    stop_reason = finish_reason
+    if finish_reason == "tool_calls":
+        stop_reason = "tool_use"
+    elif finish_reason not in ("stop", "length"):
+        stop_reason = "end_turn"
+
+    _sse_write(wfile, "message_delta", {
+        "type": "message_delta",
+        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "usage": {"output_tokens": usage.get("completion_tokens", 0)},
+    })
+    _sse_write(wfile, "message_stop", {"type": "message_stop"})
+
+    # Трассировка результата — по аналогии с событием "response_content" в
+    # convert_openai_to_anthropic, но собранная из фрагментов, накопленных
+    # за время стрима, а не из одного целого ответа.
+    tool_use_summaries = []
+    for st in tool_state.values():
+        try:
+            parsed_input = json.loads("".join(st["args_buf"]) or "{}")
+        except json.JSONDecodeError:
+            parsed_input = {}
+        skill, evidence = detect_skill(st["name"], parsed_input)
+        traced_input = parsed_input
+        if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
+            serialized = json.dumps(parsed_input, ensure_ascii=False, default=str)
+            if len(serialized) > ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
+                traced_input = _cap(serialized, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
+        tool_use_summaries.append({"id": st["id"], "name": st["name"], "skill": skill, "input": traced_input})
+        if skill:
+            _trace(session_id, req_id, "skill_signal",
+                   tool_id=st["id"], tool_name=st["name"], skill=skill,
+                   evidence=(evidence or "")[:200])
+
+    full_text = "".join(text_buf)
+    full_reasoning = "".join(reasoning_buf)
+    _trace(session_id, req_id, "response_content",
+           text_len=len(full_text), tool_uses=tool_use_summaries,
+           finish_reason_raw=finish_reason, stop_reason_mapped=stop_reason,
+           reasoning_present=bool(full_reasoning.strip()), reasoning_len=len(full_reasoning),
+           reasoning=_cap(full_reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS),
+           streamed=True)
+
+    return stop_reason, usage
+
+
 class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
     """ThreadingHTTPServer, который не сыплет полным traceback в лог, если
     клиент (Claude Code) уже закрыл соединение раньше, чем адаптер успел
@@ -691,6 +921,40 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             _d(f"[CLIENT_GONE] {type(e).__name__} during sending status={status}: client disconnected before response could be sent")
         except Exception as e:
             _d(f"[WARN] Error sending response: {type(e).__name__}: {e}")
+
+    def _start_sse(self, status=200):
+        """Отправляет заголовки SSE-ответа. После вызова этой функции
+        заголовки уже ушли клиенту — откатиться на обычный JSON-ответ
+        (например, чтобы вернуть 502 после неудачи) больше нельзя, поэтому
+        вызывается только один раз, непосредственно перед первым событием
+        стрима (см. ветку stream_requested в do_POST).
+
+        ВАЖНО про Connection: этот адаптер нигде не переопределяет
+        BaseHTTPRequestHandler.protocol_version, он остаётся дефолтным
+        "HTTP/1.0". При таком protocol_version http.server ВСЕГДА
+        закрывает TCP-соединение сразу после ответа (self.close_connection
+        остаётся True) — независимо от того, что написано в заголовке
+        Connection (см. BaseHTTPRequestHandler.parse_request: keep-alive
+        честно применяется только если ОДНОВРЕМЕННО версия запроса клиента
+        >= HTTP/1.1 И self.protocol_version >= "HTTP/1.1"). Раньше здесь
+        стояло "Connection: keep-alive" — адаптер лгал клиенту, что
+        соединение можно переиспользовать, а сам тут же его рвал. Node/
+        Stainless-клиент Claude Code этому заголовку верил, клал сокет в
+        пул на повторное использование, а при следующей попытке отправить
+        по нему запрос получал ECONNRESET на уже закрытый сокет — именно
+        это и порождало "API Error: The operation timed out" и
+        "will retry in Xm Ys" в терминале уже ПОСЛЕ того, как адаптер
+        успешно отдал предыдущий ответ (см. changelog/разбор лога).
+        Отправляем "Connection: close", что соответствует тому, что
+        сервер реально делает, и явно фиксируем self.close_connection —
+        без опоры на дефолт, чтобы не сломать это неявно при будущих
+        правках."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
 
     def do_HEAD(self):
         # Кто-то (health-check / сетевой пробник) стучится HEAD-запросами на
@@ -751,6 +1015,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         model = anthropic_req.get("model", "qwen3.6-35b-a3b")
 
+        # === Модельный маппинг (agent-facing name → backend name) ===
+        original_model = model
+        if _MAP and model in _MAP:
+            model = _MAP[model]
+            _dr(req_id, f"[MODEL_MAP] {original_model} -> {model}")
+            _trace(session_id, req_id, "model_map",
+                   agent_model=original_model, backend_model=model)
+
         # Валидация имени модели: если бэкенд список загружен и строгий
         # режим включён — проверяем что модель допустима.
         if ADAPTER_STRICT_MODELS and _AVAILABLE_MODELS:
@@ -788,10 +1060,24 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         else:
             request_kind = "plain"
 
-        # Требовал ли исходный запрос стриминг — адаптер всегда шлёт
-        # backend'у stream=False (см. openai_body ниже) независимо от этого
-        # значения; раньше расхождение нигде не логировалось.
-        _dr(req_id, f"[STREAM_REQUESTED] anthropic_stream={anthropic_req.get('stream')} -> backend_stream=False")
+        # Требовал ли исходный запрос стриминг. РАНЬШЕ здесь стоял
+        # комментарий "адаптер всегда шлёт backend'у stream=False независимо
+        # от этого значения" — именно это и было первопричиной
+        # BrokenPipeError (см. stream_openai_to_anthropic и разбор ниже):
+        # пока backend не отдаст ответ целиком, клиент не получает ни
+        # байта и рвёт сокет по своему таймауту. Теперь адаптер честно
+        # пробрасывает клиентский флаг stream дальше в backend_stream и
+        # либо стримит SSE построчно (см. ветку stream_requested в конце
+        # do_POST), либо, если клиент явно не просил стрим, работает как
+        # раньше — ждёт полный ответ.
+        stream_requested = bool(anthropic_req.get("stream", False))
+        if stream_requested and not ADAPTER_STREAMING_ENABLE:
+            # Аварийный рубильник ADAPTER_STREAMING_ENABLE=0 — принудительно
+            # откатываемся к старому поведению, даже если клиент просил
+            # stream=true. См. комментарий у переменной выше.
+            _dr(req_id, f"[STREAM_DISABLED] Клиент просил stream=true, но ADAPTER_STREAMING_ENABLE=0 -> forcing backend_stream=False")
+            stream_requested = False
+        _dr(req_id, f"[STREAM_REQUESTED] anthropic_stream={anthropic_req.get('stream')} -> backend_stream={stream_requested} (streaming_mode={'on' if ADAPTER_STREAMING_ENABLE else 'off'})")
 
         _trace(session_id, req_id, "request_start",
                path=self.path, model=model, max_tokens=max_tokens,
@@ -799,7 +1085,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                tool_count=len(in_tools), tool_names=in_tool_names,
                tool_choice=anthropic_req.get("tool_choice"),
                request_kind=request_kind,
-               stream_requested=anthropic_req.get("stream"))
+               stream_requested=stream_requested)
 
         # === Трассировка исполнения инструмента (tool_result) ===
         # Делается ДО конвертации в OpenAI-формат и ДО отправки бэкенду —
@@ -833,7 +1119,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 anthropic_req.get("system")
             ),
             "max_tokens": max_tokens,
-            "stream": False
+            # Пробрасываем клиентский флаг как есть (см. комментарий у
+            # stream_requested выше) — раньше тут было жёстко "stream": False.
+            "stream": stream_requested
         }
 
         if "tools" in anthropic_req:
@@ -872,7 +1160,124 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             method="POST"
         )
 
-        # === Retry loop ===
+        if stream_requested:
+            # === Потоковая ветка ===
+            # Retry возможен только ПОКА ни один байт не ушёл клиенту —
+            # после self._start_sse()/первого content_block_start откатиться
+            # на новую попытку уже нельзя (клиент получит два message_start
+            # подряд), поэтому в этой ветке retry действует только на этапе
+            # urlopen() (соединение/заголовки), а сбой уже во время самого
+            # чтения SSE (stream_openai_to_anthropic бросит исключение)
+            # обрабатывается отдельно — событием SSE "error", без retry.
+            last_error = None
+            started = False
+            for attempt in range(1, ADAPTER_RETRY + 1):
+                try:
+                    _dr(req_id, f"[FETCH] (stream) Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s")
+                    _trace(session_id, req_id, "backend_attempt", attempt=attempt,
+                           timeout=ADAPTER_TIMEOUT, streaming=True)
+                    t0 = time.time()
+                    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
+                    _dr(req_id, f"[FETCH] (stream) Заголовки получены за {time.time() - t0:.1f}s, status={resp.status}")
+                    _trace(session_id, req_id, "backend_result", attempt=attempt,
+                           ok=True, status=resp.status, elapsed_ms=int((time.time() - t0) * 1000))
+
+                    self._start_sse(200)
+                    started = True
+                    stop_reason, usage = stream_openai_to_anthropic(resp, self.wfile, model, session_id, req_id)
+                    _dr(req_id, f"[OK] Stream done, stop_reason={stop_reason}")
+                    _trace(session_id, req_id, "request_end",
+                           http_status=200, retries_used=attempt - 1,
+                           total_elapsed_ms=int((time.time() - req_t0) * 1000), streamed=True)
+                    return  # Успех — выходим
+
+                except urllib.error.HTTPError as e:
+                    err = e.read().decode()
+                    _dr(req_id, f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
+                    _trace(session_id, req_id, "backend_result", attempt=attempt,
+                           ok=False, status=e.code, error=redact(err[:500]))
+                    last_error = (e.code, err)
+                    if e.code not in (429, 502, 503, 504):
+                        break
+                    if attempt < ADAPTER_RETRY:
+                        delay = 2 ** attempt
+                        _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                        time.sleep(delay)
+
+                except TimeoutError as e:
+                    _dr(req_id, f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after {ADAPTER_TIMEOUT}s")
+                    _trace(session_id, req_id, "backend_result", attempt=attempt,
+                           ok=False, status="timeout", error=str(e))
+                    last_error = ("timeout", str(e))
+                    if attempt < ADAPTER_RETRY:
+                        delay = 2 ** attempt
+                        _dr(req_id, f"[RETRY] Waiting {delay}s before next attempt...")
+                        time.sleep(delay)
+
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                    # Клиент отвалился сам (по своим причинам, не по нашей
+                    # вине) прямо во время стрима — как и в _send_json,
+                    # это не ошибка адаптера и логировать полный traceback
+                    # не нужно.
+                    _dr(req_id, f"[CLIENT_GONE] {type(e).__name__} while streaming: client disconnected")
+                    _trace(session_id, req_id, "request_end", http_status=None,
+                           retries_used=attempt - 1,
+                           total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                           streamed=True, client_gone=True)
+                    return
+
+                except Exception as e:
+                    _dr(req_id, f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}")
+                    _trace(session_id, req_id, "backend_result", attempt=attempt,
+                           ok=False, status="error", error=f"{type(e).__name__}: {e}")
+                    last_error = ("error", str(e))
+                    if started:
+                        # Заголовки и часть событий уже ушли клиенту —
+                        # откатить нельзя. Сообщаем об обрыве SSE-событием
+                        # "error" вместо повторной попытки (которая бы
+                        # породила второй message_start внутри уже
+                        # начатого ответа).
+                        try:
+                            _sse_write(self.wfile, "error", {
+                                "type": "error",
+                                "error": {"type": "api_error", "message": f"{type(e).__name__}: {e}"},
+                            })
+                        except Exception:
+                            pass
+                        _trace(session_id, req_id, "request_end", http_status=200,
+                               retries_used=attempt - 1,
+                               total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                               streamed=True, failed_mid_stream=True)
+                        return
+                    if attempt < ADAPTER_RETRY:
+                        delay = 2 ** attempt
+                        _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                        time.sleep(delay)
+
+            # Все попытки исчерпаны, поток так и не начался (started=False)
+            # — заголовки ещё не отправлены, можно вернуть обычный
+            # JSON-error статус, как и в нестриминговой ветке ниже.
+            if last_error and not started:
+                code, msg = last_error
+                if code == "timeout":
+                    _dr(req_id, f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504.")
+                    self._send_json(504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"})
+                    final_status = 504
+                elif isinstance(code, int):
+                    _dr(req_id, f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
+                    self._send_json(code, {"error": f"Backend error: {msg}"})
+                    final_status = code
+                else:
+                    _dr(req_id, f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
+                    self._send_json(502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"})
+                    final_status = 502
+                _trace(session_id, req_id, "request_end", http_status=final_status,
+                       retries_used=ADAPTER_RETRY,
+                       total_elapsed_ms=int((time.time() - req_t0) * 1000), failed=True, streamed=True)
+            return
+
+        # === Нестриминговая ветка (клиент явно не просил stream) ===
+        # Retry loop — оставлена как была: ждём ответ бэкенда целиком.
         last_error = None
         for attempt in range(1, ADAPTER_RETRY + 1):
             try:
@@ -1037,6 +1442,7 @@ if __name__ == "__main__":
     print(f"Retries:    {ADAPTER_RETRY}")
     print(f"Trace log:  {ADAPTER_TRACE_LOGFILE or '(disabled)'}")
     print(f"Models:     {'strict' if ADAPTER_STRICT_MODELS else 'permissive'} validation")
+    print(f"Streaming:  {'enabled (SSE passthrough)' if ADAPTER_STREAMING_ENABLE else 'disabled (legacy stream=False, старое поведение)'}")
     print(f"{'='*70}\n")
 
     # === Проба списка моделей от бэкенда ===

@@ -1,5 +1,36 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.4.0 (streaming SSE passthrough + HTTP/1.0 keep-alive fix)
+
+### Стриминг (SSE passthrough)
+
+**Проблема:** адаптер принудительно шлёл бэкенду `stream: False` и ждал ответ целиком. Пока backend "думал" (иногда десятки секунд), клиент (Claude Code) не видел ни одного байта и рвал соединение по своему таймауту — на выходе `BrokenPipeError` при попытке записать уже готовый ответ.
+
+**Решение:**
+
+- Убран жёсткий `"stream": False`. Клиентский флаг `stream` пробрасывается бэкенду "как есть".
+- Новая функция `stream_openai_to_anthropic()` — читает SSE-ответ backend'а построчно (`data: {...}` / `data: [DONE]`) и на лету транслирует каждый чанк в Anthropic streaming-события: `message_start` → чередующиеся `content_block_start/delta/stop` (текст как `text_delta`, tool-calls как `tool_use` + `input_json_delta`, фрагменты `arguments` конкатенируются клиентом по-OpenAI-совски) → `message_delta` → `message_stop`.
+- `do_POST` разделён на две ветки:
+  - **Потоковая:** retry работает только пока не ушёл ни один байт (этап `urlopen`/заголовков). Если обрыв во время самого стрима — шлём SSE-событие `error` вместо retry (второй `message_start` сломал бы протокол). `BrokenPipeError` во время стрима → `[CLIENT_GONE]` без падения.
+  - **Нестриминговая:** без изменений, на случай если бэкенд стриминг не поддерживает.
+- Логика ретраев, редактирования секретов, per-session логов и causality (`_register_tool_use`) сохранена и в стриминговом пути.
+
+### Флаг `ADAPTER_STREAMING_ENABLE`
+
+Переключатель "рубильник" в едином стиле с остальными `ADAPTER_*_ENABLE`:
+
+- `ADAPTER_STREAMING_ENABLE=1` (по умолчанию) — новое стримящее поведение: если клиент просит `stream=true`, адаптер честно стримит.
+- `ADAPTER_STREAMING_ENABLE=0` (или `false`/`no`) — полный откат к старому поведению: `stream=False` принудительно, даже если клиент просил стриминг. Удобен как аварийный рубильник.
+- Режим виден при старте: `Streaming: enabled (SSE passthrough)` / `disabled (legacy stream=False, старое поведение)`.
+
+### HTTP/1.0 keep-alive lie fix
+
+**Проблема:** в `_start_sse()` стоял заголовок `Connection: keep-alive`, хотя `protocol_version` адаптера остаётся дефолтным `"HTTP/1.0"` — при таком protocol_version `http.server` **всегда** закрывает TCP-соединение после ответа. Клиент верил заголовку, клал сокет в пул на переиспользование, а при следующей попытке отправить по нему запрос получал `ECONNRESET` на уже мёртвый сокет — отсюда `"API Error: The operation timed out"` и `"will retry in Xm Ys"` в терминале **уже после** того, как адаптер успешно отдал предыдущий ответ.
+
+**Решение:** `_start_sse()` теперь шлёт `Connection: close` и явно выставляет `self.close_connection = True` — честно информирует клиент, что соединение будет закрыто. Ложные таймауты устранены.
+
+> Примечание: это чинит симптом, но не убирает накладные расходы на TCP+TLS handshake на каждый запрос (агентный цикл шлёт их последовательно). Настоящий keep-alive (переиспользование TCP-соединений) потребует отдельной правки: `protocol_version = "HTTP/1.1"` + chunked-фрейминг.
+
 ## v0.3.4 (unbuffered I/O for debug/trace logs)
 
 Отключена буферизация ОС/Python при записи в debug- и trace-логи. До этого `fd.write()` уже вызывал `fd.flush()`, но Python внутри файловых потоков мог держать байты в своём буфере и не сбрасывать их на диск мгновенно — в режиме пер-session логов это приводило к задержкам между моментом события и появлением записи в файле.
