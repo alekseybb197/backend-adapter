@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.4.1
+"""Claude Code <-> OpenAI-backend adapter v0.5.1
 — changelog: ../changelog.md"""
-__version__ = "0.4.1"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O"
+__version__ = "0.5.1"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models"
 
 import http.server
 import urllib.request
@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 import threading
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 
 # ==================== НАСТРОЙКИ ====================
 BACKEND_BASE      = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
@@ -53,6 +53,22 @@ ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower
 ADAPTER_MODELS_MAPPING = os.environ.get("ADAPTER_MODELS_MAPPING", "")
 # ===================================================
 
+# ==================== MULTI-BACKEND CONFIG ====================
+ADAPTER_BACKEND_CONFIG = os.environ.get("ADAPTER_BACKEND_CONFIG", "")
+# True, если используется legacy-режим (один бэкенд через BACKEND_BASE / BACKEND_KEY).
+_BACKEND_LEGACY = (ADAPTER_BACKEND_CONFIG == "")
+
+# Глобальные структуры multi-backend.
+# _BACKENDS — список [{name, base, key}, …]
+# _BACKEND_BY_NAME — name → config
+# _MODEL_TO_BACKEND — model_id → (backend_name, backend_config)
+# _DEFAULT_BACKEND — первый бэкенд в списке (fallback)
+_BACKENDS: list[dict] = []
+_BACKEND_BY_NAME: dict[str, dict] = {}
+_MODEL_TO_BACKEND: dict[str, tuple] = {}
+_DEFAULT_BACKEND: dict | None = None
+# ===================================================
+
 
 def _parse_models_mapping(raw: str) -> dict[str, str]:
     """Разбирает строку вида ``a:b,c:d`` в {a: b, c: d}.
@@ -73,6 +89,182 @@ def _parse_models_mapping(raw: str) -> dict[str, str]:
 
 
 _MAP: dict[str, str] = _parse_models_mapping(ADAPTER_MODELS_MAPPING)
+
+
+# ==================== MULTI-BACKEND: YAML PARSER ====================
+def _parse_backend_yaml(path: str) -> list[dict] | None:
+    """Мини-парсер для YAML-файла бэкендов.
+
+    Ожидаемая структура:
+        backend:
+          - name: AAA
+            base: https://llm.service.example.com
+            key: ADAPTER_BACKEND_KEY_AAA
+          - name: BBB
+            base: https://llm.service.another.com
+            key: ADAPTER_BACKEND_KEY_BBB
+
+    Возвращает список dict: {name, base, key} или None при ошибке."""
+    try:
+        with open(path) as f:
+            raw = f.read()
+    except Exception as e:
+        _d(f"[BACKEND_CONFIG] Failed to read {path}: {e}")
+        return None
+
+    # Удаляем YAML-документные маркеры
+    lines = raw.splitlines()
+    blocks = []
+    current: dict | None = None
+
+    for line in lines:
+        stripped = line.strip()
+        # Пропускаем пустые строки, комментарии, document markers
+        if not stripped or stripped.startswith("#") or stripped in ("---", "..."):
+            continue
+        # Пропускаем корневую ключевую строку "backend:"
+        if stripped == "backend:" and current is None:
+            continue
+        # Новая запись в списке: "  - name: AAA"
+        m = re.match(r'^\s*-\s+name:\s*(.+)$', line)
+        if m:
+            if current is not None:
+                blocks.append(current)
+            current = {"name": m.group(1).strip().strip('"').strip("'")}
+            continue
+        # Продолжение текущей записи: "    base: ..." или "    key: ..."
+        if current is not None:
+            m2 = re.match(r'^\s+(\w+):\s*(.+)$', line)
+            if m2:
+                key_name = m2.group(1)
+                if key_name in ("name", "base", "key"):
+                    current[key_name] = m2.group(2).strip().strip('"').strip("'")
+
+    if current is not None:
+        blocks.append(current)
+
+    # Валидация + раскрытие переменных окружения в поле key
+    valid_blocks: list[dict] = []
+    for b in blocks:
+        if not all(k in b for k in ("name", "base", "key")):
+            _d(f"[BACKEND_CONFIG] Skipping invalid entry: {b}")
+            continue
+        # key из YAML — имя переменной окружения (например "ADAPTER_HOME_KEY");
+        # заменяем на реальное значение. Если переменная не задана — оставляем
+        # строку как есть (будет ошибка при использовании, но конфиг валиден).
+        env_var = b["key"]
+        resolved = os.environ.get(env_var, env_var)
+        b["key"] = resolved
+        valid_blocks.append(b)
+
+    return valid_blocks if valid_blocks else None
+
+
+# ==================== MULTI-BACKEND: PROBE & INIT ====================
+def _fetch_models(base: str, key: str) -> list[dict]:
+    """Запрашивает GET /v1/models у бэкенда, возвращает список dict.
+
+    ``base`` — URL бэкенда, ``key`` — уже раскрытый токен (в т.ч. из
+    ADAPTER_BACKEND_CONFIG). Извлечение из os.environ — в _parse_backend_yaml.
+    """
+    url = base.rstrip("/") + "/v1/models"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Connection": "keep-alive",
+        },
+        method="GET",
+    )
+    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
+    raw = resp.read()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        _d(f"[FETCH_ERROR] json decode failed: {e} raw={raw[:500]}")
+        raise
+    if isinstance(data, list):
+        return data
+    return data.get("data", [])
+
+
+def _probe_models() -> list[dict]:
+    """Обёртка: проба legacy-бэкенда из ``_fetch_models``.
+
+    Это используется при запуске без ``ADAPTER_BACKEND_CONFIG`` —
+    старое поведение сохранено. BACKEND_KEY — уже раскрытый токен
+    (из os.environ при импорте модуля)."""
+    models = _fetch_models(BACKEND_BASE, BACKEND_KEY)
+    _d(f"[INIT] Fetched {len(models)} models from {BACKEND_BASE.rstrip('/')}/v1/models")
+    for m in models:
+        _d(f"  model={m.get('id')}, object={m.get('object')}, "
+           f"owned_by={m.get('owned_by')}")
+    return models
+
+
+def _init_multi_backends(config_path: str) -> None:
+    """Загрузить YAML-конфиг, пробовать модели, построить model → backend map.
+
+    Алгоритм префиксов:
+    1) Собрать все model id со всех бэкендов.
+    2) Обнаружить коллизии — id, которые встречаются более чем на одном бэкенде.
+    3) Для коллизирующих заменить id на ``<backend_name>.<model_id>``.
+    4) Для некллизирующих оставить как есть.
+
+    ADAPTER_MODELS_MAPPING не учитывает префиксы — маппинг применяется
+    к имени модели до разрешения бэкенда (по lookup в _MODEL_TO_BACKEND)."""
+    blocks = _parse_backend_yaml(config_path)
+    if blocks is None:
+        print(f"[FATAL] Failed to parse backend config: {config_path}")
+        sys.exit(1)
+
+    global _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND
+
+    _BACKENDS = blocks
+    _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
+    _DEFAULT_BACKEND = blocks[0]
+
+    # 1) Собрать все модели: (model_dict_copy, backend_config)
+    all_models: list[tuple[dict, dict]] = []
+    for b in blocks:
+        try:
+            bmodels = _fetch_models(b["base"], b["key"])
+        except Exception as e:
+            print(f"[WARN] Failed to probe backend '{b['name']}' at {b['base']}: {e}")
+            continue
+        for m in bmodels:
+            # Делаем копию, чтобы не мутировать оригинальный ответ бэкенда
+            all_models.append((dict(m), b))
+
+    if not all_models:
+        print("[FATAL] No models retrieved from any backend — exiting.")
+        sys.exit(1)
+
+    # 2) Обнаружить коллизии по id
+    id_counter: dict[str, int] = {}
+    for m, _ in all_models:
+        mid = m.get("id", "")
+        id_counter[mid] = id_counter.get(mid, 0) + 1
+    colliding_ids = {k for k, v in id_counter.items() if v > 1}
+
+    # 3) Заполнить _AVAILABLE_MODELS и _MODEL_TO_BACKEND
+    for m, backend in all_models:
+        mid = m.get("id", "")
+        if mid in colliding_ids:
+            prefixed = f"{backend['name']}.{mid}"
+            m["id"] = prefixed
+            _AVAILABLE_MODELS[prefixed] = m
+            _MODEL_TO_BACKEND[prefixed] = (backend["name"], backend)
+        else:
+            _AVAILABLE_MODELS[mid] = m
+            _MODEL_TO_BACKEND[mid] = (backend["name"], backend)
+
+    # 4) Логируем
+    _d(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from {len(blocks)} backends")
+    for mid in sorted(_AVAILABLE_MODELS.keys()):
+        _d(f"  model={mid}")
+
 
 # ====================================================
 # СПИСОК ДОСТУПНЫХ МОДЕЛЕЙ (заполняется при старте)
@@ -1020,24 +1212,35 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Missing required field: model"})
             return
 
-        # === Модельный маппинг (agent-facing name → backend name) ===
-        original_model = model
-        if _MAP and model in _MAP:
-            model = _MAP[model]
-            _dr(req_id, f"[MODEL_MAP] {original_model} -> {model}")
-            _trace(session_id, req_id, "model_map",
-                   agent_model=original_model, backend_model=model)
-
-        # Валидация имени модели: если бэкенд список загружен и строгий
-        # режим включён — проверяем что модель допустима.
+        # Валидация имени модели (до маппинга и разрешения бэкенда):
+        # имя из запроса клиента — именно оно указано в _AVAILABLE_MODELS
+        # (с возможными префиксами бэкендов для коллизирующих моделей).
+        client_model = model
         if ADAPTER_STRICT_MODELS and _AVAILABLE_MODELS:
-            if model not in _AVAILABLE_MODELS:
+            if client_model not in _AVAILABLE_MODELS:
                 available = list(_AVAILABLE_MODELS.keys())
-                msg = (f"Model '{model}' is not available. "
+                msg = (f"Model '{client_model}' is not available. "
                        f"Allowed models: {', '.join(available)}")
                 _dr(req_id, f"[ERROR] {msg}")
                 self._send_json(400, {"error": msg})
                 return
+
+        # === Модельный маппинг (agent-facing name → backend name) ===
+        original_model = client_model
+        if _MAP and client_model in _MAP:
+            model = _MAP[client_model]
+            _dr(req_id, f"[MODEL_MAP] {original_model} -> {model}")
+            _trace(session_id, req_id, "model_map",
+                   agent_model=original_model, backend_model=model)
+        else:
+            model = client_model
+
+        # Resolve backend для (возможно маппированного) имени.
+        backend_cfg, resolved_model = _resolve_backend(model)
+        _dr(req_id, f"[BACKEND_RESOLVE] model={client_model} -> backend={backend_cfg['name']}/{resolved_model}")
+
+        # resolved_model — имя модели, которое пойдёт на бэкенд (без префикса)
+        model = resolved_model
         max_tokens = anthropic_req.get("max_tokens", 4096)
         in_tools = anthropic_req.get("tools", [])
         in_tool_names = [t.get("name", "?") for t in in_tools]
@@ -1153,13 +1356,16 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         _dr(req_id, f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
 
-        backend_url = BACKEND_BASE.rstrip('/') + "/v1/chat/completions"
+        # Построить URL и Authorization из resolved backend-конфига.
+        # key — уже раскрытый токен (раскрытие происходит в _parse_backend_yaml).
+        backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
+        backend_key_val = backend_cfg["key"]
         req = urllib.request.Request(
             backend_url,
             data=json.dumps(openai_body, ensure_ascii=False).encode(),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {BACKEND_KEY}",
+                "Authorization": f"Bearer {backend_key_val}",
                 "Connection": "keep-alive",
             },
             method="POST"
@@ -1404,25 +1610,12 @@ def _write_pidfile() -> None:
         f.write(str(os.getpid()))
 
 
-# ==================== ПРОБА СПИСКА МОДЕЛЕЙ ====================
 def _probe_models() -> list[dict]:
-    """При старте запрашивает GET /v1/models у бэкенда, возвращает
-    список dict с полями из ответа. Формат — как в OpenAI API:
-    [ {id, object, created, owned_by, ...}, ... ]
-    Бросает исключение если бэкенд недоступен — это блокирует старт."""
+    """При старте запрашивает GET /v1/models у legacy-бэкенда.
+
+    Это обёртка над ``_fetch_models``, используемая в legacy-режиме."""
     url = BACKEND_BASE.rstrip("/") + "/v1/models"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {BACKEND_KEY}",
-            "Connection": "keep-alive",
-        },
-        method="GET",
-    )
-    resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
-    raw = resp.read()
-    data = json.loads(raw)
-    models = data if isinstance(data, list) else data.get("data", [])
+    models = _fetch_models(BACKEND_BASE, BACKEND_KEY)
     _d(f"[INIT] Fetched {len(models)} models from backend {url}")
     for m in models:
         _d(f"  model={m.get('id')}, object={m.get('object')}, "
@@ -1430,10 +1623,53 @@ def _probe_models() -> list[dict]:
     return models
 
 
+# ==================== MULTI-BACKEND: ROUTING ====================
+def _resolve_backend(model: str) -> tuple[dict, str]:
+    """Определить целевой бэкенд для модели.
+
+    Возвращает ``(backend_cfg, resolved_model_name)``.
+
+    Логика:
+    1. Legacy-режим → единственный бэкенд, model без изменений.
+    2. Явный префикс ``<backend_name>.<model>`` → stripping, routing.
+    3. Lookup в ``_MODEL_TO_BACKEND`` → первый найденный бэкенд.
+    4. Fallback → ``_DEFAULT_BACKEND``.
+    """
+    if _BACKEND_LEGACY:
+        return {"base": BACKEND_BASE, "key": BACKEND_KEY, "name": "legacy"}, model
+
+    # 2) Явный префикс: модель начинается с имени одного из бэкендов + '.'
+    for bname, bcfg in _BACKEND_BY_NAME.items():
+        prefix = bname + "."
+        if model.startswith(prefix):
+            actual = model[len(prefix):]
+            return bcfg, actual
+
+    # 3) Lookup по известному списку
+    entry = _MODEL_TO_BACKEND.get(model)
+    if entry:
+        # Если модель prefixed (имя из colliding_ids) — stripping префикса:
+        # "kl.qwen3.6-35b-a3b" → "qwen3.6-35b-a3b"
+        actual = model
+        for bname in _BACKEND_BY_NAME:
+            prefix = bname + "."
+            if model.startswith(prefix):
+                actual = model[len(prefix):]
+                break
+        return entry[1], actual
+
+    # 4) Fallback
+    if _DEFAULT_BACKEND:
+        return _DEFAULT_BACKEND, model
+    # Должно быть недостижимо — если multi-backend включён, но ни один
+    # бэкенд не прошёл проб — это fatal (см. startup). На случай
+    # неожиданных путей возвращаем legacy-конфиг.
+    return {"base": BACKEND_BASE, "key": BACKEND_KEY, "name": "legacy"}, model
+
+
 if __name__ == "__main__":
     if ADAPTER_DETACH:
         print(f"[DETACH] Starting as background service...")
-        print(f"Backend:  {BACKEND_BASE}/v1/chat/completions")
         print(f"Timeout:  {ADAPTER_TIMEOUT}s")
         print(f"Retries:  {ADAPTER_RETRY}")
         _detach()
@@ -1442,33 +1678,45 @@ if __name__ == "__main__":
     print(f"\n{'='*70}")
     print(f"Claude Code Adapter v{__version__} ({__comment__})")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
-    print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
-    print(f"Timeout:    {ADAPTER_TIMEOUT}s")
-    print(f"Retries:    {ADAPTER_RETRY}")
     print(f"Trace log:  {ADAPTER_TRACE_LOGFILE or '(disabled)'}")
     print(f"Models:     {'strict' if ADAPTER_STRICT_MODELS else 'permissive'} validation")
     print(f"Streaming:  {'enabled (SSE passthrough)' if ADAPTER_STREAMING_ENABLE else 'disabled (legacy stream=False, старое поведение)'}")
-    print(f"{'='*70}\n")
 
-    # === Проба списка моделей от бэкенда ===
-    # Пробуем GET /v1/models — результат ложится в глобальный
-    # _AVAILABLE_MODELS (str → dict). При failure — fatal: не стартуем,
-    # чтобы пользователь сразу увидел проблему.
-    try:
-        backend_models = _probe_models()
-        if backend_models:
-            for m in backend_models:
-                mid = m.get("id", "unknown")
-                _AVAILABLE_MODELS[mid] = m
-            print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from backend:")
-            for m in backend_models:
-                print(f"  - {m.get('id', '?')}")
-        else:
-            print("[WARN] Backend returned empty model list — models validation disabled.")
-    except Exception as e:
-        print(f"[FATAL] Failed to probe backend models at startup: {e}")
-        print("Adapter cannot start without knowing available models. Exiting.")
-        sys.exit(1)
+    if _BACKEND_LEGACY:
+        # === Legacy single-backend ===
+        print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
+        print(f"Retries:    {ADAPTER_RETRY}")
+        print(f"{'='*70}\n")
+
+        try:
+            backend_models = _probe_models()
+            if backend_models:
+                for m in backend_models:
+                    mid = m.get("id", "unknown")
+                    _AVAILABLE_MODELS[mid] = m
+                print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from backend:")
+                for m in backend_models:
+                    print(f"  - {m.get('id', '?')}")
+            else:
+                print("[WARN] Backend returned empty model list — models validation disabled.")
+        except Exception as e:
+            print(f"[FATAL] Failed to probe backend models at startup: {e}")
+            print("Adapter cannot start without knowing available models. Exiting.")
+            sys.exit(1)
+    else:
+        # === Multi-backend ===
+        _d(f"[INIT] Multi-backend mode: config={ADAPTER_BACKEND_CONFIG}")
+        try:
+            _init_multi_backends(ADAPTER_BACKEND_CONFIG)
+        except Exception as e:
+            print(f"[FATAL] Failed to initialize multi-backend: {e}")
+            print("Adapter cannot start. Exiting.")
+            sys.exit(1)
+
+        print(f"Backends:   {len(_BACKENDS)} configured:")
+        for b in _BACKENDS:
+            print(f"  - {b['name']}: {b['base']}")
+        print(f"{'='*70}\n")
 
     # ThreadingHTTPServer вместо socketserver.TCPServer: Claude Code может
     # открывать несколько параллельных запросов (конкурентные tool calls),
