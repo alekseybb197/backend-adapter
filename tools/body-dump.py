@@ -28,8 +28,54 @@ import sys
 from pathlib import Path
 
 import yaml
+from yaml.emitter import Emitter
 
-__version__ = "0.2.0"
+class LiteralDumper(yaml.Dumper):
+    """YAML dumper that uses block scalar (|) for multiline strings.
+
+    Patch: *space_break* detection (newline followed by whitespace) causes
+    ``analyze_scalar`` to set ``allow_block=False``, which makes
+    ``choose_scalar_style`` skip the explicit ``'|'`` requested by the
+    representer and fall through to double-quoted flow scalar.  The fix
+    re-enables ``allow_block`` for any string that contains ``\\n``.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _orig_choose = Emitter.choose_scalar_style
+        # Store on instance so __del__ can restore it
+        self._LiteralDumper__orig_choose = _orig_choose  # noqa: SLF001
+
+        def _fixed_choose(self):
+            # analyze_scalar populates self.analysis at the top of the
+            # original choose_scalar_style — run it first.
+            if self.analysis is None:
+                self.analysis = self.analyze_scalar(self.event.value)
+            # space_break (newline + whitespace) forces allow_block=False;
+            # override for multiline strings so block style ('|') works.
+            if "\n" in self.event.value:
+                self.analysis.allow_block = True
+                self.analysis.allow_block_plain = True
+            return _orig_choose(self)
+
+        # Store the original on the class so subclasses don't re-patch
+        if not hasattr(Emitter, "_LiteralDumper__orig_choose"):
+            Emitter._LiteralDumper__orig_choose = _orig_choose  # noqa: SLF001
+        Emitter.choose_scalar_style = _fixed_choose
+
+    def __del__(self):
+        # Restore the original on first destruction only
+        if hasattr(Emitter, "_LiteralDumper__orig_choose"):
+            Emitter.choose_scalar_style = Emitter._LiteralDumper__orig_choose  # noqa: SLF001
+            delattr(Emitter, "_LiteralDumper__orig_choose")  # noqa: SLF001
+
+
+def _str_representer(dumper, data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|") if "\n" in data else dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+LiteralDumper.add_representer(str, _str_representer)
+
+__version__ = "0.3.0"
 
 # Tags to look for in the log.  Each element is the bare text between brackets,
 # e.g. "BODY" → the script searches for ``[BODY]``.  Change this list to match
@@ -173,7 +219,7 @@ def dump_entries(entries: list[dict], out_dir: Path) -> list[Path]:
             yaml_name = json_name[:-5] + ".yaml"
             yaml_path = out_dir / yaml_name
             yaml_path.write_text(
-                yaml.dump(entry["parsed"], allow_unicode=True, sort_keys=False),
+                yaml.dump(entry["parsed"], Dumper=LiteralDumper, allow_unicode=True, sort_keys=False, default_flow_style=False),
                 encoding="utf-8",
             )
 
