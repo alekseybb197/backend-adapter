@@ -1,5 +1,40 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.6.0 (domain package refactoring)
+
+### Разбиение монолита `backend-adapter.py` в пакет `backend_adapter/`
+
+**Проблема:** `backend-adapter.py` содержал ~1780 строк, объединяя логически независимые подсистемы — конфигурацию, конвертацию форматов, стриминг, HTTP-сервер, логирование, трассировку, скиллы. Чтение и навигация по файлу, code review и отладка были затруднены.
+
+**Решение:** монолит разбит на 11 модулей в доменном пакете `backend_adapter/`:
+
+| Модуль | Ответственность |
+|---|---|
+| `config.py` | Многобэкенд-конфигурация, probe models, SSL, маппинг моделей |
+| `convert.py` | Anthropic ↔ OpenAI конвертация сообщений, тулов, tool-choice |
+| `daemon.py` | detach в фон, pidfile, timeout/retry при рестарте |
+| `logger.py` | `_d`, `_dr` — человеко-читаемый per-session лог |
+| `redact.py` | Сведение секретов (токены, ключи) из логов |
+| `server.py` | HTTP-сервер (`Adapter`, `QuietThreadingHTTPServer`), `do_POST`, `do_GET` |
+| `session_log.py` | FIFO-управление per-session файловыми дескрипторами |
+| `skill.py` | Pattern-матчинг скиллов по именам тулов |
+| `streaming.py` | SSE passthrough + `stream_openai_to_anthropic()` |
+| `tracer.py` | JSONL trace-лог + causality tracking (tool_use → tool_result) |
+
+Архитектура зависимостей (DAG):
+
+```
+config → logger, tracer, skill → convert, streaming → server
+         ↓          ↓         ↓           ↓           ↓
+        redact  (tracer)   (skill)    (convert)  (все выше)
+         ↓
+     session_log
+```
+
+- `backend-adapter.py` теперь —.entry point (~126 строк), который импортирует и запускает пакет.
+- mypy clean (zero type errors).
+- backward-compatible: все env-переменные и поведение без изменений.
+
 ## v0.5.2 (stream usage/input_tokens fix)
 
 ### Баг: input_tokens=0 в потоковом режиме
