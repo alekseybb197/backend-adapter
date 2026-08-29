@@ -1,5 +1,22 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.5.2 (stream usage/input_tokens fix)
+
+### Баг: input_tokens=0 в потоковом режиме
+
+**Проблема:** OpenAI-совместимый бэкенд в SSE-стриминге отдаёт `usage` только при явном `stream_options.include_usage=true`. Адаптер не запрашивал это поле, из-за чего Claude Code всю сессию видел `input_tokens=0` и не мог оценивать заполнение контекстного окна.
+
+**Решение:**
+
+- Новая переменная `ADAPTER_STREAM_INCLUDE_USAGE` (по умолчанию `1`). Без неё адаптер просит бэкенд прислать usage в SSE-чанках через `openai_body["stream_options"] = {"include_usage": True}`.
+- Аварийный рубильник `ADAPTER_STREAM_INCLUDE_USAGE=0` — на случай бэкенда, который падает на неизвестном поле `stream_options`.
+- `stream_openai_to_anthropic` дополнительно принимает `approx_prompt_chars` — размер сообщений в символах (эвристическая оценка из JSON-сериализации `messages`).
+- Если бэкенд вернул usage — пробрасывается реальный `prompt_tokens`.
+- Если бэкенд не поддержал `stream_options.include_usage` — используется эвристика `chars / 4`, явно помеченная как оценочная:
+  - в debug-логе: `[USAGE_WARN] Backend не вернул usage в стриме — input_tokens оценён эвристически`
+  - в trace: новое событие `usage_report` с полями `input_tokens`, `input_tokens_estimated`, `output_tokens`, `streamed`.
+- `message_delta` теперь содержит полный `usage` (и `input_tokens`, и `output_tokens`), а не только `output_tokens`.
+
 ## v0.5.1 (clean _fetch_models)
 
 ### Очистка `_fetch_models` от отладочного вывода

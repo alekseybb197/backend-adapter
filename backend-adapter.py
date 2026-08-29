@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.5.1
+"""Claude Code <-> OpenAI-backend adapter v0.5.2
 — changelog: ../changelog.md"""
-__version__ = "0.5.1"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models"
+__version__ = "0.5.2"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix"
 
 import http.server
 import urllib.request
@@ -47,6 +47,15 @@ ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() i
 #     стримит SSE и надёжнее временно вернуться к нестриминговому пути,
 #     не откатывая сам файл адаптера.
 ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower() not in ("0", "false", "no", "")
+# БАГ 2026-08-27: в потоковом режиме адаптер НЕ просил backend прислать
+# usage в SSE (OpenAI-совместимый стриминг отдаёт usage только при явном
+# stream_options.include_usage=true) — из-за этого клиент (Claude Code)
+# всю сессию видел input_tokens=0 и не мог корректно оценивать заполнение
+# контекстного окна (см. stream_openai_to_anthropic и message_delta ниже).
+# Флаг-рубильник на случай backend'а, который не понимает stream_options
+# и падает на неизвестном поле (такое встречается у части OpenAI-совместимых
+# серверов старых версий) — тогда можно откатиться, не трогая сам файл.
+ADAPTER_STREAM_INCLUDE_USAGE = os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1").lower() not in ("0", "false", "no", "")
 # ===================================================
 
 # ==================== МАППИНГ МОДЕЛЕЙ (agent -> backend) ====================
@@ -904,7 +913,7 @@ def _sse_write(wfile, event: str, data: dict) -> None:
     wfile.flush()
 
 
-def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id):
+def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_prompt_chars=0):
     """Построчно читает SSE-ответ backend'а (OpenAI chat.completions
     streaming формат: строки ``data: {...}``, завершается ``data: [DONE]``)
     и на лету конвертирует каждый чанк в поток Anthropic-событий
@@ -1037,12 +1046,40 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id):
     elif finish_reason not in ("stop", "length"):
         stop_reason = "end_turn"
 
+    # РАНЬШЕ здесь пробрасывался только output_tokens — input_tokens нигде
+    # за весь стрим не сообщался клиенту (message_start шлёт его нулём ДО
+    # начала генерации, реальное значение backend отдаёт только в usage
+    # последнего чанка). Из-за этого харнесс всю сессию оценивал заполнение
+    # контекстного окна вслепую. Теперь: если backend прислал usage (см.
+    # ADAPTER_STREAM_INCLUDE_USAGE/stream_options.include_usage) — отдаём
+    # реальный prompt_tokens здесь же, в единственном месте потокового
+    # ответа, где он физически может быть достоверным.
+    input_tokens = usage.get("prompt_tokens")
+    input_tokens_estimated = False
+    if input_tokens is None:
+        # Backend не поддержал stream_options.include_usage (или флаг
+        # ADAPTER_STREAM_INCLUDE_USAGE=0) — не отдаём молчаливый 0, это и
+        # была первопричина бага. Грубая эвристика лучше тишины, но
+        # ЯВНО помечается как оценочная и в trace, и для будущей отладки.
+        input_tokens = max(1, approx_prompt_chars // 4) if approx_prompt_chars else 0
+        input_tokens_estimated = True
+        _dr(req_id, f"[USAGE_WARN] Backend не вернул usage в стриме — "
+                     f"input_tokens оценён эвристически (~{input_tokens}, "
+                     f"chars/4), реальное число неизвестно")
+
     _sse_write(wfile, "message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"output_tokens": usage.get("completion_tokens", 0)},
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": usage.get("completion_tokens", 0),
+        },
     })
     _sse_write(wfile, "message_stop", {"type": "message_stop"})
+
+    _trace(session_id, req_id, "usage_report",
+           input_tokens=input_tokens, input_tokens_estimated=input_tokens_estimated,
+           output_tokens=usage.get("completion_tokens", 0), streamed=True)
 
     # Трассировка результата — по аналогии с событием "response_content" в
     # convert_openai_to_anthropic, но собранная из фрагментов, накопленных
@@ -1332,6 +1369,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             "stream": stream_requested
         }
 
+        if stream_requested and ADAPTER_STREAM_INCLUDE_USAGE:
+            # Без этого поля OpenAI-совместимый стриминг НЕ присылает usage
+            # ни в одном SSE-чанке — см. комментарий у ADAPTER_STREAM_INCLUDE_USAGE.
+            # Именно это было первопричиной input_tokens=0 в message_start/
+            # message_delta и, как следствие, неверной оценки заполнения
+            # контекстного окна агентом ТОЛЬКО в потоковом режиме.
+            openai_body["stream_options"] = {"include_usage": True}
+
         if "tools" in anthropic_req:
             openai_body["tools"] = convert_tools_anthropic_to_openai(anthropic_req["tools"])
             _dr(req_id, f"[TOOLS] Passed {len(openai_body['tools'])} tools")
@@ -1395,7 +1440,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
                     self._start_sse(200)
                     started = True
-                    stop_reason, usage = stream_openai_to_anthropic(resp, self.wfile, model, session_id, req_id)
+                    approx_prompt_chars = len(json.dumps(openai_body.get("messages", []), ensure_ascii=False))
+                    stop_reason, usage = stream_openai_to_anthropic(
+                        resp, self.wfile, model, session_id, req_id,
+                        approx_prompt_chars=approx_prompt_chars)
                     _dr(req_id, f"[OK] Stream done, stop_reason={stop_reason}")
                     _trace(session_id, req_id, "request_end",
                            http_status=200, retries_used=attempt - 1,
