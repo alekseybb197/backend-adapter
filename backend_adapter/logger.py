@@ -5,7 +5,7 @@ file) depending on ADAPTER_DEBUG_LOGFILE setting.
 """
 import time
 
-from .config import ADAPTER_DEBUG
+from .config import ADAPTER_DEBUG, ADAPTER_SENSITIVE_LOGGING_ENABLE
 from .redact import redact
 from . import session_log
 
@@ -15,9 +15,17 @@ def _d(msg: str) -> None:
     ADAPTER_DEBUG_LOGFILE).
     Если ADAPTER_DEBUG_LOGFILE указывает на директорию — запись идёт в
     сессионный файл session-<sessionID>.log (см. _open_session_file).
-    Если это полный путь — пишется в один файл (старое поведение)."""
+    Если это полный путь — пишется в один файл (старое поведение).
+
+    При ADAPTER_SENSITIVE_LOGGING_ENABLE=1 санитайзер отключается —
+    строка записывается в лог без вызова redact(), т.е. полные токены,
+    заголовки и ключи выводятся в открытом виде. По умолчанию санитайзер
+    активен, секреты маскируются."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    line = f"[{ts}] {redact(msg)}"
+    if ADAPTER_SENSITIVE_LOGGING_ENABLE:
+        line = f"[{ts}] {msg}"
+    else:
+        line = f"[{ts}] {redact(msg)}"
     if ADAPTER_DEBUG:
         print(line)
     # Писать в сессионный файл?

@@ -1,5 +1,41 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.6.2 (SSE response logging + HTTP log req_id)
+
+### Лог агрегированного ответа в стриминговом режиме
+
+**Проблема:** в нестриминговой ветке ответ логируется целиком через `[RESPONSE]` (server.py:485). В стриминговом режиме SSE-чанки шли напрямую в `wfile` без логики — в debug-логе был только `[STREAM_REQUESTED]` и `[FETCH]`, но финального ответа не видно.
+
+**Решение:**
+- `streaming.py`: по завершении стрима собирается полный ответ из накопленных буферов (`full_text`, `full_reasoning`, `tool_state`) и пишется один раз через `_dr(..., "[RESPONSE] ...")`
+- Формат тот же, что в нестриминговой ветке: `text_len`, `reasoning_len`, `tool_uses_count`, обрезанные `text`/`reasoning`, `tool_uses` со скилл-анализом
+- `[RESPONSE]` в стриме — аналог нестримингового `[RESPONSE]` — позволяет сверить что получил клиент, не читая SSE вручную
+- В trace: полное событие `response_content` + `usage_report` (input_tokens из stream_options.include_usage)
+
+### `[req_id] [HTTP]` — связка HTTP-логов с SSE-стримом
+
+**Проблема:** `log_message` вызывается из `send_response()` вне контекста `do_POST` — не было доступа к `req_id`, поэтому HTTP-сообщения вида `[HTTP]` не имели идентификатора запроса.
+
+**Решение:**
+- `threading.local()` хранит `req_id` / `session_id` на весь `do_POST` — `log_message` читает их и форматирует как `[req_id] [HTTP]`
+- try/finally гарантирует cleanup даже при исключениях
+
+## v0.6.1 (sanitizer disable flag + documentation)
+
+### Новая переменная `ADAPTER_SENSITIVE_LOGGING_ENABLE`
+
+**Проблема:** санитайзер (redaction) всегда маскировал секренты в логах. Отладка формата/длины/спецсимволов токенов требовала временного изменения кода `redact.py`.
+
+**Решение:**
+
+- Переменная `ADAPTER_SENSITIVE_LOGGING_ENABLE` (`0` по умолчанию). Значение `1`/`true`/`yes` **полностью отключает** `redact()` на всех точках применения:
+  - `logger.py`: `_d()`/`_dr()` записывают строки без `redact()`
+  - `tracer.py`: `_trace()` записывает JSONL без `redact.redact()`
+  - `server.py`: HTTP-заголовки и ошибки бэкенда записываются без маскировки (3 ветки)
+- **Только логи** — сетевой трафик (запросы/ответы к бэкенду) не модифицируется никак
+- Обновлена документация: `docs/sanitizing.md` — новая секция §4.1, обновлённая таблица §6, grep-паттерны для двух режимов
+- Исправлена китайская вставка в `sanitizing.md:352`
+
 ## v0.6.0 (domain package refactoring)
 
 ### Разбиение монолита `backend-adapter.py` в пакет `backend_adapter/`

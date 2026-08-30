@@ -105,6 +105,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | `ADAPTER_DEBUG_BODY_FULL` | `0` (выключено) | Если `1` — писать **полные** тела запросов/ответов в отладочный лог без усечения (игнорирует `ADAPTER_DEBUG_TRIM`). |
 | `ADAPTER_DEBUG_OPENAI_BODY_FULL` | `0` (выключено) | Если `1` — писать полные тела OpenAI-формата (запрос к бэкенду) в отладочный лог без усечения. |
 | `ADAPTER_DEBUG_FETCH_RAW_FULL` | `0` (выключено) | Если `1` — писать полные необработанные ответы от `/v1/models` в отладочный лог. |
+| `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` (санитайзер активен) | **Рубильник санитайзера.**<br>• `0` (по умолчанию) — все сообщения, проходящие через `_d()`, `_dr()` и `_trace()`, а также прямые вызовы `redact()` — маскируются (токены, заголовки, ключи).<br>• `1` — санитайзер **отключается полностью**: строки записываются в лог без вызова `redact()`, в секренты выводятся в открытом виде. |
 
 ---
 
@@ -178,3 +179,5 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | Отключить отладку | `ADAPTER_DEBUG_ENABLE` | `0` |
 | Запуск в фоне (daemon) | `ADAPTER_DETACH_ENABLE` | `1` |
 | Маппинг моделей | `ADAPTER_MODELS_MAPPING` | `"claude-sonnet:k2-05,..."` |
+| Включить санитайзер | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` |
+| Отключить санитайзер (секренты в логах) | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `1` |

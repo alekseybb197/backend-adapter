@@ -30,6 +30,10 @@ ADAPTER_DEBUG_FETCH_RAW_FULL = os.environ.get("ADAPTER_DEBUG_FETCH_RAW_FULL", "0
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
+# Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
+# без вызова redact(), логируются полные токены, заголовки, ключи.
+# По умолчанию false — санитайзер активен, секреты маскируются.
+ADAPTER_SENSITIVE_LOGGING_ENABLE = os.environ.get("ADAPTER_SENSITIVE_LOGGING_ENABLE", "0").lower() in ("1", "true", "yes")
 # Управляющий флаг для двух режимов работы адаптера:
 #   1 (по умолчанию) — "потоковый" режим: если клиент (Claude Code) просит
 #     stream=true, адаптер честно пробрасывает это бэкенду и стримит SSE

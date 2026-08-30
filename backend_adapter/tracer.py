@@ -10,7 +10,7 @@ import time
 from collections import OrderedDict
 
 from . import session_log
-from .config import _cap
+from .config import _cap, ADAPTER_SENSITIVE_LOGGING_ENABLE
 from . import redact
 
 
@@ -84,7 +84,8 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     }
     record.update(fields)
     line = json.dumps(record, ensure_ascii=False, default=str)
-    line = redact.redact(line)
+    if not ADAPTER_SENSITIVE_LOGGING_ENABLE:
+        line = redact.redact(line)
     with _trace_lock:
         if fd:
             fd.write((line + "\n").encode())
