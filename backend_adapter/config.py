@@ -24,26 +24,52 @@ ADAPTER_TIMEOUT   = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY     = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
 ADAPTER_SKILL_PATTERNS = os.environ.get("ADAPTER_SKILL_PATTERNS", "")
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
-ADAPTER_DEBUG_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
-ADAPTER_DEBUG_OPENAI_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_OPENAI_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
-ADAPTER_DEBUG_RESPONSE_FULL   = os.environ.get("ADAPTER_DEBUG_RESPONSE_FULL", "0").lower() not in ("0", "false", "no", "")
 # Логгирование результатов работы инструментов:
 #   ADAPTER_DEBUG_TOOLS=1 — писать все результаты ([TOOL_RESULT]).
 #   ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать ошибки инструментов ([TOOL_RESULT_ERROR]).
-#   ADAPTER_DEBUG_TOOLS_RESPONSE_FULL=1 — полный вывод content без обрезки (игнорирует ADAPTER_DEBUG_TRIM).
+#   ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
+#   отключается обрезка (trim). Если тэг в списке — полный вывод без обрезки.
+#   Пример: BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT,TOOL_RESULT_ERROR,RESPONSE
 ADAPTER_DEBUG_TOOLS            = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_TOOLS_ERROR      = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "1").lower() not in ("0", "false", "no", "")
-ADAPTER_DEBUG_TOOLS_RESPONSE_FULL = os.environ.get("ADAPTER_DEBUG_TOOLS_RESPONSE_FULL", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
+# ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
+# отключается обрезка (trim). Пусто / не задано — trim включён везде.
+_ADAPTER_DEBUG_TAGS_FULL_RAW = os.environ.get("ADAPTER_DEBUG_TAGS_FULL", "")
+ADAPTER_DEBUG_TAGS_FULL: list[str] = (
+    [t.strip() for t in _ADAPTER_DEBUG_TAGS_FULL_RAW.split(",") if t.strip()]
+    if _ADAPTER_DEBUG_TAGS_FULL_RAW.strip()
+    else []
+)
+_ADAPTER_DEBUG_TAGS_FULL_SET: frozenset[str] = frozenset(ADAPTER_DEBUG_TAGS_FULL)
+
+
+def _trim_limit(tag: str) -> int | None:
+    """Return None if trim is OFF for this tag, or ADAPTER_DEBUG_TRIM if ON."""
+    if tag in _ADAPTER_DEBUG_TAGS_FULL_SET:
+        return None
+    return ADAPTER_DEBUG_TRIM
 ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
-# ADAPTER_DEBUG_BODY_TAGS — перечисление тегов через запятую, для которых
+# ADAPTER_DEBUG_TAGS_JSON — перечисление тегов через запятую, для которых
 # дополнительно пишется JSON-файл для любой части протокола обмена.
 # Пусто / не задано — JSON-файлы не пишутся.
-_ADAPTER_DEBUG_BODY_TAGS_RAW = os.environ.get("ADAPTER_DEBUG_BODY_TAGS", "")
-ADAPTER_DEBUG_BODY_TAGS: list[str] = (
-    [t.strip() for t in _ADAPTER_DEBUG_BODY_TAGS_RAW.split(",") if t.strip()]
-    if _ADAPTER_DEBUG_BODY_TAGS_RAW.strip()
+_ADAPTER_DEBUG_TAGS_JSON_RAW = os.environ.get("ADAPTER_DEBUG_TAGS_JSON", "")
+ADAPTER_DEBUG_TAGS_JSON: list[str] = (
+    [t.strip() for t in _ADAPTER_DEBUG_TAGS_JSON_RAW.split(",") if t.strip()]
+    if _ADAPTER_DEBUG_TAGS_JSON_RAW.strip()
+    else []
+)
+
+# ADAPTER_DEBUG_TAGS_YAML — перечисление тегов через запятую, для которых
+# дополнительно пишется YAML-файл для любой части протокола обмена.
+# Пусто / не задано — YAML-файлы не пишутся.
+# Аналогичен ADAPTER_DEBUG_TAGS_JSON по формату — можно указать тот же
+# список или другой подмножество тегов.
+_ADAPTER_DEBUG_TAGS_YAML_RAW = os.environ.get("ADAPTER_DEBUG_TAGS_YAML", "")
+ADAPTER_DEBUG_TAGS_YAML: list[str] = (
+    [t.strip() for t in _ADAPTER_DEBUG_TAGS_YAML_RAW.split(",") if t.strip()]
+    if _ADAPTER_DEBUG_TAGS_YAML_RAW.strip()
     else []
 )
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки

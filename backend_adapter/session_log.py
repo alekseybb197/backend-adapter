@@ -10,6 +10,78 @@ import threading
 import time
 from collections import OrderedDict
 
+import yaml
+from yaml.emitter import Emitter
+
+# ==================== LiteralDumper — YAML dumper ====================
+# Port from body-dump.py: uses block scalar (|) for multiline strings,
+# inline scalar for single-line strings. Patch fixes space_break detection
+# (newline + whitespace) that normally forces allow_block=False in PyYAML.
+
+class LiteralDumper(yaml.Dumper):
+    """YAML dumper that uses block scalar (|) for multiline strings."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        _orig_choose = Emitter.choose_scalar_style
+        self._LiteralDumper__orig_choose = _orig_choose  # noqa: SLF001
+
+        def _fixed_choose(self):
+            if self.analysis is None:
+                self.analysis = self.analyze_scalar(self.event.value)
+            if "\n" in self.event.value:
+                self.analysis.allow_block = True
+                self.analysis.allow_block_plain = True
+            return _orig_choose(self)
+
+        if not hasattr(Emitter, "_LiteralDumper__orig_choose"):
+            Emitter._LiteralDumper__orig_choose = _orig_choose  # noqa: SLF001
+        Emitter.choose_scalar_style = _fixed_choose
+
+    def __del__(self):
+        if hasattr(Emitter, "_LiteralDumper__orig_choose"):
+            Emitter.choose_scalar_style = Emitter._LiteralDumper__orig_choose  # noqa: SLF001
+            delattr(Emitter, "_LiteralDumper__orig_choose")  # noqa: SLF001
+
+
+def _yaml_str_representer(dumper, data):
+    """YAML representer for strings with three styles:
+
+    * Block scalar (``|``) — strings with *real* newlines (actual ``\\n``
+      U+000A). The ``LiteralDumper`` fix ensures this works even with
+      space_break — see ``__init__`` patch on ``choose_scalar_style``.
+    * Double-quoted (`"..."`) — strings with *literal* backslash sequences
+      (e.g. ``\\n``, ``\\t``) or special YAML characters (``:``, ``{``, ``}``,
+      etc.). Escaping is handled by PyYAML's emitter, not pre-computed.
+    * Plain — clean single-line strings without special chars.
+    """
+    # 1) Real newlines (U+000A) → block scalar
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    # 2) Literal backslash (\\) sequences → double-quoted; let PyYAML emitter
+    #    handle escaping (not json.dumps — that would double-escape).
+    if "\\" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style='"')
+    # 3) Special YAML characters (colons, braces, etc.) → double-quoted;
+    #    same: let PyYAML emitter handle escaping.
+    if any(ch in data for ch in ":{}[]#&*?|-<>=%@!\"'"):
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style='"')
+    # 4) Clean single-line → plain scalar
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
+
+LiteralDumper.add_representer(str, _yaml_str_representer)
+
+
+def dump_yaml(payload) -> str:
+    """Serialize *payload* to YAML using LiteralDumper (block scalars for
+    multiline strings, inline for single-line). Returns a string."""
+    import io
+    s = io.StringIO()
+    yaml.dump(payload, stream=s, Dumper=LiteralDumper, allow_unicode=True,
+              sort_keys=False, default_flow_style=False)
+    return s.getvalue()
+
+
 _LOG_FILES_PER_SESSION = 5000
 _session_logs: OrderedDict[str, dict] = OrderedDict()  # session_id -> {abspath: file_handle}
 _session_file_ts: dict[str, str] = {}  # session_id -> stable timestamp (first-use)
@@ -21,7 +93,7 @@ _last_log_session_id: str = ""  # глобальный fallback для _d()
 _parts_dir: dict[str, str] = {}
 _parts_dir_ts: dict[str, str] = {}  # session_id → stable timestamp (first-use)
 
-# ==================== ADAPTER_DEBUG_BODY_TAGS ====================
+# ==================== ADAPTER_DEBUG_TAGS_JSON ====================
 # Глобальный счётчик для JSON-файлов тегированных блоков.
 # Формат имени: <session[:8]>-<seq:04d>-<tag_lower>.json
 _debug_json_seq = 0
@@ -88,7 +160,7 @@ def _close_session_file(session_id: str) -> None:
                 pass
 
 
-# ==================== ADAPTER_DEBUG_BODY_TAGS ====================
+# ==================== ADAPTER_DEBUG_TAGS_JSON ====================
 
 
 def _body_tags_parts_dir(session_id: str) -> str | None:
@@ -123,14 +195,14 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     декодируется как UTF-8.
 
     Файл пишется только если включён per-session режим логов
-    (``_DEBUG_IS_DIR``) и ``session_log.ADAPTER_DEBUG_BODY_TAGS``
+    (``_DEBUG_IS_DIR``) и ``session_log.ADAPTER_DEBUG_TAGS_JSON``
     содержит данный ``tag``.
     """
     # Быстрая проверка — тег не в списке
-    from .config import ADAPTER_DEBUG_BODY_TAGS
-    if not ADAPTER_DEBUG_BODY_TAGS:
+    from .config import ADAPTER_DEBUG_TAGS_JSON
+    if not ADAPTER_DEBUG_TAGS_JSON:
         return
-    if tag not in ADAPTER_DEBUG_BODY_TAGS:
+    if tag not in ADAPTER_DEBUG_TAGS_JSON:
         return
 
     parts_path = _body_tags_parts_dir(session_id)
@@ -161,3 +233,30 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 
     with open(json_path, "w", encoding="utf-8") as f:
         f.write(body_str)
+
+    # === YAML dump alongside JSON ===
+    # Если тег в ADAPTER_DEBUG_TAGS_YAML — пишем одноимённый .yaml
+    from .config import ADAPTER_DEBUG_TAGS_YAML
+    if ADAPTER_DEBUG_TAGS_YAML and tag in ADAPTER_DEBUG_TAGS_YAML:
+        # Данные уже нормализованы для json_path — для YAML нужно "сырое"
+        # значение (не json.dumps-строка, а исходный object), чтобы dumper
+        # мог правильно обработать типы.
+        if isinstance(data, dict):
+            yaml_payload: dict | str = data
+        elif isinstance(data, list):
+            yaml_payload = data
+        elif isinstance(data, (bytes, bytearray)):
+            # bytes → строка, YAML запишет как plain scalar
+            yaml_payload = data.decode("utf-8", errors="replace")
+        else:
+            raw = str(data)
+            try:
+                yaml_payload = json.loads(raw)
+            except (json.JSONDecodeError, ValueError):
+                yaml_payload = raw
+
+        yaml_name = json_name.replace(".json", ".yaml")
+        yaml_path = os.path.join(parts_path, yaml_name)
+        yaml_text = dump_yaml(yaml_payload)
+        with open(yaml_path, "w", encoding="utf-8") as f:
+            f.write(yaml_text)

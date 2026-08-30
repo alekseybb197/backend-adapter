@@ -1,5 +1,26 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.6.9 (YAML section logging alongside JSON)
+
+### YAML-логгирование секций взаимодействия с LLM
+
+**Проблема:** в `.parts`-директориях при `ADAPTER_DEBUG_TAGS_JSON` писались только JSON-файлы — удобный для человека формат (отступы, читаемые строки) отсутствовал. Отладка длинных текстовых блоков (промпты, ответы, reasoning) требовала либо парсить JSON, либо читать сырой трафик.
+
+**Решение:** к уже существующему JSON-логгированию добавлено параллельное YAML-логгирование тех же секций. При `ADAPTER_DEBUG_TAGS_JSON=["OPENAI_BODY", ...]` и `ADAPTER_DEBUG_TAGS_YAML=["OPENAI_BODY", ...]` — для каждого тега пишутся **парные** файлы:
+
+| Файл | Формат | Стиль |
+|---|---|---|
+| `<session>-NNNN-openai_body.json` | `json.dumps(indent=2)` | машиночитаемый |
+| `<session>-NNNN-openai_body.yaml` | `yaml.dump(LiteralDumper)` | человекочитаемый: `|` для многострочных, `"..."` для спецсимволов |
+
+**Новая переменная:** `ADAPTER_DEBUG_TAGS_YAML` — перечисление тегов через запятую, для которых дополнительно пишется `.yaml`. Аналогична `ADAPTER_DEBUG_TAGS_JSON` по формату, но может задавать подмножество тегов (не обязательно полный).
+
+Изменения:
+- `config.py`: добавлена `ADAPTER_DEBUG_TAGS_YAML` (строки 64–74).
+- `session_log.py`: добавлен `LiteralDumper` (строки 21–72) с патчем на `Emitter.choose_scalar_style` для корректного `|` при `space_break`; `dump_yaml()` (строки 75–82).
+- `session_log.py:237-262`: при записи JSON — доп. проверка `ADAPTER_DEBUG_TAGS_YAML`, запись `.yaml` с «сырыми» данными (dict/list/decoded-bytes/parsed-json).
+- Зависимость: `PyYAML` (`import yaml` / `from yaml.emitter import Emitter`).
+
 ## v0.6.8 (tool_name in TOOL_RESULT — successful)
 
 ### Имя инструмента в логе успешных вызовов инструментов
