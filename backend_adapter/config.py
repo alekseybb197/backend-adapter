@@ -37,6 +37,15 @@ ADAPTER_DEBUG_TOOLS_RESPONSE_FULL = os.environ.get("ADAPTER_DEBUG_TOOLS_RESPONSE
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
+# ADAPTER_DEBUG_BODY_TAGS — перечисление тегов через запятую, для которых
+# дополнительно пишется JSON-файл для любой части протокола обмена.
+# Пусто / не задано — JSON-файлы не пишутся.
+_ADAPTER_DEBUG_BODY_TAGS_RAW = os.environ.get("ADAPTER_DEBUG_BODY_TAGS", "")
+ADAPTER_DEBUG_BODY_TAGS: list[str] = (
+    [t.strip() for t in _ADAPTER_DEBUG_BODY_TAGS_RAW.split(",") if t.strip()]
+    if _ADAPTER_DEBUG_BODY_TAGS_RAW.strip()
+    else []
+)
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
 # без вызова redact(), логируются полные токены, заголовки, ключи.
 # По умолчанию false — санитайзер активен, секреты маскируются.

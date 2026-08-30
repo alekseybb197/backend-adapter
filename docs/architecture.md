@@ -314,6 +314,16 @@ Long base64/hex strings may also be matched.
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
 - Handles both per-session directory and single-file modes
 
+### 8.5 Per-request OpenAI body JSON dump (`ADAPTER_DEBUG_OPENAI_BODY_JSON`)
+
+When enabled, writes complete OpenAI-format request bodies as numbered JSON files alongside the session log files.
+
+- Only activates when per-session mode is enabled (`ADAPTER_DEBUG=1` + `ADAPTER_DEBUG_LOGFILE` points to a directory)
+- Creates `session-<datetime>-<sessid8>.parts/` directory next to the session log files
+- Writes `openai-NNNN.json` for each POST `/v1/messages` request with full body
+- Thread-safe: uses `threading.Lock` on the per-session counter
+- Uses `json.dump(indent=2)` for readable formatting
+
 ---
 
 ## 9. Streaming architecture

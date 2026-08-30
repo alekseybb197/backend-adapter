@@ -21,12 +21,14 @@ from .config import (
     _BACKENDS, _init_multi_backends,
     _cap, SSL_CTX,
     ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
+    ADAPTER_DEBUG_BODY_TAGS,
 )
 from .redact import redact, redact_headers
 from .daemon import _detach, _write_pidfile
 from .tracer import _trace, _register_tool_use, _lookup_tool_use_producer
 from .logger import _d, _dr
 from . import session_log
+from .session_log import write_debug_json
 from .convert import (
     extract_tool_results,
     convert_messages_anthropic_to_openai,
@@ -174,6 +176,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             _body = body.decode()
             _dr(req_id, f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_DEBUG_TRIM])}")
+            if "BODY" in ADAPTER_DEBUG_BODY_TAGS:
+                write_debug_json(session_id, "BODY", _body)
 
             try:
                 anthropic_req = json.loads(body)
@@ -293,12 +297,16 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                        is_error=tr["is_error"],
                        content=traced_content)
                 _dr(req_id, f"[TOOL_RESULT] tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}")
+                if "TOOL_RESULT" in ADAPTER_DEBUG_BODY_TAGS:
+                    write_debug_json(session_id, "TOOL_RESULT", {"tool_use_id": tr["tool_use_id"], "parent_req_id": parent_req_id, "is_error": tr["is_error"], "content": tr["content"]})
 
                 # ADAPTER_DEBUG_TOOLS=1 — писать полный content для всех результатов
                 if ADAPTER_DEBUG_TOOLS:
                     _tool_content_full = tr["content"] or ""
                     _tool_content_snippet = _tool_content_full if ADAPTER_DEBUG_TOOLS_RESPONSE_FULL else _tool_content_full[:ADAPTER_DEBUG_TRIM]
                     _dr(req_id, f"[TOOL_RESULT] content={json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)}")
+                    if "TOOL_RESULT" in ADAPTER_DEBUG_BODY_TAGS:
+                        write_debug_json(session_id, "TOOL_RESULT", json.loads(json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)))
 
                 # ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать детальный
                 # лог ошибок инструментов ([TOOL_RESULT_ERROR])
@@ -316,6 +324,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         "content": err_content_snippet,
                     }
                     _dr(req_id, f"[TOOL_RESULT_ERROR] {json.dumps(err_snapshot, ensure_ascii=False, default=str)}")
+                    if "TOOL_RESULT_ERROR" in ADAPTER_DEBUG_BODY_TAGS:
+                        write_debug_json(session_id, "TOOL_RESULT_ERROR", err_snapshot)
 
             openai_body = {
                 "model": model,
@@ -360,6 +370,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 _dr(req_id, f"[WARN] First message is NOT system: {msgs[0]['role'] if msgs else 'empty'}")
 
             _dr(req_id, f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
+
+            if "OPENAI_BODY" in ADAPTER_DEBUG_BODY_TAGS:
+                write_debug_json(session_id, "OPENAI_BODY", openai_body)
 
             # Построить URL и Authorization из resolved backend-конфига.
             # key -- уже раскрытый токен (раскрытие происходит в _parse_backend_yaml).
@@ -509,6 +522,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     elapsed = time.time() - t0
                     _dr(req_id, f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
                     _dr(req_id, f"[FETCH_RAW] {(raw.decode() if ADAPTER_DEBUG_RESPONSE_FULL else raw.decode()[:ADAPTER_DEBUG_TRIM])}")
+                    if "FETCH_RAW" in ADAPTER_DEBUG_BODY_TAGS:
+                        write_debug_json(session_id, "FETCH_RAW", raw.decode())
                     _trace(session_id, req_id, "backend_result", attempt=attempt,
                            ok=True, status=resp.status, elapsed_ms=int(elapsed * 1000))
 
@@ -516,6 +531,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
                     _dr(req_id, f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if ADAPTER_DEBUG_RESPONSE_FULL else json.dumps(anthropic_resp, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
+                    if "RESPONSE" in ADAPTER_DEBUG_BODY_TAGS:
+                        write_debug_json(session_id, "RESPONSE", anthropic_resp)
                     self._send_json(200, anthropic_resp)
                     _dr(req_id, "[OK] Done")
                     _trace(session_id, req_id, "request_end",

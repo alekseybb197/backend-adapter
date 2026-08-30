@@ -10,8 +10,9 @@ import uuid
 
 from .tracer import _trace, _register_tool_use
 from .skill import detect_skill
-from .config import _cap, ADAPTER_DEBUG_TRIM, ADAPTER_DEBUG_RESPONSE_FULL, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, ADAPTER_TRACE_REASONING_MAX_CHARS
+from .config import _cap, ADAPTER_DEBUG_TRIM, ADAPTER_DEBUG_RESPONSE_FULL, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_DEBUG_BODY_TAGS
 from .logger import _dr
+from .session_log import write_debug_json
 
 
 def _sse_write(wfile, event: str, data: dict) -> None:
@@ -229,6 +230,8 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
         "tool_uses": tool_use_summaries,
     }
     _dr(req_id, f"[RESPONSE] {(json.dumps(resp_snapshot, ensure_ascii=False, default=str) if ADAPTER_DEBUG_RESPONSE_FULL else json.dumps(resp_snapshot, ensure_ascii=False, default=str)[:ADAPTER_DEBUG_TRIM])}")
+    if "RESPONSE" in ADAPTER_DEBUG_BODY_TAGS:
+        write_debug_json(session_id, "RESPONSE", resp_snapshot)
 
     _trace(session_id, req_id, "response_content",
            text_len=len(full_text), tool_uses=tool_use_summaries,

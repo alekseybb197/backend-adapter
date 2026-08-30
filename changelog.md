@@ -1,5 +1,42 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.6.6 (unified BODY_TAGS for parts JSON dump)
+
+### Замена `ADAPTER_DEBUG_OPENAI_BODY_JSON` → `ADAPTER_DEBUG_BODY_TAGS`
+
+**Проблема:** было несколько разрозненных флагов (`ADAPTER_DEBUG_OPENAI_BODY_JSON`, `ADAPTER_DEBUG_BODY_FULL` и т.д.), каждый управлял своей частью. `ADAPTER_DEBUG_OPENAI_BODY_JSON` писал только OpenAI-тела, не позволяя выбирать другие части.
+
+**Решение:** `ADAPTER_DEBUG_BODY_TAGS` — единый список тегов, управляющий **всеми** JSON-parts частями протокола. Теги: `BODY`, `OPENAI_BODY`, `TOOL_RESULT`, `FETCH_RAW`, `RESPONSE` и др. (полный список — в `config.py`).
+
+| Была | Теперь |
+|---|---|
+| `ADAPTER_DEBUG_OPENAI_BODY_JSON=1` → OpenAI тела в `.parts` | `ADAPTER_DEBUG_BODY_TAGS=["OPENAI_BODY", "BODY", "TOOL_RESULT"]` → выбранные части во всех `.parts` |
+| Удалена | |
+
+Формат `.parts` директорий и файлов унифицирован с основным логированием:
+- Директория: `session-<YYYYMMDD-HHMMSS>-<sessionID[:8]>.parts`
+- Файл: `<sessionID[:8]>-NNNN-<tag>.json` (тег в нижнем регистре)
+
+В `session_log.py`: добавлен `_parts_dir_ts` для timestamp, совместимый с `session_file_ts`. Старые директории `*-jsonparts` устарели.
+
+## v0.6.5 (per-request OpenAI body JSON dump)
+
+### Новая переменная `ADAPTER_DEBUG_OPENAI_BODY_JSON`
+
+**Проблема:** при `ADAPTER_DEBUG_OPENAI_BODY_FULL=1` тело OpenAI-запроса попадает в лог, но обрезано (`ADAPTER_DEBUG_TRIM`), а в `stderr`. Нет возможности выгрузить полный структурированный JSON-файл для каждого запроса.
+
+**Решение:**
+
+| Переменная | Default | Описание |
+|---|---|---|
+| `ADAPTER_DEBUG_OPENAI_BODY_JSON` | `0` | Запись полных OpenAI-тел запросов в отдельные JSON-файлы. Работает ТОЛЬКО при per-session режиме логов (`ADAPTER_DEBUG=1` + `ADAPTER_DEBUG_LOGFILE` указывает на директорию). В директории логов создаётся `session-<datetime>-<sessid8>.parts/` и туда пишутся `openai-NNNN.json` для каждого POST `/v1/messages` с полным телом запроса. |
+
+Логика:
+- Активируется только если `ADAPTER_DEBUG_OPENAI_BODY_JSON=1` И per-session режим логов включён (`_DEBUG_IS_DIR=True`)
+- В директории логов создаётся `.parts` поддиректория с тем же session-именем
+- Каждый POST `/v1/messages` записывает `openai-NNNN.json` с `json.dump(indent=2)`
+- Счётчик защищён `threading.Lock` (сервер multi-threaded)
+
 ## v0.6.4 (tool result debug logging)
 
 ### Три новые переменные для логгирования результатов инструментов
