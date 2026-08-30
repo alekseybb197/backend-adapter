@@ -128,7 +128,7 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
                 # нестриминговом пути (см. convert_openai_to_anthropic) —
                 # причинность tool_use -> tool_result не должна зависеть от
                 # того, стримился ответ или нет.
-                _register_tool_use(session_id, tool_use_id, req_id)
+                _register_tool_use(session_id, tool_use_id, req_id, tool_name=name)
                 _sse_write(wfile, "content_block_start", {
                     "type": "content_block_start", "index": block_index,
                     "content_block": {"type": "tool_use", "id": tool_use_id,

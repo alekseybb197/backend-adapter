@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.6.6
+"""Claude Code <-> OpenAI-backend adapter v0.6.8
 — changelog: ../changelog.md"""
-__version__ = "0.6.6"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix"
+__version__ = "0.6.8"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful)"
 
 import os
 import sys

@@ -146,13 +146,18 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     json_name = f"{session_id[:8]}-{seq:04d}-{tag_lower}.json"
     json_path = os.path.join(parts_path, json_name)
 
-    # Нормализация данных: bytes/bytearray → str, dict/list → json
+    # Нормализация данных: bytes/bytearray → str, dict/list → pretty json,
+    # строка → пытаемся распарсить как JSON и записать в pretty form.
     if isinstance(data, (bytes, bytearray)):
         body_str = data.decode("utf-8", errors="replace")
     elif isinstance(data, dict):
         body_str = json.dumps(data, ensure_ascii=False, indent=2)
     else:
-        body_str = str(data)
+        raw = str(data)
+        try:
+            body_str = json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
+        except (json.JSONDecodeError, ValueError):
+            body_str = raw
 
     with open(json_path, "w", encoding="utf-8") as f:
         f.write(body_str)

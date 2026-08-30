@@ -249,7 +249,7 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
             # причинной связи, когда где-то в будущем запросе придёт
             # соответствующий tool_result (см. do_POST/extract_tool_results
             # и событие "tool_result" ниже).
-            _register_tool_use(session_id, tool_use_id, req_id)
+            _register_tool_use(session_id, tool_use_id, req_id, tool_name=name)
             skill, evidence = detect_skill(name, input_data)
             traced_input = input_data
             if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:

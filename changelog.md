@@ -1,5 +1,37 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.6.8 (tool_name in TOOL_RESULT — successful)
+
+### Имя инструмента в логе успешных вызовов инструментов
+
+**Проблема:** в `[TOOL_RESULT]` log-строке отсутствовало имя вызванного инструмента — было видно только `tool_use_id`, `parent_req_id`, `is_error=false`, `len`. По строке лога нельзя было сразу понять, какой инструмент вызвался и вернул успешный результат.
+
+**Решение:**
+
+| Было | Теперь |
+|---|---|
+| `[TOOL_RESULT] tool_use_id=... parent_req_id=... is_error=false len=...` | `[TOOL_RESULT] tool_name=ls tool_use_id=... parent_req_id=... is_error=false len=...` |
+
+Изменения:
+- `server.py`: в `[TOOL_RESULT]` `_dr()` и `write_debug_json()` добавлен `tool_name` через `_lookup_tool_use_name()`.
+
+## v0.6.7 (tool_name in TOOL_RESULT_ERROR log)
+
+### Имя инструмента в логе ошибок инструментов
+
+**Проблема:** в `[TOOL_RESULT_ERROR]` log-строке (по умолчанию `ADAPTER_DEBUG_TOOLS_ERROR=1`) отсутствовало имя вызванного инструмента — было видно только `tool_use_id`, `parent_req_id`, `is_error`, `content`. По строке лога нельзя было понять, какой инструмент вызвался и вернул ошибку.
+
+**Решение:**
+
+| Было | Теперь |
+|---|---|
+| `[TOOL_RESULT_ERROR] {"tool_use_id": "...", "parent_req_id": "...", "is_error": true, "content": "..."}` | `[TOOL_RESULT_ERROR] {"tool_use_id": "...", "tool_name": "...", "parent_req_id": "...", "is_error": true, "content": "..."}` |
+
+Изменения:
+- `tracer.py`: `_register_tool_use()` теперь принимает `tool_name`, хранит `tool_use_id → tool_name` в `_tool_use_names`. Добавлен `_lookup_tool_use_name()`.
+- `convert.py:252`, `streaming.py:131`: передают `tool_name` в `_register_tool_use()`.
+- `server.py`: в `[TOOL_RESULT_ERROR]` snapshot добавлен `tool_name` через `_lookup_tool_use_name()`.
+
 ## v0.6.6 (unified BODY_TAGS for parts JSON dump)
 
 ### Замена `ADAPTER_DEBUG_OPENAI_BODY_JSON` → `ADAPTER_DEBUG_BODY_TAGS`

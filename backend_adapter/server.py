@@ -25,7 +25,7 @@ from .config import (
 )
 from .redact import redact, redact_headers
 from .daemon import _detach, _write_pidfile
-from .tracer import _trace, _register_tool_use, _lookup_tool_use_producer
+from .tracer import _trace, _register_tool_use, _lookup_tool_use_producer, _lookup_tool_use_name
 from .logger import _d, _dr
 from . import session_log
 from .session_log import write_debug_json
@@ -296,9 +296,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                        parent_req_id=parent_req_id,
                        is_error=tr["is_error"],
                        content=traced_content)
-                _dr(req_id, f"[TOOL_RESULT] tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}")
+                _tool_name = _lookup_tool_use_name(session_id, tr["tool_use_id"])
+                _dr(req_id, f"[TOOL_RESULT] tool_name={_tool_name or '?'} tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}")
                 if "TOOL_RESULT" in ADAPTER_DEBUG_BODY_TAGS:
-                    write_debug_json(session_id, "TOOL_RESULT", {"tool_use_id": tr["tool_use_id"], "parent_req_id": parent_req_id, "is_error": tr["is_error"], "content": tr["content"]})
+                    write_debug_json(session_id, "TOOL_RESULT", {"tool_use_id": tr["tool_use_id"], "tool_name": _tool_name or "", "parent_req_id": parent_req_id, "is_error": tr["is_error"], "content": tr["content"]})
 
                 # ADAPTER_DEBUG_TOOLS=1 — писать полный content для всех результатов
                 if ADAPTER_DEBUG_TOOLS:
@@ -316,9 +317,11 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     # в JSONL trace. Санитайзер через _dr() → redact().
                     err_content = tr["content"] or ""
                     err_content_snippet = err_content if ADAPTER_DEBUG_TOOLS_RESPONSE_FULL else err_content[:ADAPTER_DEBUG_TRIM]
+                    tool_name = _lookup_tool_use_name(session_id, tr["tool_use_id"])
                     err_snapshot = {
                         "tool_result": True,
                         "tool_use_id": tr["tool_use_id"],
+                        "tool_name": tool_name or "",
                         "parent_req_id": parent_req_id,
                         "is_error": True,
                         "content": err_content_snippet,

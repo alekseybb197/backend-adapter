@@ -43,9 +43,10 @@ def _next_seq(session_id: str) -> int:
 # сессий) — вытесняем самые старые записи по FIFO.
 _TOOL_USE_INDEX_MAX_PER_SESSION = 2000
 _tool_use_producers: dict[str, OrderedDict[str, str]] = {}  # session_id -> OrderedDict(tool_use_id -> req_id)
+_tool_use_names: dict[str, dict[str, str]] = {}  # session_id -> dict(tool_use_id -> tool_name)
 
 
-def _register_tool_use(session_id: str, tool_use_id: str, req_id: str) -> None:
+def _register_tool_use(session_id: str, tool_use_id: str, req_id: str, tool_name: str = "") -> None:
     if not tool_use_id:
         return
     with _trace_lock:
@@ -53,6 +54,9 @@ def _register_tool_use(session_id: str, tool_use_id: str, req_id: str) -> None:
         idx[tool_use_id] = req_id
         while len(idx) > _TOOL_USE_INDEX_MAX_PER_SESSION:
             idx.popitem(last=False)
+        # Храним имя инструмента для отладки tool_result ошибок
+        names = _tool_use_names.setdefault(session_id, {})
+        names[tool_use_id] = tool_name
 
 
 def _lookup_tool_use_producer(session_id: str, tool_use_id: str):
@@ -61,6 +65,15 @@ def _lookup_tool_use_producer(session_id: str, tool_use_id: str):
         if not idx:
             return None
         return idx.get(tool_use_id)
+
+
+def _lookup_tool_use_name(session_id: str, tool_use_id: str):
+    """Возвращает имя инструмента по tool_use_id или None."""
+    with _trace_lock:
+        names = _tool_use_names.get(session_id)
+        if not names:
+            return None
+        return names.get(tool_use_id)
 
 
 def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
