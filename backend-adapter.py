@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.6.2
+"""Claude Code <-> OpenAI-backend adapter v0.6.4
 — changelog: ../changelog.md"""
-__version__ = "0.6.2"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging"
+__version__ = "0.6.4"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging"
 
 import os
 import sys
@@ -16,7 +16,8 @@ from backend_adapter.config import (
     ADAPTER_DETACH, ADAPTER_TIMEOUT, ADAPTER_RETRY,
     ADAPTER_SKILL_PATTERNS, ADAPTER_DEBUG_TRIM,
     ADAPTER_DEBUG_BODY_FULL, ADAPTER_DEBUG_OPENAI_BODY_FULL,
-    ADAPTER_DEBUG_FETCH_RAW_FULL,
+    ADAPTER_DEBUG_RESPONSE_FULL,
+    ADAPTER_DEBUG_TOOLS, ADAPTER_DEBUG_TOOLS_ERROR, ADAPTER_DEBUG_TOOLS_RESPONSE_FULL,
     ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
     ADAPTER_STRICT_MODELS,
     ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE,

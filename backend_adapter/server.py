@@ -11,7 +11,9 @@ import uuid
 
 from .config import (
     PROXY_PORT, ADAPTER_DEBUG_BODY_FULL, ADAPTER_DEBUG_TRIM,
-    ADAPTER_DEBUG_OPENAI_BODY_FULL, ADAPTER_DEBUG_FETCH_RAW_FULL,
+    ADAPTER_DEBUG_OPENAI_BODY_FULL, ADAPTER_DEBUG_RESPONSE_FULL,
+    ADAPTER_DEBUG_TOOLS, ADAPTER_DEBUG_TOOLS_ERROR,
+    ADAPTER_DEBUG_TOOLS_RESPONSE_FULL,
     ADAPTER_STRICT_MODELS, ADAPTER_RETRY, ADAPTER_TIMEOUT,
     ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_SENSITIVE_LOGGING_ENABLE,
@@ -292,6 +294,29 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                        content=traced_content)
                 _dr(req_id, f"[TOOL_RESULT] tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}")
 
+                # ADAPTER_DEBUG_TOOLS=1 — писать полный content для всех результатов
+                if ADAPTER_DEBUG_TOOLS:
+                    _tool_content_full = tr["content"] or ""
+                    _tool_content_snippet = _tool_content_full if ADAPTER_DEBUG_TOOLS_RESPONSE_FULL else _tool_content_full[:ADAPTER_DEBUG_TRIM]
+                    _dr(req_id, f"[TOOL_RESULT] content={json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)}")
+
+                # ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать детальный
+                # лог ошибок инструментов ([TOOL_RESULT_ERROR])
+                if tr["is_error"] and ADAPTER_DEBUG_TOOLS_ERROR:
+                    # При ошибке — полная запись результата (аналог [RESPONSE])
+                    # чтобы видеть что именно вернул инструмент, без копания
+                    # в JSONL trace. Санитайзер через _dr() → redact().
+                    err_content = tr["content"] or ""
+                    err_content_snippet = err_content if ADAPTER_DEBUG_TOOLS_RESPONSE_FULL else err_content[:ADAPTER_DEBUG_TRIM]
+                    err_snapshot = {
+                        "tool_result": True,
+                        "tool_use_id": tr["tool_use_id"],
+                        "parent_req_id": parent_req_id,
+                        "is_error": True,
+                        "content": err_content_snippet,
+                    }
+                    _dr(req_id, f"[TOOL_RESULT_ERROR] {json.dumps(err_snapshot, ensure_ascii=False, default=str)}")
+
             openai_body = {
                 "model": model,
                 "messages": convert_messages_anthropic_to_openai(
@@ -483,14 +508,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     raw = resp.read()
                     elapsed = time.time() - t0
                     _dr(req_id, f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
-                    _dr(req_id, f"[FETCH_RAW] {(raw.decode() if ADAPTER_DEBUG_FETCH_RAW_FULL else raw.decode()[:ADAPTER_DEBUG_TRIM])}")
+                    _dr(req_id, f"[FETCH_RAW] {(raw.decode() if ADAPTER_DEBUG_RESPONSE_FULL else raw.decode()[:ADAPTER_DEBUG_TRIM])}")
                     _trace(session_id, req_id, "backend_result", attempt=attempt,
                            ok=True, status=resp.status, elapsed_ms=int(elapsed * 1000))
 
                     o = json.loads(raw)
                     anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
-                    _dr(req_id, f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)[:800]}")
+                    _dr(req_id, f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if ADAPTER_DEBUG_RESPONSE_FULL else json.dumps(anthropic_resp, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
                     self._send_json(200, anthropic_resp)
                     _dr(req_id, "[OK] Done")
                     _trace(session_id, req_id, "request_end",

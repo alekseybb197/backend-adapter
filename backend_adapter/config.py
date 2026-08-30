@@ -26,7 +26,14 @@ ADAPTER_SKILL_PATTERNS = os.environ.get("ADAPTER_SKILL_PATTERNS", "")
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
 ADAPTER_DEBUG_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_OPENAI_BODY_FULL   = os.environ.get("ADAPTER_DEBUG_OPENAI_BODY_FULL", "0").lower() not in ("0", "false", "no", "")
-ADAPTER_DEBUG_FETCH_RAW_FULL = os.environ.get("ADAPTER_DEBUG_FETCH_RAW_FULL", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG_RESPONSE_FULL   = os.environ.get("ADAPTER_DEBUG_RESPONSE_FULL", "0").lower() not in ("0", "false", "no", "")
+# Логгирование результатов работы инструментов:
+#   ADAPTER_DEBUG_TOOLS=1 — писать все результаты ([TOOL_RESULT]).
+#   ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать ошибки инструментов ([TOOL_RESULT_ERROR]).
+#   ADAPTER_DEBUG_TOOLS_RESPONSE_FULL=1 — полный вывод content без обрезки (игнорирует ADAPTER_DEBUG_TRIM).
+ADAPTER_DEBUG_TOOLS            = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG_TOOLS_ERROR      = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "1").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG_TOOLS_RESPONSE_FULL = os.environ.get("ADAPTER_DEBUG_TOOLS_RESPONSE_FULL", "0").lower() not in ("0", "false", "no", "")
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")

@@ -1,5 +1,38 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.6.4 (tool result debug logging)
+
+### Три новые переменные для логгирования результатов инструментов
+
+**Проблема:** `[TOOL_RESULT]` писал только метаданные (id, parent_req_id, is_error, len, content обрезан до 3000 символов). `[TOOL_RESULT_ERROR]` — только для ошибок, тоже обрезан до 3000. Нет возможности включить полный вывод всех результатов без ручного чтения trace JSONL.
+
+**Решение:**
+
+| Переменная | Default | Описание |
+|---|---|---|
+| `ADAPTER_DEBUG_TOOLS` | `0` | Полные `content` всех результатов инструментов в `[TOOL_RESULT]` лог |
+| `ADAPTER_DEBUG_TOOLS_ERROR` | `1` | Детальные ошибки в `[TOOL_RESULT_ERROR]` (по умолчанию включено) |
+| `ADAPTER_DEBUG_TOOLS_RESPONSE_FULL` | `0` | Полный `content` без обрезки (игнорирует `ADAPTER_DEBUG_TRIM`) для `ADAPTER_DEBUG_TOOLS` / `ADAPTER_DEBUG_TOOLS_ERROR` |
+
+Логика:
+- Старый `[TOOL_RESULT]` (метаданные) пишется всегда (без изменений)
+- `ADAPTER_DEBUG_TOOLS=1` → доп. строка `content=...` для всех результатов
+- `ADAPTER_DEBUG_TOOLS_ERROR=1` (по умолчание) → доп. строка `[TOOL_RESULT_ERROR] {content: ...}` для ошибок
+- `ADAPTER_DEBUG_TOOLS_RESPONSE_FULL=1` → `content` без обрезки (иначе `[:ADAPTER_DEBUG_TRIM]`)
+
+## v0.6.3 (unified response full logging flag)
+
+### Замена `ADAPTER_DEBUG_FETCH_RAW_FULL` → `ADAPTER_DEBUG_RESPONSE_FULL`
+
+**Проблема:** было три разных переключателя полноты (`ADAPTER_DEBUG_BODY_FULL`, `ADAPTER_DEBUG_OPENAI_BODY_FULL`, `ADAPTER_DEBUG_FETCH_RAW_FULL`) и две разных жёстких обрезки `[:800]` / `[:ADAPTER_DEBUG_TRIM]` для `[RESPONSE]` в нестриминговом / стриминговом режимах. Никакая из них не управляла форматированным `[RESPONSE]` — ни нестриминговым (хардкод 800), ни стриминговым.
+
+**Решение:** единая переменная `ADAPTER_DEBUG_RESPONSE_FULL` (0 по умолчанию), управляющая полнотой в двух местах:
+- `server.py:[FETCH_RAW]` — сырой ответ бэкенда
+- `server.py:[RESPONSE]` — отформатированный Anthropic-ответ (нестриминг)
+- `streaming.py:[RESPONSE]` — агрегированный ответ стрима
+
+При `ADAPTER_DEBUG_RESPONSE_FULL=1` — полный вывод без обрезки во всех трёх случаях. Иначе — `[:ADAPTER_DEBUG_TRIM]` (по умолчанию 3000).
+
 ## v0.6.2 (SSE response logging + HTTP log req_id)
 
 ### Лог агрегированного ответа в стриминговом режиме
