@@ -4,10 +4,10 @@ After=network.target
 
 [Service]
 Type=simple
-User=barabanov
-WorkingDirectory=/home/username/tmp
-EnvironmentFile=/home/username/tmp/backend-adapter.env
-ExecStart=/usr/bin/python3 /home/username/tmp/backend-adapter.py
+User=username
+WorkingDirectory=%h/backend-adapter
+EnvironmentFile=%h/backend-adapter/backend-adapter.env
+ExecStart=/usr/bin/python3 %h/backend-adapter/backend-adapter.py
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

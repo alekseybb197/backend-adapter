@@ -9,11 +9,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/Users/username/tmp/backend-adapter.py</string>
+        <string>~/backend-adapter/backend-adapter.py</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/username/tmp</string>
+    <string>~/backend-adapter</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -27,6 +27,12 @@
         <string>1</string>
         <key>ADAPTER_DETACH_ENABLE</key>
         <string>0</string>
+        <key>ADAPTER_STREAMING_ENABLE</key>
+        <string>1</string>
+        <key>ADAPTER_STREAM_INCLUDE_USAGE</key>
+        <string>1</string>
+        <key>ADAPTER_STRICT_MODELS</key>
+        <string>1</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -36,10 +42,10 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/username/tmp/adapter.log</string>
+    <string>~/backend-adapter/adapter.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/username/tmp/adapter.log</string>
+    <string>~/backend-adapter/adapter.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

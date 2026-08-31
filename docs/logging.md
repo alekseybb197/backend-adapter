@@ -8,7 +8,7 @@
 | **Console-only blocks** | Stdout/stderr | `_d("[NAME] ...")` |
 | **Structured traces** | `session_log/trace-<session>.jsonl` | `_trace(...)` |
 
-Также отдельный механизм: **OpenAI JSON dump** → `session_log/<session>.parts/openai-NNNN.json`.
+Также дополнительные механизмы: **JSON/YAML дампы** per-session через `ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`.
 
 ---
 
@@ -37,7 +37,7 @@
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
 | 1 | `[REQ]` | ← CLIENT | всегда | HTTP метод, путь, session_id |
-| 2 | `[BODY]` | ← CLIENT | `ADAPTER_DEBUG_TRIM` / `ADAPTER_DEBUG_BODY_FULL=1` | Полное тело Anthropic-запроса клиента |
+| 2 | `[BODY]` | ← CLIENT | `_trim_limit('BODY')` → `ADAPTER_DEBUG_TAGS_FULL` содержит `"BODY"` | Полное тело Anthropic-запроса клиента. Иначе — усечено до `ADAPTER_DEBUG_TRIM` символов |
 
 ### → BACKEND — Подготовка и отправка в бэкенд
 
@@ -51,15 +51,17 @@
 | 8 | `[TOOL_CHOICE]` | INTERNAL | всегда | Конфигурация tool choice |
 | 9 | `[CHECK]` | INTERNAL | всегда | Инвариант: "First message is system, OK" |
 | 10 | `[WARN]` (invariant) | INTERNAL | всегда | Инвариант нарушен: "First message is NOT system: \<role\>" |
-| 11 | `[OPENAI_BODY]` | → BACKEND | `ADAPTER_DEBUG_OPENAI_BODY_FULL` | Полное тело OpenAI-запроса, отправляемого в бэкенд |
+| 11 | `[OPENAI_BODY]` | → BACKEND | `ADAPTER_DEBUG_TAGS_FULL` содержит `"OPENAI_BODY"` | Полное тело OpenAI-запроса, отправляемого в бэкенд. Иначе — усечено до `ADAPTER_DEBUG_TRIM` символов |
 
-### ← CLIENT — Обработка tool_result от клиента
+---
+
+### ← CLIENT — Tool result обработка
 
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
-| 12 | `[TOOL_RESULT]` (summary) | ← CLIENT | всегда | `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` |
-| 13 | `[TOOL_RESULT]` (content) | ← CLIENT | `ADAPTER_DEBUG_TOOLS=1` | Полный JSON content tool result |
-| 14 | `[TOOL_RESULT_ERROR]` | ← CLIENT | `ADAPTER_DEBUG_TOOLS_ERROR=1` | Снэпшот ошибки: `tool_use_id`, `parent_req_id`, `is_error`, `content` |
+| 12 | `[TOOL_RESULT]` (summary) | ← CLIENT | всегда | `tool_name`, `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` |
+| 13 | `[TOOL_RESULT]` (content) | ← CLIENT | `ADAPTER_DEBUG_TOOLS=1` | Полный JSON content tool result. Дополнительно: при `ADAPTER_DEBUG_TAGS_JSON` содержит `"TOOL_RESULT"` пишется JSON-файл per-session |
+| 14 | `[TOOL_RESULT_ERROR]` | ← CLIENT | `ADAPTER_DEBUG_TOOLS_ERROR=1` (по умолчанию) | Полный JSON ошибки. Дополнительно: при `ADAPTER_DEBUG_TAGS_JSON` содержит `"TOOL_RESULT_ERROR"` пишется JSON-файл per-session |
 
 ### → BACKEND — FETCH (request phase, отправка запроса)
 
@@ -71,15 +73,15 @@
 
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
-| 16 | `[FETCH_RAW]` | ← BACKEND | `ADAPTER_DEBUG_RESPONSE_FULL` / `stream=False` | Сырой ответ бэкенда (OpenAI format), до конвертации |
+| 16 | `[FETCH_RAW]` | ← BACKEND | `_trim_limit('FETCH_RAW')` → `ADAPTER_DEBUG_TAGS_FULL` содержит `"FETCH_RAW"` | Сырой ответ бэкенда (OpenAI format), до конвертации. Иначе — усечено до `ADAPTER_DEBUG_TRIM` символов |
 | 17 | `[FETCH]` (success) | INTERNAL | всегда | Elapsed time, HTTP status, размер ответа в байтах |
 
 ### → CLIENT — Конвертация и отправка ответа
 
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
-| 18 | `[RESPONSE]` (non-stream) | → CLIENT | `ADAPTER_DEBUG_RESPONSE_FULL` / `stream=False` | Полностью преобразованный Anthropic-ответ |
-| 19 | `[RESPONSE]` (stream) | → CLIENT | `stream=True` | Агрегированный snapshot стримированного ответа: text, reasoning, tool_uses, длины |
+| 18 | `[RESPONSE]` (non-stream) | → CLIENT | `_trim_limit('RESPONSE')` | Полностью преобразованный Anthropic-ответ |
+| 19 | `[RESPONSE]` (stream) | → CLIENT | всегда | Агрегированный snapshot стримированного ответа: text, reasoning, tool_uses, длины. Дополнительно: при `ADAPTER_DEBUG_TAGS_JSON` содержит `"RESPONSE"` пишется JSON-файл per-session |
 
 ### → CLIENT — Статус завершения
 
@@ -113,7 +115,24 @@
 | 3 | `[CLIENT_GONE]` | `server.py:84` | Client gone during JSON send |
 | 4 | `[WARN]` | `server.py:86` | Ошибка отправки ответа клиенту |
 | 5 | `[SKILL_PATTERNS]` | `skill.py:33` | Не удалось загрузить файлы паттернов скиллов |
-| 6 | `[INIT]` | `backend-adapter.py:102` | Старт multi-backend режима |
+| 6 | `[INIT]` | `backend-adapter.py:100` | Старт multi-backend режима |
+
+---
+
+## JSON / YAML дампы per-session — `ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`
+
+| Переменная | Default | Описание |
+|---|---|---|
+| `ADAPTER_DEBUG_TAGS_FULL` | `""` | Перечисление тегов через запятую, для которых **отключается** обрезка (trim). Например: `"BODY,TOOL_RESULT,RESPONSE"`. Если тег в списке — `_trim_limit(tag)` возвращает `None`, и данные записываются полностью в `_dr()` и в JSON-дамп. |
+| `ADAPTER_DEBUG_TAGS_JSON` | `""` | Перечисление тегов через запятую, для которых дополнительно пишется **JSON-файл** per-session. Файлы пишутся функцией `write_debug_json(session_id, tag, data)` из `session_log.py`. |
+| `ADAPTER_DEBUG_TAGS_YAML` | `""` | Перечисление тегов через запятую, для которых дополнительно пишется **YAML-файл** per-session (аналогично JSON, но с расширением `.yaml`). |
+
+**Тэги для дампов:** `BODY`, `TOOL_RESULT`, `TOOL_RESULT_ERROR`, `OPENAI_BODY`, `FETCH_RAW`, `RESPONSE`.
+
+**Поведение:**
+- JSON/YAML файлы пишутся в ту же директорию, что и debug-логи (`ADAPTER_DEBUG_LOGFILE`).
+- Если `ADAPTER_DEBUG_LOGFILE` — файл, а не директория, дампы не пишутся (требуется per-session директория).
+- JSON-дамп `RESPONSE` при stream-режиме также пишется агрегированный snapshot (см. `streaming.py`).
 
 ---
 
@@ -137,14 +156,6 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 
 ---
 
-## OpenAI JSON dump — отдельный механизм
-
-| Механизм | Где | Направление | Опции | Что |
-|---|---|---|---|---|
-| `openai-NNNN.json` | `<session>.parts/openai-NNNN.json` | → BACKEND | `ADAPTER_DEBUG_OPENAI_BODY_JSON=1` | Полный `openai_body` dict — **тело запроса, отправленного в LLM backend** |
-
----
-
 ## Сводная матрица по направлениям
 
 ### → BACKEND — данные, отправляемые в LLM backend
@@ -152,7 +163,7 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | Block | Описание |
 |---|---|
 | `[OPENAI_BODY]` | Тело OpenAI-формата, отправляемое POST-запросом в бэкенд (converted from Anthropic) |
-| `openai-NNNN.json` | То же самое, но в отдельном JSON-файле по сессии |
+| `OPENAI_BODY` (JSON/YAML) | То же самое, в отдельном JSON/YAML-файле по сессии (`ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`) |
 | `[TOOLS]` | Мета: количество инструментов (подсказка, не само тело запроса) |
 | `[TOOL_CHOICE]` | Мета: конфигурация tool choice |
 | `[STREAM_REQUESTED]` | Мета: negotiated streaming flags |

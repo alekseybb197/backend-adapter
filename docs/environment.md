@@ -102,14 +102,13 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | `ADAPTER_TRACE_LOGFILE` | *(пусто)* | Путь к файлу трассировки (JSONL). Записывает структурированные события: tool calls, usage, skill signals, response content. Если указано — пишется в один файл. Если указано имя директории — создаётся отдельный JSONL-файл на каждую сессию. |
 | `ADAPTER_DETACH_ENABLE` | `0` (отключён) | **Фон detachment.**<br>• `1` — адаптер запускается в фоновом сервисе (пишет PID-файл). |
 | `ADAPTER_DEBUG_TRIM` | `3000` | Максимальная длина отладочного лога (в символах). Тела запросов/ответов длиннее этого значения будут усечены. |
-| `ADAPTER_DEBUG_BODY_FULL` | `0` (выключено) | Если `1` — писать **полные** тела запросов/ответов в отладочный лог без усечения (игнорирует `ADAPTER_DEBUG_TRIM`). |
-| `ADAPTER_DEBUG_OPENAI_BODY_FULL` | `0` (выключено) | Если `1` — писать полные тела OpenAI-формата (запрос к бэкенду) в отладочный лог без усечения. |
-| `ADAPTER_DEBUG_RESPONSE_FULL` | `0` (выключено) | Если `1` — писать полные ответы в отладочный лог (все режимы, включая `[RESPONSE]` и `[FETCH_RAW]`) без усечения. Заменяет старую `ADAPTER_DEBUG_FETCH_RAW_FULL`. |
-| `ADAPTER_DEBUG_OPENAI_BODY_JSON` | `0` (выключено) | **Запись полных OpenAI-тел запросов в отдельные JSON-файлы.**<br>Работает ТОЛЬКО если включён per-session режим логов (`ADAPTER_DEBUG=1` и `ADAPTER_DEBUG_LOGFILE` указывает на директорию).<br>• В директории логов создаётся `session-<datetime>-<sessid8>.parts/`<br>• Туда пишутся `openai-NNNN.json` для каждого POST `/v1/messages` с полным телом запроса. |
-| `ADAPTER_DEBUG_TOOLS` | `0` (выключено) | Если `1` — писать полные `content` (результат работы инструмента) в `[TOOL_RESULT]` лог для **всех** результатов. Игнорирует `ADAPTER_DEBUG_TRIM`. |
+| `ADAPTER_DEBUG_TOOLS` | `0` (выключено) | Если `1` — писать полные `content` (результат работы инструмента) в `[TOOL_RESULT]` лог для **всех** результатов. |
 | `ADAPTER_DEBUG_TOOLS_ERROR` | `1` (включено) | Если `1` — писать детальные ошибки инструментов в `[TOOL_RESULT_ERROR]` лог. |
-| `ADAPTER_DEBUG_TOOLS_RESPONSE_FULL` | `0` (выключено) | Если `1` — писать полные `content` ответов инструментов без обрезки (игнорирует `ADAPTER_DEBUG_TRIM`) в `[TOOL_RESULT]` и `[TOOL_RESULT_ERROR]`. Работает в паре с `ADAPTER_DEBUG_TOOLS` / `ADAPTER_DEBUG_TOOLS_ERROR`. |
-| `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` (санитайзер активен) | **Рубильник санитайзера.**<br>• `0` (по умолчанию) — все сообщения, проходящие через `_d()`, `_dr()` и `_trace()`, а также прямые вызовы `redact()` — маскируются (токены, заголовки, ключи).<br>• `1` — санитайзер **отключается полностью**: строки записываются в лог без вызова `redact()`, в секренты выводятся в открытом виде. |
+| `ADAPTER_DEBUG_TAGS_FULL` | `""` (пусто) | Перечисление тегов через запятую, для которых **отключается** обрезка (trim). Например: `"BODY,TOOL_RESULT,RESPONSE"`. Пусто — trim включён везде. |
+| `ADAPTER_DEBUG_TAGS_JSON` | `""` (пусто) | Перечисление тегов через запятую, для которых дополнительно пишется JSON-файл per-session. Пусто — JSON-файлы не пишутся. |
+| `ADAPTER_DEBUG_TAGS_YAML` | `""` (пусто) | Перечисление тегов через запятую, для которых дополнительно пишется YAML-файл per-session (формат аналогичен JSON_TAGS). |
+| `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` (санитайзер активен) | **Рубильник санитайзера.**<br>• `0` (по умолчанию) — санитайзер **активен**: все сообщения, проходящие через `_d()`, `_dr()` и `_trace()`, а также прямые вызовы `redact()` — маскируются (токены, заголовки, ключи).<br>• `1` — санитайзер **отключается полностью**: строки записываются в лог без вызова `redact()`, секреты выводятся в открытом виде. |
+| `ADAPTER_PIDFILE` | `"/tmp/adapter.pid"` | Путь к файлу PID-файла. Пишется в `daemon.py` при запуске адаптера в фоне. |
 
 ---
 
@@ -184,4 +183,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | Запуск в фоне (daemon) | `ADAPTER_DETACH_ENABLE` | `1` |
 | Маппинг моделей | `ADAPTER_MODELS_MAPPING` | `"claude-sonnet:k2-05,..."` |
 | Включить санитайзер | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` |
-| Отключить санитайзер (секренты в логах) | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `1` |
+| Отключить санитайзер (секреты в логах) | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `1` |
+| Отладка тегов full | `ADAPTER_DEBUG_TAGS_FULL` | `"TAG1,TAG2"` (через запятую) |
+| JSON дамп тегов | `ADAPTER_DEBUG_TAGS_JSON` | `"TAG1"` |
+| YAML дамп тегов | `ADAPTER_DEBUG_TAGS_YAML` | `"TAG1"` |
