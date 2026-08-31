@@ -24,13 +24,16 @@
 Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LLM Backend
 ```
 
-Без внешних зависимостей — только стандартная библиотека Python.
+Единственная внешняя зависимость — **PyYAML** (используется в session-логировании);
+остальной код — стандартная библиотека Python. Установка зависимостей:
+`pip install -r requirements.txt`.
 
 ---
 
 ## 1. Требования
 
-- **Python 3.8+** (используется только stdlib: `urllib`, `json`, `threading`, `ssl`)
+- **Python 3.10+** (код использует аннотации `X | Y`; помимо стандартной библиотеки
+  требуется только `PyYAML`)
 - **git** (для клонирования репозитория)
 - **bash/zsh** (для запуска через терминал)
 
@@ -42,6 +45,11 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
 # Клонировать репозиторий
 git clone https://github.com/alekseybb197/backend-adapter.git
 cd backend-adapter
+
+# Установить зависимости (единственная внешняя — PyYAML).
+# При необходимости используйте виртуальное окружение:
+#   python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 ```
 
 Структура проекта:
@@ -71,6 +79,7 @@ backend-adapter/
 ├── backend-adapter.env        # Пример env для сервиса
 ├── sample.adapter.env         # Полный пример env (сервис + клиент)
 ├── adapter.yaml               # Пример multi-backend YAML
+├── requirements.txt           # Зависимости (единственная — PyYAML)
 └── changelog.md               # История версий
 ```
 

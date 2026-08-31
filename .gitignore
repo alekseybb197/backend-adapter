@@ -1,3 +1,10 @@
+# project
+.claude/
+local-adapter.env
+local-adapter.yaml
+tmp/
+CLAUDE.md
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

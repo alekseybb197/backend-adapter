@@ -22,13 +22,16 @@ Claude Code  ←--Anthropic API-->  adapter (localhost:9999)  ←--OpenAI API-->
 git clone https://github.com/alekseybb197/backend-adapter.git
 cd backend-adapter
 
-# 2. Загрузить env-переменные
+# 2. Установить зависимости (единственная внешняя — PyYAML)
+pip install -r requirements.txt
+
+# 3. Загрузить env-переменные
 source sample.adapter.env
 
-# 3. Запустить адаптер
+# 4. Запустить адаптер
 python3 backend-adapter.py
 
-# 4. В другом терминале запустить Claude Code
+# 5. В другом терминале запустить Claude Code
 claude
 ```
 
@@ -66,7 +69,8 @@ backend-adapter/
 ├── com.user.backend-adapter.plist  # launchd (macOS)
 ├── backend-adapter.env         # Пример env для сервиса
 ├── sample.adapter.env          # Полный пример env
-└── adapter.yaml                # Пример multi-backend YAML
+├── adapter.yaml                # Пример multi-backend YAML
+└── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 
 ---

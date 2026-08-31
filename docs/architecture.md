@@ -385,7 +385,7 @@ backend-adapter.py
   ├── tracer.py          → session_log, config, redact
   ├── logger.py          → config, redact, session_log
   ├── redact.py          (no internal deps — stdlib only)
-  ├── session_log.py     (no internal deps — stdlib only)
+  ├── session_log.py     (no internal deps — PyYAML)
   ├── skill.py           → config
   ├── daemon.py          (no internal deps — stdlib only)
   └── __init__.py        → config, logger, tracer, skill, session_log (lazy)
