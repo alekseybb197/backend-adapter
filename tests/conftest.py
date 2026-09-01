@@ -234,12 +234,53 @@ class FakeBackend:
         backend.serve()
         # ... calls ...
         backend.close()
+
+    Response configuration is a property facade over the handler's *class*
+    attributes: ThreadingHTTPServer instantiates a fresh handler per request,
+    and the handler reads ``FakeBackendHandler.completions_response``, so
+    instance-level settings would never be seen. The facade lets tests keep
+    the natural ``backend.completions_response = ...`` API while writes land
+    on the class. Reads happen per request, so tests may also reconfigure the
+    backend mid-test (e.g. 503 twice, then 200 for a retry scenario).
     """
 
     def __init__(self):
         self.server = None
         self.thread = None
         self.host = "127.0.0.1"
+
+    # -- response configuration: instance facade over handler class attrs --
+    @property
+    def models_response(self):
+        return FakeBackendHandler.models_response
+
+    @models_response.setter
+    def models_response(self, value):
+        FakeBackendHandler.models_response = value
+
+    @property
+    def completions_response(self):
+        return FakeBackendHandler.completions_response
+
+    @completions_response.setter
+    def completions_response(self, value):
+        FakeBackendHandler.completions_response = value
+
+    @property
+    def completions_status(self):
+        return FakeBackendHandler.completions_status
+
+    @completions_status.setter
+    def completions_status(self, value):
+        FakeBackendHandler.completions_status = value
+
+    @property
+    def request_count(self):
+        return FakeBackendHandler.request_count
+
+    @property
+    def requests(self):
+        return FakeBackendHandler.requests
 
     def serve(self):
         """Start the fake backend server in a background thread."""
