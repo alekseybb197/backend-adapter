@@ -31,7 +31,9 @@ backend_adapter/
 ├── redact.py               ← secret masking (Bearer tokens, *_KEY, *_PAT, etc.)
 ├── session_log.py          ← per-session log file management with FIFO eviction
 ├── skill.py                ← skill detection from tool call argument patterns
-└── daemon.py               ← process detachment (double fork + stdio redirect)
+├── daemon.py               ← process detachment (double fork + stdio redirect)
+├── session_viewer.py       ← WEBUI: local web server over *.parts sessions (tabs + tree.html)
+└── artifact_tree.py        ← builds artifact tree (artefacts/, tree.puml/png/html) from dumps
 ```
 
 ---
@@ -98,6 +100,7 @@ Claude Code (Anthropic API client)
    - **Legacy mode** (`ADAPTER_BACKEND_CONFIG` empty): single `GET /v1/models` call
    - **Multi-backend mode**: parse YAML config (`_parse_backend_yaml`), probe each backend, resolve model collisions by prefixing with `<backend_name>.`
 4. Start `QuietThreadingHTTPServer` on `0.0.0.0:<PROXY_PORT>`
+5. If `ADAPTER_WEBUI_ENABLE=1` and `ADAPTER_DEBUG_LOGFILE` is a directory: start `session_viewer` web server in a daemon thread on `127.0.0.1:<ADAPTER_WEBUI_PORT>` (root = `ADAPTER_DEBUG_LOGFILE`)
 
 ### 4.2 POST /v1/messages (do_POST, server.py:148–581)
 

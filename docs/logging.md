@@ -8,7 +8,7 @@
 | **Console-only blocks** | Stdout/stderr | `_d("[NAME] ...")` |
 | **Structured traces** | `session_log/trace-<session>.jsonl` | `_trace(...)` |
 
-Также дополнительные механизмы: **JSON/YAML дампы** per-session через `ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`.
+Также дополнительные механизмы: **JSON/YAML дампы** per-session через `ADAPTER_DEBUG_TAGS_OUT`.
 
 ---
 
@@ -60,8 +60,8 @@
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
 | 12 | `[TOOL_RESULT]` (summary) | ← CLIENT | всегда | `tool_name`, `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` |
-| 13 | `[TOOL_RESULT]` (content) | ← CLIENT | `ADAPTER_DEBUG_TOOLS=1` | Полный JSON content tool result. Дополнительно: при `ADAPTER_DEBUG_TAGS_JSON` содержит `"TOOL_RESULT"` пишется JSON-файл per-session |
-| 14 | `[TOOL_RESULT_ERROR]` | ← CLIENT | `ADAPTER_DEBUG_TOOLS_ERROR=1` (по умолчанию) | Полный JSON ошибки. Дополнительно: при `ADAPTER_DEBUG_TAGS_JSON` содержит `"TOOL_RESULT_ERROR"` пишется JSON-файл per-session |
+| 13 | `[TOOL_RESULT]` (content) | ← CLIENT | `ADAPTER_DEBUG_TOOLS=1` | Полный JSON content tool result. Дополнительно: при `ADAPTER_DEBUG_TAGS_OUT=1` пишутся JSON/YAML-файлы per-session |
+| 14 | `[TOOL_RESULT_ERROR]` | ← CLIENT | `ADAPTER_DEBUG_TOOLS_ERROR=1` (по умолчанию) | Полный JSON ошибки. Дополнительно: при `ADAPTER_DEBUG_TAGS_OUT=1` пишутся JSON/YAML-файлы per-session |
 
 ### → BACKEND — FETCH (request phase, отправка запроса)
 
@@ -81,7 +81,7 @@
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
 | 18 | `[RESPONSE]` (non-stream) | → CLIENT | `_trim_limit('RESPONSE')` | Полностью преобразованный Anthropic-ответ |
-| 19 | `[RESPONSE]` (stream) | → CLIENT | всегда | Агрегированный snapshot стримированного ответа: text, reasoning, tool_uses, длины. Дополнительно: при `ADAPTER_DEBUG_TAGS_JSON` содержит `"RESPONSE"` пишется JSON-файл per-session |
+| 19 | `[RESPONSE]` (stream) | → CLIENT | всегда | Агрегированный snapshot стримированного ответа: text, reasoning, tool_uses, длины. Дополнительно: при `ADAPTER_DEBUG_TAGS_OUT=1` пишутся JSON/YAML-файлы per-session |
 
 ### → CLIENT — Статус завершения
 
@@ -119,15 +119,14 @@
 
 ---
 
-## JSON / YAML дампы per-session — `ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`
+## JSON / YAML дампы per-session — `ADAPTER_DEBUG_TAGS_OUT`
 
 | Переменная | Default | Описание |
 |---|---|---|
 | `ADAPTER_DEBUG_TAGS_FULL` | `""` | Перечисление тегов через запятую, для которых **отключается** обрезка (trim). Например: `"BODY,TOOL_RESULT,RESPONSE"`. Если тег в списке — `_trim_limit(tag)` возвращает `None`, и данные записываются полностью в `_dr()` и в JSON-дамп. |
-| `ADAPTER_DEBUG_TAGS_JSON` | `""` | Перечисление тегов через запятую, для которых дополнительно пишется **JSON-файл** per-session. Файлы пишутся функцией `write_debug_json(session_id, tag, data)` из `session_log.py`. |
-| `ADAPTER_DEBUG_TAGS_YAML` | `""` | Перечисление тегов через запятую, для которых дополнительно пишется **YAML-файл** per-session (аналогично JSON, но с расширением `.yaml`). |
+| `ADAPTER_DEBUG_TAGS_OUT` | `0` (выключено) | **Флаг**: включить per-session дампы **всех** частей протокола (список фиксирован — см. ниже). Для каждого тега пишется **пара файлов**: `.json` (машиночитаемый, `json.dumps(indent=2)`) и `.yaml` (человекочитаемый, `yaml.dump(LiteralDumper)`). Файлы пишутся функцией `write_debug_json(session_id, tag, data)` из `session_log.py`. Срабатывает только если `ADAPTER_DEBUG_LOGFILE` указывает на директорию. |
 
-**Тэги для дампов:** `BODY`, `TOOL_RESULT`, `TOOL_RESULT_ERROR`, `OPENAI_BODY`, `FETCH_RAW`, `RESPONSE`.
+**Тэги для дампов (фиксированный список):** `BODY`, `TOOL_RESULT`, `TOOL_RESULT_ERROR`, `OPENAI_BODY`, `FETCH_RAW`, `RESPONSE`.
 
 **Поведение:**
 - JSON/YAML файлы пишутся в ту же директорию, что и debug-логи (`ADAPTER_DEBUG_LOGFILE`).
@@ -163,7 +162,7 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | Block | Описание |
 |---|---|
 | `[OPENAI_BODY]` | Тело OpenAI-формата, отправляемое POST-запросом в бэкенд (converted from Anthropic) |
-| `OPENAI_BODY` (JSON/YAML) | То же самое, в отдельном JSON/YAML-файле по сессии (`ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`) |
+| `OPENAI_BODY` (JSON/YAML) | То же самое, в отдельном JSON/YAML-файле по сессии (`ADAPTER_DEBUG_TAGS_OUT`) |
 | `[TOOLS]` | Мета: количество инструментов (подсказка, не само тело запроса) |
 | `[TOOL_CHOICE]` | Мета: конфигурация tool choice |
 | `[STREAM_REQUESTED]` | Мета: negotiated streaming flags |
@@ -215,3 +214,19 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | `[ERROR]` | Валидация модели |
 | Console-only: `[CLIENT_GONE]`, `[HTTP]`, `[WARN]`, `[SKILL_PATTERNS]`, `[INIT]` | Системные логи |
 | Все trace events | Структурированное журналирование (см. таблицу выше) |
+
+---
+
+## Просмотр сессий в браузере — `ADAPTER_WEBUI_ENABLE`
+
+Веб-интерфейс (`backend_adapter/session_viewer.py`) показывает «треки»
+общения агента и LLM по `.parts`-дампам: для каждой сессии строится дерево
+артефактов (`artefacts/tree.html`), страница открывается во вкладках.
+
+- Включается флагом `ADAPTER_WEBUI_ENABLE=1`, порт — `ADAPTER_WEBUI_PORT`
+  (по умолчанию `8765`), слушает только `127.0.0.1`.
+- Корень веб-сервера — директория из `ADAPTER_DEBUG_LOGFILE` (там лежат
+  `*.parts` папки сессий); работает только если это директория.
+- Дерево генерируется на лету: если `artefacts/tree.html` устарел или
+  отсутствует, `artifact_tree.generate()` пересоздаёт его при заходе на
+  страницу. Обновите страницу браузера, чтобы увидеть актуальное состояние.

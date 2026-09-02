@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Claude Code <-> OpenAI-backend adapter v0.6.9
+"""[CC] <-> [OI]-backend adapter v0.7.0
 — changelog: ../changelog.md"""
-__version__ = "0.6.9"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful)"
+__version__ = "0.7.0"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization)"
 
 import os
 import sys
@@ -17,7 +17,7 @@ from backend_adapter.config import (
     ADAPTER_SKILL_PATTERNS, ADAPTER_DEBUG_TRIM,
     ADAPTER_DEBUG_TOOLS, ADAPTER_DEBUG_TOOLS_ERROR,
     ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
-    ADAPTER_STRICT_MODELS,
+    ADAPTER_STRICT_MODELS, ADAPTER_WEBUI_ENABLE, ADAPTER_WEBUI_PORT,
     ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_MODELS_MAPPING,
     ADAPTER_BACKEND_CONFIG,
@@ -116,6 +116,20 @@ if __name__ == "__main__":
     # первый запрос ждёт ADAPTER_TIMEOUT секунд от бэкенда, остальные
     # соединения простаивают в очереди accept() и клиент рвёт их по своему
     # таймауту. Это и есть основной источник BrokenPipeError в логе.
+    # Веб-интерфейс просмотра сессий (session_viewer.py) — отдельный поток
+    # внутри процесса адаптера: daemon-поток, живёт вместе с адаптером.
+    # Корень — директория из ADAPTER_DEBUG_LOGFILE (там лежат *.parts папки).
+    if ADAPTER_WEBUI_ENABLE:
+        if os.path.isdir(ADAPTER_DEBUG_LOGFILE):
+            from backend_adapter.session_viewer import serve as webui_serve
+            webui = webui_serve(ADAPTER_DEBUG_LOGFILE, "127.0.0.1", ADAPTER_WEBUI_PORT, verbose=False)
+            if webui:
+                threading.Thread(target=webui.serve_forever, daemon=True).start()
+                print(f"[WEBUI] http://127.0.0.1:{ADAPTER_WEBUI_PORT}/ (root: {ADAPTER_DEBUG_LOGFILE})")
+        else:
+            print(f"[WEBUI] ADAPTER_WEBUI_ENABLE=1, но ADAPTER_DEBUG_LOGFILE не директория: "
+                  f"{ADAPTER_DEBUG_LOGFILE!r} — веб-интерфейс не запущен")
+
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
     with QuietThreadingHTTPServer(("", PROXY_PORT), Adapter) as httpd:
         try:

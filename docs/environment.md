@@ -105,8 +105,9 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | `ADAPTER_DEBUG_TOOLS` | `0` (выключено) | Если `1` — писать полные `content` (результат работы инструмента) в `[TOOL_RESULT]` лог для **всех** результатов. |
 | `ADAPTER_DEBUG_TOOLS_ERROR` | `1` (включено) | Если `1` — писать детальные ошибки инструментов в `[TOOL_RESULT_ERROR]` лог. |
 | `ADAPTER_DEBUG_TAGS_FULL` | `""` (пусто) | Перечисление тегов через запятую, для которых **отключается** обрезка (trim). Например: `"BODY,TOOL_RESULT,RESPONSE"`. Пусто — trim включён везде. |
-| `ADAPTER_DEBUG_TAGS_JSON` | `""` (пусто) | Перечисление тегов через запятую, для которых дополнительно пишется JSON-файл per-session. Пусто — JSON-файлы не пишутся. |
-| `ADAPTER_DEBUG_TAGS_YAML` | `""` (пусто) | Перечисление тегов через запятую, для которых дополнительно пишется YAML-файл per-session (формат аналогичен JSON_TAGS). |
+| `ADAPTER_DEBUG_TAGS_OUT` | `0` (выключено) | **Флаг: включить per-session дампы всех частей протокола.**<br>• `1` — включено (значения `0`, `false`, `no`, пусто — выключено).<br>• Для каждого тега из фиксированного списка (`BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE`) пишется **пара файлов** (`.json` + `.yaml`).<br>• Срабатывает только если `ADAPTER_DEBUG_LOGFILE` указывает на директорию. |
+| `ADAPTER_WEBUI_ENABLE` | `0` (выключено) | **Флаг: локальный веб-интерфейс просмотра сессий** (`backend_adapter/session_viewer.py`).<br>• `1` — включено (значения `0`, `false`, `no`, пусто — выключено).<br>• Поднимает веб-сервер на `127.0.0.1:ADAPTER_WEBUI_PORT`, корень — директория из `ADAPTER_DEBUG_LOGFILE` (там лежат `*.parts` папки сессий).<br>• Срабатывает только если `ADAPTER_DEBUG_LOGFILE` указывает на директорию. |
+| `ADAPTER_WEBUI_PORT` | `8765` | Порт для веб-интерфейса просмотра сессий (см. `ADAPTER_WEBUI_ENABLE`). |
 | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` (санитайзер активен) | **Рубильник санитайзера.**<br>• `0` (по умолчанию) — санитайзер **активен**: все сообщения, проходящие через `_d()`, `_dr()` и `_trace()`, а также прямые вызовы `redact()` — маскируются (токены, заголовки, ключи).<br>• `1` — санитайзер **отключается полностью**: строки записываются в лог без вызова `redact()`, секреты выводятся в открытом виде. |
 | `ADAPTER_PIDFILE` | `"/tmp/adapter.pid"` | Путь к файлу PID-файла. Пишется в `daemon.py` при запуске адаптера в фоне. |
 
@@ -185,5 +186,6 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | Включить санитайзер | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` |
 | Отключить санитайзер (секреты в логах) | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `1` |
 | Отладка тегов full | `ADAPTER_DEBUG_TAGS_FULL` | `"TAG1,TAG2"` (через запятую) |
-| JSON дамп тегов | `ADAPTER_DEBUG_TAGS_JSON` | `"TAG1"` |
-| YAML дамп тегов | `ADAPTER_DEBUG_TAGS_YAML` | `"TAG1"` |
+| JSON+YAML дампы всех частей | `ADAPTER_DEBUG_TAGS_OUT` | `1` |
+| Веб-интерфейс просмотра сессий | `ADAPTER_WEBUI_ENABLE` | `1` |
+| Порт веб-интерфейса | `ADAPTER_WEBUI_PORT` | `8765` |

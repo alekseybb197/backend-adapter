@@ -51,27 +51,21 @@ def _trim_limit(tag: str) -> int | None:
         return None
     return ADAPTER_DEBUG_TRIM
 ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
-# ADAPTER_DEBUG_TAGS_JSON — перечисление тегов через запятую, для которых
-# дополнительно пишется JSON-файл для любой части протокола обмена.
-# Пусто / не задано — JSON-файлы не пишутся.
-_ADAPTER_DEBUG_TAGS_JSON_RAW = os.environ.get("ADAPTER_DEBUG_TAGS_JSON", "")
-ADAPTER_DEBUG_TAGS_JSON: list[str] = (
-    [t.strip() for t in _ADAPTER_DEBUG_TAGS_JSON_RAW.split(",") if t.strip()]
-    if _ADAPTER_DEBUG_TAGS_JSON_RAW.strip()
-    else []
+# ADAPTER_DEBUG_TAGS_OUT — логический флаг: включить per-session дампы
+# (.json и .yaml парой) для всех частей протокола обмена (список частей
+# фиксирован — ADAPTER_DEBUG_TAGS_OUT_ALL). Срабатывает только если
+# ADAPTER_DEBUG_LOGFILE указывает на директорию. Пусто / 0 / false — выкл.
+ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() not in ("0", "false", "no", "")
+# Полный фиксированный список частей протокола, для которых пишутся дампы.
+ADAPTER_DEBUG_TAGS_OUT_ALL = (
+    "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
 )
-
-# ADAPTER_DEBUG_TAGS_YAML — перечисление тегов через запятую, для которых
-# дополнительно пишется YAML-файл для любой части протокола обмена.
-# Пусто / не задано — YAML-файлы не пишутся.
-# Аналогичен ADAPTER_DEBUG_TAGS_JSON по формату — можно указать тот же
-# список или другой подмножество тегов.
-_ADAPTER_DEBUG_TAGS_YAML_RAW = os.environ.get("ADAPTER_DEBUG_TAGS_YAML", "")
-ADAPTER_DEBUG_TAGS_YAML: list[str] = (
-    [t.strip() for t in _ADAPTER_DEBUG_TAGS_YAML_RAW.split(",") if t.strip()]
-    if _ADAPTER_DEBUG_TAGS_YAML_RAW.strip()
-    else []
-)
+# Веб-интерфейс просмотра сессий (backend_adapter/session_viewer.py):
+#   ADAPTER_WEBUI_ENABLE=1 — поднять локальный веб-сервер на 127.0.0.1.
+#   Срабатывает только если ADAPTER_DEBUG_LOGFILE указывает на директорию
+#   (там лежат *.parts папки сессий). Порт — ADAPTER_WEBUI_PORT.
+ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_WEBUI_PORT   = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
 # без вызова redact(), логируются полные токены, заголовки, ключи.
 # По умолчанию false — санитайзер активен, секреты маскируются.

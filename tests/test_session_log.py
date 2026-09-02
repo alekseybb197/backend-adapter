@@ -110,7 +110,7 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_TAGS_JSON = ["TEST"]
+        config.ADAPTER_DEBUG_TAGS_OUT = True
         # Force parts dir creation
         session_log._parts_dir["sess1_jsonparts"] = tmp_path / "parts"
         session_log._parts_dir_ts["sess1"] = "20260831-120000"
@@ -127,7 +127,8 @@ class TestWriteDebugJson:
         data = json.loads(files[0].read_text())
         assert data == {"key": "value"}
 
-    def test_ignores_tag_outside_list(self, tmp_path):
+    def test_flag_off_no_files(self, tmp_path):
+        """When ADAPTER_DEBUG_TAGS_OUT flag is off, no dumps are written."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -135,8 +136,7 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_TAGS_JSON = ["TEST"]
-        # Make sure parts dir exists
+        config.ADAPTER_DEBUG_TAGS_OUT = False
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}
@@ -146,8 +146,27 @@ class TestWriteDebugJson:
         files = list(parts.glob("*.json"))
         assert len(files) == 0
 
-    def test_writes_yaml_when_tag_in_yaml_list(self, tmp_path):
-        """When tag is in ADAPTER_DEBUG_TAGS_YAML, .yaml should also be written."""
+    def test_no_dir_no_files(self, tmp_path):
+        """When ADAPTER_DEBUG_LOGFILE is not a directory, no dumps are written."""
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log, config
+        session_log._DEBUG_IS_DIR = False
+        session_log._DEBUG_PATH = str(tmp_path / "not-a-dir.log")
+        config.ADAPTER_DEBUG_TAGS_OUT = True
+        parts = tmp_path / "parts"
+        parts.mkdir(exist_ok=True)
+        session_log._parts_dir = {"sess1_jsonparts": str(parts)}
+        session_log._debug_json_seq = 0
+
+        session_log.write_debug_json("sess1", "BODY", {"key": "value"})
+        files = list(parts.glob("*.json"))
+        assert len(files) == 0
+
+    def test_writes_yaml_alongside_json(self, tmp_path):
+        """When ADAPTER_DEBUG_TAGS_OUT flag is on, .yaml is written alongside .json."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -155,8 +174,7 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_TAGS_JSON = ["TEST"]
-        config.ADAPTER_DEBUG_TAGS_YAML = ["TEST"]
+        config.ADAPTER_DEBUG_TAGS_OUT = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}
@@ -176,7 +194,7 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_TAGS_JSON = ["TEST"]
+        config.ADAPTER_DEBUG_TAGS_OUT = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}

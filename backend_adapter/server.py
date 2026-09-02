@@ -20,7 +20,7 @@ from .config import (
     _BACKENDS, _init_multi_backends,
     _cap, SSL_CTX,
     ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
-    ADAPTER_DEBUG_TAGS_JSON,
+    ADAPTER_DEBUG_TAGS_OUT,
 )
 from .redact import redact, redact_headers
 from .daemon import _detach, _write_pidfile
@@ -175,7 +175,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(length)
             _body = body.decode()
             _dr(req_id, f"[BODY] {(_body if (lim := _trim_limit('BODY')) is None else _body[:lim])}")
-            if "BODY" in ADAPTER_DEBUG_TAGS_JSON:
+            if ADAPTER_DEBUG_TAGS_OUT:
                 write_debug_json(session_id, "BODY", _body)
 
             try:
@@ -297,7 +297,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                        content=traced_content)
                 _tool_name = _lookup_tool_use_name(session_id, tr["tool_use_id"])
                 _dr(req_id, f"[TOOL_RESULT] tool_name={_tool_name or '?'} tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}")
-                if "TOOL_RESULT" in ADAPTER_DEBUG_TAGS_JSON:
+                if ADAPTER_DEBUG_TAGS_OUT:
                     write_debug_json(session_id, "TOOL_RESULT", {"tool_use_id": tr["tool_use_id"], "tool_name": _tool_name or "", "parent_req_id": parent_req_id, "is_error": tr["is_error"], "content": tr["content"]})
 
                 # ADAPTER_DEBUG_TOOLS=1 — писать полный content для всех результатов
@@ -305,7 +305,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     _tool_content_full = tr["content"] or ""
                     _tool_content_snippet = _tool_content_full if (lim := _trim_limit('TOOL_RESULT')) is None else _tool_content_full[:lim]
                     _dr(req_id, f"[TOOL_RESULT] content={json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)}")
-                    if "TOOL_RESULT" in ADAPTER_DEBUG_TAGS_JSON:
+                    if ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "TOOL_RESULT", json.loads(json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)))
 
                 # ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать детальный
@@ -326,7 +326,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         "content": err_content_snippet,
                     }
                     _dr(req_id, f"[TOOL_RESULT_ERROR] {json.dumps(err_snapshot, ensure_ascii=False, default=str)}")
-                    if "TOOL_RESULT_ERROR" in ADAPTER_DEBUG_TAGS_JSON:
+                    if ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "TOOL_RESULT_ERROR", err_snapshot)
 
             openai_body = {
@@ -373,7 +373,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             _dr(req_id, f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if (lim := _trim_limit('OPENAI_BODY')) is None else json.dumps(openai_body, ensure_ascii=False)[:lim])}")
 
-            if "OPENAI_BODY" in ADAPTER_DEBUG_TAGS_JSON:
+            if ADAPTER_DEBUG_TAGS_OUT:
                 write_debug_json(session_id, "OPENAI_BODY", openai_body)
 
             # Построить URL и Authorization из resolved backend-конфига.
@@ -524,7 +524,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     elapsed = time.time() - t0
                     _dr(req_id, f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes")
                     _dr(req_id, f"[FETCH_RAW] {(raw.decode() if (lim := _trim_limit('FETCH_RAW')) is None else raw.decode()[:lim])}")
-                    if "FETCH_RAW" in ADAPTER_DEBUG_TAGS_JSON:
+                    if ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "FETCH_RAW", raw.decode())
                     _trace(session_id, req_id, "backend_result", attempt=attempt,
                            ok=True, status=resp.status, elapsed_ms=int(elapsed * 1000))
@@ -533,7 +533,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
                     _dr(req_id, f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(anthropic_resp, ensure_ascii=False)[:lim])}")
-                    if "RESPONSE" in ADAPTER_DEBUG_TAGS_JSON:
+                    if ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "RESPONSE", anthropic_resp)
                     self._send_json(200, anthropic_resp)
                     _dr(req_id, "[OK] Done")

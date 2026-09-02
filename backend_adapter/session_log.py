@@ -93,7 +93,7 @@ _last_log_session_id: str = ""  # глобальный fallback для _d()
 _parts_dir: dict[str, str] = {}
 _parts_dir_ts: dict[str, str] = {}  # session_id → stable timestamp (first-use)
 
-# ==================== ADAPTER_DEBUG_TAGS_JSON ====================
+# ==================== ADAPTER_DEBUG_TAGS_OUT ====================
 # Глобальный счётчик для JSON-файлов тегированных блоков.
 # Формат имени: <session[:8]>-<seq:04d>-<tag_lower>.json
 _debug_json_seq = 0
@@ -160,7 +160,7 @@ def _close_session_file(session_id: str) -> None:
                 pass
 
 
-# ==================== ADAPTER_DEBUG_TAGS_JSON ====================
+# ==================== ADAPTER_DEBUG_TAGS_OUT ====================
 
 
 def _body_tags_parts_dir(session_id: str) -> str | None:
@@ -194,15 +194,16 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     ``data`` — dict, str, list или bytearray/bytes. При bytes/bytearray
     декодируется как UTF-8.
 
-    Файл пишется только если включён per-session режим логов
-    (``_DEBUG_IS_DIR``) и ``session_log.ADAPTER_DEBUG_TAGS_JSON``
-    содержит данный ``tag``.
+    Файл пишется только если включён флаг ``config.ADAPTER_DEBUG_TAGS_OUT``
+    и per-session режим логов (``_DEBUG_IS_DIR`` — т.е. ADAPTER_DEBUG_LOGFILE
+    указывает на директорию). Для каждого тега пишутся парные файлы —
+    ``.json`` и ``.yaml``.
     """
-    # Быстрая проверка — тег не в списке
-    from .config import ADAPTER_DEBUG_TAGS_JSON
-    if not ADAPTER_DEBUG_TAGS_JSON:
+    # Быстрая проверка — флаг выключен или лог-путь не директория
+    from .config import ADAPTER_DEBUG_TAGS_OUT
+    if not ADAPTER_DEBUG_TAGS_OUT:
         return
-    if tag not in ADAPTER_DEBUG_TAGS_JSON:
+    if not _DEBUG_IS_DIR or not _DEBUG_PATH:
         return
 
     parts_path = _body_tags_parts_dir(session_id)
@@ -235,28 +236,25 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
         f.write(body_str)
 
     # === YAML dump alongside JSON ===
-    # Если тег в ADAPTER_DEBUG_TAGS_YAML — пишем одноимённый .yaml
-    from .config import ADAPTER_DEBUG_TAGS_YAML
-    if ADAPTER_DEBUG_TAGS_YAML and tag in ADAPTER_DEBUG_TAGS_YAML:
-        # Данные уже нормализованы для json_path — для YAML нужно "сырое"
-        # значение (не json.dumps-строка, а исходный object), чтобы dumper
-        # мог правильно обработать типы.
-        if isinstance(data, dict):
-            yaml_payload: dict | str = data
-        elif isinstance(data, list):
-            yaml_payload = data
-        elif isinstance(data, (bytes, bytearray)):
-            # bytes → строка, YAML запишет как plain scalar
-            yaml_payload = data.decode("utf-8", errors="replace")
-        else:
-            raw = str(data)
-            try:
-                yaml_payload = json.loads(raw)
-            except (json.JSONDecodeError, ValueError):
-                yaml_payload = raw
+    # К каждому .json пишем одноимённый .yaml парой. Для YAML нужно "сырое"
+    # значение (не json.dumps-строка, а исходный object), чтобы dumper мог
+    # правильно обработать типы.
+    if isinstance(data, dict):
+        yaml_payload: dict | str = data
+    elif isinstance(data, list):
+        yaml_payload = data
+    elif isinstance(data, (bytes, bytearray)):
+        # bytes → строка, YAML запишет как plain scalar
+        yaml_payload = data.decode("utf-8", errors="replace")
+    else:
+        raw = str(data)
+        try:
+            yaml_payload = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            yaml_payload = raw
 
-        yaml_name = json_name.replace(".json", ".yaml")
-        yaml_path = os.path.join(parts_path, yaml_name)
-        yaml_text = dump_yaml(yaml_payload)
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            f.write(yaml_text)
+    yaml_name = json_name.replace(".json", ".yaml")
+    yaml_path = os.path.join(parts_path, yaml_name)
+    yaml_text = dump_yaml(yaml_payload)
+    with open(yaml_path, "w", encoding="utf-8") as f:
+        f.write(yaml_text)

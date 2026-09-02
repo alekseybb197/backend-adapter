@@ -1,5 +1,73 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.7.0 (WEBUI: session viewer + artifact tree visualization, merged ADAPTER_DEBUG_TAGS_JSON/YAML)
+
+### Веб-интерфейс просмотра сессий (session_viewer + artifact_tree)
+
+**Проблема:** следить за ходом длинной сессии (что агент отправлял модели,
+что модель возвращала — включая reasoning, tool calls и результаты
+инструментов) по сырым `.parts`-дампам и JSONL-трейсам вручную
+нереально: контент повторяется почти в каждом запросе, а связи
+«запрос → ответ → следующий запрос» теряются среди десятков файлов.
+
+**Решение:** в пакет добавлены два модуля (перенесены из `tmp/`), которые
+строят из `.parts`-дампов визуальное дерево взаимодействия агента и LLM,
+и веб-сервер для просмотра этих деревьев:
+
+| Модуль | Роль |
+|---|---|
+| `backend_adapter/artifact_tree.py` | Извлекает уникальные текстовые артефакты (system/user-промпты, tool_result, reasoning, toolcall, response — дедупликация по sha256 с учётом волатильных вставок вида `<total_tokens>`) и строит дерево ходов диалога. Генерирует `artefacts/`: артефакты (`.yaml`/`.txt`), `tree.puml`, `tree.png` (PlantUML или Graphviz-fallback), интерактивный `tree.html`. Программный API: `generate(parts_dir, verbose)`. |
+| `backend_adapter/session_viewer.py` | Локальный веб-сервер: сканирует корневую папку на `*.parts`-директории, на лету (пере)генерирует `tree.html` (если устарел/отсутствует — сравнение mtime с part-файлами), показывает деревья всех сессий на одной странице во вкладках. URL-схема зеркалит структуру диска 1:1 (`/session/<имя>/...`), поэтому относительные ссылки в `tree.html` на raw-файлы одинаково работают через `file://` и через сервер. |
+
+**Запуск.** Включается флагом `ADAPTER_WEBUI_ENABLE=1`; порт —
+`ADAPTER_WEBUI_PORT` (по умолчанию 8765); слушает только `127.0.0.1`.
+Веб-сервер стартует **в daemon-потоке внутри процесса адаптера** (а не
+отдельным процессом), корень — директория из `ADAPTER_DEBUG_LOGFILE`
+(там лежат `*.parts` папки). Срабатывает только если `ADAPTER_DEBUG_LOGFILE`
+указывает на директорию; иначе — предупреждение в лог и сервер не стартует.
+
+**Встраивание в пакет:**
+- `artifact_tree.py`: убран встроенный `configure_logging()` (`logging.basicConfig`) —
+  при импорте из пакета он перехватывал бы корневой логгер и портил формат
+  логов адаптера; формат теперь наследуется от адаптера. CLI-запуск
+  (`python -m backend_adapter.artifact_tree <parts_dir>`) сохранён через `main()`.
+- `session_viewer.py`: импорт `artifact_tree` — относительный (`from . import`);
+  добавлена функция `serve(root_dir, host, port, verbose)`, возвращающая инстанс
+  `ThreadingHTTPServer` (вызывающий сам решает, когда звать `serve_forever()`);
+  ручной CLI-запуск (`python -m backend_adapter.session_viewer [ROOT_DIR]`) сохранён.
+- `backend-adapter.py`: перед стартом основного прокси при
+  `ADAPTER_WEBUI_ENABLE=1` поднимается `session_viewer` в отдельном
+  daemon-потоке.
+
+### Единая переменная для per-session дампов (JSON+YAML парой)
+
+**Проблема:** для per-session дампов существовали две почти одинаковые
+переменные — `ADAPTER_DEBUG_TAGS_JSON` (теги для `.json`-файлов) и
+`ADAPTER_DEBUG_TAGS_YAML` (теги для дополнительных `.yaml`-файлов).
+В реальных конфигах они всегда задавались одним и тем же списком тегов.
+
+**Решение:** переменные объединены в одну — `ADAPTER_DEBUG_TAGS_OUT`,
+теперь это **логический флаг**: при `=1` дампы пишутся для всех частей
+протокола сразу (фиксированный список
+`BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE`),
+для каждого тега — парой `.json` + `.yaml`. Срабатывает только если
+`ADAPTER_DEBUG_LOGFILE` указывает на директорию (как и WEBUI).
+Старые переменные `ADAPTER_DEBUG_TAGS_JSON` / `ADAPTER_DEBUG_TAGS_YAML`
+удалены полностью (код, тесты, документация, конфиги).
+
+Изменения:
+- `config.py`: вместо двух списков — флаг `ADAPTER_DEBUG_TAGS_OUT` +
+  константа `ADAPTER_DEBUG_TAGS_OUT_ALL`; добавлены `ADAPTER_WEBUI_ENABLE`,
+  `ADAPTER_WEBUI_PORT`.
+- `session_log.py`: проверка в `write_debug_json` — флаг + `_DEBUG_IS_DIR`;
+  YAML пишется всегда парой к `.json` (условная ветка убрана).
+- `server.py`, `streaming.py`: проверки «тег в списке» → «флаг включён».
+- `tests/conftest.py`, `tests/test_session_log.py`: обновлены дефолты env;
+  тест «тег вне списка» заменён на `test_flag_off_no_files` и
+  `test_no_dir_no_files` (новая семантика: флаг + требование директории).
+- Документация: `docs/environment.md`, `docs/logging.md`, `docs/install.md`,
+  `docs/architecture.md`, `local-adapter.env`.
+
 ## v0.6.9 (YAML section logging alongside JSON)
 
 ### YAML-логгирование секций взаимодействия с LLM
