@@ -89,10 +89,10 @@ pip install -r requirements.txt
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (11 модулей)
+├── backend_adapter/            # Доменный пакет (20 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env-переменных, multi-backend, YAML
 │   ├── server.py              # HTTP-сервер, Handler
-│   ├── convert.py             # Anthropic ↔ OpenAI конвертация
+│   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
 │   ├── session_log.py         # Per-session логи с FIFO eviction
@@ -100,8 +100,16 @@ backend-adapter/
 │   ├── daemon.py              # Detach (double fork)
 │   ├── logger.py              # Debug-логирование с redaction
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
+│   ├── session_viewer.py      # WEBUI: веб-сервер просмотра *.parts сессий
+│   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
+│   ├── artifact_tree_common.py    # утилиты, константы, цвета
+│   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
+│   ├── artifact_tree_parse.py     # разбор дампов, классификация kind
+│   ├── artifact_tree_turnbuilder.py  # связывание openai_body/fetch_raw в ходы
+│   ├── artifact_tree_plantuml.py  # PlantUML-рендер
+│   ├── artifact_tree_graphviz.py  # PNG через plantuml/graphviz-fallback
+│   ├── artifact_tree_html.py      # интерактивный tree.html
 │   └── __init__.py            # Module-level proxy
-├── docs/
 │   ├── architecture.md        # Архитектура
 │   ├── environment.md         # Полный список env-переменных
 │   ├── logging.md             # Конфигурация логирования

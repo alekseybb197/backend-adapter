@@ -33,8 +33,22 @@ backend_adapter/
 ├── skill.py                ← skill detection from tool call argument patterns
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
 ├── session_viewer.py       ← WEBUI: local web server over *.parts sessions (tabs + tree.html)
-└── artifact_tree.py        ← builds artifact tree (artefacts/, tree.puml/png/html) from dumps
+└── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
+    artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
+    artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
+    artifact_tree_parse.py       ← part discovery, JSON load, kind classification, inline labels
+    artifact_tree_turnbuilder.py ← build_turns: pair openai_body ↔ fetch_raw into turns
+    artifact_tree_plantuml.py    ← PlantUML rendering (tree.puml)
+    artifact_tree_graphviz.py    ← PNG via real PlantUML or Graphviz fallback
+    artifact_tree_html.py        ← interactive tree.html (graph model, dot layout, render)
+    artifact_tree.py             ← thin shim: generate(), main(), __all__ re-exports
 ```
+
+`artifact_tree.py` is kept as a thin re-export shim (public API: `generate()`), so
+`from backend_adapter import artifact_tree` and the `session_viewer.py` import keep
+working unchanged. The 7 real modules above it live flat in `backend_adapter/`
+(the package was intentionally NOT nested in a subdirectory — the repo keeps every
+module on one level, see ADR 2026-09-01).
 
 ---
 
@@ -391,10 +405,21 @@ backend-adapter.py
   ├── session_log.py     (no internal deps — PyYAML)
   ├── skill.py           → config
   ├── daemon.py          (no internal deps — stdlib only)
-  └── __init__.py        → config, logger, tracer, skill, session_log (lazy)
+  ├── session_viewer.py  → artifact_tree (WEBUI; entry point backend-adapter.py:124
+  │                       импортирует session_viewer.serve() для daemon-потока)
+  └── artifact_tree*.py  (8 modules, layered):
+      artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
+      ├── artifact_tree_html.py      → common  (цвета ANCHOR/SINK/ORPHAN определены здесь)
+      ├── artifact_tree_graphviz.py  → common  (render_png_via_plantuml определён здесь)
+      ├── artifact_tree_plantuml.py  → common
+      ├── artifact_tree_turnbuilder.py → parse, registry, common
+      ├── artifact_tree_parse.py     → common, registry
+      ├── artifact_tree_registry.py  → common
+      └── artifact_tree_common.py    (no internal deps — stdlib only)
+  └── __init__.py        → (lazy proxy, резолвит globals в _get_config_globals())
 ```
 
-**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, and `config.py` (env var reads) have **zero internal package dependencies**, forming the dependency base. All other modules depend on at least one of these.
+**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), and `artifact_tree_common.py` have **zero internal package dependencies**, forming the dependency base. All other modules depend on at least one of these.
 
 ---
 
