@@ -116,13 +116,15 @@ if __name__ == "__main__":
     # первый запрос ждёт ADAPTER_TIMEOUT секунд от бэкенда, остальные
     # соединения простаивают в очереди accept() и клиент рвёт их по своему
     # таймауту. Это и есть основной источник BrokenPipeError в логе.
-    # Веб-интерфейс просмотра сессий (session_viewer.py) — отдельный поток
+    # Веб-интерфейс WEBUI (webserver.py — общее ядро; эндпойнты:
+    # session_viewer.py "/session" + webui_status.py "/") — отдельный поток
     # внутри процесса адаптера: daemon-поток, живёт вместе с адаптером.
     # Корень — директория из ADAPTER_DEBUG_LOGFILE (там лежат *.parts папки).
     if ADAPTER_WEBUI_ENABLE:
         if os.path.isdir(ADAPTER_DEBUG_LOGFILE):
-            from backend_adapter.session_viewer import serve as webui_serve
-            webui = webui_serve(ADAPTER_DEBUG_LOGFILE, "127.0.0.1", ADAPTER_WEBUI_PORT, verbose=False)
+            from backend_adapter.webserver import serve as webui_serve
+            webui = webui_serve(ADAPTER_DEBUG_LOGFILE, __version__, "127.0.0.1",
+                                ADAPTER_WEBUI_PORT, verbose=False)
             if webui:
                 threading.Thread(target=webui.serve_forever, daemon=True).start()
                 print(f"[WEBUI] http://127.0.0.1:{ADAPTER_WEBUI_PORT}/ (root: {ADAPTER_DEBUG_LOGFILE})")

@@ -184,12 +184,21 @@ class TestSmoke:
             assert name in ns, f"star-import не дал имя: {name}"
 
     def test_import_session_viewer(self):
+        # С v0.7.1 session_viewer — чистый эндпойнт "/session" общего ядра
+        # webserver.py: CLI/serve()/Handler уехали в ядро, в модуле остались
+        # логика генерации + эндпойнт.
         to_remove = [k for k in sys.modules if k.startswith("backend_adapter")]
         for k in to_remove:
             del sys.modules[k]
         from backend_adapter import session_viewer
         assert hasattr(session_viewer, "find_or_generate_sessions")
-        assert hasattr(session_viewer, "serve")
+        assert hasattr(session_viewer, "render_shell")
+        assert hasattr(session_viewer, "SessionEndpoint")
+        assert not hasattr(session_viewer, "serve")
+        assert not hasattr(session_viewer, "main")
+        assert not hasattr(session_viewer, "Handler")
+        from backend_adapter import webserver
+        assert hasattr(webserver, "serve")
 
 
 # ---------------------------------------------------------------------------

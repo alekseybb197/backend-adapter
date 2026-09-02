@@ -1,5 +1,52 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.7.1 (WIP — накопление в feature/v0.7.1, версия не сдвигается)
+
+### 2026-09-02 WEBUI: общее ядро веб-сервера, эндпойнты /session и / (статус)
+**Проблема:** `session_viewer.py` совмещал CLI (main/argparse), создание
+сервера, HTTP-обработчик и рендеры в одном растущем файле — добавление
+нового эндпойнта требовало правки этого файла, а корень сервера умел
+только просмотр сессий (версия кода и состояние LLM-бэкендов нигде не
+видны без чтения логов).
+
+**Решение:** веб-часть разделена на общее ядро и модули-эндпойнты.
+Новый эндпойнт = новый модуль с `@webserver.register`-классом + одна
+строка импорта в `serve()`; роутинг, раздача, 404/405 и контекст
+(root_dir/version) достаются автоматически. Корень `/` стал статус-
+страницей: версия кода, режим работы, каждый LLM-эндпойнт с
+доступностью и списком моделей; кнопка «⟳ Проверить сейчас» выполняет
+живую пробу (GET `/v1/models`) с жёстким таймаутом 5 с на эндпойнт.
+
+| Файл | Роль |
+|---|---|
+| `backend_adapter/webserver.py` | Общее ядро: база `Endpoint` (prefix + GET/POST с дефолтами 404/405), реестр `ENDPOINTS` + декор `register`, единый `Handler`-диспетчер (самый длинный совпавший префикс; корень `/` — только точный путь), `QuietWebServer`, `serve(root_dir, version, ...)`, CLI `python -m backend_adapter.webserver [ROOT] [--port] [--host]`. |
+| `backend_adapter/session_viewer.py` | Чистый эндпойнт `/session`: вкладки сессий + раздача файлов. CLI/`serve()`/`Handler` убраны (переехали в ядро). |
+| `backend_adapter/webui_status.py` | Новый эндпойнт `/`: статус-страница. GET — snapshot состояния на старте (конфиг-глобалы адаптера, без сети); POST — живая проба всех эндпойнтов. Чистая логика (`_collect_endpoints`/`_config_snapshot`/`_probe_live`) отделена от HTML для тестирования без HTTP. |
+
+**Изменения:** webserver.py, session_viewer.py, webui_status.py,
+backend-adapter.py (WEBUI-блок зовёт `webserver.serve(..., __version__, ...)`
+— версия передаётся из единственного источника), tests/test_webserver.py,
+tests/test_session_viewer.py, tests/test_webui_status.py (новые),
+tests/test_artifact_tree.py (smoke-тест импорта под новый API),
+docs/architecture.md, docs/environment.md, docs/logging.md, docs/install.md.
+
+ВАЖНО про standalone: `config.BACKEND_BASE` не пуст даже без env
+(дефолт `https://llm.service.example.com`) — статус-страница показывает
+legacy-эндпойнт только если `ADAPTER_BACKEND_BASE` реально задана в
+окружении, иначе честную подсказку «данные адаптера недоступны» вместо
+фантомного бэкенда.
+
+Найден и починен баг CLI-запуска ядра: при `python -m backend_adapter.webserver`
+runpy исполняет модуль дважды — каноническая копия в `sys.modules` (в неё
+регистрируются эндпойнты через `from . import ...`) и namespace `__main__`
+с пустым реестром. Если бы `serve()` звался из `__main__`, сервер отвечал
+бы 404 на каждый путь; в тестах баг не виден (там `serve()` зовётся из
+канонического модуля напрямую). Починено трамплином
+`from backend_adapter.webserver import main as _main` в
+`if __name__ == "__main__"`; добавлен поведенческий регресс-тест
+`test_cli_standalone_serves_builtin_endpoints` (субпроцесс `python -m`,
+эндпойнты `/` и `/session` отвечают 200).
+
 ## v0.7.0 (WEBUI: session viewer + artifact tree visualization, merged ADAPTER_DEBUG_TAGS_JSON/YAML)
 
 ### Веб-интерфейс просмотра сессий (session_viewer + artifact_tree)

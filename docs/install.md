@@ -100,7 +100,9 @@ backend-adapter/
 │   ├── daemon.py              # Detach (double fork)
 │   ├── logger.py              # Debug-логирование с redaction
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
-│   ├── session_viewer.py      # WEBUI: веб-сервер просмотра *.parts сессий
+│   ├── webserver.py           # WEBUI-ядро: общий веб-сервер, роутинг эндпойнтов, CLI
+│   ├── webui_status.py        # WEBUI-эндпойнт "/": статус (версия, LLM, модели)
+│   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
@@ -265,9 +267,11 @@ export ADAPTER_DEBUG_ENABLE=1
 # JSON/YAML-дампы per-session всех частей протокола (требуется директория в ADAPTER_DEBUG_LOGFILE)
 # export ADAPTER_DEBUG_TAGS_OUT=1
 
-# Веб-интерфейс просмотра сессий (требуется директория в ADAPTER_DEBUG_LOGFILE)
+# Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий
+# (требуется директория в ADAPTER_DEBUG_LOGFILE)
 # export ADAPTER_WEBUI_ENABLE=1
 # export ADAPTER_WEBUI_PORT=8765
+# Standalone-запуск вне процесса адаптера: python -m backend_adapter.webserver [ROOT] [--port] [--host]
 
 # Детальные логи результатов инструментов
 # export ADAPTER_DEBUG_TOOLS=0
