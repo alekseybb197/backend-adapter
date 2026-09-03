@@ -32,9 +32,26 @@ backend_adapter/
 ├── session_log.py          ← per-session log file management with FIFO eviction
 ├── skill.py                ← skill detection from tool call argument patterns
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
-├── session_viewer.py       ← WEBUI: local web server over *.parts sessions (tabs + tree.html)
-└── artifact_tree.py        ← builds artifact tree (artefacts/, tree.puml/png/html) from dumps
+├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
+│                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
+├── webui_status.py         ← WEBUI endpoint "/": status page (version, LLM endpoints, models)
+├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
+└── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
+    artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
+    artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
+    artifact_tree_parse.py       ← part discovery, JSON load, kind classification, inline labels
+    artifact_tree_turnbuilder.py ← build_turns: pair openai_body ↔ fetch_raw into turns
+    artifact_tree_plantuml.py    ← PlantUML rendering (tree.puml)
+    artifact_tree_graphviz.py    ← PNG via real PlantUML or Graphviz fallback
+    artifact_tree_html.py        ← interactive tree.html (graph model, dot layout, render)
+    artifact_tree.py             ← thin shim: generate(), main(), __all__ re-exports
 ```
+
+`artifact_tree.py` is kept as a thin re-export shim (public API: `generate()`), so
+`from backend_adapter import artifact_tree` and the `session_viewer.py` import keep
+working unchanged. The 7 real modules above it live flat in `backend_adapter/`
+(the package was intentionally NOT nested in a subdirectory — the repo keeps every
+module on one level, see ADR 2026-09-01).
 
 ---
 
@@ -100,7 +117,13 @@ Claude Code (Anthropic API client)
    - **Legacy mode** (`ADAPTER_BACKEND_CONFIG` empty): single `GET /v1/models` call
    - **Multi-backend mode**: parse YAML config (`_parse_backend_yaml`), probe each backend, resolve model collisions by prefixing with `<backend_name>.`
 4. Start `QuietThreadingHTTPServer` on `0.0.0.0:<PROXY_PORT>`
-5. If `ADAPTER_WEBUI_ENABLE=1` and `ADAPTER_DEBUG_LOGFILE` is a directory: start `session_viewer` web server in a daemon thread on `127.0.0.1:<ADAPTER_WEBUI_PORT>` (root = `ADAPTER_DEBUG_LOGFILE`)
+5. If `ADAPTER_WEBUI_ENABLE=1` and `ADAPTER_DEBUG_LOGFILE` is a directory: start the WEBUI
+   in a daemon thread via `webserver.serve(ADAPTER_DEBUG_LOGFILE, __version__)` on
+   `127.0.0.1:<ADAPTER_WEBUI_PORT>` (root = `ADAPTER_DEBUG_LOGFILE`; endpoint `/` — status,
+   `/session` — session viewer). Each GET/POST to the status page `/` re-probes the
+   backends (`config.refresh_models`, 5 s timeout per endpoint) and rebuilds the
+   `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers — models added
+   by the backend after startup are picked up without restarting the adapter.
 
 ### 4.2 POST /v1/messages (do_POST, server.py:148–581)
 
@@ -391,10 +414,26 @@ backend-adapter.py
   ├── session_log.py     (no internal deps — PyYAML)
   ├── skill.py           → config
   ├── daemon.py          (no internal deps — stdlib only)
-  └── __init__.py        → config, logger, tracer, skill, session_log (lazy)
+  ├── webserver.py       → session_viewer, webui_status (WEBUI core: serve() импортирует
+  │                       встроенные эндпойнты; CLI python -m backend_adapter.webserver)
+  ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
+  ├── webui_status.py    → webserver (эндпойнт "/"), config
+  └── artifact_tree*.py  (8 modules, layered):
+      artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
+      ├── artifact_tree_html.py      → common  (цвета ANCHOR/SINK/ORPHAN определены здесь)
+      ├── artifact_tree_graphviz.py  → common  (render_png_via_plantuml определён здесь)
+      ├── artifact_tree_plantuml.py  → common
+      ├── artifact_tree_turnbuilder.py → parse, registry, common
+      ├── artifact_tree_parse.py     → common, registry
+      ├── artifact_tree_registry.py  → common
+      └── artifact_tree_common.py    (no internal deps — stdlib only)
+  └── __init__.py        → (lazy proxy, резолвит globals в _get_config_globals())
 ```
 
-**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, and `config.py` (env var reads) have **zero internal package dependencies**, forming the dependency base. All other modules depend on at least one of these.
+Entry point (WEBUI): `backend-adapter.py` импортирует `webserver.serve()`
+для daemon-потока WEBUI (см. §4.1). Вход CLI: `python -m backend_adapter.webserver`.
+
+**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time**, forming the dependency base. All other modules depend on at least one of these.
 
 ---
 
@@ -406,5 +445,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 13. Version
 
-Current: **v0.6.4** (see `backend-adapter.py:4`)
-Changelog: `changelog.md`
+Current: **v0.7.1** (see `backend-adapter.py`).
+Changelog: `changelog.md` (история версии — секция с её номером).

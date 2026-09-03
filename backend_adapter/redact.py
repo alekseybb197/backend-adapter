@@ -5,16 +5,22 @@ Policies that prevent secrets from being written to debug/trace logs:
 - Variables like *_PAT / *_KEY / *_TOKEN / *_SECRET = <value>
 - Long base64/hex strings that may be tokens
 """
-import re
 
+import re
 
 # ==================== REDACTION ====================
 _SECRET_PATTERNS = [
-    (re.compile(r'(Bearer\s+)([A-Za-z0-9\-_\.=/+]{6,})', re.IGNORECASE),
-     lambda m: m.group(1) + _mask(m.group(2))),
-    (re.compile(r'((?:[A-Z0-9_]*(?:_PAT|_KEY|_TOKEN|_SECRET|API_KEY)[A-Z0-9_]*)\s*[:=]\s*["\']?)([A-Za-z0-9\-_\.\/+=]{8,})',
-                re.IGNORECASE),
-     lambda m: m.group(1) + _mask(m.group(2))),
+    (
+        re.compile(r"(Bearer\s+)([A-Za-z0-9\-_\.=/+]{6,})", re.IGNORECASE),
+        lambda m: m.group(1) + _mask(m.group(2)),
+    ),
+    (
+        re.compile(
+            r'((?:[A-Z0-9_]*(?:_PAT|_KEY|_TOKEN|_SECRET|API_KEY)[A-Z0-9_]*)\s*[:=]\s*["\']?)([A-Za-z0-9\-_\.\/+=]{8,})',
+            re.IGNORECASE,
+        ),
+        lambda m: m.group(1) + _mask(m.group(2)),
+    ),
 ]
 
 

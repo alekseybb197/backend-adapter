@@ -3,11 +3,13 @@
 Calls config redaction, writes to console and/or session file (or single
 file) depending on ADAPTER_DEBUG_LOGFILE setting.
 """
+
+import os
 import time
 
+from . import session_log
 from .config import ADAPTER_DEBUG, ADAPTER_SENSITIVE_LOGGING_ENABLE
 from .redact import redact
-from . import session_log
 
 
 def _d(msg: str) -> None:
@@ -22,10 +24,7 @@ def _d(msg: str) -> None:
     заголовки и ключи выводятся в открытом виде. По умолчанию санитайзер
     активен, секреты маскируются."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    if ADAPTER_SENSITIVE_LOGGING_ENABLE:
-        line = f"[{ts}] {msg}"
-    else:
-        line = f"[{ts}] {redact(msg)}"
+    line = f"[{ts}] {msg}" if ADAPTER_SENSITIVE_LOGGING_ENABLE else f"[{ts}] {redact(msg)}"
     if ADAPTER_DEBUG:
         print(line)
     # Писать в сессионный файл?
@@ -39,6 +38,11 @@ def _d(msg: str) -> None:
             fd.flush()
     elif not session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
         # Режим «один файл» (старое поведение)
+        # Создаём директорию если её нет — иначе `open(".../nonexistent/foo.log",
+        # "a")` падает с FileNotFoundError (директория должна существовать)
+        parent = os.path.dirname(session_log._DEBUG_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(session_log._DEBUG_PATH, "a") as f:
             f.write(line + "\n")
 

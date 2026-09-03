@@ -1,5 +1,115 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.7.1 (консольный entry point, CI/PR-каркас, единая конфигурация тулинга, 2026-09-02)
+
+### 2026-09-02 v0.7.1: консольный entry point, CI/PR-каркас, единая конфигурация тулинга
+**Проблема:** движок CI/PR-разработки отсутствовал: без автоматической
+проверки регрессии (ruff/mypy/pytest в CI), без конвенции описания PR
+(CONTRIBUTING.md), без установки из PyPI (консольный скрипт не работал:
+entry point в pyproject.toml ссылался на несуществующий
+`backend_adapter.cli:main`).
+
+**Решение:** добавлен каркас совместной разработки, единая конфигурация
+тулинга в pyproject.toml и рабочий entry point:
+
+| Файл | Роль |
+|---|---|
+| `pyproject.toml` | Пакетная метадата + конфигурация ruff (lint-правила, per-file-ignores), mypy (НЕ-strict: репозиторий исторически не типизирован, конфиг даёт базовую проверку типов без шума от legacy-кода) и pytest. |
+| `.github/workflows/ci.yml` | Четыре job: lint-and-typecheck (ruff check/format + mypy), test (pytest+cov, матрица Python 3.10–3.13), install-smoke-test (установка `pip install -e .`, проверка entry point), webui-smoke (standalone `python -m backend_adapter.webserver`, проба `/`, `/session`, 404). |
+| `.github/PULL_REQUEST_TEMPLATE.md` | Шаблон описания PR: контекст/проблема, решение, тесты, проверка вручную. |
+| `CONTRIBUTING.md` | Конвенции для контрибьюторов: Python 3.10+, venv, ruff/mypy/pytest, ветки `feature/*` от `main`, автор коммита — человек. |
+| `backend_adapter/cli.py` | Новый консольный entry point: runpy-трамплин, исполняющий `backend-adapter.py` как `__main__` (имя с дефисом не импортируется, файл не попадает в wheel; версия остаётся в одном месте). |
+
+**Изменения:** pyproject.toml, .github/workflows/ci.yml,
+.github/PULL_REQUEST_TEMPLATE.md, CONTRIBUTING.md (новые),
+backend_adapter/cli.py (новый), requirements-dev.txt
+(добавлены pytest-cov/mypy/ruff — набор инструментов, который гоняет CI),
+backend-adapter.py
+(версия 0.7.0 → 0.7.1), backend_adapter/* (мелкие правки под ruff:
+logger.py — SIM108, server.py — SIM102/SIM105, session_log.py — SIM105,
+webserver.py — SIM102/SIM105/UP032, artifact_tree_html.py — F811/N806,
+artifact_tree_registry.py — F811, плюс аннотации в artifact_tree_parse.py,
+artifact_tree_turnbuilder.py, session_viewer.py), docs/*, README.md,
+changelog.md.
+
+### 2026-09-02 WEBUI: общее ядро веб-сервера, эндпойнты /session и / (статус)
+
+**Проблема:** `session_viewer.py` совмещал CLI (main/argparse), создание
+сервера, HTTP-обработчик и рендеры в одном растущем файле — добавление
+нового эндпойнта требовало правки этого файла, а корень сервера умел
+только просмотр сессий (версия кода и состояние LLM-бэкендов нигде не
+видны без чтения логов).
+
+**Решение:** веб-часть разделена на общее ядро и модули-эндпойнты.
+Новый эндпойнт = новый модуль с `@webserver.register`-классом + одна
+строка импорта в `serve()`; роутинг, раздача, 404/405 и контекст
+(root_dir/version) достаются автоматически. Корень `/` стал статус-
+страницей: версия кода, режим работы, каждый LLM-эндпойнт с
+доступностью и списком моделей; кнопка «⟳ Проверить сейчас» выполняет
+живую пробу (GET `/v1/models`) с жёстким таймаутом 5 с на эндпойнт.
+
+| Файл | Роль |
+|---|---|
+| `backend_adapter/webserver.py` | Общее ядро: база `Endpoint` (prefix + GET/POST с дефолтами 404/405), реестр `ENDPOINTS` + декор `register`, единый `Handler`-диспетчер (самый длинный совпавший префикс; корень `/` — только точный путь), `QuietWebServer`, `serve(root_dir, version, ...)`, CLI `python -m backend_adapter.webserver [ROOT] [--port] [--host]`. |
+| `backend_adapter/session_viewer.py` | Чистый эндпойнт `/session`: вкладки сессий + раздача файлов. CLI/`serve()`/`Handler` убраны (переехали в ядро). |
+| `backend_adapter/webui_status.py` | Новый эндпойнт `/`: статус-страница. GET — snapshot состояния на старте (конфиг-глобалы адаптера, без сети); POST — живая проба всех эндпойнтов. Чистая логика (`_collect_endpoints`/`_config_snapshot`/`_probe_live`) отделена от HTML для тестирования без HTTP. |
+
+**Изменения:** webserver.py, session_viewer.py, webui_status.py,
+backend-adapter.py (WEBUI-блок зовёт `webserver.serve(..., __version__, ...)`
+— версия передаётся из единственного источника), tests/test_webserver.py,
+tests/test_session_viewer.py, tests/test_webui_status.py (новые),
+tests/test_artifact_tree.py (smoke-тест импорта под новый API),
+docs/architecture.md, docs/environment.md, docs/logging.md, docs/install.md.
+
+ВАЖНО про standalone: `config.BACKEND_BASE` не пуст даже без env
+(дефолт `https://llm.service.example.com`) — статус-страница показывает
+legacy-эндпойнт только если `ADAPTER_BACKEND_BASE` реально задана в
+окружении, иначе честную подсказку «данные адаптера недоступны» вместо
+фантомного бэкенда.
+
+Найден и починен баг CLI-запуска ядра: при `python -m backend_adapter.webserver`
+runpy исполняет модуль дважды — каноническая копия в `sys.modules` (в неё
+регистрируются эндпойнты через `from . import ...`) и namespace `__main__`
+с пустым реестром. Если бы `serve()` звался из `__main__`, сервер отвечал
+бы 404 на каждый путь; в тестах баг не виден (там `serve()` зовётся из
+канонического модуля напрямую). Починено трамплином
+`from backend_adapter.webserver import main as _main` в
+`if __name__ == "__main__"`; добавлен поведенческий регресс-тест
+`test_cli_standalone_serves_builtin_endpoints` (субпроцесс `python -m`,
+эндпойнты `/` и `/session` отвечают 200).
+
+### 2026-09-03 WEBUI: обновление списка моделей при загрузке статус-страницы
+
+**Проблема:** кэш моделей (`_AVAILABLE_MODELS`) — snapshot со старта
+адаптера. Если бэкенд добавляет модели после старта, строгая валидация
+отвергает их (ошибка 400 «model is not available»), а список на странице
+статуса обновлялся только кнопкой «⟳ Проверить сейчас».
+
+**Решение:** у кэша моделей появился on-demand refresh без перезапуска
+адаптера, и загрузка страницы статуса делает то же, что кнопка.
+
+- `config.py`: новый `refresh_models(timeout=None)` — живая пере-проба
+  каждого эндпойнта (`GET /v1/models`) с пересборкой
+  `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` (общий с init алгоритм коллизий
+  вынесен в `_rebuild_index`). Возвращает `{"ok", "count", "errors"}`:
+  полный провал/пустой ответ — старый кэш НЕ тронут; частичный успех —
+  кэш из ответивших бэкендов, упавшие выпадают. В standalone-режиме
+  (viewer вне процесса адаптера) блоки бэкендов перечитываются из
+  `ADAPTER_BACKEND_CONFIG`, кнопка работает и без процесса адаптера.
+  `_fetch_models` получил параметр `timeout` (None → ADAPTER_TIMEOUT).
+  Периодического фонового обновления НЕТ — только по явным сигналам
+  (старт адаптера, загрузка страницы, кнопка).
+- `webui_status.py`: GET `/` и POST `/` делают одно и то же через общий
+  `_refresh_and_render()` — `config.refresh_models(timeout=PROBE_TIMEOUT)`
+  (5 с на эндпойнт) и рендер из обновлённых глобалов. При провале
+  страница показывает прежний список и текст ошибки. Собственный
+  `_probe_live` удалён — его заменил `refresh_models`.
+
+**Изменения:** backend_adapter/config.py, backend_adapter/webui_status.py,
+tests/test_config.py (новый `TestRefreshModels`, 11 тестов),
+tests/test_webui_status.py (GET `/` обновляет модели с коротким таймаутом),
+docs/architecture.md, docs/environment.md, docs/logging.md.
+
 ## v0.7.0 (WEBUI: session viewer + artifact tree visualization, merged ADAPTER_DEBUG_TAGS_JSON/YAML)
 
 ### Веб-интерфейс просмотра сессий (session_viewer + artifact_tree)

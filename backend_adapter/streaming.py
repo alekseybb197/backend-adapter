@@ -5,14 +5,21 @@ translates each into Anthropic streaming events (message_start /
 content_block_start / content_block_delta / content_block_stop /
 message_delta / message_stop).
 """
+
 import json
 import uuid
 
-from .tracer import _trace, _register_tool_use
-from .skill import detect_skill
-from .config import _cap, ADAPTER_DEBUG_TRIM, _trim_limit, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_DEBUG_TAGS_OUT
+from .config import (
+    ADAPTER_DEBUG_TAGS_OUT,
+    ADAPTER_TRACE_REASONING_MAX_CHARS,
+    ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
+    _cap,
+    _trim_limit,
+)
 from .logger import _dr
 from .session_log import write_debug_json
+from .skill import detect_skill
+from .tracer import _register_tool_use, _trace
 
 
 def _sse_write(wfile, event: str, data: dict) -> None:
@@ -39,14 +46,21 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
     код (do_POST) решает, можно ли ещё retry или поток уже начался и надо
     сообщить об ошибке SSE-событием "error"."""
     message_id = f"msg_stream_{req_id}"
-    _sse_write(wfile, "message_start", {
-        "type": "message_start",
-        "message": {
-            "id": message_id, "type": "message", "role": "assistant",
-            "model": model, "content": [],
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+    _sse_write(
+        wfile,
+        "message_start",
+        {
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": model,
+                "content": [],
+                "usage": {"input_tokens": 0, "output_tokens": 0},
+            },
         },
-    })
+    )
 
     block_index = -1
     block_open = None  # "text" | "tool_use" | None — тип текущего открытого content_block
@@ -62,14 +76,16 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
     def _close_current_block():
         nonlocal block_open
         if block_open is not None:
-            _sse_write(wfile, "content_block_stop", {"type": "content_block_stop", "index": block_index})
+            _sse_write(
+                wfile, "content_block_stop", {"type": "content_block_stop", "index": block_index}
+            )
             block_open = None
 
     for raw_line in resp:
         line = raw_line.decode("utf-8", errors="replace").strip("\n").strip("\r")
         if not line or not line.startswith("data:"):
             continue
-        payload = line[len("data:"):].strip()
+        payload = line[len("data:") :].strip()
         if payload == "[DONE]":
             break
         try:
@@ -101,17 +117,27 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
                 _close_current_block()
                 block_index += 1
                 block_open = "text"
-                _sse_write(wfile, "content_block_start", {
-                    "type": "content_block_start", "index": block_index,
-                    "content_block": {"type": "text", "text": ""},
-                })
+                _sse_write(
+                    wfile,
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": block_index,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
             text_buf.append(text_piece)
-            _sse_write(wfile, "content_block_delta", {
-                "type": "content_block_delta", "index": block_index,
-                "delta": {"type": "text_delta", "text": text_piece},
-            })
+            _sse_write(
+                wfile,
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": {"type": "text_delta", "text": text_piece},
+                },
+            )
 
-        for tc in (delta.get("tool_calls") or []):
+        for tc in delta.get("tool_calls") or []:
             oi = tc.get("index", 0)
             func = tc.get("function", {}) or {}
             st = tool_state.get(oi)
@@ -121,19 +147,32 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
                 block_open = "tool_use"
                 tool_use_id = tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
                 name = func.get("name", "")
-                st = {"anthropic_index": block_index, "id": tool_use_id,
-                      "name": name, "args_buf": []}
+                st = {
+                    "anthropic_index": block_index,
+                    "id": tool_use_id,
+                    "name": name,
+                    "args_buf": [],
+                }
                 tool_state[oi] = st
                 # Регистрируем производителя tool_use_id сразу, как и в
                 # нестриминговом пути (см. convert_openai_to_anthropic) —
                 # причинность tool_use -> tool_result не должна зависеть от
                 # того, стримился ответ или нет.
                 _register_tool_use(session_id, tool_use_id, req_id, tool_name=name)
-                _sse_write(wfile, "content_block_start", {
-                    "type": "content_block_start", "index": block_index,
-                    "content_block": {"type": "tool_use", "id": tool_use_id,
-                                       "name": name, "input": {}},
-                })
+                _sse_write(
+                    wfile,
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": block_index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": name,
+                            "input": {},
+                        },
+                    },
+                )
             elif func.get("name") and not st["name"]:
                 st["name"] = func["name"]
 
@@ -144,10 +183,15 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
                 # OpenAI конкатенирует фрагменты arguments — реконструкция
                 # полного JSON на стороне адаптера не нужна, пробрасываем
                 # фрагмент как есть.
-                _sse_write(wfile, "content_block_delta", {
-                    "type": "content_block_delta", "index": st["anthropic_index"],
-                    "delta": {"type": "input_json_delta", "partial_json": args_piece},
-                })
+                _sse_write(
+                    wfile,
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": st["anthropic_index"],
+                        "delta": {"type": "input_json_delta", "partial_json": args_piece},
+                    },
+                )
 
     _close_current_block()
 
@@ -174,23 +218,36 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
         # ЯВНО помечается как оценочная и в trace, и для будущей отладки.
         input_tokens = max(1, approx_prompt_chars // 4) if approx_prompt_chars else 0
         input_tokens_estimated = True
-        _dr(req_id, f"[USAGE_WARN] Backend не вернул usage в стриме — "
-                     f"input_tokens оценён эвристически (~{input_tokens}, "
-                     f"chars/4), реальное число неизвестно")
+        _dr(
+            req_id,
+            f"[USAGE_WARN] Backend не вернул usage в стриме — "
+            f"input_tokens оценён эвристически (~{input_tokens}, "
+            f"chars/4), реальное число неизвестно",
+        )
 
-    _sse_write(wfile, "message_delta", {
-        "type": "message_delta",
-        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {
-            "input_tokens": input_tokens,
-            "output_tokens": usage.get("completion_tokens", 0),
+    _sse_write(
+        wfile,
+        "message_delta",
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
         },
-    })
+    )
     _sse_write(wfile, "message_stop", {"type": "message_stop"})
 
-    _trace(session_id, req_id, "usage_report",
-           input_tokens=input_tokens, input_tokens_estimated=input_tokens_estimated,
-           output_tokens=usage.get("completion_tokens", 0), streamed=True)
+    _trace(
+        session_id,
+        req_id,
+        "usage_report",
+        input_tokens=input_tokens,
+        input_tokens_estimated=input_tokens_estimated,
+        output_tokens=usage.get("completion_tokens", 0),
+        streamed=True,
+    )
 
     # Трассировка результата — по аналогии с событием "response_content" в
     # convert_openai_to_anthropic, но собранная из фрагментов, накопленных
@@ -207,11 +264,19 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
             serialized = json.dumps(parsed_input, ensure_ascii=False, default=str)
             if len(serialized) > ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
                 traced_input = _cap(serialized, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
-        tool_use_summaries.append({"id": st["id"], "name": st["name"], "skill": skill, "input": traced_input})
+        tool_use_summaries.append(
+            {"id": st["id"], "name": st["name"], "skill": skill, "input": traced_input}
+        )
         if skill:
-            _trace(session_id, req_id, "skill_signal",
-                   tool_id=st["id"], tool_name=st["name"], skill=skill,
-                   evidence=(evidence or "")[:200])
+            _trace(
+                session_id,
+                req_id,
+                "skill_signal",
+                tool_id=st["id"],
+                tool_name=st["name"],
+                skill=skill,
+                evidence=(evidence or "")[:200],
+            )
 
     full_text = "".join(text_buf)
     full_reasoning = "".join(reasoning_buf)
@@ -228,18 +293,30 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
         "reasoning_len": len(full_reasoning),
         "tool_uses_count": len(tool_use_summaries),
         "text": full_text[:resp_limit] if full_text and resp_limit is not None else full_text,
-        "reasoning": full_reasoning[:resp_limit] if full_reasoning and resp_limit is not None else full_reasoning,
+        "reasoning": full_reasoning[:resp_limit]
+        if full_reasoning and resp_limit is not None
+        else full_reasoning,
         "tool_uses": tool_use_summaries,
     }
-    _dr(req_id, f"[RESPONSE] {(json.dumps(resp_snapshot, ensure_ascii=False, default=str) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(resp_snapshot, ensure_ascii=False, default=str)[:lim])}")
+    _dr(
+        req_id,
+        f"[RESPONSE] {(json.dumps(resp_snapshot, ensure_ascii=False, default=str) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(resp_snapshot, ensure_ascii=False, default=str)[:lim])}",
+    )
     if ADAPTER_DEBUG_TAGS_OUT:
         write_debug_json(session_id, "RESPONSE", resp_snapshot)
 
-    _trace(session_id, req_id, "response_content",
-           text_len=len(full_text), tool_uses=tool_use_summaries,
-           finish_reason_raw=finish_reason, stop_reason_mapped=stop_reason,
-           reasoning_present=bool(full_reasoning.strip()), reasoning_len=len(full_reasoning),
-           reasoning=_cap(full_reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS),
-           streamed=True)
+    _trace(
+        session_id,
+        req_id,
+        "response_content",
+        text_len=len(full_text),
+        tool_uses=tool_use_summaries,
+        finish_reason_raw=finish_reason,
+        stop_reason_mapped=stop_reason,
+        reasoning_present=bool(full_reasoning.strip()),
+        reasoning_len=len(full_reasoning),
+        reasoning=_cap(full_reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS),
+        streamed=True,
+    )
 
     return stop_reason, usage

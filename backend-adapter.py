@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.7.0
+"""[CC] <-> [OI]-backend adapter v0.7.1
 — changelog: ../changelog.md"""
-__version__ = "0.7.0"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization)"
+
+__version__ = "0.7.1"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold"
 
 import os
 import sys
@@ -11,22 +12,41 @@ from collections import Counter
 
 # ==================== Package imports ====================
 from backend_adapter.config import (
-    BACKEND_BASE, BACKEND_KEY, PROXY_PORT,
-    ADAPTER_DEBUG, ADAPTER_DEBUG_LOGFILE, ADAPTER_TRACE_LOGFILE,
-    ADAPTER_DETACH, ADAPTER_TIMEOUT, ADAPTER_RETRY,
-    ADAPTER_SKILL_PATTERNS, ADAPTER_DEBUG_TRIM,
-    ADAPTER_DEBUG_TOOLS, ADAPTER_DEBUG_TOOLS_ERROR,
-    ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
-    ADAPTER_STRICT_MODELS, ADAPTER_WEBUI_ENABLE, ADAPTER_WEBUI_PORT,
-    ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE,
+    BACKEND_BASE,
+    BACKEND_KEY,
+    PROXY_PORT,
+    ADAPTER_DEBUG,
+    ADAPTER_DEBUG_LOGFILE,
+    ADAPTER_TRACE_LOGFILE,
+    ADAPTER_DETACH,
+    ADAPTER_TIMEOUT,
+    ADAPTER_RETRY,
+    ADAPTER_SKILL_PATTERNS,
+    ADAPTER_DEBUG_TRIM,
+    ADAPTER_DEBUG_TOOLS,
+    ADAPTER_DEBUG_TOOLS_ERROR,
+    ADAPTER_TRACE_REASONING_MAX_CHARS,
+    ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
+    ADAPTER_STRICT_MODELS,
+    ADAPTER_WEBUI_ENABLE,
+    ADAPTER_WEBUI_PORT,
+    ADAPTER_STREAMING_ENABLE,
+    ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_MODELS_MAPPING,
     ADAPTER_BACKEND_CONFIG,
     _BACKEND_LEGACY,
-    _BACKENDS, _BACKEND_BY_NAME, _MODEL_TO_BACKEND, _DEFAULT_BACKEND,
-    _parse_models_mapping, _MAP,
+    _BACKENDS,
+    _BACKEND_BY_NAME,
+    _MODEL_TO_BACKEND,
+    _DEFAULT_BACKEND,
+    _parse_models_mapping,
+    _MAP,
     _parse_backend_yaml,
-    _fetch_models, _probe_models, _init_multi_backends,
-    _AVAILABLE_MODELS, _cap,
+    _fetch_models,
+    _probe_models,
+    _init_multi_backends,
+    _AVAILABLE_MODELS,
+    _cap,
     SSL_CTX,
     _resolve_backend,
 )
@@ -34,13 +54,20 @@ from backend_adapter.redact import redact, redact_headers
 from backend_adapter.daemon import _detach, _write_pidfile
 from backend_adapter.logger import _d, _dr
 from backend_adapter.tracer import (
-    _trace_lock, _session_seq, _next_seq,
-    _TOOL_USE_INDEX_MAX_PER_SESSION, _tool_use_producers,
-    _register_tool_use, _lookup_tool_use_producer, _trace,
+    _trace_lock,
+    _session_seq,
+    _next_seq,
+    _TOOL_USE_INDEX_MAX_PER_SESSION,
+    _tool_use_producers,
+    _register_tool_use,
+    _lookup_tool_use_producer,
+    _trace,
 )
 from backend_adapter.skill import (
-    DEFAULT_SKILL_PATTERNS, SKILL_PATTERNS,
-    _load_skill_patterns, detect_skill,
+    DEFAULT_SKILL_PATTERNS,
+    SKILL_PATTERNS,
+    _load_skill_patterns,
+    detect_skill,
 )
 from backend_adapter.convert import (
     extract_text,
@@ -53,32 +80,33 @@ from backend_adapter.convert import (
 )
 from backend_adapter.streaming import _sse_write, stream_openai_to_anthropic
 from backend_adapter.server import Adapter, QuietThreadingHTTPServer
+
 # session_log — globals only (functions used internally by module)
 from backend_adapter import session_log
 
 
-
-
 if __name__ == "__main__":
     if ADAPTER_DETACH:
-        print(f"[DETACH] Starting as background service...")
+        print("[DETACH] Starting as background service...")
         print(f"Timeout:  {ADAPTER_TIMEOUT}s")
         print(f"Retries:  {ADAPTER_RETRY}")
         _detach()
         _write_pidfile()
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"Claude Code Adapter v{__version__} ({__comment__})")
     print(f"Listening:  http://localhost:{PROXY_PORT}")
     print(f"Trace log:  {ADAPTER_TRACE_LOGFILE or '(disabled)'}")
     print(f"Models:     {'strict' if ADAPTER_STRICT_MODELS else 'permissive'} validation")
-    print(f"Streaming:  {'enabled (SSE passthrough)' if ADAPTER_STREAMING_ENABLE else 'disabled (legacy stream=False, старое поведение)'}")
+    print(
+        f"Streaming:  {'enabled (SSE passthrough)' if ADAPTER_STREAMING_ENABLE else 'disabled (legacy stream=False, старое поведение)'}"
+    )
 
     if _BACKEND_LEGACY:
         # === Legacy single-backend ===
         print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
         print(f"Retries:    {ADAPTER_RETRY}")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         try:
             backend_models = _probe_models()
@@ -108,7 +136,7 @@ if __name__ == "__main__":
         print(f"Backends:   {len(_BACKENDS)} configured:")
         for b in _BACKENDS:
             print(f"  - {b['name']}: {b['base']}")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
     # ThreadingHTTPServer вместо socketserver.TCPServer: Claude Code может
     # открывать несколько параллельных запросов (конкурентные tool calls),
@@ -116,19 +144,27 @@ if __name__ == "__main__":
     # первый запрос ждёт ADAPTER_TIMEOUT секунд от бэкенда, остальные
     # соединения простаивают в очереди accept() и клиент рвёт их по своему
     # таймауту. Это и есть основной источник BrokenPipeError в логе.
-    # Веб-интерфейс просмотра сессий (session_viewer.py) — отдельный поток
+    # Веб-интерфейс WEBUI (webserver.py — общее ядро; эндпойнты:
+    # session_viewer.py "/session" + webui_status.py "/") — отдельный поток
     # внутри процесса адаптера: daemon-поток, живёт вместе с адаптером.
     # Корень — директория из ADAPTER_DEBUG_LOGFILE (там лежат *.parts папки).
     if ADAPTER_WEBUI_ENABLE:
         if os.path.isdir(ADAPTER_DEBUG_LOGFILE):
-            from backend_adapter.session_viewer import serve as webui_serve
-            webui = webui_serve(ADAPTER_DEBUG_LOGFILE, "127.0.0.1", ADAPTER_WEBUI_PORT, verbose=False)
+            from backend_adapter.webserver import serve as webui_serve
+
+            webui = webui_serve(
+                ADAPTER_DEBUG_LOGFILE, __version__, "127.0.0.1", ADAPTER_WEBUI_PORT, verbose=False
+            )
             if webui:
                 threading.Thread(target=webui.serve_forever, daemon=True).start()
-                print(f"[WEBUI] http://127.0.0.1:{ADAPTER_WEBUI_PORT}/ (root: {ADAPTER_DEBUG_LOGFILE})")
+                print(
+                    f"[WEBUI] http://127.0.0.1:{ADAPTER_WEBUI_PORT}/ (root: {ADAPTER_DEBUG_LOGFILE})"
+                )
         else:
-            print(f"[WEBUI] ADAPTER_WEBUI_ENABLE=1, но ADAPTER_DEBUG_LOGFILE не директория: "
-                  f"{ADAPTER_DEBUG_LOGFILE!r} — веб-интерфейс не запущен")
+            print(
+                f"[WEBUI] ADAPTER_WEBUI_ENABLE=1, но ADAPTER_DEBUG_LOGFILE не директория: "
+                f"{ADAPTER_DEBUG_LOGFILE!r} — веб-интерфейс не запущен"
+            )
 
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
     with QuietThreadingHTTPServer(("", PROXY_PORT), Adapter) as httpd:

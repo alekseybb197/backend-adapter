@@ -16,6 +16,7 @@ _AVAILABLE_MODELS: dict = {}
 def _get_config_globals():
     """Called during startup to populate module-level globals."""
     global _SSL_CTX
-    from .config import SSL_CTX, _AVAILABLE_MODELS
+    from .config import _AVAILABLE_MODELS, SSL_CTX
+
     _SSL_CTX = SSL_CTX
     _AVAILABLE_MODELS.update(_AVAILABLE_MODELS)

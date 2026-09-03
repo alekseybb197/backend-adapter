@@ -3,6 +3,8 @@
 Manages per-session debug/trace file handles with FIFO eviction.
 Reads log path settings from config at import time.
 """
+
+import contextlib
 import json
 import os
 import re
@@ -17,6 +19,7 @@ from yaml.emitter import Emitter
 # Port from body-dump.py: uses block scalar (|) for multiline strings,
 # inline scalar for single-line strings. Patch fixes space_break detection
 # (newline + whitespace) that normally forces allow_block=False in PyYAML.
+
 
 class LiteralDumper(yaml.Dumper):
     """YAML dumper that uses block scalar (|) for multiline strings."""
@@ -69,6 +72,7 @@ def _yaml_str_representer(dumper, data):
     # 4) Clean single-line → plain scalar
     return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
+
 LiteralDumper.add_representer(str, _yaml_str_representer)
 
 
@@ -76,9 +80,16 @@ def dump_yaml(payload) -> str:
     """Serialize *payload* to YAML using LiteralDumper (block scalars for
     multiline strings, inline for single-line). Returns a string."""
     import io
+
     s = io.StringIO()
-    yaml.dump(payload, stream=s, Dumper=LiteralDumper, allow_unicode=True,
-              sort_keys=False, default_flow_style=False)
+    yaml.dump(
+        payload,
+        stream=s,
+        Dumper=LiteralDumper,
+        allow_unicode=True,
+        sort_keys=False,
+        default_flow_style=False,
+    )
     return s.getvalue()
 
 
@@ -106,8 +117,10 @@ def _resolve_log_base():
     dbg = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
     trc = os.environ.get("ADAPTER_TRACE_LOGFILE", "")
     return (
-        os.path.isdir(dbg) if dbg else False, dbg,
-        os.path.isdir(trc) if trc else False, trc,
+        os.path.isdir(dbg) if dbg else False,
+        dbg,
+        os.path.isdir(trc) if trc else False,
+        trc,
     )
 
 
@@ -119,7 +132,7 @@ def _make_session_file(base_path: str, session_id: str, ext: str):
     Формат имени: session-<YYYYMMDD-HHMMSS>-<sessionID>.<ext>.
     Timestamp фиксируется при первом обращении к сессии и переиспользуется,
     чтобы весь трафик сессии шёл в один файл."""
-    safe = re.sub(r'[^A-Za-z0-9._-]', '_', session_id[:8])
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id[:8])
     if session_id not in _session_file_ts:
         _session_file_ts[session_id] = time.strftime("%Y%m%d-%H%M%S")
     ts = _session_file_ts[session_id]
@@ -144,7 +157,9 @@ def _open_session_file(kind: str, session_id: str):
     # Превысили лимит? Вытесняем самые старые сессии.
     while len(logs) > _LOG_FILES_PER_SESSION:
         _session_logs.popitem(last=False)
-    fd = open(target, "ab")
+    # Дескриптор ДОЛЖЕН пережить этот вызов (пишем в него из других потоков
+    # до закрытия сессии), поэтому открываем без контекстного менеджера.
+    fd = open(target, "ab")  # noqa: SIM115 — живой хендл хранится в logs[]
     logs[target] = fd
     return fd
 
@@ -154,10 +169,8 @@ def _close_session_file(session_id: str) -> None:
     logs = _session_logs.pop(session_id, None)
     if logs:
         for f in logs.values():
-            try:
+            with contextlib.suppress(Exception):
                 f.close()
-            except Exception:
-                pass
 
 
 # ==================== ADAPTER_DEBUG_TAGS_OUT ====================
@@ -201,6 +214,7 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     """
     # Быстрая проверка — флаг выключен или лог-путь не директория
     from .config import ADAPTER_DEBUG_TAGS_OUT
+
     if not ADAPTER_DEBUG_TAGS_OUT:
         return
     if not _DEBUG_IS_DIR or not _DEBUG_PATH:

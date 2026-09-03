@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.7.0) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **backend-adapter** (v0.7.1) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно обрабатывает протокол Anthropic Messages API.
 
@@ -89,10 +89,10 @@ pip install -r requirements.txt
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (11 модулей)
+├── backend_adapter/            # Доменный пакет (20 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env-переменных, multi-backend, YAML
 │   ├── server.py              # HTTP-сервер, Handler
-│   ├── convert.py             # Anthropic ↔ OpenAI конвертация
+│   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
 │   ├── session_log.py         # Per-session логи с FIFO eviction
@@ -100,8 +100,18 @@ backend-adapter/
 │   ├── daemon.py              # Detach (double fork)
 │   ├── logger.py              # Debug-логирование с redaction
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
+│   ├── webserver.py           # WEBUI-ядро: общий веб-сервер, роутинг эндпойнтов, CLI
+│   ├── webui_status.py        # WEBUI-эндпойнт "/": статус (версия, LLM, модели)
+│   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
+│   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
+│   ├── artifact_tree_common.py    # утилиты, константы, цвета
+│   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
+│   ├── artifact_tree_parse.py     # разбор дампов, классификация kind
+│   ├── artifact_tree_turnbuilder.py  # связывание openai_body/fetch_raw в ходы
+│   ├── artifact_tree_plantuml.py  # PlantUML-рендер
+│   ├── artifact_tree_graphviz.py  # PNG через plantuml/graphviz-fallback
+│   ├── artifact_tree_html.py      # интерактивный tree.html
 │   └── __init__.py            # Module-level proxy
-├── docs/
 │   ├── architecture.md        # Архитектура
 │   ├── environment.md         # Полный список env-переменных
 │   ├── logging.md             # Конфигурация логирования
@@ -257,9 +267,11 @@ export ADAPTER_DEBUG_ENABLE=1
 # JSON/YAML-дампы per-session всех частей протокола (требуется директория в ADAPTER_DEBUG_LOGFILE)
 # export ADAPTER_DEBUG_TAGS_OUT=1
 
-# Веб-интерфейс просмотра сессий (требуется директория в ADAPTER_DEBUG_LOGFILE)
+# Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий
+# (требуется директория в ADAPTER_DEBUG_LOGFILE)
 # export ADAPTER_WEBUI_ENABLE=1
 # export ADAPTER_WEBUI_PORT=8765
+# Standalone-запуск вне процесса адаптера: python -m backend_adapter.webserver [ROOT] [--port] [--host]
 
 # Детальные логи результатов инструментов
 # export ADAPTER_DEBUG_TOOLS=0
@@ -362,7 +374,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.7.0 (...
+Claude Code Adapter v0.7.1 (...
 Listening:  http://localhost:9999
 Trace log:  (disabled)
 Models:     strict validation

@@ -2,6 +2,7 @@
 
 Stdlib only — no internal dependencies.
 """
+
 import os
 import sys
 import time
@@ -35,7 +36,7 @@ def _detach() -> None:
     sys.stdout.flush()
     sys.stderr.flush()
 
-    with open(os.devnull, "r") as fin:
+    with open(os.devnull) as fin:
         os.dup2(fin.fileno(), sys.stdin.fileno())
     with open(os.devnull, "w") as fout:
         os.dup2(fout.fileno(), sys.stdout.fileno())

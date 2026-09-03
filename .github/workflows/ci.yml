@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install mypy ruff
+
+      - name: Run ruff (lint + format check)
+        run: |
+          ruff check backend_adapter/ backend-adapter.py
+          ruff format --check backend_adapter/ backend-adapter.py
+
+      - name: Run mypy
+        # Конфигурация mypy живёт в pyproject.toml ([tool.mypy]) и задаёт
+        # НЕ-strict режим: репозиторий исторически строго не типизирован,
+        # mypy ловит базовые ошибки типов, а не служит барьером.
+        run: |
+          mypy backend_adapter/ backend-adapter.py
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run tests
+        run: |
+          pytest --cov=backend_adapter --cov-report=xml --cov-report=term
+
+      - name: Upload coverage
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  install-smoke-test:
+    name: Install Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install from source
+        run: |
+          pip install -e .
+          backend-adapter --help 2>/dev/null || true
+
+      - name: Check entry point works
+        run: |
+          python -c "import importlib; m = importlib.import_module('backend_adapter.cli'); assert callable(m.main); print('CLI entry point OK')"
+          python -c "from backend_adapter.config import PROXY_PORT; print('Config import OK')"
+
+  webui-smoke:
+    name: WEBUI Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Serve WEBUI and probe endpoints
+        run: |
+          mkdir -p smoke-log-dir
+          python -m backend_adapter.webserver smoke-log-dir --port 8799 &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://127.0.0.1:8799/; then break; fi
+            sleep 0.5
+          done
+          echo "GET /          -> $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/)"
+          echo "GET /session   -> $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/session)"
+          echo "GET /nope      -> $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/nope)"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/session)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8799/nope)" = "404"
