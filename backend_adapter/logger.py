@@ -4,6 +4,7 @@ Calls config redaction, writes to console and/or session file (or single
 file) depending on ADAPTER_DEBUG_LOGFILE setting.
 """
 
+import os
 import time
 
 from . import session_log
@@ -37,6 +38,11 @@ def _d(msg: str) -> None:
             fd.flush()
     elif not session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
         # Режим «один файл» (старое поведение)
+        # Создаём директорию если её нет — иначе `open(".../nonexistent/foo.log",
+        # "a")` падает с FileNotFoundError (директория должна существовать)
+        parent = os.path.dirname(session_log._DEBUG_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(session_log._DEBUG_PATH, "a") as f:
             f.write(line + "\n")
 
