@@ -120,7 +120,10 @@ Claude Code (Anthropic API client)
 5. If `ADAPTER_WEBUI_ENABLE=1` and `ADAPTER_DEBUG_LOGFILE` is a directory: start the WEBUI
    in a daemon thread via `webserver.serve(ADAPTER_DEBUG_LOGFILE, __version__)` on
    `127.0.0.1:<ADAPTER_WEBUI_PORT>` (root = `ADAPTER_DEBUG_LOGFILE`; endpoint `/` — status,
-   `/session` — session viewer)
+   `/session` — session viewer). Each GET/POST to the status page `/` re-probes the
+   backends (`config.refresh_models`, 5 s timeout per endpoint) and rebuilds the
+   `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers — models added
+   by the backend after startup are picked up without restarting the adapter.
 
 ### 4.2 POST /v1/messages (do_POST, server.py:148–581)
 

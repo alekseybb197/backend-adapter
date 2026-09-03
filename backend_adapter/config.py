@@ -256,11 +256,14 @@ SSL_CTX.check_hostname = False
 SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
-def _fetch_models(base: str, key: str) -> list[dict]:
+def _fetch_models(base: str, key: str, timeout: float | None = None) -> list[dict]:
     """Запрашивает GET /v1/models у бэкенда, возвращает список dict.
 
     ``base`` — URL бэкенда, ``key`` — уже раскрытый токен (в т.ч. из
     ADAPTER_BACKEND_CONFIG). Извлечение из os.environ — в _parse_backend_yaml.
+    ``timeout`` — таймаут urlopen в секундах; None → ADAPTER_TIMEOUT
+    (используется refresh-ом из веб-страницы с коротким таймаутом, чтобы
+    страница статуса не висела по 300 с при недоступном бэкенде).
     """
     url = base.rstrip("/") + "/v1/models"
     req = urllib.request.Request(
@@ -273,7 +276,9 @@ def _fetch_models(base: str, key: str) -> list[dict]:
         method="GET",
     )
     try:
-        resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
+        resp = urllib.request.urlopen(
+            req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT if timeout is None else timeout
+        )
     except Exception as e:
         print(f"[FETCH_ERROR] Failed to fetch models from {url}: {e}")
         raise
@@ -317,7 +322,7 @@ def _init_multi_backends(config_path: str) -> None:
         print(f"[FATAL] Failed to parse backend config: {config_path}")
         sys.exit(1)
 
-    global _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND
+    global _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND, _AVAILABLE_MODELS, _MODEL_TO_BACKEND
 
     _BACKENDS = blocks
     _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
@@ -339,28 +344,133 @@ def _init_multi_backends(config_path: str) -> None:
         print("[FATAL] No models retrieved from any backend — exiting.")
         sys.exit(1)
 
-    # 2) Обнаружить коллизии по id
+    _AVAILABLE_MODELS, _MODEL_TO_BACKEND = _rebuild_index(all_models)
+
+    print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from {len(blocks)} backends")
+    for mid in sorted(_AVAILABLE_MODELS.keys()):
+        print(f"  model={mid}")
+
+
+def _rebuild_index(all_models: list[tuple[dict, dict]]) -> tuple[dict[str, dict], dict[str, tuple]]:
+    """Построить (_AVAILABLE_MODELS, _MODEL_TO_BACKEND) из ``all_models``.
+
+    ``all_models`` — список ``(модель, backend_config)``, где модель — уже
+    копия (``dict(m)``), чтобы переименование при коллизии не мутировало
+    оригинальный ответ бэкенда.
+
+    Алгоритм префиксов (общий для init и refresh):
+    1) Собрать все model id со всех бэкендов.
+    2) Обнаружить коллизии — id, встречающиеся более чем на одном бэкенде.
+    3) Для коллизирующих заменить id на ``<backend_name>.<model_id>``.
+    4) Для некколлизирующих оставить как есть.
+
+    Возвращает новые словари (глобалы обновляет вызывающий)."""
     id_counter: dict[str, int] = {}
     for m, _ in all_models:
         mid = m.get("id", "")
         id_counter[mid] = id_counter.get(mid, 0) + 1
     colliding_ids = {k for k, v in id_counter.items() if v > 1}
 
-    # 3) Заполнить _AVAILABLE_MODELS и _MODEL_TO_BACKEND
+    available: dict[str, dict] = {}
+    model_to_backend: dict[str, tuple] = {}
     for m, backend in all_models:
         mid = m.get("id", "")
         if mid in colliding_ids:
             prefixed = f"{backend['name']}.{mid}"
             m["id"] = prefixed
-            _AVAILABLE_MODELS[prefixed] = m
-            _MODEL_TO_BACKEND[prefixed] = (backend["name"], backend)
+            available[prefixed] = m
+            model_to_backend[prefixed] = (backend["name"], backend)
         else:
-            _AVAILABLE_MODELS[mid] = m
-            _MODEL_TO_BACKEND[mid] = (backend["name"], backend)
+            available[mid] = m
+            model_to_backend[mid] = (backend["name"], backend)
+    return available, model_to_backend
 
-    print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from {len(blocks)} backends")
-    for mid in sorted(_AVAILABLE_MODELS.keys()):
-        print(f"  model={mid}")
+
+def refresh_models(timeout: float | None = None) -> dict:
+    """Пере-опросить бэкенды и обновить кэш моделей ``_AVAILABLE_MODELS`` /
+    ``_MODEL_TO_BACKEND`` (и для legacy, и для multi-backend).
+
+    Вызывается только по явному сигналу: при старте адаптера (существующий
+    init/probe) и по запросу веб-страницы статуса (GET/POST ``/``).
+    Периодического фонового обновления НЕТ. Бэкенд может добавлять модели
+    между стартами; refresh подхватывает их без перезапуска адаптера.
+
+    ``timeout`` — таймаут на один бэкенд (None → ADAPTER_TIMEOUT). Страница
+    статуса передаёт короткий (PROBE_TIMEOUT), чтобы не висеть по 300 с.
+
+    Режимы:
+    - legacy (ADAPTER_BACKEND_CONFIG не задан): один бэкенд из
+      BACKEND_BASE/BACKEND_KEY; ``_MODEL_TO_BACKEND`` не используется.
+    - multi в процессе адаптера: ``_BACKENDS`` заполнен при старте;
+      refresh опрашивает каждый бэкенд и пересобирает оба словаря.
+    - standalone (viewer вне адаптера, ``_BACKENDS`` пуст): блоки YAML
+      перечитываются из ADAPTER_BACKEND_CONFIG, бэкенды опрашиваются —
+      кнопка «⟳ Проверить сейчас» работает и без процесса адаптера.
+
+    Возвращает ``{"ok": bool, "count": int, "errors": {имя_бэкенда: текст}}``:
+    - ``ok=True`` — кэш пересобран из ответивших бэкендов. При частичном
+      успехе модели упавших бэкендов выпадают из кэша (бэкенд недоступен —
+      это честное состояние); текст ошибок — в ``errors``.
+    - ``ok=False`` — ни один бэкенд не ответил (или нет ни одного
+      настроенного бэкенда: standalone без env); старый кэш НЕ тронут,
+      ``count`` — размер прежнего списка (на странице показывается он)."""
+    global _AVAILABLE_MODELS, _MODEL_TO_BACKEND, _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND
+
+    if _BACKEND_LEGACY:
+        try:
+            models = _fetch_models(BACKEND_BASE, BACKEND_KEY, timeout=timeout)
+        except Exception as e:
+            return {"ok": False, "count": len(_AVAILABLE_MODELS), "errors": {"legacy": str(e)}}
+        if not models:
+            # Пустой список ответа не стираем кэш — показываем прежний список.
+            return {
+                "ok": False,
+                "count": len(_AVAILABLE_MODELS),
+                "errors": {"legacy": "backend returned empty model list"},
+            }
+        available: dict[str, dict] = {}
+        for m in models:
+            cm = dict(m)
+            mid = cm.get("id", "")
+            if mid:
+                available[mid] = cm
+        _AVAILABLE_MODELS = available
+        print(f"[REFRESH] Reloaded {len(available)} models from {BACKEND_BASE.rstrip('/')}/v1/models")
+        return {"ok": True, "count": len(available), "errors": {}}
+
+    # multi-backend: опрашиваем каждый бэкенд, ошибки копим по имени.
+    # _BACKENDS может быть пуст — standalone: перечитываем YAML (тот же
+    # путь, что адаптер взял бы при старте), чтобы кнопка работала.
+    backends = _BACKENDS
+    if not backends:
+        # standalone: адаптер в этом процессе не инициализировался —
+        # поднимаем глобалы бэкендов из YAML, чтобы _collect_endpoints
+        # нашёл эндпоинты, а _resolve_backend маршрутизировал запросы.
+        blocks = _parse_backend_yaml(ADAPTER_BACKEND_CONFIG)
+        if not blocks:
+            # Env не задаёт ни одного бэкенда — обновлять нечего.
+            return {"ok": False, "count": len(_AVAILABLE_MODELS), "errors": {}}
+        backends = blocks
+        _BACKENDS = blocks
+        _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
+        _DEFAULT_BACKEND = blocks[0]
+    all_models: list[tuple[dict, dict]] = []
+    errors: dict[str, str] = {}
+    for b in backends:
+        try:
+            bmodels = _fetch_models(b["base"], b["key"], timeout=timeout)
+        except Exception as e:
+            errors[b["name"]] = str(e)
+            continue
+        for m in bmodels:
+            all_models.append((dict(m), b))
+
+    if not all_models:
+        return {"ok": False, "count": len(_AVAILABLE_MODELS), "errors": errors}
+
+    _AVAILABLE_MODELS, _MODEL_TO_BACKEND = _rebuild_index(all_models)
+    print(f"[REFRESH] Reloaded {len(_AVAILABLE_MODELS)} models from {len(backends)} backends")
+    return {"ok": True, "count": len(_AVAILABLE_MODELS), "errors": errors}
 
 
 # ==================== MULTI-BACKEND: ROUTING ====================

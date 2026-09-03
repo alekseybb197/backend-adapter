@@ -78,6 +78,38 @@ runpy исполняет модуль дважды — каноническая 
 `test_cli_standalone_serves_builtin_endpoints` (субпроцесс `python -m`,
 эндпойнты `/` и `/session` отвечают 200).
 
+### 2026-09-03 WEBUI: обновление списка моделей при загрузке статус-страницы
+
+**Проблема:** кэш моделей (`_AVAILABLE_MODELS`) — snapshot со старта
+адаптера. Если бэкенд добавляет модели после старта, строгая валидация
+отвергает их (ошибка 400 «model is not available»), а список на странице
+статуса обновлялся только кнопкой «⟳ Проверить сейчас».
+
+**Решение:** у кэша моделей появился on-demand refresh без перезапуска
+адаптера, и загрузка страницы статуса делает то же, что кнопка.
+
+- `config.py`: новый `refresh_models(timeout=None)` — живая пере-проба
+  каждого эндпойнта (`GET /v1/models`) с пересборкой
+  `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` (общий с init алгоритм коллизий
+  вынесен в `_rebuild_index`). Возвращает `{"ok", "count", "errors"}`:
+  полный провал/пустой ответ — старый кэш НЕ тронут; частичный успех —
+  кэш из ответивших бэкендов, упавшие выпадают. В standalone-режиме
+  (viewer вне процесса адаптера) блоки бэкендов перечитываются из
+  `ADAPTER_BACKEND_CONFIG`, кнопка работает и без процесса адаптера.
+  `_fetch_models` получил параметр `timeout` (None → ADAPTER_TIMEOUT).
+  Периодического фонового обновления НЕТ — только по явным сигналам
+  (старт адаптера, загрузка страницы, кнопка).
+- `webui_status.py`: GET `/` и POST `/` делают одно и то же через общий
+  `_refresh_and_render()` — `config.refresh_models(timeout=PROBE_TIMEOUT)`
+  (5 с на эндпойнт) и рендер из обновлённых глобалов. При провале
+  страница показывает прежний список и текст ошибки. Собственный
+  `_probe_live` удалён — его заменил `refresh_models`.
+
+**Изменения:** backend_adapter/config.py, backend_adapter/webui_status.py,
+tests/test_config.py (новый `TestRefreshModels`, 11 тестов),
+tests/test_webui_status.py (GET `/` обновляет модели с коротким таймаутом),
+docs/architecture.md, docs/environment.md, docs/logging.md.
+
 ## v0.7.0 (WEBUI: session viewer + artifact tree visualization, merged ADAPTER_DEBUG_TAGS_JSON/YAML)
 
 ### Веб-интерфейс просмотра сессий (session_viewer + artifact_tree)
