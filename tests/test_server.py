@@ -50,18 +50,21 @@ def _send_http(host, port, method, path, body=None, headers=None):
 class TestServer:
     """Integration tests for the HTTP server."""
 
-    def _setup_legacy_adapter(self, fake_backend):
-        """Set up adapter in legacy mode pointing at fake backend.
+    def _setup_adapter(self, fake_backend):
+        """Set up adapter pointing at fake backend (single-backend YAML config).
 
         Uses direct attribute patching on already-loaded modules to avoid
-        circular import issues from module deletion + reimport.
+        circular import issues from module deletion + reimport. The backend
+        config is a one-entry multi-backend structure — единственный режим
+        конфигурации бэкендов.
         """
         from backend_adapter import config, server as server_mod
 
-        # Patch BACKEND_BASE so the adapter sends requests to fake backend
-        config.BACKEND_BASE = fake_backend.base_url
-        config.BACKEND_KEY = "test-key"
-        config._BACKEND_LEGACY = True
+        cfg = {"name": "test", "base": fake_backend.base_url, "key": "test-key"}
+        config._BACKENDS = [cfg]
+        config._BACKEND_BY_NAME = {"test": cfg}
+        config._MODEL_TO_BACKEND = {"test-model": ("test", cfg)}
+        config._DEFAULT_BACKEND = cfg
         config._AVAILABLE_MODELS["test-model"] = {"id": "test-model"}
 
         # Patch server's logger helpers to avoid file I/O blocking
@@ -110,7 +113,7 @@ class TestServer:
             "usage": {"prompt_tokens": 10, "completion_tokens": 5},
         }
         with fake_backend:
-            server = self._setup_legacy_adapter(fake_backend)
+            server = self._setup_adapter(fake_backend)
             try:
                 resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
                                   body={
@@ -131,7 +134,7 @@ class TestServer:
         fake_backend.models_response = {"data": [{"id": "known-model"}]}
         fake_backend.completions_response = {}
         with fake_backend:
-            server = self._setup_legacy_adapter(fake_backend)
+            server = self._setup_adapter(fake_backend)
             try:
                 resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
                                   body={
@@ -147,7 +150,7 @@ class TestServer:
         """GET /v1/models should return available models."""
         fake_backend.models_response = {"data": [{"id": "m1"}, {"id": "m2"}]}
         with fake_backend:
-            server = self._setup_legacy_adapter(fake_backend)
+            server = self._setup_adapter(fake_backend)
             # Add extra model to _AVAILABLE_MODELS to simulate model probing
             from backend_adapter import config as cfg
             cfg._AVAILABLE_MODELS["m1"] = {"id": "m1"}
@@ -165,7 +168,7 @@ class TestServer:
         """HEAD request should return 200 without body."""
         fake_backend.models_response = {"data": []}
         with fake_backend:
-            server = self._setup_legacy_adapter(fake_backend)
+            server = self._setup_adapter(fake_backend)
             try:
                 resp = _send_http("127.0.0.1", server.port, "HEAD", "/health")
                 assert resp["status"] == 200
@@ -176,7 +179,7 @@ class TestServer:
         """Unknown path should return 404."""
         fake_backend.models_response = {"data": []}
         with fake_backend:
-            server = self._setup_legacy_adapter(fake_backend)
+            server = self._setup_adapter(fake_backend)
             try:
                 resp = _send_http("127.0.0.1", server.port, "GET", "/unknown")
                 assert resp["status"] == 404

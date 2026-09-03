@@ -186,20 +186,9 @@ backend:
 class TestResolveBackend:
     """Tests for _resolve_backend()."""
 
-    def test_legacy_mode(self):
-        _reload_config()
-        from backend_adapter import config
-        config.BACKEND_BASE = "http://localhost:9999"
-        config.BACKEND_KEY = "test-key"
-        config._BACKEND_LEGACY = True
-        result = config._resolve_backend("my-model")
-        assert result[0]["key"] == "test-key"
-        assert result[1] == "my-model"
-
     def test_explicit_prefix(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         config._BACKEND_BY_NAME = {"kl": {"name": "kl", "base": "http://kl", "key": "k"}}
         config._DEFAULT_BACKEND = config._BACKEND_BY_NAME["kl"]
         result = config._resolve_backend("kl.qwen36")
@@ -209,7 +198,6 @@ class TestResolveBackend:
     def test_lookup_by_model_to_backend(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         config._BACKEND_BY_NAME = {"kl": {"name": "kl", "base": "http://kl", "key": "k"}}
         config._MODEL_TO_BACKEND = {"qwen36": ("kl", config._BACKEND_BY_NAME["kl"])}
         config._DEFAULT_BACKEND = config._BACKEND_BY_NAME["kl"]
@@ -219,12 +207,25 @@ class TestResolveBackend:
     def test_fallback_to_default(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         default = {"name": "default", "base": "http://def", "key": "def-key"}
         config._BACKEND_BY_NAME = {"default": default}
         config._DEFAULT_BACKEND = default
         result = config._resolve_backend("unknown-model")
         assert result[0]["name"] == "default"
+
+    def test_no_backend_configured_raises(self):
+        # Пустой конфиг при корректном старте недостижим (fatal), но на
+        # случай неожиданных путей — явная ошибка, а не тихий fallback.
+        _reload_config()
+        from backend_adapter import config
+        config._BACKEND_BY_NAME = {}
+        config._MODEL_TO_BACKEND = {}
+        config._DEFAULT_BACKEND = None
+        try:
+            config._resolve_backend("any-model")
+            assert False, "Should have raised RuntimeError"
+        except RuntimeError:
+            pass
 
 
 class TestInitMultiBackends:
@@ -312,18 +313,20 @@ class TestRefreshModels:
     nothing configured) → old cache kept untouched, count = old size.
     """
 
-    def _legacy_config(self):
-        """Reload config in legacy mode (ADAPTER_BACKEND_CONFIG="")."""
+    def _solo_config(self):
+        """Reload config with a single backend configured via multi-backend
+        globals (единственный режим конфигурации — YAML-конфиг)."""
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = True
+        solo = {"name": "solo", "base": "http://solo.local", "key": "k"}
+        config._BACKENDS = [solo]
+        config._BACKEND_BY_NAME = {"solo": solo}
+        config._DEFAULT_BACKEND = solo
         return config
 
-    def test_legacy_success_updates_cache(self):
-        config = self._legacy_config()
+    def test_solo_success_updates_cache(self):
+        config = self._solo_config()
         config._AVAILABLE_MODELS["old-m"] = {"id": "old-m"}
-        config.BACKEND_BASE = "http://legacy.local"
-        config.BACKEND_KEY = "k"
         with mock.patch.object(
             config, "_fetch_models",
             return_value=[{"id": "new-m1"}, {"id": "new-m2", "owned_by": "me"}],
@@ -335,36 +338,31 @@ class TestRefreshModels:
         # timeout пробрасывается в _fetch_models (короткий — из веб-страницы)
         assert m_fetch.call_args.kwargs.get("timeout") == 7.0
 
-    def test_legacy_fetch_error_keeps_old_cache(self):
-        config = self._legacy_config()
+    def test_solo_fetch_error_keeps_old_cache(self):
+        config = self._solo_config()
         config._AVAILABLE_MODELS["old-m"] = {"id": "old-m"}
-        config.BACKEND_BASE = "http://legacy.local"
-        config.BACKEND_KEY = "k"
         with mock.patch.object(
             config, "_fetch_models", side_effect=OSError("Connection refused by test")
         ):
             result = config.refresh_models()
         assert result["ok"] is False
         assert result["count"] == 1            # прежний размер кэша
-        assert "legacy" in result["errors"]
-        assert "Connection refused by test" in str(result["errors"]["legacy"])
+        assert "solo" in result["errors"]
+        assert "Connection refused by test" in str(result["errors"]["solo"])
         assert set(config._AVAILABLE_MODELS) == {"old-m"}   # кэш не тронут
 
-    def test_legacy_empty_answer_keeps_old_cache(self):
-        config = self._legacy_config()
+    def test_solo_empty_answer_keeps_old_cache(self):
+        config = self._solo_config()
         config._AVAILABLE_MODELS["old-m"] = {"id": "old-m"}
-        config.BACKEND_BASE = "http://legacy.local"
-        config.BACKEND_KEY = "k"
         with mock.patch.object(config, "_fetch_models", return_value=[]):
             result = config.refresh_models()
         assert result["ok"] is False
-        assert "empty model list" in str(result["errors"].get("legacy"))
+        assert result["errors"] == {}
         assert set(config._AVAILABLE_MODELS) == {"old-m"}
 
     def test_multi_success_and_prefix_collision(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         aaa = {"name": "AAA", "base": "http://aaa", "key": "k-aaa"}
         bbb = {"name": "BBB", "base": "http://bbb", "key": "k-bbb"}
         config._BACKENDS = [aaa, bbb]
@@ -390,7 +388,6 @@ class TestRefreshModels:
     def test_multi_partial_failure_drops_failed_backend(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         aaa = {"name": "AAA", "base": "http://aaa", "key": "k-aaa"}
         bbb = {"name": "BBB", "base": "http://bbb", "key": "k-bbb"}
         config._BACKENDS = [aaa, bbb]
@@ -417,7 +414,6 @@ class TestRefreshModels:
     def test_multi_total_failure_keeps_old_cache(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         aaa = {"name": "AAA", "base": "http://aaa", "key": "k-aaa"}
         bbb = {"name": "BBB", "base": "http://bbb", "key": "k-bbb"}
         config._BACKENDS = [aaa, bbb]
@@ -439,7 +435,6 @@ class TestRefreshModels:
     def test_multi_empty_answers_keeps_old_cache(self):
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         aaa = {"name": "AAA", "base": "http://aaa", "key": "k-aaa"}
         config._BACKENDS = [aaa]
         config._BACKEND_BY_NAME = {"AAA": aaa}
@@ -456,7 +451,6 @@ class TestRefreshModels:
         # задан — refresh перечитывает YAML, поднимает глобалы и опрашивает.
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         config._BACKENDS = []                    # как в standalone-процессе
         config._BACKEND_BY_NAME = {}
         config._DEFAULT_BACKEND = None
@@ -485,7 +479,6 @@ class TestRefreshModels:
         # Ни бэкендов, ни env: refresh нечего делать — ok=False, кэш пуст.
         _reload_config()
         from backend_adapter import config
-        config._BACKEND_LEGACY = False
         config._BACKENDS = []
         config._BACKEND_BY_NAME = {}
         config._DEFAULT_BACKEND = None
@@ -505,9 +498,6 @@ class TestRefreshModels:
         # _fetch_models: timeout=None → ADAPTER_TIMEOUT.
         _reload_config()
         from backend_adapter import config
-        config.BACKEND_BASE = "http://legacy.local"
-        config.BACKEND_KEY = "k"
-        config._BACKEND_LEGACY = True
         with mock.patch("urllib.request.urlopen") as m_urlopen:
             mock_response = mock.Mock()
             mock_response.read.return_value = json.dumps({"data": []}).encode()

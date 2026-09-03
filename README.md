@@ -69,7 +69,7 @@ backend-adapter/
 ├── com.user.backend-adapter.plist  # launchd (macOS)
 ├── backend-adapter.env         # Пример env для сервиса
 ├── sample.adapter.env          # Полный пример env
-├── adapter.yaml                # Пример multi-backend YAML
+├── sample.adapter.yaml         # Пример YAML-конфига бэкендов
 └── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 

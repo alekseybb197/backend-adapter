@@ -5,17 +5,17 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
 Показывает на одной странице:
   - версию кода (из WebContext.version — в адаптере это __version__ из
     backend-adapter.py, единственный источник);
-  - режим работы (legacy single-backend / multi-backend / standalone);
+  - режим работы (multi-backend / standalone);
   - каждый настроенный LLM-эндпойнт: доступность и список моделей.
 
 Откуда данные:
   - GET "/" и POST "/" (кнопка «⟳ Проверить сейчас») делают ОДНО И ТО ЖЕ:
     вызывают config.refresh_models() — живую пере-пробу каждого эндпойнта
     с жёстким коротким таймаутом PROBE_TIMEOUT (5 с) и обновляют
-    конфиг-глобалы адаптера (_AVAILABLE_MODELS/_MODEL_TO_BACKEND для
-    legacy; +_BACKENDS/_BACKEND_BY_NAME для multi-backend). Обновление
-    происходит только по явному сигналу (старт адаптера, загрузка
-    страницы, кнопка) — периодического фонового refresh НЕТ.
+    конфиг-глобалы адаптера (_AVAILABLE_MODELS/_MODEL_TO_BACKEND/
+    _BACKENDS/_BACKEND_BY_NAME). Обновление происходит только по явному
+    сигналу (старт адаптера, загрузка страницы, кнопка) — периодического
+    фонового refresh НЕТ.
   - Страница рендерится из обновлённых глобалов: бэкенд мог добавить
     новые модели между стартами адаптера (или после ошибки 400 «model is
     not available»), refresh подхватывает их без перезапуска — следующие
@@ -26,13 +26,12 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     свежий список ответивших бэкендов и тексты ошибок упавших.
 
 САМОСТОЯТЕЛЬНЫЙ ЗАПУСК (standalone — python -m backend_adapter.webserver
-вне процесса адаптера): конфиг-глобалы адаптера пусты (нет ни env
-бэкенда, ни YAML-конфига), поэтому страница показывает режим standalone
-и подсказку, как получить живые данные, — вместо фантомного списка
-«example.com» из дефолтов env. Эндпойнты для refresh в этом режиме могут
-быть заданы переменными окружения адаптера (ADAPTER_BACKEND_BASE +
-ADAPTER_BACKEND_KEY для одного, либо ADAPTER_BACKEND_CONFIG для
-нескольких) — модуль берёт их из config так же, как сам адаптер.
+вне процесса адаптера): конфиг-глобалы адаптера пусты (нет YAML-конфига),
+поэтому страница показывает режим standalone и подсказку, как получить
+живые данные, — вместо фантомного списка «example.com» из дефолтов env.
+Эндпойнты для refresh в этом режиме задаются той же переменной
+окружения, что у адаптера, — ADAPTER_BACKEND_CONFIG (путь к YAML);
+модуль берёт её из config так же, как сам адаптер.
 
 Чистая логика (snapshot, refresh, рендер) вынесена в отдельные функции,
 чтобы её можно было тестировать без HTTP-сервера.
@@ -58,29 +57,21 @@ def _collect_endpoints() -> list[dict]:
     """Список настроенных LLM-эндпойнтов из конфиг-глобалов адаптера.
 
     Каждый элемент: {"name", "base", "key", "models": [model_id, ...]}.
-    models — модели, успешно опрошенные на старте адаптера (для
-    multi-backend — из _MODEL_TO_BACKEND, сгруппированные по бэкенду; это
-    ровно те модели, что адаптер реально принимает в запросах). key —
-    токен для живой пробы (в HTML не выводится).
-
-    ВАЖНО про standalone: config.BACKEND_BASE не пуст даже без env —
-    в config.py у него дефолт "https://llm.service.example.com". Поэтому
-    legacy-эндпойнт добавляется только если ADAPTER_BACKEND_BASE РЕАЛЬНО
-    задана в окружении процесса — иначе страница показала бы фантомный
-    «example.com» вместо честного «данных нет».
+    models — модели, успешно опрошенные на старте адаптера (из
+    _MODEL_TO_BACKEND, сгруппированные по бэкенду; это ровно те модели,
+    что адаптер реально принимает в запросах). key — токен для живой
+    пробы (в HTML не выводится).
 
     Режимы:
       - multi-backend в процессе адаптера (_BACKENDS заполнен при старте);
-      - legacy single-backend (BACKEND_BASE/BACKEND_KEY из env; модели —
-        ключи _AVAILABLE_MODELS после стартовой пробы);
       - standalone (viewer вне адаптера): эндпойнты не опрошены, но если
-        окружение задаёт бэкенд (ADAPTER_BACKEND_BASE или
-        ADAPTER_BACKEND_CONFIG с YAML) — они показываются пустыми, чтобы
-        кнопка «⟳ Проверить сейчас» могла выполнить живую пробу."""
+        окружение задаёт ADAPTER_BACKEND_CONFIG с YAML-файлом — они
+        показываются пустыми, чтобы кнопка «⟳ Проверить сейчас» могла
+        выполнить живую пробу."""
     endpoints = []
 
     if config._BACKENDS:
-        # multi-backend: явный список бэкендов из YAML, загружен адаптером
+        # Бэкенды из YAML, загружен адаптером при старте
         for b in config._BACKENDS:
             endpoints.append(
                 {
@@ -96,32 +87,16 @@ def _collect_endpoints() -> list[dict]:
             )
         return endpoints
 
-    if not config._BACKEND_LEGACY:
-        # ADAPTER_BACKEND_CONFIG задан, но _BACKENDS пуст — адаптер в этом
-        # процессе не стартовал (standalone, либо упал до инициализации).
-        # Перечитываем YAML только ради списка эндпойнтов для живой пробы
-        # (парсер config._parse_backend_yaml — тот же, что у адаптера;
-        # модели всё равно не опрошены — статус будет «не опрошен»).
-        cfg_path = config.ADAPTER_BACKEND_CONFIG or os.environ.get("ADAPTER_BACKEND_CONFIG", "")
-        if cfg_path and os.path.isfile(cfg_path):
-            blocks = config._parse_backend_yaml(cfg_path)
-            for b in blocks or []:
-                endpoints.append(
-                    {"name": b["name"], "base": b["base"], "key": b["key"], "models": []}
-                )
-        return endpoints
-
-    # legacy single-backend: бэкенд есть только если env-переменная задана
-    # реально (иначе BACKEND_BASE — дефолт config.py, показывать нечего)
-    if os.environ.get("ADAPTER_BACKEND_BASE"):
-        endpoints.append(
-            {
-                "name": "legacy",
-                "base": config.BACKEND_BASE,
-                "key": config.BACKEND_KEY,
-                "models": sorted(config._AVAILABLE_MODELS.keys()),
-            }
-        )
+    # ADAPTER_BACKEND_CONFIG задан, но _BACKENDS пуст — адаптер в этом
+    # процессе не стартовал (standalone, либо упал до инициализации).
+    # Перечитываем YAML только ради списка эндпойнтов для живой пробы
+    # (парсер config._parse_backend_yaml — тот же, что у адаптера;
+    # модели всё равно не опрошены — статус будет «не опрошен»).
+    cfg_path = config.ADAPTER_BACKEND_CONFIG or os.environ.get("ADAPTER_BACKEND_CONFIG", "")
+    if cfg_path and os.path.isfile(cfg_path):
+        blocks = config._parse_backend_yaml(cfg_path)
+        for b in blocks or []:
+            endpoints.append({"name": b["name"], "base": b["base"], "key": b["key"], "models": []})
     return endpoints
 
 
@@ -132,19 +107,11 @@ def _config_snapshot() -> dict:
     "status"}], "note": str|None}. status — "ok" (на старте опрошен, есть
     модели) или "не опрошен" (бэкенд есть в конфиге, но моделей нет — в
     multi-режиме это бэкенд, чья проба не удалась; в standalone — любой
-    бэкенд из env, т.к. проб никто не делал). Пустой список эндпойнтов —
-    режим standalone без env-бэкенда: страница показывает подсказку."""
+    бэкенд из конфига, т.к. проб никто не делал). Пустой список
+    эндпойнтов — режим standalone без конфига: страница показывает
+    подсказку."""
     endpoints = _collect_endpoints()
-    if config._BACKENDS:
-        mode = "multi-backend"
-    elif not config._BACKEND_LEGACY and endpoints:
-        # standalone с ADAPTER_BACKEND_CONFIG: бэкендов несколько, но без
-        # стартовой инициализации адаптера
-        mode = "multi-backend"
-    elif endpoints:
-        mode = "legacy"
-    else:
-        mode = "standalone"
+    mode = "multi-backend" if endpoints else "standalone"
 
     for ep in endpoints:
         ep["status"] = "ok" if ep["models"] else "не опрошен"
@@ -154,9 +121,8 @@ def _config_snapshot() -> dict:
         note = (
             "Данные адаптера недоступны — запущен standalone-режим (viewer вне процесса "
             "адаптера). Живые данные появятся после запуска внутри адаптера "
-            "(ADAPTER_WEBUI_ENABLE=1), либо задайте env-переменные бэкенда "
-            "(ADAPTER_BACKEND_BASE/ADAPTER_BACKEND_KEY или ADAPTER_BACKEND_CONFIG) "
-            "и перезапустите сервер."
+            "(ADAPTER_WEBUI_ENABLE=1), либо задайте ADAPTER_BACKEND_CONFIG (путь к "
+            "YAML-файлу конфигурации бэкенда) и перезапустите сервер."
         )
     return {"mode": mode, "endpoints": endpoints, "note": note}
 

@@ -19,10 +19,10 @@ Claude Code is configured to route its API traffic through the adapter via `ANTH
 ## 2. Directory layout
 
 ```
-backend-adapter.py          ← entry point (startup, probe models, start server)
+backend-adapter.py          ← entry point (startup: config check, backend init, server)
 backend_adapter/
 ├── __init__.py             ← lazy proxy for module-level globals
-├── config.py               ← env vars, model mapping, multi-backend routing, YAML parser, probe
+├── config.py               ← env vars, model mapping, backend routing, YAML parser, probe (refresh)
 ├── server.py               ← HTTP handler (Adapter), QuietThreadingHTTPServer
 ├── convert.py              ← Anthropic ↔ OpenAI conversion functions
 ├── streaming.py            ← SSE streaming: OpenAI SSE → Anthropic SSE
@@ -65,7 +65,7 @@ Claude Code (Anthropic API client)
        ▼
 ┌─────────────────────────────────────────────────┐
 │              backend-adapter.py                  │
-│  (entry: startup probe → server.serve_forever()) │
+│  (entry: startup backend init → server.serve_forever()) │
 └──────────────────────┬──────────────────────────┘
                        │
                        ▼
@@ -109,13 +109,11 @@ Claude Code (Anthropic API client)
 
 ## 4. Request lifecycle
 
-### 4.1 Startup (`backend-adapter.py:64–127`)
+### 4.1 Startup (`backend-adapter.py:80–122`)
 
-1. If `ADAPTER_DETACH=1` — double-fork daemonize + write PID file
+1. If `ADAPTER_DETACH_ENABLE=1` — double-fork daemonize + write PID file
 2. Parse env config → `backend_adapter/config.py` (all env vars with `ADAPTER_` prefix)
-3. Probe backend models:
-   - **Legacy mode** (`ADAPTER_BACKEND_CONFIG` empty): single `GET /v1/models` call
-   - **Multi-backend mode**: parse YAML config (`_parse_backend_yaml`), probe each backend, resolve model collisions by prefixing with `<backend_name>.`
+3. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend, resolve model collisions by prefixing with `<backend_name>.`
 4. Start `QuietThreadingHTTPServer` on `0.0.0.0:<PROXY_PORT>`
 5. If `ADAPTER_WEBUI_ENABLE=1` and `ADAPTER_DEBUG_LOGFILE` is a directory: start the WEBUI
    in a daemon thread via `webserver.serve(ADAPTER_DEBUG_LOGFILE, __version__)` on
@@ -133,7 +131,6 @@ Claude Code (Anthropic API client)
 3. Strict model validation (ADAPTER_STRICT_MODELS)
 4. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
 5. Backend resolution (_resolve_backend)
-   - Legacy → single backend, model unchanged
    - Explicit prefix (<backend>.model) → strip, route
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
@@ -207,11 +204,11 @@ Accumulates text, reasoning_content, and tool_calls buffers across chunks, then 
 
 ---
 
-## 6. Multi-backend routing
+## 6. Backend routing
 
 ### 6.1 Configuration
 
-Path to YAML file via `ADAPTER_BACKEND_CONFIG`. Minimal YAML parser (`_parse_backend_yaml`) handles:
+Путь к YAML-файлу бэкендов — `ADAPTER_BACKEND_CONFIG` (структура `backend:`, список записей `name`/`base`/`key`). Парсер (`_parse_backend_yaml`) поддерживает:
 
 ```yaml
 backend:
@@ -223,22 +220,21 @@ backend:
     key: ADAPTER_LITELLM_KEY
 ```
 
-### 6.2 Collision resolution
+### 6.2 Разрешение коллизий имён моделей
 
-When the same model ID appears on multiple backends, a prefixed ID is generated:
+Когда одна и та же модель встречается на нескольких бэкендах, генерируется префиксный ID:
 
 ```
 <backend_name>.<model_id>  →  e.g.  "home.qwen3.6-35b-a3b"
 ```
 
-Only conflicting IDs get prefixed; unique IDs pass through unchanged.
+Префикс получают только конфликтующие ID; уникальные ID проходят без изменений.
 
-### 6.3 Routing logic (`_resolve_backend`, config.py:307–348)
+### 6.3 Логика маршрутизации (`_resolve_backend`, config.py:435–475)
 
-1. **Legacy mode** — return single backend, model unchanged
-2. **Explicit prefix** — strip `<backend_name>.` prefix, route to matching backend
-3. **Model lookup** — search `_MODEL_TO_BACKEND` dict
-4. **Fallback** — first backend in config (`_DEFAULT_BACKEND`)
+1. **Явный префикс** — снять префикс `<backend_name>.`, направить на соответствующий бэкенд
+2. **Lookup по списку моделей** — поиск в `_MODEL_TO_BACKEND`
+3. **Fallback** — первый бэкенд в конфиге (`_DEFAULT_BACKEND`); если бэкенд не сконфигурирован/не найден — `RuntimeError`
 
 ---
 

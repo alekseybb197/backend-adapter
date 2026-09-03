@@ -115,7 +115,7 @@
 | 3 | `[CLIENT_GONE]` | `server.py:84` | Client gone during JSON send |
 | 4 | `[WARN]` | `server.py:86` | Ошибка отправки ответа клиенту |
 | 5 | `[SKILL_PATTERNS]` | `skill.py:33` | Не удалось загрузить файлы паттернов скиллов |
-| 6 | `[INIT]` | `backend-adapter.py:100` | Старт multi-backend режима |
+| 6 | `[INIT]` | `backend-adapter.py:108` | Старт адаптера: путь к YAML-конфигу бэкендов |
 
 ---
 

@@ -2,6 +2,28 @@
 
 ## v0.7.2 (WIP — накопление в feature/v0.7.2)
 
+### 2026-09-03 Удалён legacy-режим конфигурации бэкенда
+
+**Проблема:** подключение к бэкенду задавалось двумя способами — парой
+env-переменных `ADAPTER_BACKEND_BASE`/`ADAPTER_BACKEND_KEY` (legacy) и
+YAML-файлом через `ADAPTER_BACKEND_CONFIG`. Двойной путь умножал ветки
+в `refresh_models`, `_resolve_backend`, стартовом блоке и webui_status,
+а также расходился в документации и env-примерах.
+
+**Решение:** конфигурация бэкенда — только через `ADAPTER_BACKEND_CONFIG`
+(структура `backend:`: список записей `name`/`base`/`key`; `key` — имя
+env-переменной токена, раскрывается при старте). Legacy-режим полностью
+удалён из кода, тестов, документации и env-примеров. Пустой
+`ADAPTER_BACKEND_CONFIG` на старте — явный `[FATAL]` с подсказкой
+(пример — `sample.adapter.yaml`) и `sys.exit(1)`. Недостижимый финальный
+return в `_resolve_backend` заменён на `RuntimeError`.
+
+**Изменения:** backend_adapter/config.py, backend_adapter/webui_status.py,
+backend-adapter.py, tests/, backend-adapter.env, sample.adapter.env,
+com.user.backend-adapter.plist, README.md, docs/ (architecture, environment,
+install, logging, sanitizing), CLAUDE.md, changelog.md; добавлен
+sample.adapter.yaml.
+
 ### 2026-09-03 CLAUDE.md: в журнал ADR только существенные решения
 
 **Проблема:** в журнале решений `CLAUDE.md` наравне с changelog.md

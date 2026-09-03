@@ -13,8 +13,6 @@ import urllib.error
 import urllib.request
 
 # ==================== НАСТРОЙКИ ====================
-BACKEND_BASE = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
-BACKEND_KEY = os.environ.get("ADAPTER_BACKEND_KEY", "")
 PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_LOGFILE = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
@@ -129,12 +127,10 @@ ADAPTER_STREAM_INCLUDE_USAGE = os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1
 ADAPTER_MODELS_MAPPING = os.environ.get("ADAPTER_MODELS_MAPPING", "")
 # ===================================================
 
-# ==================== MULTI-BACKEND CONFIG ====================
+# ==================== BACKEND CONFIG ====================
 ADAPTER_BACKEND_CONFIG = os.environ.get("ADAPTER_BACKEND_CONFIG", "")
-# True, если используется legacy-режим (один бэкенд через BACKEND_BASE / BACKEND_KEY).
-_BACKEND_LEGACY = ADAPTER_BACKEND_CONFIG == ""
 
-# Глобальные структуры multi-backend.
+# Глобальные структуры конфигурации бэкендов (единственный режим — YAML).
 # _BACKENDS — список [{name, base, key}, …]
 # _BACKEND_BY_NAME — name → config
 # _MODEL_TO_BACKEND — model_id → (backend_name, backend_config)
@@ -293,19 +289,6 @@ def _fetch_models(base: str, key: str, timeout: float | None = None) -> list[dic
     return data.get("data", [])
 
 
-def _probe_models() -> list[dict]:
-    """Обёртка: проба legacy-бэкенда из ``_fetch_models``.
-
-    Это используется при запуске без ``ADAPTER_BACKEND_CONFIG`` —
-    старое поведение сохранено. BACKEND_KEY — уже раскрытый токен
-    (из os.environ при импорте модуля)."""
-    models = _fetch_models(BACKEND_BASE, BACKEND_KEY)
-    print(f"[INIT] Fetched {len(models)} models from backend {BACKEND_BASE.rstrip('/')}/v1/models")
-    for m in models:
-        print(f"  model={m.get('id')}, object={m.get('object')}, owned_by={m.get('owned_by')}")
-    return models
-
-
 def _init_multi_backends(config_path: str) -> None:
     """Загрузить YAML-конфиг, пробовать модели, построить model → backend map.
 
@@ -388,7 +371,7 @@ def _rebuild_index(all_models: list[tuple[dict, dict]]) -> tuple[dict[str, dict]
 
 def refresh_models(timeout: float | None = None) -> dict:
     """Пере-опросить бэкенды и обновить кэш моделей ``_AVAILABLE_MODELS`` /
-    ``_MODEL_TO_BACKEND`` (и для legacy, и для multi-backend).
+    ``_MODEL_TO_BACKEND``.
 
     Вызывается только по явному сигналу: при старте адаптера (существующий
     init/probe) и по запросу веб-страницы статуса (GET/POST ``/``).
@@ -398,14 +381,11 @@ def refresh_models(timeout: float | None = None) -> dict:
     ``timeout`` — таймаут на один бэкенд (None → ADAPTER_TIMEOUT). Страница
     статуса передаёт короткий (PROBE_TIMEOUT), чтобы не висеть по 300 с.
 
-    Режимы:
-    - legacy (ADAPTER_BACKEND_CONFIG не задан): один бэкенд из
-      BACKEND_BASE/BACKEND_KEY; ``_MODEL_TO_BACKEND`` не используется.
-    - multi в процессе адаптера: ``_BACKENDS`` заполнен при старте;
-      refresh опрашивает каждый бэкенд и пересобирает оба словаря.
-    - standalone (viewer вне адаптера, ``_BACKENDS`` пуст): блоки YAML
-      перечитываются из ADAPTER_BACKEND_CONFIG, бэкенды опрашиваются —
-      кнопка «⟳ Проверить сейчас» работает и без процесса адаптера.
+    Основной путь — в процессе адаптера: ``_BACKENDS`` заполнен при старте;
+    refresh опрашивает каждый бэкенд и пересобирает оба словаря.
+    Если ``_BACKENDS`` пуст (viewer вне адаптера): блоки YAML перечитываются
+    из ADAPTER_BACKEND_CONFIG, бэкенды опрашиваются — кнопка
+    «⟳ Проверить сейчас» работает и без процесса адаптера.
 
     Возвращает ``{"ok": bool, "count": int, "errors": {имя_бэкенда: текст}}``:
     - ``ok=True`` — кэш пересобран из ответивших бэкендов. При частичном
@@ -416,33 +396,9 @@ def refresh_models(timeout: float | None = None) -> dict:
       ``count`` — размер прежнего списка (на странице показывается он)."""
     global _AVAILABLE_MODELS, _MODEL_TO_BACKEND, _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND
 
-    if _BACKEND_LEGACY:
-        try:
-            models = _fetch_models(BACKEND_BASE, BACKEND_KEY, timeout=timeout)
-        except Exception as e:
-            return {"ok": False, "count": len(_AVAILABLE_MODELS), "errors": {"legacy": str(e)}}
-        if not models:
-            # Пустой список ответа не стираем кэш — показываем прежний список.
-            return {
-                "ok": False,
-                "count": len(_AVAILABLE_MODELS),
-                "errors": {"legacy": "backend returned empty model list"},
-            }
-        available: dict[str, dict] = {}
-        for m in models:
-            cm = dict(m)
-            mid = cm.get("id", "")
-            if mid:
-                available[mid] = cm
-        _AVAILABLE_MODELS = available
-        print(
-            f"[REFRESH] Reloaded {len(available)} models from {BACKEND_BASE.rstrip('/')}/v1/models"
-        )
-        return {"ok": True, "count": len(available), "errors": {}}
-
-    # multi-backend: опрашиваем каждый бэкенд, ошибки копим по имени.
-    # _BACKENDS может быть пуст — standalone: перечитываем YAML (тот же
-    # путь, что адаптер взял бы при старте), чтобы кнопка работала.
+    # Опрашиваем каждый бэкенд, ошибки копим по имени. _BACKENDS может быть
+    # пуст — standalone: перечитываем YAML (тот же путь, что адаптер взял бы
+    # при старте), чтобы кнопка работала.
     backends = _BACKENDS
     if not backends:
         # standalone: адаптер в этом процессе не инициализировался —
@@ -482,22 +438,18 @@ def _resolve_backend(model: str) -> tuple[dict, str]:
     Возвращает ``(backend_cfg, resolved_model_name)``.
 
     Логика:
-    1. Legacy-режим → единственный бэкенд, model без изменений.
-    2. Явный префикс ``<backend_name>.<model>`` → stripping, routing.
-    3. Lookup в ``_MODEL_TO_BACKEND`` → первый найденный бэкенд.
-    4. Fallback → ``_DEFAULT_BACKEND``.
+    1. Явный префикс ``<backend_name>.<model>`` → stripping, routing.
+    2. Lookup в ``_MODEL_TO_BACKEND`` → первый найденный бэкенд.
+    3. Fallback → ``_DEFAULT_BACKEND``.
     """
-    if _BACKEND_LEGACY:
-        return {"base": BACKEND_BASE, "key": BACKEND_KEY, "name": "legacy"}, model
-
-    # 2) Явный префикс: модель начинается с имени одного из бэкендов + '.'
+    # 1) Явный префикс: модель начинается с имени одного из бэкендов + '.'
     for bname, bcfg in _BACKEND_BY_NAME.items():
         prefix = bname + "."
         if model.startswith(prefix):
             actual = model[len(prefix) :]
             return bcfg, actual
 
-    # 3) Lookup по известному списку
+    # 2) Lookup по известному списку
     entry = _MODEL_TO_BACKEND.get(model)
     if entry:
         # Если модель prefixed (имя из colliding_ids) — stripping префикса:
@@ -510,10 +462,10 @@ def _resolve_backend(model: str) -> tuple[dict, str]:
                 break
         return entry[1], actual
 
-    # 4) Fallback
+    # 3) Fallback
     if _DEFAULT_BACKEND:
         return _DEFAULT_BACKEND, model
-    # Должно быть недостижимо — если multi-backend включён, но ни один
-    # бэкенд не прошёл проб — это fatal (см. startup). На случай
-    # неожиданных путей возвращаем legacy-конфиг.
-    return {"base": BACKEND_BASE, "key": BACKEND_KEY, "name": "legacy"}, model
+    # Должно быть недостижимо при корректном старте (пустой конфиг — fatal,
+    # см. startup), но на случай неожиданных путей — явная ошибка, а не
+    # тихий fallback на несуществующий конфиг.
+    raise RuntimeError(f"no backend resolved for model {model!r}")

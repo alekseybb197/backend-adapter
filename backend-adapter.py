@@ -12,8 +12,6 @@ from collections import Counter
 
 # ==================== Package imports ====================
 from backend_adapter.config import (
-    BACKEND_BASE,
-    BACKEND_KEY,
     PROXY_PORT,
     ADAPTER_DEBUG,
     ADAPTER_DEBUG_LOGFILE,
@@ -34,7 +32,6 @@ from backend_adapter.config import (
     ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_MODELS_MAPPING,
     ADAPTER_BACKEND_CONFIG,
-    _BACKEND_LEGACY,
     _BACKENDS,
     _BACKEND_BY_NAME,
     _MODEL_TO_BACKEND,
@@ -42,8 +39,6 @@ from backend_adapter.config import (
     _parse_models_mapping,
     _MAP,
     _parse_backend_yaml,
-    _fetch_models,
-    _probe_models,
     _init_multi_backends,
     _AVAILABLE_MODELS,
     _cap,
@@ -102,41 +97,26 @@ if __name__ == "__main__":
         f"Streaming:  {'enabled (SSE passthrough)' if ADAPTER_STREAMING_ENABLE else 'disabled (legacy stream=False, старое поведение)'}"
     )
 
-    if _BACKEND_LEGACY:
-        # === Legacy single-backend ===
-        print(f"Backend:    {BACKEND_BASE}/v1/chat/completions")
-        print(f"Retries:    {ADAPTER_RETRY}")
-        print(f"{'=' * 70}\n")
+    if not ADAPTER_BACKEND_CONFIG:
+        print(
+            "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу "
+            "конфигурации бэкенда (пример — sample.adapter.yaml в корне репозитория)."
+        )
+        sys.exit(1)
 
-        try:
-            backend_models = _probe_models()
-            if backend_models:
-                for m in backend_models:
-                    mid = m.get("id", "unknown")
-                    _AVAILABLE_MODELS[mid] = m
-                print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from backend:")
-                for m in backend_models:
-                    print(f"  - {m.get('id', '?')}")
-            else:
-                print("[WARN] Backend returned empty model list — models validation disabled.")
-        except Exception as e:
-            print(f"[FATAL] Failed to probe backend models at startup: {e}")
-            print("Adapter cannot start without knowing available models. Exiting.")
-            sys.exit(1)
-    else:
-        # === Multi-backend ===
-        _d(f"[INIT] Multi-backend mode: config={ADAPTER_BACKEND_CONFIG}")
-        try:
-            _init_multi_backends(ADAPTER_BACKEND_CONFIG)
-        except Exception as e:
-            print(f"[FATAL] Failed to initialize multi-backend: {e}")
-            print("Adapter cannot start. Exiting.")
-            sys.exit(1)
+    # === Backend config ===
+    _d(f"[INIT] Backend config: {ADAPTER_BACKEND_CONFIG}")
+    try:
+        _init_multi_backends(ADAPTER_BACKEND_CONFIG)
+    except Exception as e:
+        print(f"[FATAL] Failed to initialize backends: {e}")
+        print("Adapter cannot start. Exiting.")
+        sys.exit(1)
 
-        print(f"Backends:   {len(_BACKENDS)} configured:")
-        for b in _BACKENDS:
-            print(f"  - {b['name']}: {b['base']}")
-        print(f"{'=' * 70}\n")
+    print(f"Backends:   {len(_BACKENDS)} configured:")
+    for b in _BACKENDS:
+        print(f"  - {b['name']}: {b['base']}")
+    print(f"{'=' * 70}\n")
 
     # ThreadingHTTPServer вместо socketserver.TCPServer: Claude Code может
     # открывать несколько параллельных запросов (конкурентные tool calls),

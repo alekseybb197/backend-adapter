@@ -90,7 +90,7 @@ pip install -r requirements.txt
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
 ├── backend_adapter/            # Доменный пакет (20 модулей, включая __init__.py; artifact_tree* — 8 модулей)
-│   ├── config.py              # Парсинг env-переменных, multi-backend, YAML
+│   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
@@ -120,7 +120,7 @@ backend-adapter/
 ├── com.user.backend-adapter.plist  # launchd (macOS, продакшен)
 ├── backend-adapter.env        # Пример env для сервиса
 ├── sample.adapter.env         # Полный пример env (сервис + клиент)
-├── adapter.yaml               # Пример multi-backend YAML
+├── sample.adapter.yaml         # Пример YAML-конфига бэкендов
 ├── requirements.txt           # Зависимости (единственная — PyYAML)
 └── changelog.md               # История версий
 ```
@@ -129,36 +129,30 @@ backend-adapter/
 
 ## 4. Конфигурация
 
-Все настройки задаются через переменные окружения. Минимальный набор зависит от режима работы.
+Все настройки задаются через переменные окружения.
 
-### 4.1 Одный бэкенд (legacy-режим)
+### 4.1 Конфигурация бэкенда (YAML-файл через ADAPTER_BACKEND_CONFIG)
 
-Для одного бэкенда задайте два обязательных параметра:
-
-```bash
-export ADAPTER_BACKEND_BASE="https://llm.service.example.com"
-export ADAPTER_BACKEND_KEY="your-api-key-here"
-```
-
-### 4.2 Несколько бэкендов (multi-backend, рекомендуемый)
-
-Создайте YAML-файл с конфигурацией:
+Единственный способ указать подключение к бэкенду — переменная окружения
+`ADAPTER_BACKEND_CONFIG`, ссылающаяся на YAML-файл со структурой `backend:`
+(пример — `sample.adapter.yaml` в корне репозитория). Один или несколько бэкендов
+задаются записями в одном списке:
 
 ```yaml
-# adapter.yaml
+# sample.adapter.yaml — один бэкенд; другие добавляются записями в тот же список
 backend:
   - name: home
     base: "http://127.0.0.1:8002"
     key: ADAPTER_HOME_KEY
-  - name: litellm
+  - name: assistant
     base: "https://llm.service.example.com"
     key: ADAPTER_LITELLM_KEY
 ```
 
-Затем укажите путь к файлу:
+Укажите путь к файлу в окружении:
 
 ```bash
-export ADAPTER_BACKEND_CONFIG="./adapter.yaml"
+export ADAPTER_BACKEND_CONFIG="./sample.adapter.yaml"
 ```
 
 Каждый бэкенд имеет три поля:
@@ -172,7 +166,7 @@ export ADAPTER_BACKEND_CONFIG="./adapter.yaml"
 **Маршрутизация**: если модель содержит префикс `<name>.` (например `kl.qwen3.6-35b-a3b`),
 запрос отправляется на соответствующий бэкенд. Fallback — первый бэкенд в конфигурации.
 
-### 4.3 Настройка клиента Claude Code
+### 4.2 Настройка клиента Claude Code
 
 Для работы Claude Code через адаптер задайте:
 
@@ -199,7 +193,7 @@ export CLAUDE_CODE_DISABLE_THINKING="1"
 > а не адаптера. Адаптер их не читает, они задаются в окружении процесса Claude Code.
 > Полный список переменных адаптера — в [`docs/environment.md`](environment.md).
 
-### 4.4 Рекомендуемые параметры сети
+### 4.3 Рекомендуемые параметры сети
 
 ```bash
 # Таймаут запроса к бэкенду (сек)
@@ -213,7 +207,7 @@ export ADAPTER_RETRY_COUNT=3
 export ADAPTER_PROXY_PORT=9999
 ```
 
-### 4.5 Стриминг
+### 4.4 Стриминг
 
 ```bash
 # Включить SSE streaming passthrough
@@ -226,7 +220,7 @@ export ADAPTER_STREAM_INCLUDE_USAGE=1
 Если бэкенд некорректно стримит, отключите стриминг полностью:
 `ADAPTER_STREAMING_ENABLE=0` (аварийный режим — адаптер ждёт ответ целиком).
 
-### 4.6 Валидация моделей
+### 4.5 Валидация моделей
 
 ```bash
 # Строгий режим: адаптер опрашивает бэкенд (/v1/models) и принимает только известные модели
@@ -235,7 +229,7 @@ export ADAPTER_STRICT_MODELS=1
 # export ADAPTER_STRICT_MODELS=0
 ```
 
-### 4.7 Маппинг моделей
+### 4.6 Маппинг моделей
 
 При необходимости преобразования имён моделей:
 
@@ -246,7 +240,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 Формат: `agent_model:backend_model`. Применяется **до** валидации — преобразованная модель
 проверяется по новому имени.
 
-### 4.8 Отладка и трассировка
+### 4.7 Отладка и трассировка
 
 ```bash
 # Включить debug-логирование (1 = включено, 0/false/no = выключено)
@@ -306,7 +300,7 @@ export ADAPTER_DEBUG_TOOLS_ERROR=1
 
 Подробнее про логирование — в [`docs/logging.md`](logging.md).
 
-### 4.9 Полный пример env-файла
+### 4.8 Полный пример env-файла
 
 ```bash
 # sample.adapter.env — полный пример
@@ -315,8 +309,11 @@ export ADAPTER_DEBUG_TOOLS_ERROR=1
 # ============================================================
 
 # --- Backend connection ---
-export ADAPTER_BACKEND_BASE="https://llm.service.example.com"
-export ADAPTER_BACKEND_KEY="your-api-key-here"
+# Путь к YAML-файлу конфигурации бэкендов — единственный способ
+# указать подключение. Пример файла — sample.adapter.yaml в корне
+# репозитория (структура backend: - name/base/key; key — имя
+# переменной окружения, в которой лежит токен).
+export ADAPTER_BACKEND_CONFIG="<путь>/sample.adapter.yaml"
 
 # --- Server settings ---
 export ADAPTER_PROXY_PORT=9999
@@ -380,8 +377,8 @@ Trace log:  (disabled)
 Models:     strict validation
 Streaming:  enabled (SSE passthrough)
 
-Backend:    https://llm.service.example.com/v1/chat/completions
-Retries:    3
+Backends:   1 configured:
+  - home: http://127.0.0.1:8002
 ======================================================================
 ```
 
@@ -477,14 +474,16 @@ curl -s https://llm.service.example.com/v1/models
 ### Ошибка инициализации моделей
 
 ```
-[FATAL] Failed to probe backend models at startup: ...
-Adapter cannot start without knowing available models. Exiting.
+[FATAL] Failed to initialize backends: <причина>
+Adapter cannot start. Exiting.
 ```
 
 Проверьте:
 
+- Путь в `ADAPTER_BACKEND_CONFIG` корректен и YAML-файл существует
+- Структура YAML — `backend:` со списком записей (пример — `sample.adapter.yaml`)
+- Поле `key` каждой записи указывает на существующую переменную окружения, в которой лежит токен
 - Бэкенд доступен и отдаёт `GET /v1/models`
-- `ADAPTER_BACKEND_KEY` содержит валидный токен
 - `ADAPTER_STRICT_MODELS=0` — переключить в разрешающий режим
 
 ### Ошибка SSL
@@ -509,8 +508,7 @@ Adapter cannot start without knowing available models. Exiting.
 
 | Переменная | Значение | Зачем |
 |---|---|---|
-| `ADAPTER_BACKEND_BASE` | URL бэкенда | Точка подключения к LLM |
-| `ADAPTER_BACKEND_KEY` | API-ключ | Авторизация на бэкенде |
+| `ADAPTER_BACKEND_CONFIG` | путь к YAML | Подключение к бэкенду (пример — `sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` | Порт, на котором слушает адаптер |
 | `ADAPTER_DEBUG_ENABLE` | `1` | Включить логирование |
 | `ADAPTER_DETACH_ENABLE` | `0` | **Важно:** не включаем detach при systemd |
@@ -526,8 +524,7 @@ Adapter cannot start without knowing available models. Exiting.
 cp backend-adapter.service ~/.config/systemd/user/backend-adapter.service
 
 # 2. Заполнить .env (или создать новый файл для сервиса)
-# ADAPTER_BACKEND_BASE="https://llm.service.example.com"
-# ADAPTER_BACKEND_KEY="your-api-key-here"
+# ADAPTER_BACKEND_CONFIG="/home/username/backend-adapter/sample.adapter.yaml"
 # ADAPTER_PROXY_PORT=9999
 # ADAPTER_DEBUG_ENABLE=1
 # ADAPTER_DETACH_ENABLE=0
@@ -587,8 +584,7 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 
 | Переменная | Значение |
 |---|---|
-| `ADAPTER_BACKEND_BASE` | URL бэкенда |
-| `ADAPTER_BACKEND_KEY` | API-ключ |
+| `ADAPTER_BACKEND_CONFIG` | путь к YAML (пример — `sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` |
 | `ADAPTER_DEBUG_ENABLE` | `1` |
 | `ADAPTER_DETACH_ENABLE` | `0` |

@@ -10,11 +10,9 @@
 
 | Переменная | Default | Описание |
 |---|---|---|
-| `ADAPTER_BACKEND_BASE` | `https://llm.service.example.com` | URL OpenAI-совместимого бэкенда (legacy-режим, один бэкенд). К этому адресу адаптир будет перенаправлять запросы. |
-| `ADAPTER_BACKEND_KEY` | *(пусто)* | Токен аутентификации (Bearer token) для бэкенда. Передаётся в заголовке `Authorization: Bearer &lt;key&gt;`. |
-| `ADAPTER_BACKEND_CONFIG` | *(пусто)* | **Переключатель режимов.** Если задан — путь к YAML-файлу с конфигурацией нескольких бэкендов (multi-backend). Если пусто — адаптер работает в legacy-режиме с одним бэкендом (`BACKEND_BASE` / `BACKEND_KEY`). |
+| `ADAPTER_BACKEND_CONFIG` | *(пусто)* | **Единственный способ конфигурации бэкенда.** Путь к YAML-файлу со структурой `backend:` (список записей `name`/`base`/`key`). Пример — `sample.adapter.yaml` в корне репозитория. Не задан — старт невозможен: адаптер завершается с `[FATAL]`. |
 
-### Пример multi-backend YAML (`ADAPTER_BACKEND_CONFIG=./adapter.yaml`)
+### Пример YAML-конфига бэкендов (`ADAPTER_BACKEND_CONFIG=./sample.adapter.yaml`)
 
 ```yaml
 backend:
@@ -35,7 +33,7 @@ backend:
 - **`base`** — базовый URL бэкенда (без `/v1/`).
 - **`key`** — либо прямой токен, либо **имя переменной окружения**. Адаптер сначала подставляет значение переменной, затем использует его как Bearer-токен.
 
-### Маршрутизация в multi-backend
+### Маршрутизация по бэкендам
 
 1. Если в запросе модель содержит префикс `&lt;имя_бэкенда&gt;.` (например `litellm.qwen3.6-35b-a3b`), запрос отправляется на соответствующий бэкенд, а префикс обрезается.
 2. Если модель встречается на нескольких бэкендах (коллизия), к её ID автоматически добавляется префикс `&lt;backend_name&gt;.model_id`.
@@ -172,8 +170,8 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 
 | Цель | Переменная | Значение |
 |---|---|---|
-| Одиночный бэкенд | `ADAPTER_BACKEND_CONFIG` | `""` (пусто), задать `ADAPTER_BACKEND_BASE` + `ADAPTER_BACKEND_KEY` |
-| Множественные бэкенды | `ADAPTER_BACKEND_CONFIG` | `"./adapter.yaml"` |
+| Один бэкенд | `ADAPTER_BACKEND_CONFIG` | `"./sample.adapter.yaml"` — YAML с одним элементом `backend:` |
+| Несколько бэкендов | `ADAPTER_BACKEND_CONFIG` | `"./sample.adapter.yaml"` — YAML с несколькими элементами `backend:` |
 | Включить стриминг | `ADAPTER_STREAMING_ENABLE` | `1` |
 | Отключить стриминг (аварийный) | `ADAPTER_STREAMING_ENABLE` | `0` |
 | Токены usage в стриме | `ADAPTER_STREAM_INCLUDE_USAGE` | `1` |
