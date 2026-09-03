@@ -43,6 +43,14 @@ tree.html по плоскому "/session/<имя>/tree.html" без сегме�
 subprocess. Логгер "artifact_tree" наследует формат логов от того, кто
 запустил процесс (вручную — стандартный запасной хендлер logging).
 
+Активная вкладка запоминается в location.hash (идентификатор вкладки —
+транслитерация имени сессии): клик по вкладке пишет hash, при загрузке/
+обновлении страницы скрипт открывает вкладку из hash (если она ещё
+существует), а не первую попавшуюся. В левом краю панели вкладок —
+ссылка «← статус» на корень сервера (статус-страницу WEBUI, эндпойнт
+"/"), чтобы после просмотра сессий возвращаться к списку бэкендов и
+моделей одним кликом.
+
 Реактивность реализована ПОЛЛИНГОМ при заходе на страницу (без фонового
 watcher'а на inotify/FSEvents и без внешних зависимостей вроде watchdog —
 ту же задачу решает простое сравнение mtime, и оно полностью переносимо):
@@ -51,7 +59,8 @@ watcher'а на inotify/FSEvents и без внешних зависимосте
 сознательно не делается — открытая вкладка может быть в процессе
 активного исследования (pan/zoom, открытый popup), и молча дёргать
 reload было бы разрушительно; вместо этого — просто обновите страницу
-браузера, когда захотите увидеть актуальное состояние.
+браузера, когда захотите увидеть актуальное состояние (активная вкладка
+при этом сохранится).
 """
 
 import html
@@ -155,6 +164,9 @@ SHELL_TEMPLATE = """<!DOCTYPE html>
   #tabs button.active {{ background: #fff; color: #111; font-weight: bold; }}
   #tabs button:hover {{ background: #444; }}
   #tabs button.active:hover {{ background: #fff; }}
+  #status-link {{ background: #222; color: #8ab4f8; border: none; padding: 10px 16px; cursor: pointer;
+                 font-size: 13px; text-decoration: none; border-right: 1px solid #444; }}
+  #status-link:hover {{ background: #444; }}
   #frame-wrap {{ position: absolute; top: 42px; left: 0; right: 0; bottom: 0; }}
   iframe {{ width: 100%; height: 100%; border: none; }}
   #empty {{ padding: 24px; color: #555; }}
@@ -170,7 +182,13 @@ function showTab(id, btn) {{
   btn.classList.add('active');
   document.querySelectorAll('iframe').forEach(f => f.style.display = 'none');
   document.getElementById('frame-' + id).style.display = 'block';
+  if (location.hash !== '#' + id) location.hash = id;
 }}
+window.addEventListener('DOMContentLoaded', function() {{
+  var id = location.hash.replace('#', '');
+  var tab = document.getElementById('tab-' + id);
+  if (tab) showTab(id, tab);
+}});
 </script>
 </body>
 </html>
@@ -187,9 +205,13 @@ def render_shell(sessions, root_dir):
             f"<code>{TREE_RELATIVE_PATH.replace(os.sep, '/')}</code>, он будет сгенерирован автоматически. "
             f"Перезапускать сервер не нужно.</div>"
         )
+        tabs = '<a id="status-link" href="/">← статус</a>'
+        body = f'<div id="tabs">{tabs}</div>' + body
         return SHELL_TEMPLATE.format(body=body)
 
-    tabs_html = []
+    # Ссылка на статус-страницу "/" — первой в панели (как и на пустой
+    # странице), затем вкладки сессий, справа (margin-left:auto) — reload.
+    tabs_html = ['<a id="status-link" href="/">← статус</a>']
     frames_html = []
     for i, (name, _) in enumerate(sessions):
         safe_id = "".join(c if c.isalnum() else "_" for c in name)
@@ -200,7 +222,8 @@ def render_shell(sessions, root_dir):
         active = " active" if i == 0 else ""
         display_style = "block" if i == 0 else "none"
         tabs_html.append(
-            f'<button class="tab{active}" onclick="showTab(\'{safe_id}\', this)">{html.escape(display_name)}</button>'
+            f'<button id="tab-{safe_id}" class="tab{active}" '
+            f"onclick=\"showTab('{safe_id}', this)\">{html.escape(display_name)}</button>"
         )
         tree_url = f"/session/{urllib.parse.quote(name)}/{urllib.parse.quote(TREE_RELATIVE_PATH.replace(os.sep, '/'))}"
         frames_html.append(
