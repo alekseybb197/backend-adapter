@@ -232,12 +232,12 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
         if refresh.get("ok"):
             base = (
                 f'<span style="color:#1a7f37">Список моделей обновлён '
-                f'в {html.escape(checked_at or "")} ({count} моделей).</span>'
+                f"в {html.escape(checked_at or '')} ({count} моделей).</span>"
             )
         else:
             base = (
                 f'<span style="color:#c0392b">Не удалось обновить список моделей '
-                f'в {html.escape(checked_at or "")} — показан прежний список '
+                f"в {html.escape(checked_at or '')} — показан прежний список "
                 f"({count} моделей).</span>"
             )
         if errors:

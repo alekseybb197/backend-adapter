@@ -435,7 +435,9 @@ def refresh_models(timeout: float | None = None) -> dict:
             if mid:
                 available[mid] = cm
         _AVAILABLE_MODELS = available
-        print(f"[REFRESH] Reloaded {len(available)} models from {BACKEND_BASE.rstrip('/')}/v1/models")
+        print(
+            f"[REFRESH] Reloaded {len(available)} models from {BACKEND_BASE.rstrip('/')}/v1/models"
+        )
         return {"ok": True, "count": len(available), "errors": {}}
 
     # multi-backend: опрашиваем каждый бэкенд, ошибки копим по имени.
