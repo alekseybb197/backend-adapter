@@ -3,14 +3,13 @@
 import hashlib
 import json
 import logging
-import os
 import re
-from collections import OrderedDict
 
 logger = logging.getLogger("artifact_tree")
 
 try:
     import yaml
+
     YAML_AVAILABLE = True
 
     def _yaml_str_representer(dumper, data):
@@ -26,7 +25,7 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
-PART_RE = re.compile(r'^(?P<session>[0-9a-f]+)-(?P<id>\d+)-(?P<type>openai_body|fetch_raw)\.json$')
+PART_RE = re.compile(r"^(?P<session>[0-9a-f]+)-(?P<id>\d+)-(?P<type>openai_body|fetch_raw)\.json$")
 
 # Волатильные вставки, которые меняются от хода к ходу без изменения
 # содержательного смысла артефакта (см. докстринг выше про
@@ -36,14 +35,14 @@ PART_RE = re.compile(r'^(?P<session>[0-9a-f]+)-(?P<id>\d+)-(?P<type>openai_body|
 # Список осознанно небольшой и явный: расширяйте по мере обнаружения новых
 # похожих случаев, не пытайтесь угадать все волатильные паттерны заранее.
 VOLATILITY_PATTERNS = [
-    re.compile(r'<total_tokens>\d+ tokens left</total_tokens>\n?'),
+    re.compile(r"<total_tokens>\d+ tokens left</total_tokens>\n?"),
 ]
 
 
 def normalize_for_dedup(text: str) -> str:
     normalized = text
     for pat in VOLATILITY_PATTERNS:
-        normalized = pat.sub('', normalized)
+        normalized = pat.sub("", normalized)
     return normalized.rstrip()
 
 
@@ -66,14 +65,19 @@ def strip_trailing_line_whitespace(text: str) -> str:
 # ==================== ЦВЕТА ====================
 
 DOMAIN_COLOR = {
-    "system": "#FFF3CD", "user": "#D1ECF1", "tool_result": "#D4EDDA",
-    "toolcall": "#E0CFFC", "reasoning": "#F8D7DA", "response": "#D6D8DB",
+    "system": "#FFF3CD",
+    "user": "#D1ECF1",
+    "tool_result": "#D4EDDA",
+    "toolcall": "#E0CFFC",
+    "reasoning": "#F8D7DA",
+    "response": "#D6D8DB",
     "other": "#FFFFFF",
 }
 KIND_COLOR = {"agent_turn": "#CFE2FF", "structured_output": "#FFE5B4"}
 
 
 # ==================== ИЗВЛЕЧЕНИЕ ТЕКСТА ИЗ СООБЩЕНИЙ ====================
+
 
 def extract_message_text(content) -> str:
     """Извлекает текстовое содержание из content-поля сообщения.
@@ -117,5 +121,6 @@ def tool_call_text(tc: dict) -> str:
         args_canonical = json.dumps(json.loads(args_raw), ensure_ascii=False, sort_keys=True)
     except (json.JSONDecodeError, TypeError):
         args_canonical = args_raw  # не смогли распарсить — используем как есть
-    return json.dumps({"name": func.get("name"), "arguments": args_canonical},
-                       ensure_ascii=False, sort_keys=True)
+    return json.dumps(
+        {"name": func.get("name"), "arguments": args_canonical}, ensure_ascii=False, sort_keys=True
+    )

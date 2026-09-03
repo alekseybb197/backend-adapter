@@ -37,6 +37,7 @@ ADAPTER_BACKEND_KEY для одного, либо ADAPTER_BACKEND_CONFIG для
 Чистая логика (snapshot, проба) вынесена в отдельные функции, чтобы её
 можно было тестировать без HTTP-сервера.
 """
+
 import html
 import json
 import logging
@@ -44,8 +45,7 @@ import os
 import time
 import urllib.request
 
-from . import config
-from . import webserver
+from . import config, webserver
 
 logger = logging.getLogger("webui_status")
 
@@ -84,13 +84,18 @@ def _collect_endpoints() -> list[dict]:
     if config._BACKENDS:
         # multi-backend: явный список бэкендов из YAML, загружен адаптером
         for b in config._BACKENDS:
-            endpoints.append({
-                "name": b["name"],
-                "base": b["base"],
-                "key": b["key"],
-                "models": sorted(mid for mid, (bname, _) in
-                                 config._MODEL_TO_BACKEND.items() if bname == b["name"]),
-            })
+            endpoints.append(
+                {
+                    "name": b["name"],
+                    "base": b["base"],
+                    "key": b["key"],
+                    "models": sorted(
+                        mid
+                        for mid, (bname, _) in config._MODEL_TO_BACKEND.items()
+                        if bname == b["name"]
+                    ),
+                }
+            )
         return endpoints
 
     if not config._BACKEND_LEGACY:
@@ -103,19 +108,22 @@ def _collect_endpoints() -> list[dict]:
         if cfg_path and os.path.isfile(cfg_path):
             blocks = config._parse_backend_yaml(cfg_path)
             for b in blocks or []:
-                endpoints.append({"name": b["name"], "base": b["base"],
-                                  "key": b["key"], "models": []})
+                endpoints.append(
+                    {"name": b["name"], "base": b["base"], "key": b["key"], "models": []}
+                )
         return endpoints
 
     # legacy single-backend: бэкенд есть только если env-переменная задана
     # реально (иначе BACKEND_BASE — дефолт config.py, показывать нечего)
     if os.environ.get("ADAPTER_BACKEND_BASE"):
-        endpoints.append({
-            "name": "legacy",
-            "base": config.BACKEND_BASE,
-            "key": config.BACKEND_KEY,
-            "models": sorted(config._AVAILABLE_MODELS.keys()),
-        })
+        endpoints.append(
+            {
+                "name": "legacy",
+                "base": config.BACKEND_BASE,
+                "key": config.BACKEND_KEY,
+                "models": sorted(config._AVAILABLE_MODELS.keys()),
+            }
+        )
     return endpoints
 
 
@@ -145,11 +153,13 @@ def _config_snapshot() -> dict:
 
     note = None
     if not endpoints:
-        note = ("Данные адаптера недоступны — запущен standalone-режим (viewer вне процесса "
-                "адаптера). Живые данные появятся после запуска внутри адаптера "
-                "(ADAPTER_WEBUI_ENABLE=1), либо задайте env-переменные бэкенда "
-                "(ADAPTER_BACKEND_BASE/ADAPTER_BACKEND_KEY или ADAPTER_BACKEND_CONFIG) "
-                "и перезапустите сервер.")
+        note = (
+            "Данные адаптера недоступны — запущен standalone-режим (viewer вне процесса "
+            "адаптера). Живые данные появятся после запуска внутри адаптера "
+            "(ADAPTER_WEBUI_ENABLE=1), либо задайте env-переменные бэкенда "
+            "(ADAPTER_BACKEND_BASE/ADAPTER_BACKEND_KEY или ADAPTER_BACKEND_CONFIG) "
+            "и перезапустите сервер."
+        )
     return {"mode": mode, "endpoints": endpoints, "note": note}
 
 
@@ -165,9 +175,11 @@ def _probe_live(base: str, key: str, timeout: float = PROBE_TIMEOUT):
     url = base.rstrip("/") + "/v1/models"
     req = urllib.request.Request(
         url,
-        headers={"Authorization": f"Bearer {key}",
-                 "Content-Type": "application/json",
-                 "Connection": "keep-alive"},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Connection": "keep-alive",
+        },
         method="GET",
     )
     try:
@@ -217,17 +229,21 @@ def _render_status_page(context, live_results=None, checked_at=None) -> bytes:
             if ok:
                 status = "ok"
                 models = sorted(m.get("id", "") for m in payload)
-                status_cell = f'<span style="color:#1a7f37">ok</span>'
+                status_cell = '<span style="color:#1a7f37">ok</span>'
             else:
                 status = "ошибка"
                 models = []
-                status_cell = (f'<span style="color:#c0392b">недоступен</span> '
-                               f'<span style="color:#999">({html.escape(str(payload))})</span>')
+                status_cell = (
+                    f'<span style="color:#c0392b">недоступен</span> '
+                    f'<span style="color:#999">({html.escape(str(payload))})</span>'
+                )
             models_cell = _models_html(models, status)
         else:
-            status_cell = (f'<span style="color:#1a7f37">ok</span>'
-                           if ep["status"] == "ok" else
-                           f'<span style="color:#b8860b">{html.escape(ep["status"])}</span>')
+            status_cell = (
+                '<span style="color:#1a7f37">ok</span>'
+                if ep["status"] == "ok"
+                else f'<span style="color:#b8860b">{html.escape(ep["status"])}</span>'
+            )
             models_cell = _models_html(ep["models"], ep["status"])
 
         rows.append(f"""
@@ -243,15 +259,19 @@ def _render_status_page(context, live_results=None, checked_at=None) -> bytes:
       <tr><td colspan="4" style="color:#888">нет данных (см. примечание ниже)</td></tr>""")
 
     if live_results is not None:
-        footer = (f'<p style="color:#555">Живая проверка выполнена в '
-                  f'{html.escape(checked_at or "")}.</p>')
+        footer = (
+            f'<p style="color:#555">Живая проверка выполнена в {html.escape(checked_at or "")}.</p>'
+        )
     else:
-        footer = ('<p style="color:#888">Показано состояние на старте адаптера. '
-                  'Кнопка выполняет живую проверку каждого эндпойнта '
-                  '(GET /v1/models, таймаут 5 с).</p>')
+        footer = (
+            '<p style="color:#888">Показано состояние на старте адаптера. '
+            "Кнопка выполняет живую проверку каждого эндпойнта "
+            "(GET /v1/models, таймаут 5 с).</p>"
+        )
 
-    note_html = (f'<p style="color:#b8860b">{html.escape(snapshot["note"])}</p>'
-                 if snapshot["note"] else "")
+    note_html = (
+        f'<p style="color:#b8860b">{html.escape(snapshot["note"])}</p>' if snapshot["note"] else ""
+    )
 
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
@@ -274,7 +294,7 @@ def _render_status_page(context, live_results=None, checked_at=None) -> bytes:
 {note_html}
 <table>
   <tr><th>Эндпойнт</th><th>Base URL</th><th>Статус</th><th>Модели</th></tr>
-  {''.join(rows)}
+  {"".join(rows)}
 </table>
 {footer}
 <form method="POST" action="/" style="margin-top:12px">
@@ -306,8 +326,7 @@ class StatusEndpoint(webserver.Endpoint):
         if remainder:
             handler.send_error(404, "Not found")
             return
-        handler._write(200, "text/html; charset=utf-8",
-                       _render_status_page(self.context))
+        handler._write(200, "text/html; charset=utf-8", _render_status_page(self.context))
 
     def POST(self, handler, remainder: str):
         # Тело формы не читаем — кнопка одна, действий нет.
@@ -316,9 +335,11 @@ class StatusEndpoint(webserver.Endpoint):
             ok, payload = _probe_live(ep["base"], ep["key"])
             results[ep["base"]] = (ok, payload)
         checked_at = time.strftime("%H:%M:%S")
-        handler._write(200, "text/html; charset=utf-8",
-                       _render_status_page(self.context, live_results=results,
-                                           checked_at=checked_at))
+        handler._write(
+            200,
+            "text/html; charset=utf-8",
+            _render_status_page(self.context, live_results=results, checked_at=checked_at),
+        )
 
 
 __all__ = [

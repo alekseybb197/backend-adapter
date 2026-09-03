@@ -1,17 +1,14 @@
 """artifact_tree_registry — класс ArtifactRegistry для хранения артефактов."""
 
-import logging
 import os
 
 from .artifact_tree_common import (
     YAML_AVAILABLE,
+    logger,
     normalize_for_dedup,
     sha12,
     strip_trailing_line_whitespace,
-    logger,
 )
-
-logger = logging.getLogger("artifact_tree")
 
 
 class ArtifactRegistry:
@@ -59,16 +56,25 @@ class ArtifactRegistry:
                     "content": entry["text"],
                 }
                 import yaml
+
                 with open(path, "w", encoding="utf-8") as f:
-                    yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False,
-                                   default_flow_style=False, width=100000)
+                    yaml.safe_dump(
+                        data,
+                        f,
+                        allow_unicode=True,
+                        sort_keys=False,
+                        default_flow_style=False,
+                        width=100000,
+                    )
             else:
                 path = os.path.join(out_dir, f"{entry['name']}.txt")
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(f"# domain: {entry['domain']}\n")
                     f.write(f"# first_seen_part_id: {entry['first_part_id']}\n")
                     f.write(f"# sha256[:12] (raw): {sha12(entry['text'])}\n")
-                    f.write(f"# sha256[:12] (normalized, use for dedup identity): "
-                            f"{sha12(normalize_for_dedup(entry['text']))}\n")
+                    f.write(
+                        f"# sha256[:12] (normalized, use for dedup identity): "
+                        f"{sha12(normalize_for_dedup(entry['text']))}\n"
+                    )
                     f.write("# ---\n")
                     f.write(entry["text"])

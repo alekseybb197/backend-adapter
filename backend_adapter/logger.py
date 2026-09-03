@@ -3,11 +3,12 @@
 Calls config redaction, writes to console and/or session file (or single
 file) depending on ADAPTER_DEBUG_LOGFILE setting.
 """
+
 import time
 
+from . import session_log
 from .config import ADAPTER_DEBUG, ADAPTER_SENSITIVE_LOGGING_ENABLE
 from .redact import redact
-from . import session_log
 
 
 def _d(msg: str) -> None:
@@ -22,10 +23,7 @@ def _d(msg: str) -> None:
     заголовки и ключи выводятся в открытом виде. По умолчанию санитайзер
     активен, секреты маскируются."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    if ADAPTER_SENSITIVE_LOGGING_ENABLE:
-        line = f"[{ts}] {msg}"
-    else:
-        line = f"[{ts}] {redact(msg)}"
+    line = f"[{ts}] {msg}" if ADAPTER_SENSITIVE_LOGGING_ENABLE else f"[{ts}] {redact(msg)}"
     if ADAPTER_DEBUG:
         print(line)
     # Писать в сессионный файл?

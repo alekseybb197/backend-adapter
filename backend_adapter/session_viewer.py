@@ -53,14 +53,14 @@ watcher'а на inotify/FSEvents и без внешних зависимосте
 reload было бы разрушительно; вместо этого — просто обновите страницу
 браузера, когда захотите увидеть актуальное состояние.
 """
+
 import html
 import logging
 import os
 import shutil
 import urllib.parse
 
-from . import artifact_tree
-from . import webserver
+from . import artifact_tree, webserver
 
 SESSION_SUFFIX = ".parts"
 TREE_RELATIVE_PATH = os.path.join("artefacts", "tree.html")
@@ -113,7 +113,7 @@ def find_or_generate_sessions(root_dir: str, verbose: bool = False):
 
     Удаление сессии обрабатывается САМО СОБОЙ — функция каждый раз заново
     делает os.listdir по факту, ничего не кэширует между вызовами."""
-    sessions = []
+    sessions: list[tuple[str, str]] = []
     if not os.path.isdir(root_dir):
         return sessions
     for entry in sorted(os.listdir(root_dir)):
@@ -127,7 +127,9 @@ def find_or_generate_sessions(root_dir: str, verbose: bool = False):
 
         if not exists or stale:
             if stale:
-                logger.info(f"[{entry}] tree.html устарел (появились новые part-файлы) — перегенерирую...")
+                logger.info(
+                    f"[{entry}] tree.html устарел (появились новые part-файлы) — перегенерирую..."
+                )
                 shutil.rmtree(os.path.join(full, ARTEFACTS_DIRNAME), ignore_errors=True)
             else:
                 logger.info(f"[{entry}] tree.html не найден — генерирую...")
@@ -177,12 +179,14 @@ function showTab(id, btn) {{
 
 def render_shell(sessions, root_dir):
     if not sessions:
-        body = (f'<div id="empty">Не найдено ни одной директории <code>*{SESSION_SUFFIX}</code> в '
-                 f'<code>{html.escape(root_dir)}</code>.'
-                 f'<br><br>Как только рядом появится папка <code>session-XXXX{SESSION_SUFFIX}</code> с дампами '
-                 f'адаптера — просто обновите эту страницу: если в ней ещё нет готового '
-                 f'<code>{TREE_RELATIVE_PATH.replace(os.sep, "/")}</code>, он будет сгенерирован автоматически. '
-                 f'Перезапускать сервер не нужно.</div>')
+        body = (
+            f'<div id="empty">Не найдено ни одной директории <code>*{SESSION_SUFFIX}</code> в '
+            f"<code>{html.escape(root_dir)}</code>."
+            f"<br><br>Как только рядом появится папка <code>session-XXXX{SESSION_SUFFIX}</code> с дампами "
+            f"адаптера — просто обновите эту страницу: если в ней ещё нет готового "
+            f"<code>{TREE_RELATIVE_PATH.replace(os.sep, '/')}</code>, он будет сгенерирован автоматически. "
+            f"Перезапускать сервер не нужно.</div>"
+        )
         return SHELL_TEMPLATE.format(body=body)
 
     tabs_html = []
@@ -192,7 +196,7 @@ def render_shell(sessions, root_dir):
         # ".parts" в подписи вкладки — чисто техническое расширение имени
         # директории, самостоятельного смысла не несёт. В URL и во всех
         # словарях-поисках имя сессии остаётся полным.
-        display_name = name[:-len(SESSION_SUFFIX)] if name.endswith(SESSION_SUFFIX) else name
+        display_name = name[: -len(SESSION_SUFFIX)] if name.endswith(SESSION_SUFFIX) else name
         active = " active" if i == 0 else ""
         display_style = "block" if i == 0 else "none"
         tabs_html.append(
@@ -219,8 +223,7 @@ class SessionEndpoint(webserver.Endpoint):
         self.context = context
 
     def GET(self, handler, remainder: str):
-        sessions = find_or_generate_sessions(self.context.root_dir,
-                                             verbose=self.context.verbose)
+        sessions = find_or_generate_sessions(self.context.root_dir, verbose=self.context.verbose)
         if not remainder:
             # "/session" — страница с вкладками всех сессий
             body = render_shell(sessions, self.context.root_dir)

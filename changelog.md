@@ -1,8 +1,39 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
-## v0.7.1 (WIP — накопление в feature/v0.7.1, версия не сдвигается)
+## v0.7.1 (консольный entry point, CI/PR-каркас, единая конфигурация тулинга, 2026-09-02)
+
+### 2026-09-02 v0.7.1: консольный entry point, CI/PR-каркас, единая конфигурация тулинга
+**Проблема:** движок CI/PR-разработки отсутствовал: без автоматической
+проверки регрессии (ruff/mypy/pytest в CI), без конвенции описания PR
+(CONTRIBUTING.md), без установки из PyPI (консольный скрипт не работал:
+entry point в pyproject.toml ссылался на несуществующий
+`backend_adapter.cli:main`).
+
+**Решение:** добавлен каркас совместной разработки, единая конфигурация
+тулинга в pyproject.toml и рабочий entry point:
+
+| Файл | Роль |
+|---|---|
+| `pyproject.toml` | Пакетная метадата + конфигурация ruff (lint-правила, per-file-ignores), mypy (НЕ-strict: репозиторий исторически не типизирован, конфиг даёт базовую проверку типов без шума от legacy-кода) и pytest. |
+| `.github/workflows/ci.yml` | Четыре job: lint-and-typecheck (ruff check/format + mypy), test (pytest+cov, матрица Python 3.10–3.13), install-smoke-test (установка `pip install -e .`, проверка entry point), webui-smoke (standalone `python -m backend_adapter.webserver`, проба `/`, `/session`, 404). |
+| `.github/PULL_REQUEST_TEMPLATE.md` | Шаблон описания PR: контекст/проблема, решение, тесты, проверка вручную. |
+| `CONTRIBUTING.md` | Конвенции для контрибьюторов: Python 3.10+, venv, ruff/mypy/pytest, ветки `feature/*` от `main`, автор коммита — человек. |
+| `backend_adapter/cli.py` | Новый консольный entry point: runpy-трамплин, исполняющий `backend-adapter.py` как `__main__` (имя с дефисом не импортируется, файл не попадает в wheel; версия остаётся в одном месте). |
+
+**Изменения:** pyproject.toml, .github/workflows/ci.yml,
+.github/PULL_REQUEST_TEMPLATE.md, CONTRIBUTING.md (новые),
+backend_adapter/cli.py (новый), requirements-dev.txt
+(добавлены pytest-cov/mypy/ruff — набор инструментов, который гоняет CI),
+backend-adapter.py
+(версия 0.7.0 → 0.7.1), backend_adapter/* (мелкие правки под ruff:
+logger.py — SIM108, server.py — SIM102/SIM105, session_log.py — SIM105,
+webserver.py — SIM102/SIM105/UP032, artifact_tree_html.py — F811/N806,
+artifact_tree_registry.py — F811, плюс аннотации в artifact_tree_parse.py,
+artifact_tree_turnbuilder.py, session_viewer.py), docs/*, README.md,
+changelog.md.
 
 ### 2026-09-02 WEBUI: общее ядро веб-сервера, эндпойнты /session и / (статус)
+
 **Проблема:** `session_viewer.py` совмещал CLI (main/argparse), создание
 сервера, HTTP-обработчик и рендеры в одном растущем файле — добавление
 нового эндпойнта требовало правки этого файла, а корень сервера умел

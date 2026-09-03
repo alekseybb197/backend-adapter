@@ -3,12 +3,13 @@
 Includes pure conversion functions and the traced OpenAI->Anthropic
 response converter (which depends on tracer + skill packages).
 """
+
 import json
 import re
 
-from .tracer import _trace, _register_tool_use
+from .config import ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, _cap
 from .skill import detect_skill
-from .config import _cap, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, ADAPTER_TRACE_REASONING_MAX_CHARS
+from .tracer import _register_tool_use, _trace
 
 
 def extract_text(content):
@@ -30,14 +31,16 @@ def convert_tools_anthropic_to_openai(tools):
     """Anthropic tool -> OpenAI tool."""
     openai_tools = []
     for tool in tools:
-        openai_tools.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {})
+        openai_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {}),
+                },
             }
-        })
+        )
     return openai_tools
 
 
@@ -70,11 +73,13 @@ def extract_tool_results(messages):
             continue
         for block in content:
             if block.get("type") == "tool_result":
-                results.append({
-                    "tool_use_id": block.get("tool_use_id", ""),
-                    "content": extract_text(block.get("content")),
-                    "is_error": bool(block.get("is_error", False)),
-                })
+                results.append(
+                    {
+                        "tool_use_id": block.get("tool_use_id", ""),
+                        "content": extract_text(block.get("content")),
+                        "is_error": bool(block.get("is_error", False)),
+                    }
+                )
     return results
 
 
@@ -105,11 +110,13 @@ def convert_messages_anthropic_to_openai(messages, system):
                 tool_results = []
                 for block in content:
                     if block.get("type") == "tool_result":
-                        tool_results.append({
-                            "role": "tool",
-                            "tool_call_id": block.get("tool_use_id", ""),
-                            "content": extract_text(block.get("content"))
-                        })
+                        tool_results.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": block.get("tool_use_id", ""),
+                                "content": extract_text(block.get("content")),
+                            }
+                        )
                     elif block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
                 if text_parts:
@@ -126,14 +133,16 @@ def convert_messages_anthropic_to_openai(messages, system):
                     if block.get("type") == "text":
                         text_parts.append(block.get("text", ""))
                     elif block.get("type") == "tool_use":
-                        tool_calls.append({
-                            "id": block.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": block.get("name", ""),
-                                "arguments": json.dumps(block.get("input", {}))
+                        tool_calls.append(
+                            {
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": block.get("name", ""),
+                                    "arguments": json.dumps(block.get("input", {})),
+                                },
                             }
-                        })
+                        )
                 assistant_msg = {"role": "assistant"}
                 if text_parts:
                     assistant_msg["content"] = "\n".join(text_parts)
@@ -154,21 +163,27 @@ def convert_messages_anthropic_to_openai(messages, system):
 def parse_tool_calls_from_text(text):
     """Fallback: парсит <tool_call>...</tool_call> из текста (Qwen-формат)."""
     tool_calls = []
-    pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
+    pattern = r"<tool_call>\s*(\{.*?\})\s*</tool_call>"
     matches = re.findall(pattern, text, re.DOTALL)
     for match in matches:
         try:
             data = json.loads(match)
             name = data.get("name") or data.get("function", {}).get("name")
-            args = data.get("arguments") or data.get("function", {}).get("arguments") or data.get("parameters", {})
+            args = (
+                data.get("arguments")
+                or data.get("function", {}).get("arguments")
+                or data.get("parameters", {})
+            )
             if isinstance(args, str):
                 args = json.loads(args)
             if name:
-                tool_calls.append({
-                    "id": f"call_{abs(hash(match)) % 10000000000}",
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(args)}
-                })
+                tool_calls.append(
+                    {
+                        "id": f"call_{abs(hash(match)) % 10000000000}",
+                        "type": "function",
+                        "function": {"name": name, "arguments": json.dumps(args)},
+                    }
+                )
         except Exception:
             continue
 
@@ -180,11 +195,13 @@ def parse_tool_calls_from_text(text):
             if isinstance(args, str):
                 args = json.loads(args)
             if name:
-                tool_calls.append({
-                    "id": f"call_{abs(hash(text)) % 10000000000}",
-                    "type": "function",
-                    "function": {"name": name, "arguments": json.dumps(args)}
-                })
+                tool_calls.append(
+                    {
+                        "id": f"call_{abs(hash(text)) % 10000000000}",
+                        "type": "function",
+                        "function": {"name": name, "arguments": json.dumps(args)},
+                    }
+                )
         except Exception:
             pass
     return tool_calls
@@ -209,7 +226,9 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
         if parsed:
             used_text_fallback = True
             tool_calls = parsed
-            clean_text = re.sub(r'<tool_call>\s*\{.*?\}\s*</tool_call>', '', text, flags=re.DOTALL).strip()
+            clean_text = re.sub(
+                r"<tool_call>\s*\{.*?\}\s*</tool_call>", "", text, flags=re.DOTALL
+            ).strip()
             text = clean_text if clean_text else ""
 
     if used_text_fallback:
@@ -220,9 +239,13 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
         # скилла (обрезанный JSON, лишний текст рядом и т.п.). Это реальное
         # ветвление поведения адаптера с последствиями — поэтому у него
         # собственное событие, а не общий "harness_branch".
-        _trace(session_id, req_id, "tool_call_fallback",
-               parsed_count=len(tool_calls),
-               raw_text_len=len(text))
+        _trace(
+            session_id,
+            req_id,
+            "tool_call_fallback",
+            parsed_count=len(tool_calls),
+            raw_text_len=len(text),
+        )
 
     content = []
     if text and text.strip():
@@ -238,12 +261,9 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
                 input_data = {}
             name = func.get("name", "")
             tool_use_id = tc.get("id", "")
-            content.append({
-                "type": "tool_use",
-                "id": tool_use_id,
-                "name": name,
-                "input": input_data
-            })
+            content.append(
+                {"type": "tool_use", "id": tool_use_id, "name": name, "input": input_data}
+            )
             # Регистрируем, что ИМЕННО ЭТОТ запрос (req_id) породил данный
             # tool_use_id — это и есть узел "родитель" для последующей
             # причинной связи, когда где-то в будущем запросе придёт
@@ -256,19 +276,29 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
                 serialized = json.dumps(input_data, ensure_ascii=False, default=str)
                 if len(serialized) > ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
                     traced_input = _cap(serialized, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
-            tool_use_summaries.append({
-                "id": tool_use_id, "name": name, "skill": skill,
-                # Полные аргументы вызова, не только имя — без них нельзя
-                # отличить содержательно разные вызовы одного инструмента
-                # (см. пример с двумя разными "ls" из параллельных веток).
-                # Секреты вычищаются позже, при записи всей trace-строки
-                # (см. _trace -> redact(line)).
-                "input": traced_input,
-            })
+            tool_use_summaries.append(
+                {
+                    "id": tool_use_id,
+                    "name": name,
+                    "skill": skill,
+                    # Полные аргументы вызова, не только имя — без них нельзя
+                    # отличить содержательно разные вызовы одного инструмента
+                    # (см. пример с двумя разными "ls" из параллельных веток).
+                    # Секреты вычищаются позже, при записи всей trace-строки
+                    # (см. _trace -> redact(line)).
+                    "input": traced_input,
+                }
+            )
             if skill:
-                _trace(session_id, req_id, "skill_signal",
-                       tool_id=tool_use_id, tool_name=name,
-                       skill=skill, evidence=evidence[:200])
+                _trace(
+                    session_id,
+                    req_id,
+                    "skill_signal",
+                    tool_id=tool_use_id,
+                    tool_name=name,
+                    skill=skill,
+                    evidence=evidence[:200],
+                )
 
     if not content:
         content = [{"type": "text", "text": " "}]
@@ -284,13 +314,20 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
     # заводилось отдельное событие "harness_branch". Теперь это просто два
     # поля внутри response_content, где и так уже есть остальной результат
     # этого же ответа модели.
-    _trace(session_id, req_id, "response_content",
-           text_len=len(text), tool_uses=tool_use_summaries,
-           finish_reason_raw=finish_reason, stop_reason_mapped=stop_reason,
-           reasoning_present=bool(reasoning.strip()), reasoning_len=len(reasoning),
-           # Полный reasoning, а не reasoning[:500] — обрезка убивала как
-           # раз ту часть рассуждения, где объясняется выбор ветки/тула.
-           reasoning=_cap(reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS))
+    _trace(
+        session_id,
+        req_id,
+        "response_content",
+        text_len=len(text),
+        tool_uses=tool_use_summaries,
+        finish_reason_raw=finish_reason,
+        stop_reason_mapped=stop_reason,
+        reasoning_present=bool(reasoning.strip()),
+        reasoning_len=len(reasoning),
+        # Полный reasoning, а не reasoning[:500] — обрезка убивала как
+        # раз ту часть рассуждения, где объясняется выбор ветки/тула.
+        reasoning=_cap(reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS),
+    )
 
     return {
         "id": f"msg_{o.get('id', 'local')}",
@@ -300,7 +337,7 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
         "content": content,
         "usage": {
             "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0)
+            "output_tokens": usage.get("completion_tokens", 0),
         },
-        "stop_reason": stop_reason
+        "stop_reason": stop_reason,
     }

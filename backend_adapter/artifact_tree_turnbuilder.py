@@ -2,33 +2,33 @@
 
 import os
 
-from .artifact_tree_common import extract_message_text
 from .artifact_tree_parse import (
     classify_kind,
-    discover_parts,
+    compute_inline_labels,
     determine_fetch_raw_kind,
+    discover_parts,
     fetch_raw_has_tool_calls,
     load_json,
     process_fetch_raw,
     process_openai_body,
 )
-from .artifact_tree_parse import compute_inline_labels
 from .artifact_tree_registry import ArtifactRegistry
 
 # ==================== СВЯЗЫВАНИЕ openai_body <-> fetch_raw В ХОДЫ ====================
+
 
 def build_turns(parts_dir: str, registry: ArtifactRegistry):
     found = discover_parts(parts_dir)
 
     merged = sorted(
-        [("ob", pid, path) for pid, path in found["openai_body"]] +
-        [("fr", pid, path) for pid, path in found["fetch_raw"]],
-        key=lambda t: t[1]
+        [("ob", pid, path) for pid, path in found["openai_body"]]
+        + [("fr", pid, path) for pid, path in found["fetch_raw"]],
+        key=lambda t: t[1],
     )
 
-    resolution_edges = []  # п.5: [(toolcall_name, tool_result_name), ...]
-    ob_records = []   # {part_id, kind, input_names, raw_file}
-    fr_records = []   # {part_id, kind, reasoning_name, decision_names, raw_file}
+    resolution_edges: list[tuple[str, str]] = []  # п.5: [(toolcall_name, tool_result_name), ...]
+    ob_records = []  # {part_id, kind, input_names, raw_file}
+    fr_records = []  # {part_id, kind, reasoning_name, decision_names, raw_file}
     for etype, part_id, path in merged:
         data = load_json(path)
         # Имя ИСХОДНОГО part-файла (в .yaml, а не в .json — так же, как
@@ -40,7 +40,9 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
         if etype == "ob":
             kind = classify_kind(data)
             names = process_openai_body(data, str(part_id), registry, resolution_edges)
-            ob_records.append({"part_id": part_id, "kind": kind, "input_names": names, "raw_file": raw_file})
+            ob_records.append(
+                {"part_id": part_id, "kind": kind, "input_names": names, "raw_file": raw_file}
+            )
         else:
             kind = determine_fetch_raw_kind(data)
             # tool_calls в ответе — ТОЧНЫЙ, а не эвристический признак: раз
@@ -54,17 +56,25 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
             # и произошло на реальных данных).
             definite = fetch_raw_has_tool_calls(data)
             fr_out = process_fetch_raw(data, str(part_id), registry)
-            fr_records.append({"part_id": part_id, "kind": kind, "definite": definite, "raw_file": raw_file, **fr_out})
+            fr_records.append(
+                {
+                    "part_id": part_id,
+                    "kind": kind,
+                    "definite": definite,
+                    "raw_file": raw_file,
+                    **fr_out,
+                }
+            )
 
     # Жадное сопоставление: очередь непогашенных openai_body на каждый kind
-    pending = {"agent_turn": [], "structured_output": []}
+    pending: dict[str, list] = {"agent_turn": [], "structured_output": []}
     turns = []
     orphans = []
 
     all_events = sorted(
-        [("ob", r["part_id"], r) for r in ob_records] +
-        [("fr", r["part_id"], r) for r in fr_records],
-        key=lambda t: t[1]
+        [("ob", r["part_id"], r) for r in ob_records]
+        + [("fr", r["part_id"], r) for r in fr_records],
+        key=lambda t: t[1],
     )
 
     for etype, part_id, rec in all_events:
@@ -82,22 +92,26 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
             if rec["definite"]:
                 search_order = [kind]
             else:
-                search_order = [kind] + [k for k in ("agent_turn", "structured_output") if k != kind]
+                search_order = [kind] + [
+                    k for k in ("agent_turn", "structured_output") if k != kind
+                ]
             match_kind = next((k for k in search_order if pending[k]), None)
             if match_kind is None:
                 orphans.append(rec)
                 continue
             ob_rec = pending[match_kind].pop()  # LIFO — самый свежий
-            turns.append({
-                "ob_part_id": ob_rec["part_id"],
-                "fr_part_id": rec["part_id"],
-                "kind": match_kind,
-                "input_names": ob_rec["input_names"],
-                "reasoning_name": rec["reasoning_name"],
-                "decision_names": rec["decision_names"],
-                "ob_raw_file": ob_rec["raw_file"],
-                "fr_raw_file": rec["raw_file"],
-            })
+            turns.append(
+                {
+                    "ob_part_id": ob_rec["part_id"],
+                    "fr_part_id": rec["part_id"],
+                    "kind": match_kind,
+                    "input_names": ob_rec["input_names"],
+                    "reasoning_name": rec["reasoning_name"],
+                    "decision_names": rec["decision_names"],
+                    "ob_raw_file": ob_rec["raw_file"],
+                    "fr_raw_file": rec["raw_file"],
+                }
+            )
 
     turns.sort(key=lambda t: t["ob_part_id"])
 
@@ -132,19 +146,21 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
     # остальные (если есть) — вытеснены повторным запросом ВНУТРИ этого же
     # логического запроса (тот же эффект дублей, что мы уже находили).
     real_user_entries = sorted(
-        (int(e["first_part_id"]), e["name"]) for e in registry.by_hash.values()
+        (int(e["first_part_id"]), e["name"])
+        for e in registry.by_hash.values()
         if e["domain"] == "user" and e["name"] not in inline_labels
     )
     start_target = real_user_entries[0][1] if real_user_entries else None
 
     agent_turns = [t for t in turns if t["kind"] == "agent_turn"]
     final_text_turns = [
-        t for t in agent_turns
+        t
+        for t in agent_turns
         if any(n.startswith("response-") for n in t["decision_names"])
         and not any(n.startswith("toolcall-") for n in t["decision_names"])
     ]
 
-    request_answers = {}       # user_artifact_name -> response, который на него отвечает
+    request_answers = {}  # user_artifact_name -> response, который на него отвечает
     superseded_targets = []
     boundaries = [pid for pid, _ in real_user_entries] + [float("inf")]
     for i, (pid, uname) in enumerate(real_user_entries):
@@ -153,9 +169,13 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
         if not segment:
             continue  # запрос виден, но финального текстового ответа на него в окне дампов нет
         *earlier, last = segment
-        request_answers[uname] = next(n for n in last["decision_names"] if n.startswith("response-"))
+        request_answers[uname] = next(
+            n for n in last["decision_names"] if n.startswith("response-")
+        )
         for t in earlier:
-            superseded_targets.append(next(n for n in t["decision_names"] if n.startswith("response-")))
+            superseded_targets.append(
+                next(n for n in t["decision_names"] if n.startswith("response-"))
+            )
 
     # Finish — ответ на САМЫЙ ПОЗДНИЙ по part_id реальный запрос (последнее
     # слово в сессии). Остальные запросы получают свою собственную стрелку
@@ -184,5 +204,15 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
         if t["kind"] == "structured_output":
             title_targets += [n for n in t["decision_names"] if n.startswith("response-")]
 
-    return (turns, orphans, resolution_edges, start_target, inline_labels, finish_source,
-            superseded_targets, title_targets, request_answers, next_request_edges)
+    return (
+        turns,
+        orphans,
+        resolution_edges,
+        start_target,
+        inline_labels,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+    )

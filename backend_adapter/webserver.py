@@ -27,7 +27,9 @@ CLI (ручной запуск вне адаптера):
 Встроенный запуск — из backend-adapter.py при ADAPTER_WEBUI_ENABLE=1
 (daemon-поток процесса адаптера), через serve().
 """
+
 import argparse
+import contextlib
 import http.server
 import logging
 import os
@@ -117,11 +119,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     атрибутами перед запуском сервера (тот же приём, что Handler.root_dir
     в старом session_viewer: хэндлер пересоздаётся на каждый запрос,
     instance-атрибуты были бы недоступны)."""
+
     context: WebContext = None  # type: ignore[assignment]
     endpoints: list = []  # list[Endpoint] — инстанцированные эндпойнты
 
     def log_message(self, fmt, *args):
-        logger.debug("%s - %s" % (self.address_string(), fmt % args))
+        logger.debug(f"{self.address_string()} - {fmt % args}")
 
     # ---- сервис для эндпойнтов ----
 
@@ -163,10 +166,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise
         except Exception as e:
             logger.exception("[WEBUI] %s %s: ошибка обработки: %s", method, path, e)
-            try:
+            with contextlib.suppress(Exception):
                 self.send_error(500, "Internal Server Error")
-            except Exception:
-                pass
 
     def _match(self, path: str):
         """Самый длинный подходящий префикс среди endpoints.
@@ -186,9 +187,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if path == "/":
                     return ep, ""
                 continue
-            if path == prefix or path.startswith(prefix + "/"):
-                if len(prefix) > best_len:
-                    best, best_len = ep, len(prefix)
+            if (path == prefix or path.startswith(prefix + "/")) and len(prefix) > best_len:
+                best, best_len = ep, len(prefix)
         return (best, path[best_len:].lstrip("/")) if best else (None, "")
 
 
@@ -207,8 +207,9 @@ class QuietWebServer(http.server.ThreadingHTTPServer):
 # ==================== ЗАПУСК ====================
 
 
-def serve(root_dir: str, version: str, host: str = "127.0.0.1",
-          port: int = 8765, verbose: bool = False):
+def serve(
+    root_dir: str, version: str, host: str = "127.0.0.1", port: int = 8765, verbose: bool = False
+):
     """Поднять веб-сервер WEBUI в ДАННОМ процессе (не fork).
 
     Импортирует модули встроенных эндпойнтов (единственное место, где
@@ -246,8 +247,9 @@ def serve(root_dir: str, version: str, host: str = "127.0.0.1",
     logger.info(f"[WEBUI] Сервер запущен: http://{host}:{port}/  (Ctrl+C — остановить)")
     logger.info(f"[WEBUI] Корень: {root_dir}")
     logger.info(f"[WEBUI] Версия кода: {version}")
-    logger.info(f"[WEBUI] Эндпойнты: "
-                + ", ".join(sorted({f"{ep.prefix}" for ep in Handler.endpoints})))
+    logger.info(
+        "[WEBUI] Эндпойнты: " + ", ".join(sorted({f"{ep.prefix}" for ep in Handler.endpoints}))
+    )
     return httpd
 
 
@@ -260,7 +262,8 @@ def _detect_version() -> str:
     "unknown"."""
     try:
         script = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "..", "backend-adapter.py")
+            os.path.dirname(os.path.abspath(__file__)), "..", "backend-adapter.py"
+        )
         with open(script, encoding="utf-8") as f:
             head = f.read(4000)
         m = re.search(r'^__version__\s*=\s*"([^"]+)"', head, re.MULTILINE)
@@ -281,17 +284,24 @@ def main():
     эндпойнты регистрируются внутри serve(), так что из CLI видны те же
     страницы, что и внутри адаптера."""
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("root_dir", nargs="?", default=".",
-                    help="Корневая папка с *.parts сессиями (по умолчанию — текущая)")
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument(
+        "root_dir",
+        nargs="?",
+        default=".",
+        help="Корневая папка с *.parts сессиями (по умолчанию — текущая)",
+    )
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--host", default="127.0.0.1",
-                    help="По умолчанию только localhost — содержимое сессий (git log, "
-                         "файлы, reasoning) не должно случайно утечь в сеть")
+    ap.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="По умолчанию только localhost — содержимое сессий (git log, "
+        "файлы, reasoning) не должно случайно утечь в сеть",
+    )
     args = ap.parse_args()
 
-    httpd = serve(args.root_dir, _detect_version(), host=args.host,
-                  port=args.port, verbose=True)
+    httpd = serve(args.root_dir, _detect_version(), host=args.host, port=args.port, verbose=True)
     if httpd is None:
         sys.exit(1)
     try:
@@ -312,6 +322,7 @@ if __name__ == "__main__":
     # канонического модуля). Поэтому __main__ — только трамплин: делегирует
     # канонической копии, которая и содержит зарегистрированные эндпойнты.
     from backend_adapter.webserver import main as _main
+
     _main()
 
 __all__ = [

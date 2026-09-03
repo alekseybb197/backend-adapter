@@ -4,15 +4,14 @@ Per-session JSONL trace with monotonically increasing sequence numbers,
 and a bidirectional tool_use_id → req_id mapping for parent/child causality
 in parallel agent turns.
 """
+
 import json
 import threading
 import time
 from collections import OrderedDict
 
-from . import session_log
-from .config import _cap, ADAPTER_SENSITIVE_LOGGING_ENABLE
-from . import redact
-
+from . import redact, session_log
+from .config import ADAPTER_SENSITIVE_LOGGING_ENABLE
 
 _trace_lock = threading.Lock()
 _session_seq: dict[str, int] = {}  # session_id -> next seq number
@@ -42,7 +41,9 @@ def _next_seq(session_id: str) -> int:
 # храним per-session, с ограничением размера (на случай очень долгих
 # сессий) — вытесняем самые старые записи по FIFO.
 _TOOL_USE_INDEX_MAX_PER_SESSION = 2000
-_tool_use_producers: dict[str, OrderedDict[str, str]] = {}  # session_id -> OrderedDict(tool_use_id -> req_id)
+_tool_use_producers: dict[
+    str, OrderedDict[str, str]
+] = {}  # session_id -> OrderedDict(tool_use_id -> req_id)
 _tool_use_names: dict[str, dict[str, str]] = {}  # session_id -> dict(tool_use_id -> tool_name)
 
 

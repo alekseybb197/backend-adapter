@@ -3,25 +3,25 @@ backend probe, YAML parser, SSL context, utility functions.
 
 This is the heaviest module (root of the dependency DAG).
 """
-import os
-import ssl
-import re
-import urllib.request
-import urllib.error
+
 import json
+import os
+import re
+import ssl
 import sys
-from collections import OrderedDict, Counter
+import urllib.error
+import urllib.request
 
 # ==================== НАСТРОЙКИ ====================
-BACKEND_BASE      = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
-BACKEND_KEY       = os.environ.get("ADAPTER_BACKEND_KEY", "")
-PROXY_PORT        = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
-ADAPTER_DEBUG     = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
+BACKEND_BASE = os.environ.get("ADAPTER_BACKEND_BASE", "https://llm.service.example.com")
+BACKEND_KEY = os.environ.get("ADAPTER_BACKEND_KEY", "")
+PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
+ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
 ADAPTER_DEBUG_LOGFILE = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
 ADAPTER_TRACE_LOGFILE = os.environ.get("ADAPTER_TRACE_LOGFILE", "")
-ADAPTER_DETACH    = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
-ADAPTER_TIMEOUT   = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
-ADAPTER_RETRY     = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
+ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
+ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
+ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
 ADAPTER_SKILL_PATTERNS = os.environ.get("ADAPTER_SKILL_PATTERNS", "")
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
 # Логгирование результатов работы инструментов:
@@ -30,8 +30,18 @@ ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
 #   ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
 #   отключается обрезка (trim). Если тэг в списке — полный вывод без обрезки.
 #   Пример: BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT,TOOL_RESULT_ERROR,RESPONSE
-ADAPTER_DEBUG_TOOLS            = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in ("0", "false", "no", "")
-ADAPTER_DEBUG_TOOLS_ERROR      = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "1").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG_TOOLS = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+ADAPTER_DEBUG_TOOLS_ERROR = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 # ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
@@ -50,26 +60,38 @@ def _trim_limit(tag: str) -> int | None:
     if tag in _ADAPTER_DEBUG_TAGS_FULL_SET:
         return None
     return ADAPTER_DEBUG_TRIM
-ADAPTER_STRICT_MODELS   = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
+
+
+ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
 # ADAPTER_DEBUG_TAGS_OUT — логический флаг: включить per-session дампы
 # (.json и .yaml парой) для всех частей протокола обмена (список частей
 # фиксирован — ADAPTER_DEBUG_TAGS_OUT_ALL). Срабатывает только если
 # ADAPTER_DEBUG_LOGFILE указывает на директорию. Пусто / 0 / false — выкл.
-ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() not in ("0", "false", "no", "")
-# Полный фиксированный список частей протокола, для которых пишутся дампы.
-ADAPTER_DEBUG_TAGS_OUT_ALL = (
-    "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
+ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
 )
+# Полный фиксированный список частей протокола, для которых пишутся дампы.
+ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
 # Веб-интерфейс просмотра сессий (backend_adapter/session_viewer.py):
 #   ADAPTER_WEBUI_ENABLE=1 — поднять локальный веб-сервер на 127.0.0.1.
 #   Срабатывает только если ADAPTER_DEBUG_LOGFILE указывает на директорию
 #   (там лежат *.parts папки сессий). Порт — ADAPTER_WEBUI_PORT.
-ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "0").lower() not in ("0", "false", "no", "")
-ADAPTER_WEBUI_PORT   = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
+ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "0").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+ADAPTER_WEBUI_PORT = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
 # без вызова redact(), логируются полные токены, заголовки, ключи.
 # По умолчанию false — санитайзер активен, секреты маскируются.
-ADAPTER_SENSITIVE_LOGGING_ENABLE = os.environ.get("ADAPTER_SENSITIVE_LOGGING_ENABLE", "0").lower() in ("1", "true", "yes")
+ADAPTER_SENSITIVE_LOGGING_ENABLE = os.environ.get(
+    "ADAPTER_SENSITIVE_LOGGING_ENABLE", "0"
+).lower() in ("1", "true", "yes")
 # Управляющий флаг для двух режимов работы адаптера:
 #   1 (по умолчанию) — "потоковый" режим: если клиент (Claude Code) просит
 #     stream=true, адаптер честно пробрасывает это бэкенду и стримит SSE
@@ -81,7 +103,12 @@ ADAPTER_SENSITIVE_LOGGING_ENABLE = os.environ.get("ADAPTER_SENSITIVE_LOGGING_ENA
 #     рубильник — например, если конкретный backend плохо/нестандартно
 #     стримит SSE и надёжнее временно вернуться к нестриминговому пути,
 #     не откатывая сам файл адаптера.
-ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower() not in ("0", "false", "no", "")
+ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
 # БАГ 2026-08-27: в потоковом режиме адаптер НЕ просил backend прислать
 # usage в SSE (OpenAI-совместимый стриминг отдаёт usage только при явном
 # stream_options.include_usage=true) — из-за этого клиент (Claude Code)
@@ -90,7 +117,12 @@ ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower
 # Флаг-рубильник на случай backend'а, который не понимает stream_options
 # и падает на неизвестном поле (такое встречается у части OpenAI-совместимых
 # серверов старых версий) — тогда можно откатиться, не трогая сам файл.
-ADAPTER_STREAM_INCLUDE_USAGE = os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1").lower() not in ("0", "false", "no", "")
+ADAPTER_STREAM_INCLUDE_USAGE = os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
 # ===================================================
 
 # ==================== МАППИНГ МОДЕЛЕЙ (agent -> backend) ====================
@@ -100,7 +132,7 @@ ADAPTER_MODELS_MAPPING = os.environ.get("ADAPTER_MODELS_MAPPING", "")
 # ==================== MULTI-BACKEND CONFIG ====================
 ADAPTER_BACKEND_CONFIG = os.environ.get("ADAPTER_BACKEND_CONFIG", "")
 # True, если используется legacy-режим (один бэкенд через BACKEND_BASE / BACKEND_KEY).
-_BACKEND_LEGACY = (ADAPTER_BACKEND_CONFIG == "")
+_BACKEND_LEGACY = ADAPTER_BACKEND_CONFIG == ""
 
 # Глобальные структуры multi-backend.
 # _BACKENDS — список [{name, base, key}, …]
@@ -170,7 +202,7 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
         if stripped == "backend:" and current is None:
             continue
         # Новая запись в списке: "  - name: AAA"
-        m = re.match(r'^\s*-\s+name:\s*(.+)$', line)
+        m = re.match(r"^\s*-\s+name:\s*(.+)$", line)
         if m:
             if current is not None:
                 blocks.append(current)
@@ -178,7 +210,7 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
             continue
         # Продолжение текущей записи: "    base: ..." или "    key: ..."
         if current is not None:
-            m2 = re.match(r'^\s+(\w+):\s*(.+)$', line)
+            m2 = re.match(r"^\s+(\w+):\s*(.+)$", line)
             if m2:
                 key_name = m2.group(1)
                 if key_name in ("name", "base", "key"):
@@ -265,8 +297,7 @@ def _probe_models() -> list[dict]:
     models = _fetch_models(BACKEND_BASE, BACKEND_KEY)
     print(f"[INIT] Fetched {len(models)} models from backend {BACKEND_BASE.rstrip('/')}/v1/models")
     for m in models:
-        print(f"  model={m.get('id')}, object={m.get('object')}, "
-              f"owned_by={m.get('owned_by')}")
+        print(f"  model={m.get('id')}, object={m.get('object')}, owned_by={m.get('owned_by')}")
     return models
 
 
@@ -351,7 +382,7 @@ def _resolve_backend(model: str) -> tuple[dict, str]:
     for bname, bcfg in _BACKEND_BY_NAME.items():
         prefix = bname + "."
         if model.startswith(prefix):
-            actual = model[len(prefix):]
+            actual = model[len(prefix) :]
             return bcfg, actual
 
     # 3) Lookup по известному списку
@@ -363,7 +394,7 @@ def _resolve_backend(model: str) -> tuple[dict, str]:
         for bname in _BACKEND_BY_NAME:
             prefix = bname + "."
             if model.startswith(prefix):
-                actual = model[len(prefix):]
+                actual = model[len(prefix) :]
                 break
         return entry[1], actual
 

@@ -6,7 +6,6 @@ import re
 
 from .artifact_tree_common import (
     PART_RE,
-    YAML_AVAILABLE,
     extract_message_text,
     tool_call_text,
 )
@@ -14,9 +13,10 @@ from .artifact_tree_registry import ArtifactRegistry
 
 # ==================== ЗАГРУЗКА ЧАСТЕЙ ====================
 
+
 def discover_parts(parts_dir: str):
     """Возвращает {'openai_body': [(part_id:int, path)], 'fetch_raw': [...]}"""
-    found = {"openai_body": [], "fetch_raw": []}
+    found: dict[str, list] = {"openai_body": [], "fetch_raw": []}
     for fname in os.listdir(parts_dir):
         m = PART_RE.match(fname)
         if not m:
@@ -33,6 +33,7 @@ def load_json(path: str) -> dict:
 
 
 # ==================== ИЗВЛЕЧЕНИЕ АРТЕФАКТОВ ИЗ ОДНОЙ ЧАСТИ ====================
+
 
 def process_openai_body(ob: dict, part_id: str, registry: ArtifactRegistry, resolution_edges: list):
     """Регистрирует артефакты входа этого запроса, возвращает упорядоченный
@@ -78,7 +79,9 @@ def process_openai_body(ob: dict, part_id: str, registry: ArtifactRegistry, reso
             for tc in msg.get("tool_calls", []) or []:
                 text = tool_call_text(tc)
                 name = registry.name_for(text) or registry.register("toolcall", text, part_id)
-                registry.link_protocol_id(tc.get("id"), name)  # на случай, если это первое появление в видимом окне
+                registry.link_protocol_id(
+                    tc.get("id"), name
+                )  # на случай, если это первое появление в видимом окне
                 names.append(name)
             # ВАЖНО: текст регистрируется НЕЗАВИСИМО от наличия tool_calls —
             # предыдущая версия теряла текст-преамбулу целиком, если в том
@@ -87,7 +90,9 @@ def process_openai_body(ob: dict, part_id: str, registry: ArtifactRegistry, reso
             # такой текст без следа, ни как toolcall, ни как response).
             content_text = extract_message_text(msg.get("content"))
             if content_text.strip():
-                name = registry.name_for(content_text) or registry.register("response", content_text, part_id)
+                name = registry.name_for(content_text) or registry.register(
+                    "response", content_text, part_id
+                )
                 names.append(name)
         else:
             text = extract_message_text(msg.get("content"))
@@ -113,7 +118,9 @@ def process_fetch_raw(fr: dict, part_id: str, registry: ArtifactRegistry):
     decision_names = []
     for tc in msg.get("tool_calls", []) or []:
         name = registry.register("toolcall", tool_call_text(tc), part_id)
-        registry.link_protocol_id(tc.get("id"), name)  # п.5: запоминаем id для будущей связки с tool_result
+        registry.link_protocol_id(
+            tc.get("id"), name
+        )  # п.5: запоминаем id для будущей связки с tool_result
         decision_names.append(name)
     content = msg.get("content") or ""
     if content.strip():
@@ -123,6 +130,7 @@ def process_fetch_raw(fr: dict, part_id: str, registry: ArtifactRegistry):
 
 
 # ==================== КЛАССИФИКАЦИЯ ====================
+
 
 def classify_kind(ob: dict) -> str:
     return "agent_turn" if ob.get("tools") else "structured_output"
@@ -160,7 +168,7 @@ def looks_like_structured_output(content: str) -> bool:
         if start == -1 or end == -1 or end <= start:
             return False
         try:
-            obj = json.loads(text[start:end + 1])
+            obj = json.loads(text[start : end + 1])
         except (json.JSONDecodeError, TypeError):
             return False
     if isinstance(obj, dict):

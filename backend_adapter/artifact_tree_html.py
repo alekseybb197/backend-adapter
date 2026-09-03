@@ -1,13 +1,13 @@
 """artifact_tree_html — интерактивная HTML-визуализация дерева артефактов."""
 
 import json
-import logging
 import shlex
 import subprocess
 
 from .artifact_tree_common import DOMAIN_COLOR, KIND_COLOR, YAML_AVAILABLE, logger
 
-logger = logging.getLogger("artifact_tree")
+# logger берётся из artifact_tree_common (общий для пакета), чтобы фильтры
+# и уровень логирования настраивались в одном месте.
 
 # ==================== HTML-ВИЗУАЛИЗАЦИЯ ====================
 #
@@ -55,16 +55,27 @@ def artifact_filename(name: str) -> str:
     return f"{name}.{ext}"
 
 
-def build_graph_model(turns, orphans, resolution_edges, start_target, inline_labels,
-                       finish_source, superseded_targets, title_targets,
-                       request_answers, next_request_edges, registry):
+def build_graph_model(
+    turns,
+    orphans,
+    resolution_edges,
+    start_target,
+    inline_labels,
+    finish_source,
+    superseded_targets,
+    title_targets,
+    request_answers,
+    next_request_edges,
+    registry,
+):
     """Строит универсальную модель графа (узлы + рёбра + детали для popup)
     для HTML-визуализации. Узлы КОРОТКИЕ (просто имя) — весь состав хода,
     полный текст артефакта и т.п. лежит в node["detail"] и показывается по
     клику, а не впихивается в сам узел, как в PlantUML/Graphviz-версии."""
     from collections import OrderedDict
-    nodes = OrderedDict()   # id -> {"label", "category", "detail"}
-    edges = []              # {"source", "target", "type", "label"}
+
+    nodes = OrderedDict()  # id -> {"label", "category", "detail"}
+    edges = []  # {"source", "target", "type", "label"}
 
     def add_node(node_id, label, category, detail):
         if node_id not in nodes:
@@ -92,8 +103,16 @@ def build_graph_model(turns, orphans, resolution_edges, start_target, inline_lab
         add_node(name, name, f"artifact:{domain}", artifact_detail(name))
 
     if start_target:
-        add_node("Start", "Start", "anchor",
-                  {"title": "Start", "meta": "", "text": "Начало сессии — самый ранний по part_id реальный запрос пользователя."})
+        add_node(
+            "Start",
+            "Start",
+            "anchor",
+            {
+                "title": "Start",
+                "meta": "",
+                "text": "Начало сессии — самый ранний по part_id реальный запрос пользователя.",
+            },
+        )
         add_artifact_node(start_target)
         add_edge("Start", start_target, "start", "")
 
@@ -106,26 +125,37 @@ def build_graph_model(turns, orphans, resolution_edges, start_target, inline_lab
         # ОТДЕЛЬНОЙ гиперссылкой на её файл (см. showDetail() в JS), а не
         # просто перечислить имена в <pre>.
         composition = [
-            {"label": (f"{n}:{inline_labels[n]}" if n in inline_labels else n), "file": artifact_filename(n)}
+            {
+                "label": (f"{n}:{inline_labels[n]}" if n in inline_labels else n),
+                "file": artifact_filename(n),
+            }
             for n in t["input_names"]
         ]
-        reasoning = ({"label": t["reasoning_name"], "file": artifact_filename(t["reasoning_name"])}
-                     if t["reasoning_name"] else None)
-        add_node(turn_id, f"Ход {t['ob_part_id']}", f"turn:{t['kind']}", {
-            "title": f"Ход {t['ob_part_id']} ({t['kind']})",
-            # Гиперссылки на ИСХОДНЫЕ (не извлечённые) part-файлы этого
-            # хода — тот же принцип, что и у composition/reasoning ниже,
-            # только тут ссылка ведёт не на извлечённый артефакт, а на
-            # полный сырой дамп запроса/ответа целиком (см. _stage_raw_file
-            # в generate()). file=None, если файл не нашёлся вообще ни в
-            # .yaml, ни в .json — тогда просто текст без ссылки.
-            "meta_links": [
-                {"label": f"openai_body {t['ob_part_id']}", "file": t["ob_raw_file"]},
-                {"label": f"fetch_raw {t['fr_part_id']}", "file": t["fr_raw_file"]},
-            ],
-            "composition": composition,
-            "reasoning": reasoning,
-        })
+        reasoning = (
+            {"label": t["reasoning_name"], "file": artifact_filename(t["reasoning_name"])}
+            if t["reasoning_name"]
+            else None
+        )
+        add_node(
+            turn_id,
+            f"Ход {t['ob_part_id']}",
+            f"turn:{t['kind']}",
+            {
+                "title": f"Ход {t['ob_part_id']} ({t['kind']})",
+                # Гиперссылки на ИСХОДНЫЕ (не извлечённые) part-файлы этого
+                # хода — тот же принцип, что и у composition/reasoning ниже,
+                # только тут ссылка ведёт не на извлечённый артефакт, а на
+                # полный сырой дамп запроса/ответа целиком (см. _stage_raw_file
+                # в generate()). file=None, если файл не нашёлся вообще ни в
+                # .yaml, ни в .json — тогда просто текст без ссылки.
+                "meta_links": [
+                    {"label": f"openai_body {t['ob_part_id']}", "file": t["ob_raw_file"]},
+                    {"label": f"fetch_raw {t['fr_part_id']}", "file": t["fr_raw_file"]},
+                ],
+                "composition": composition,
+                "reasoning": reasoning,
+            },
+        )
 
         for name in t["input_names"]:
             if name in inline_labels:
@@ -153,12 +183,17 @@ def build_graph_model(turns, orphans, resolution_edges, start_target, inline_lab
 
     for rec in orphans:
         node_id = f"orphan_{rec['part_id']}"
-        add_node(node_id, f"orphan {rec['part_id']}", "orphan", {
-            "title": f"Осиротевший fetch_raw {rec['part_id']}",
-            "meta": "",
-            "text": "Причинный openai_body не найден в видимом окне дампов — "
-                    "нить, скорее всего, началась раньше начала записи.",
-        })
+        add_node(
+            node_id,
+            f"orphan {rec['part_id']}",
+            "orphan",
+            {
+                "title": f"Осиротевший fetch_raw {rec['part_id']}",
+                "meta": "",
+                "text": "Причинный openai_body не найден в видимом окне дампов — "
+                "нить, скорее всего, началась раньше начала записи.",
+            },
+        )
         all_out = ([rec["reasoning_name"]] if rec["reasoning_name"] else []) + rec["decision_names"]
         for name in all_out:
             add_artifact_node(name)
@@ -181,26 +216,46 @@ def build_graph_model(turns, orphans, resolution_edges, start_target, inline_lab
 
     if finish_source:
         add_artifact_node(finish_source)
-        add_node("Finish", "Finish", "anchor",
-                  {"title": "Finish", "meta": "", "text": "Финальный ответ на самый поздний реальный запрос сессии."})
+        add_node(
+            "Finish",
+            "Finish",
+            "anchor",
+            {
+                "title": "Finish",
+                "meta": "",
+                "text": "Финальный ответ на самый поздний реальный запрос сессии.",
+            },
+        )
         add_edge(finish_source, "Finish", "finish", "")
 
     if superseded_targets:
-        add_node("Superseded", "Superseded", "sink", {
-            "title": "Superseded", "meta": "",
-            "text": "Ответы, вытесненные повторным (побайтово идентичным) запросом "
-                    "внутри того же логического обращения пользователя.",
-        })
+        add_node(
+            "Superseded",
+            "Superseded",
+            "sink",
+            {
+                "title": "Superseded",
+                "meta": "",
+                "text": "Ответы, вытесненные повторным (побайтово идентичным) запросом "
+                "внутри того же логического обращения пользователя.",
+            },
+        )
         for name in superseded_targets:
             add_artifact_node(name)
             add_edge(name, "Superseded", "superseded", "")
 
     if title_targets:
-        add_node("SessionTitle", "SessionTitle", "sink", {
-            "title": "SessionTitle", "meta": "",
-            "text": "Ответы сайдкара генерации заголовка сессии — свой законный "
-                    "потребитель (UI), не часть основного диалога.",
-        })
+        add_node(
+            "SessionTitle",
+            "SessionTitle",
+            "sink",
+            {
+                "title": "SessionTitle",
+                "meta": "",
+                "text": "Ответы сайдкара генерации заголовка сессии — свой законный "
+                "потребитель (UI), не часть основного диалога.",
+            },
+        )
         for name in title_targets:
             add_artifact_node(name)
             add_edge(name, "SessionTitle", "title", "")
@@ -217,6 +272,7 @@ def run_dot_plain_layout(model: dict):
     локального `dot` нет — тогда HTML сам посчитает грубую укладку по
     рангам в браузере (см. JS)."""
     import shutil as _shutil
+
     dot_bin = _shutil.which("dot")
     if not dot_bin:
         return None
@@ -229,8 +285,11 @@ def run_dot_plain_layout(model: dict):
     # расстояния по своей, обычно куда более узкой, оценке ширины текста).
     node_w_in = 150 / 72.0
     node_h_in = 34 / 72.0
-    lines = ["digraph g {", "rankdir=TB; nodesep=0.4; ranksep=0.6;",
-              f'node [shape=box, width={node_w_in:.4f}, height={node_h_in:.4f}, fixedsize=true];']
+    lines = [
+        "digraph g {",
+        "rankdir=TB; nodesep=0.4; ranksep=0.6;",
+        f"node [shape=box, width={node_w_in:.4f}, height={node_h_in:.4f}, fixedsize=true];",
+    ]
     for node_id, n in model["nodes"].items():
         safe_label = n["label"].replace('"', "'")
         lines.append(f'"{node_id}" [label="{safe_label}"];')
@@ -239,8 +298,14 @@ def run_dot_plain_layout(model: dict):
     lines.append("}")
     dot_src = "\n".join(lines)
     try:
-        proc = subprocess.run([dot_bin, "-Tplain"], input=dot_src, capture_output=True,
-                               text=True, timeout=60, check=True)
+        proc = subprocess.run(
+            [dot_bin, "-Tplain"],
+            input=dot_src,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
     except Exception as e:
         logger.warning(f"dot -Tplain не сработал, HTML посчитает укладку сам в браузере: {e}")
         return None
@@ -255,7 +320,7 @@ def run_dot_plain_layout(model: dict):
     # было на скриншоте). 72 — стандартный коэффициент Graphviz для
     # перевода дюймов в points, тем же масштабом, что использует сам dot
     # внутри для форматов вроде -Tps/-Tjson.
-    SCALE = 72.0
+    scale = 72.0
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -267,9 +332,9 @@ def run_dot_plain_layout(model: dict):
         if not parts:
             continue
         if parts[0] == "graph" and len(parts) >= 4:
-            height = float(parts[3]) * SCALE
+            height = float(parts[3]) * scale
         elif parts[0] == "node" and len(parts) >= 4:
-            name, x, y = parts[1], float(parts[2]) * SCALE, float(parts[3]) * SCALE
+            name, x, y = parts[1], float(parts[2]) * scale, float(parts[3]) * scale
             positions[name] = (x, y)
     if not positions:
         return None
@@ -590,15 +655,22 @@ def render_html(model: dict, layout, out_path: str) -> None:
         node_payload = []
         for nid, n in nodes.items():
             x, y = positions.get(nid, (None, None))
-            entry = {"id": nid, "label": n["label"], "category": n["category"], "detail": n["detail"]}
+            entry = {
+                "id": nid,
+                "label": n["label"],
+                "category": n["category"],
+                "detail": n["detail"],
+            }
             if x is not None:
                 entry["x"] = x
                 entry["y"] = height - y  # переворот: у dot Y растёт вверх, в SVG — вниз
             node_payload.append(entry)
         has_layout = True
     else:
-        node_payload = [{"id": nid, "label": n["label"], "category": n["category"], "detail": n["detail"]}
-                         for nid, n in nodes.items()]
+        node_payload = [
+            {"id": nid, "label": n["label"], "category": n["category"], "detail": n["detail"]}
+            for nid, n in nodes.items()
+        ]
         has_layout = False
 
     payload = {"nodes": node_payload, "edges": model["edges"], "hasLayout": has_layout}

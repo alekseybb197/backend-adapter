@@ -58,6 +58,7 @@ import sys
 # yaml.safe_load не меняется.
 try:
     import yaml
+
     YAML_AVAILABLE = True
 
     def _yaml_str_representer(dumper, data):
@@ -68,17 +69,25 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
+# Цвета и YAML_AVAILABLE — для обратной совместимости с внешним кодом,
+# обращавшимся к ним как к атрибутам artifact_tree (в монолите они лежали
+# прямо здесь). Реальное определение: DOMAIN_COLOR/KIND_COLOR — в common.py,
+# ANCHOR_COLOR/SINK_COLOR/ORPHAN_COLOR — в html.py.
+from .artifact_tree_common import DOMAIN_COLOR, KIND_COLOR, YAML_AVAILABLE
 from .artifact_tree_graphviz import (
     render_png_via_graphviz_fallback,
     render_png_via_plantuml,
 )
 from .artifact_tree_html import (
+    ANCHOR_COLOR,
     HTML_TEMPLATE,
+    ORPHAN_COLOR,
+    SINK_COLOR,
     _category_color,
     artifact_filename,
     build_graph_model,
-    run_dot_plain_layout,
     render_html,
+    run_dot_plain_layout,
 )
 from .artifact_tree_parse import (
     classify_kind,
@@ -86,25 +95,14 @@ from .artifact_tree_parse import (
     determine_fetch_raw_kind,
     discover_parts,
     fetch_raw_has_tool_calls,
-    looks_like_structured_output,
     load_json,
+    looks_like_structured_output,
     process_fetch_raw,
     process_openai_body,
 )
 from .artifact_tree_plantuml import puml_id, render_plantuml
 from .artifact_tree_registry import ArtifactRegistry
 from .artifact_tree_turnbuilder import build_turns
-
-# Цвета и YAML_AVAILABLE — для обратной совместимости с внешним кодом,
-# обращавшимся к ним как к атрибутам artifact_tree (в монолите они лежали
-# прямо здесь). Реальное определение: DOMAIN_COLOR/KIND_COLOR — в common.py,
-# ANCHOR_COLOR/SINK_COLOR/ORPHAN_COLOR — в html.py.
-from .artifact_tree_common import YAML_AVAILABLE, DOMAIN_COLOR, KIND_COLOR
-from .artifact_tree_html import (
-    ANCHOR_COLOR,
-    SINK_COLOR,
-    ORPHAN_COLOR,
-)
 
 logger = logging.getLogger("artifact_tree")
 
@@ -125,7 +123,7 @@ def _raw_file_href(parts_dir: str, preferred_yaml_name: str):
     yaml_src = os.path.join(parts_dir, preferred_yaml_name)
     if os.path.isfile(yaml_src):
         return f"../{preferred_yaml_name}"
-    json_name = preferred_yaml_name[:-len(".yaml")] + ".json"
+    json_name = preferred_yaml_name[: -len(".yaml")] + ".json"
     json_src = os.path.join(parts_dir, json_name)
     if os.path.isfile(json_src):
         return f"../{json_name}"
@@ -169,8 +167,18 @@ def generate(parts_dir: str, verbose: bool = True) -> str:
     os.makedirs(out_dir, exist_ok=True)
 
     registry = ArtifactRegistry()
-    (turns, orphans, resolution_edges, start_target, inline_labels, finish_source,
-     superseded_targets, title_targets, request_answers, next_request_edges) = build_turns(parts_dir, registry)
+    (
+        turns,
+        orphans,
+        resolution_edges,
+        start_target,
+        inline_labels,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+    ) = build_turns(parts_dir, registry)
 
     # Ссылки из заголовка панели хода на исходные (не извлечённые)
     # openai_body/fetch_raw файлы — без копирования, см. _raw_file_href.
@@ -189,14 +197,27 @@ def generate(parts_dir: str, verbose: bool = True) -> str:
     if request_answers:
         log(f"Запрос -> ответ: {request_answers}")
     if superseded_targets:
-        log(f"Вытесненных повторным запросом финальных ответов: {len(superseded_targets)} -> {superseded_targets}")
+        log(
+            f"Вытесненных повторным запросом финальных ответов: {len(superseded_targets)} -> {superseded_targets}"
+        )
     if orphans:
-        warn(f"Осиротевших fetch_raw (нить началась до окна дампов): {len(orphans)} "
-             f"-> part_id {[o['part_id'] for o in orphans]}")
+        warn(
+            f"Осиротевших fetch_raw (нить началась до окна дампов): {len(orphans)} "
+            f"-> part_id {[o['part_id'] for o in orphans]}"
+        )
 
-    puml_text = render_plantuml(turns, orphans, resolution_edges, start_target, inline_labels,
-                                 finish_source, superseded_targets, title_targets,
-                                 request_answers, next_request_edges)
+    puml_text = render_plantuml(
+        turns,
+        orphans,
+        resolution_edges,
+        start_target,
+        inline_labels,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+    )
     puml_path = os.path.join(out_dir, "tree.puml")
     with open(puml_path, "w", encoding="utf-8") as f:
         f.write(puml_text)
@@ -205,31 +226,56 @@ def generate(parts_dir: str, verbose: bool = True) -> str:
     png_path = os.path.join(out_dir, "tree.png")
     if render_png_via_plantuml(puml_path):
         log(f"PNG (настоящий PlantUML): {png_path}")
-    elif render_png_via_graphviz_fallback(turns, orphans, resolution_edges, start_target, inline_labels,
-                                           finish_source, superseded_targets, title_targets,
-                                           request_answers, next_request_edges,
-                                           png_path):
-        warn(f"Локальный plantuml/java не найден — PNG отрендерен запасным способом "
-             f"через Graphviz: {png_path} (структура та же, но это НЕ PlantUML-рендер)")
+    elif render_png_via_graphviz_fallback(
+        turns,
+        orphans,
+        resolution_edges,
+        start_target,
+        inline_labels,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+        png_path,
+    ):
+        warn(
+            f"Локальный plantuml/java не найден — PNG отрендерен запасным способом "
+            f"через Graphviz: {png_path} (структура та же, но это НЕ PlantUML-рендер)"
+        )
     else:
-        warn("Ни plantuml, ни graphviz (dot) не найдены — PNG не создан. "
-             "tree.puml можно отрендерить на любой другой машине с Java "
-             "(`plantuml tree.puml`) или через https://plantuml.com (свой сервер).")
+        warn(
+            "Ни plantuml, ни graphviz (dot) не найдены — PNG не создан. "
+            "tree.puml можно отрендерить на любой другой машине с Java "
+            "(`plantuml tree.puml`) или через https://plantuml.com (свой сервер)."
+        )
 
     # Интерактивная HTML-версия — для сессий, где статичная картинка (PNG/
     # PlantUML) уже нечитаема из-за плотности графа. Открывается напрямую в
     # браузере (file://), без сервера и без внешних библиотек.
-    model = build_graph_model(turns, orphans, resolution_edges, start_target, inline_labels,
-                               finish_source, superseded_targets, title_targets,
-                               request_answers, next_request_edges, registry)
+    model = build_graph_model(
+        turns,
+        orphans,
+        resolution_edges,
+        start_target,
+        inline_labels,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+        registry,
+    )
     layout = run_dot_plain_layout(model)
     html_path = os.path.join(out_dir, "tree.html")
     render_html(model, layout, html_path)
     if layout:
         log(f"HTML (интерактивный, укладка Graphviz): {html_path}")
     else:
-        warn(f"HTML сгенерирован, но dot не найден — укладка посчитана в браузере "
-             f"(грубее настоящего Graphviz): {html_path}")
+        warn(
+            f"HTML сгенерирован, но dot не найден — укладка посчитана в браузере "
+            f"(грубее настоящего Graphviz): {html_path}"
+        )
 
     return html_path
 
@@ -239,7 +285,8 @@ def main():
     Формат логов наследуется от того, кто запустил процесс (вручную —
     стандартный запасной хендлер logging)."""
     ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("parts_dir", help="Путь к директории *.parts с дампами адаптера")
     args = ap.parse_args()
 

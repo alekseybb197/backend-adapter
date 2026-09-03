@@ -442,6 +442,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 13. Version
 
-Current: **v0.7.0** (see `backend-adapter.py`); ветка `feature/v0.7.1` накапливает
-изменения без сдвига версии (история ветки — вверху `changelog.md`)
-Changelog: `changelog.md`
+Current: **v0.7.1** (see `backend-adapter.py`).
+Changelog: `changelog.md` (история версии — секция с её номером).
