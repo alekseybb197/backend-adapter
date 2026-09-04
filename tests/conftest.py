@@ -29,8 +29,7 @@ def fresh_env(monkeypatch):
     Usage::
 
         config = fresh_env(ADAPTER_DEBUG_ENABLE="0",
-                           ADAPTER_DEBUG_LOGFILE="",
-                           ADAPTER_TRACE_LOGFILE="",
+                           ADAPTER_DEBUG_LOGPATH="",
                            ADAPTER_BACKEND_CONFIG="/tmp/x.yaml")
 
     After the call ``config`` is the *reloaded* module; all downstream
@@ -39,9 +38,10 @@ def fresh_env(monkeypatch):
     """
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
-        "ADAPTER_DEBUG_LOGFILE": "",
-        "ADAPTER_TRACE_LOGFILE": "",
+        "ADAPTER_DEBUG_LOGPATH": "",
         "ADAPTER_PROXY_PORT": "9998",
+        "ADAPTER_ENDPOINT_HOST": "127.0.0.1",
+        "ADAPTER_WEBUI_HOST": "127.0.0.1",
         "ADAPTER_TIMEOUT": "300",
         "ADAPTER_RETRY_COUNT": "3",
         "ADAPTER_STRICT_MODELS": "1",
@@ -84,9 +84,10 @@ def _default_config():
     """Re-import config with defaults (called by tests that need defaults)."""
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
-        "ADAPTER_DEBUG_LOGFILE": "",
-        "ADAPTER_TRACE_LOGFILE": "",
+        "ADAPTER_DEBUG_LOGPATH": "",
         "ADAPTER_PROXY_PORT": "9998",
+        "ADAPTER_ENDPOINT_HOST": "127.0.0.1",
+        "ADAPTER_WEBUI_HOST": "127.0.0.1",
         "ADAPTER_TIMEOUT": "300",
         "ADAPTER_RETRY_COUNT": "3",
         "ADAPTER_STRICT_MODELS": "1",

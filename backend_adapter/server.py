@@ -375,8 +375,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             ),
                         )
 
-                # ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать детальный
-                # лог ошибок инструментов ([TOOL_RESULT_ERROR])
+                # ADAPTER_DEBUG_TOOLS_ERROR=1 (default "0" — zero-config не
+                # обрабатывает собранные логи) — писать детальный лог ошибок
+                # инструментов ([TOOL_RESULT_ERROR])
                 if tr["is_error"] and ADAPTER_DEBUG_TOOLS_ERROR:
                     # При ошибке — полная запись результата (аналог [RESPONSE])
                     # чтобы видеть что именно вернул инструмент, без копания

@@ -14,17 +14,32 @@ import urllib.request
 
 # ==================== НАСТРОЙКИ ====================
 PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
+# Адрес (host), на котором слушает HTTP-эндпоинт адаптера. Пусто / не задано —
+# дефолт 127.0.0.1 (localhost). "0.0.0.0" — слушать на всех интерфейсах
+# (доступ из сети). Идиом `or "127.0.0.1"`, а не get(name, default): пустая
+# env-переменная в bind-кортеже socketserver означала бы INADDR_ANY (все
+# интерфейсы) — с `or` и незаданная, и пустая дают безопасный localhost.
+ADAPTER_ENDPOINT_HOST = os.environ.get("ADAPTER_ENDPOINT_HOST", "") or "127.0.0.1"
 ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
-ADAPTER_DEBUG_LOGFILE = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
-ADAPTER_TRACE_LOGFILE = os.environ.get("ADAPTER_TRACE_LOGFILE", "")
+# Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы).
+# ПУСТО / не задано → файловая запись ВЫКЛЮЧЕНА (zero-config: консольные
+# debug-блоки видны, ничего не пишется на диск и папка не создаётся).
+# Задано → директория логов: создаётся при необходимости на старте,
+# вся файловая запись (в т.ч. trace и *.parts дампы) подчинена
+# ADAPTER_DEBUG_ENABLE (мастер-выключатель: 0 → ничего не пишется).
+# Корень веб-интерфейса НЕ зависит от этой переменной (см. блок WEBUI).
+# Режим «один файл» удалён — путь всегда директория.
+ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "")
 ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
 ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
 ADAPTER_SKILL_PATTERNS = os.environ.get("ADAPTER_SKILL_PATTERNS", "")
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
-# Логгирование результатов работы инструментов:
+# Логгирование результатов работы инструментов (обработка собранных логов —
+# по умолчанию выключена, zero-config: ничего лишнего не обрабатывается):
 #   ADAPTER_DEBUG_TOOLS=1 — писать все результаты ([TOOL_RESULT]).
-#   ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать ошибки инструментов ([TOOL_RESULT_ERROR]).
+#   ADAPTER_DEBUG_TOOLS_ERROR=1 — писать ошибки инструментов ([TOOL_RESULT_ERROR]).
+#   По умолчанию оба выключены (0).
 #   ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
 #   отключается обрезка (trim). Если тэг в списке — полный вывод без обрезки.
 #   Пример: BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT,TOOL_RESULT_ERROR,RESPONSE
@@ -34,7 +49,7 @@ ADAPTER_DEBUG_TOOLS = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in 
     "no",
     "",
 )
-ADAPTER_DEBUG_TOOLS_ERROR = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "1").lower() not in (
+ADAPTER_DEBUG_TOOLS_ERROR = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "0").lower() not in (
     "0",
     "false",
     "no",
@@ -63,8 +78,9 @@ def _trim_limit(tag: str) -> int | None:
 ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
 # ADAPTER_DEBUG_TAGS_OUT — логический флаг: включить per-session дампы
 # (.json и .yaml парой) для всех частей протокола обмена (список частей
-# фиксирован — ADAPTER_DEBUG_TAGS_OUT_ALL). Срабатывает только если
-# ADAPTER_DEBUG_LOGFILE указывает на директорию. Пусто / 0 / false — выкл.
+# фиксирован — ADAPTER_DEBUG_TAGS_OUT_ALL). Срабатывает только при
+# ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
+# (файлы кладутся в неё). Пусто / 0 / false — выкл.
 ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() not in (
     "0",
     "false",
@@ -73,17 +89,26 @@ ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() no
 )
 # Полный фиксированный список частей протокола, для которых пишутся дампы.
 ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
-# Веб-интерфейс просмотра сессий (backend_adapter/session_viewer.py):
-#   ADAPTER_WEBUI_ENABLE=1 — поднять локальный веб-сервер на 127.0.0.1.
-#   Срабатывает только если ADAPTER_DEBUG_LOGFILE указывает на директорию
-#   (там лежат *.parts папки сессий). Порт — ADAPTER_WEBUI_PORT.
-ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "0").lower() not in (
+# Веб-интерфейс — общий статус адаптера + просмотр сессий:
+#   ADAPTER_WEBUI_ENABLE=1 (по умолчанию) — поднять локальный веб-сервер;
+#   статус-страница "/" (версия, режим, LLM-эндпоинты) работает всегда,
+#   "/session" (просмотр *.parts сессий) — только когда задан
+#   ADAPTER_DEBUG_LOGPATH (иначе вкладки сессий пусты, т.к. логи не пишутся).
+#   Корень — директория ADAPTER_DEBUG_LOGPATH, если задана; иначе —
+#   "./tmp/webui" (отдельная папка, НЕ зависит от лог-директории).
+#   Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST (пусто/не задано →
+#   дефолт 127.0.0.1, только локально).
+ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "1").lower() not in (
     "0",
     "false",
     "no",
     "",
 )
 ADAPTER_WEBUI_PORT = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
+# Адрес, на котором слушает веб-интерфейс; дефолт 127.0.0.1 (только
+# локально). "0.0.0.0" — доступ из сети (внимание: содержимое сессий —
+# git log, файлы, reasoning — не должно случайно утечь).
+ADAPTER_WEBUI_HOST = os.environ.get("ADAPTER_WEBUI_HOST", "") or "127.0.0.1"
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
 # без вызова redact(), логируются полные токены, заголовки, ключи.
 # По умолчанию false — санитайзер активен, секреты маскируются.
@@ -307,6 +332,11 @@ def _init_multi_backends(config_path: str) -> None:
 
     global _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND, _AVAILABLE_MODELS, _MODEL_TO_BACKEND
 
+    # Глобалы _AVAILABLE_MODELS/_MODEL_TO_BACKEND ПЕРЕживают переприсваивание:
+    # server.py и другие модули делают `from .config import _AVAILABLE_MODELS` на
+    # импорте и держат ссылку на ОРИГИНАЛЬНЫЙ объект словаря. Поэтому словари
+    # мутируются на месте (clear + update), а не пересоздаются — иначе сервер
+    # продолжает видеть пустой/устаревший кэш (501/400 на живых моделях).
     _BACKENDS = blocks
     _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
     _DEFAULT_BACKEND = blocks[0]
@@ -327,7 +357,12 @@ def _init_multi_backends(config_path: str) -> None:
         print("[FATAL] No models retrieved from any backend — exiting.")
         sys.exit(1)
 
-    _AVAILABLE_MODELS, _MODEL_TO_BACKEND = _rebuild_index(all_models)
+    available, model_to_backend = _rebuild_index(all_models)
+    # Мутация на месте — см. комментарий выше (импортированные ссылки живые).
+    _AVAILABLE_MODELS.clear()
+    _AVAILABLE_MODELS.update(available)
+    _MODEL_TO_BACKEND.clear()
+    _MODEL_TO_BACKEND.update(model_to_backend)
 
     print(f"[INIT] Loaded {len(_AVAILABLE_MODELS)} models from {len(blocks)} backends")
     for mid in sorted(_AVAILABLE_MODELS.keys()):
@@ -426,7 +461,14 @@ def refresh_models(timeout: float | None = None) -> dict:
     if not all_models:
         return {"ok": False, "count": len(_AVAILABLE_MODELS), "errors": errors}
 
-    _AVAILABLE_MODELS, _MODEL_TO_BACKEND = _rebuild_index(all_models)
+    available, model_to_backend = _rebuild_index(all_models)
+    # Мутация на месте — см. комментарий в _init_multi_backends: модули,
+    # импортировавшие глобалы (server.py и др.), держат ссылку на исходные
+    # объекты словарей и должны видеть обновлённый кэш.
+    _AVAILABLE_MODELS.clear()
+    _AVAILABLE_MODELS.update(available)
+    _MODEL_TO_BACKEND.clear()
+    _MODEL_TO_BACKEND.update(model_to_backend)
     print(f"[REFRESH] Reloaded {len(_AVAILABLE_MODELS)} models from {len(backends)} backends")
     return {"ok": True, "count": len(_AVAILABLE_MODELS), "errors": errors}
 

@@ -220,7 +220,7 @@ def serve(
     backend-adapter.py при ADAPTER_WEBUI_ENABLE=1).
 
     ``root_dir`` — папка, в которой лежат ``*.parts`` директории сессий
-    (в адаптере это ADAPTER_DEBUG_LOGFILE). ``version`` — версия кода
+    (в адаптере это директория ADAPTER_DEBUG_LOGPATH). ``version`` — версия кода
     (передаётся из backend-adapter.py, где объявлена ``__version__``;
     в пакете её нет). ``verbose`` — как в artifact_tree.generate(): False
     понижает рутинные прогресс-сообщения генерации до DEBUG.

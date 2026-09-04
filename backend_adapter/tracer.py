@@ -11,7 +11,7 @@ import time
 from collections import OrderedDict
 
 from . import redact, session_log
-from .config import ADAPTER_SENSITIVE_LOGGING_ENABLE
+from .config import ADAPTER_DEBUG, ADAPTER_SENSITIVE_LOGGING_ENABLE
 
 _trace_lock = threading.Lock()
 _session_seq: dict[str, int] = {}  # session_id -> next seq number
@@ -78,16 +78,16 @@ def _lookup_tool_use_name(session_id: str, tool_use_id: str):
 
 
 def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
-    # Если база — директория, пишем в сессионный файл; если полный путь —
-    # в один файл (старое поведение).
-    if session_log._TRACE_IS_DIR and session_log._TRACE_PATH:
-        fd = session_log._open_session_file("trace", session_id)
-        if not fd:
-            return
-    elif not session_log._TRACE_IS_DIR and not session_log._TRACE_PATH:
+    # Мастер-выключатель: при ADAPTER_DEBUG_ENABLE=0 трасса не пишется.
+    # Путь — всегда директория логов сессий (ADAPTER_DEBUG_LOGPATH);
+    # запись — в per-session JSONL-файл, single-file режим удалён.
+    if not ADAPTER_DEBUG:
         return
-    else:
-        fd = None  # режим «один файл» — ниже open() на _TRACE_PATH
+    if not (session_log._TRACE_IS_DIR and session_log._TRACE_PATH):
+        return
+    fd = session_log._open_session_file("trace", session_id)
+    if not fd:
+        return
 
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(time.time() * 1000) % 1000:03d}Z",
@@ -101,10 +101,5 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     if not ADAPTER_SENSITIVE_LOGGING_ENABLE:
         line = redact.redact(line)
     with _trace_lock:
-        if fd:
-            fd.write((line + "\n").encode())
-            fd.flush()
-        else:
-            with open(session_log._TRACE_PATH, "a") as f:
-                f.write(line + "\n")
-                f.flush()
+        fd.write((line + "\n").encode())
+        fd.flush()

@@ -113,15 +113,26 @@ Claude Code (Anthropic API client)
 
 1. If `ADAPTER_DETACH_ENABLE=1` — double-fork daemonize + write PID file
 2. Parse env config → `backend_adapter/config.py` (all env vars with `ADAPTER_` prefix)
-3. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend, resolve model collisions by prefixing with `<backend_name>.`
-4. Start `QuietThreadingHTTPServer` on `0.0.0.0:<PROXY_PORT>`
-5. If `ADAPTER_WEBUI_ENABLE=1` and `ADAPTER_DEBUG_LOGFILE` is a directory: start the WEBUI
-   in a daemon thread via `webserver.serve(ADAPTER_DEBUG_LOGFILE, __version__)` on
-   `127.0.0.1:<ADAPTER_WEBUI_PORT>` (root = `ADAPTER_DEBUG_LOGFILE`; endpoint `/` — status,
-   `/session` — session viewer). Each GET/POST to the status page `/` re-probes the
-   backends (`config.refresh_models`, 5 s timeout per endpoint) and rebuilds the
-   `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers — models added
-   by the backend after startup are picked up without restarting the adapter.
+3. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend (this startup probe is unconditional — it fills the model list used for strict validation; a backend that fails to respond only logs a `[WARN]` and drops out, but the adapter exits `[FATAL]` if no models were retrieved from any backend), resolve model collisions by prefixing with `<backend_name>.`
+4. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
+   (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
+   `0.0.0.0` — all interfaces)
+5. Log directory `ADAPTER_DEBUG_LOGPATH` (empty — **file logging off**: console
+   debug blocks still visible at `ADAPTER_DEBUG_ENABLE=1`, no directory is created):
+   when set, created when `ADAPTER_DEBUG_ENABLE=1` (master switch — at `0` nothing is
+   written and the folder is NOT created); points at an existing **file** →
+   `[FATAL]` + hint + `sys.exit(1)` (the path is always a directory).
+6. If `ADAPTER_WEBUI_ENABLE=1` (default): start the WEBUI in a daemon thread via
+   `webserver.serve(root, __version__)` on `ADAPTER_WEBUI_HOST:<ADAPTER_WEBUI_PORT>`
+   (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
+   careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` when set,
+   otherwise an independent `./tmp/webui` (created on demand — status page `/`
+   works out of the box; `/session` is empty until logs exist; endpoint `/` —
+   status, `/session` — session viewer). Each GET/POST to the status page `/`
+   re-probes the backends (`config.refresh_models`, 5 s timeout per endpoint) and
+   rebuilds the `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers
+   — models added by the backend after startup are picked up without restarting the
+   adapter.
 
 ### 4.2 POST /v1/messages (do_POST, server.py:148–581)
 
@@ -258,9 +269,11 @@ Trace event `tool_result` includes `parent_req_id` — `null` if the producer wa
 
 `_d(msg)` — timestamped message, optionally prefixed with `[req_id]` (`_dr`)
 
-- Goes to stdout if `ADAPTER_DEBUG_ENABLE=1`
-- Written to file if `ADAPTER_DEBUG_LOGFILE` set
-- Per-session files if logfile points to a directory
+- Goes to stdout if `ADAPTER_DEBUG_ENABLE=1` (master switch — console blocks are
+  independent of disk logging)
+- Written to per-session `session-<ts>-<sid>.log` files in the `ADAPTER_DEBUG_LOGPATH`
+  directory (only when set — empty means file logging is off, no directory is
+  created) when `ADAPTER_DEBUG_ENABLE=1`
 - All messages pass through `redact()` to mask secrets (unless `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`)
 
 Debug flags:
@@ -271,7 +284,7 @@ Debug flags:
 | `ADAPTER_DEBUG_OPENAI_BODY_FULL` | Full OpenAI request body |
 | `ADAPTER_DEBUG_RESPONSE_FULL` | Full responses (both stream and non-stream) |
 | `ADAPTER_DEBUG_TOOLS` | Full tool result content for all results |
-| `ADAPTER_DEBUG_TOOLS_ERROR` | Full tool error details (default: on) |
+| `ADAPTER_DEBUG_TOOLS_ERROR` | Full tool error details (default: off — zero-config does not process collected logs) |
 | `ADAPTER_DEBUG_TOOLS_RESPONSE_FULL` | No trim on tool result content |
 | `ADAPTER_DEBUG_TRIM` | Max chars for trimmed logs (default: 3000) |
 
@@ -313,8 +326,10 @@ Event types:
 | `adapter_invariant_check` | System message position validation |
 
 Output:
-- Per-session JSONL files if `ADAPTER_TRACE_LOGFILE` is a directory
-- Single JSONL file if it's a full path
+- Per-session JSONL files (`session-<ts>-<sid>.jsonl`) in the same
+  `ADAPTER_DEBUG_LOGPATH` directory as debug logs (only when the path is set —
+  empty means file logging off)
+- Written only when `ADAPTER_DEBUG_ENABLE=1` (master switch)
 - All trace lines redacted (unless `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`)
 
 ### 8.3 Secret redaction (`redact.py`)
@@ -331,16 +346,21 @@ Long base64/hex strings may also be matched.
 
 ### 8.4 Per-session files (`session_log.py`)
 
-- File naming: `session-<YYYYMMDD-HHMMSS>-<sessionID_short>.<ext>`
+- File naming: `session-<YYYYMMDD-HHMMSS>-<sessionID_short>.<ext>` (`.log` — debug,
+  `.jsonl` — trace), plus `session-*.parts/` dump directories — all flat in
+  `ADAPTER_DEBUG_LOGPATH`
 - Timestamp frozen on first use per session (all traffic → same file)
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
-- Handles both per-session directory and single-file modes
+- The log directory `ADAPTER_DEBUG_LOGPATH` is created on demand when set
+  (adapter startup when `ADAPTER_DEBUG_ENABLE=1`, and/or at first write);
+  empty (default) — no directory, no disk writes
 
 ### 8.5 Per-request OpenAI body JSON dump (`ADAPTER_DEBUG_OPENAI_BODY_JSON`)
 
 When enabled, writes complete OpenAI-format request bodies as numbered JSON files alongside the session log files.
 
-- Only activates when per-session mode is enabled (`ADAPTER_DEBUG=1` + `ADAPTER_DEBUG_LOGFILE` points to a directory)
+- Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch) and the log directory
+  `ADAPTER_DEBUG_LOGPATH` is set (created on demand)
 - Creates `session-<datetime>-<sessid8>.parts/` directory next to the session log files
 - Writes `openai-NNNN.json` for each POST `/v1/messages` request with full body
 - Thread-safe: uses `threading.Lock` on the per-session counter
@@ -441,5 +461,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 13. Version
 
-Current: **v0.7.1** (see `backend-adapter.py`).
+Current: **v0.7.2** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

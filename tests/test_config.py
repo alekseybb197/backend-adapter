@@ -94,6 +94,78 @@ class TestTrimLimit:
         assert self.config._trim_limit("BODY") is None
 
 
+class TestHostVars:
+    """Tests for ADAPTER_ENDPOINT_HOST / ADAPTER_WEBUI_HOST env parsing.
+
+    Both default to "127.0.0.1" (localhost). The `or "127.0.0.1"` idiom matters:
+    an *empty* env value must ALSO resolve to the default — in a socketserver
+    bind tuple "" would mean INADDR_ANY (all interfaces)."""
+
+    def setup_method(self):
+        _reload_config()
+        from backend_adapter import config
+        self.config = config
+
+    def test_defaults(self):
+        """Env unset / default (fresh_env sets both) → 127.0.0.1."""
+        assert self.config.ADAPTER_ENDPOINT_HOST == "127.0.0.1"
+        assert self.config.ADAPTER_WEBUI_HOST == "127.0.0.1"
+
+    def test_empty_env_means_default(self, monkeypatch):
+        """Empty env value must NOT become INADDR_ANY — resolves to default."""
+        monkeypatch.setenv("ADAPTER_ENDPOINT_HOST", "")
+        monkeypatch.setenv("ADAPTER_WEBUI_HOST", "")
+        _reload_config()
+        from backend_adapter import config
+        assert config.ADAPTER_ENDPOINT_HOST == "127.0.0.1"
+        assert config.ADAPTER_WEBUI_HOST == "127.0.0.1"
+
+    def test_explicit_host_from_env(self, monkeypatch):
+        """Explicit value (all interfaces) is honored."""
+        monkeypatch.setenv("ADAPTER_ENDPOINT_HOST", "0.0.0.0")
+        monkeypatch.setenv("ADAPTER_WEBUI_HOST", "0.0.0.0")
+        _reload_config()
+        from backend_adapter import config
+        assert config.ADAPTER_ENDPOINT_HOST == "0.0.0.0"
+        assert config.ADAPTER_WEBUI_HOST == "0.0.0.0"
+
+
+class TestZeroConfigDefaults:
+    """Default flags for the zero-config run (v0.7.2).
+
+    With env vars *absent* the adapter should: process no tool logs
+    (TOOLS_ERROR=0) and show status by default (WEBUI_ENABLE=1). Both parse
+    off-words incl. "" — so asserting the default requires delenv, NOT
+    setenv("", ...) (an empty env value parses as False for both)."""
+
+    def setup_method(self):
+        _reload_config()
+        from backend_adapter import config
+        self.config = config
+
+    def test_webui_enable_defaults_true(self, monkeypatch):
+        """WEBUI_ENABLE unset → enabled (status page up by default)."""
+        monkeypatch.delenv("ADAPTER_WEBUI_ENABLE", raising=False)
+        _reload_config()
+        from backend_adapter import config
+        assert config.ADAPTER_WEBUI_ENABLE is True
+        assert config.ADAPTER_WEBUI_PORT == 8765
+
+    def test_tools_error_defaults_false(self, monkeypatch):
+        """TOOLS_ERROR unset → disabled (no tool-error log processing)."""
+        monkeypatch.delenv("ADAPTER_DEBUG_TOOLS_ERROR", raising=False)
+        _reload_config()
+        from backend_adapter import config
+        assert config.ADAPTER_DEBUG_TOOLS_ERROR is False
+
+    def test_webui_explicit_off(self, monkeypatch):
+        """WEBUI_ENABLE=0 → disabled."""
+        monkeypatch.setenv("ADAPTER_WEBUI_ENABLE", "0")
+        _reload_config()
+        from backend_adapter import config
+        assert config.ADAPTER_WEBUI_ENABLE is False
+
+
 class TestParseBackendYaml:
     """Tests for _parse_backend_yaml()."""
 
@@ -304,6 +376,38 @@ class TestInitMultiBackends:
         # qwen36 exists on both → should be prefixed
         assert "kl.qwen36" in config._AVAILABLE_MODELS
         assert "litellm.qwen36" in config._AVAILABLE_MODELS
+
+    def test_init_multi_backends_mutates_global_dicts_in_place(self, tmp_path):
+        """Init должен МУТИРОВАТЬ глобальные словари на месте, а не
+        переприсваивать их: server.py и другие модули делают
+        ``from .config import _AVAILABLE_MODELS`` на импорте и держат ссылку
+        на исходный объект. Пересоздание словаря оставляет этим ссылкам
+        пустой/устаревший кэш (реальный баг: /v1/models -> 501, строгая
+        валидация -> 400 на живых моделях)."""
+        yaml_file = tmp_path / "init.yaml"
+        yaml_file.write_text("""backend:
+  - name: home
+    base: http://home
+    key: k
+""")
+        _reload_config()
+        from backend_adapter import config
+
+        # Ссылки-импортёры: держат исходные объекты словарей (как делает
+        # server.py через `from .config import _AVAILABLE_MODELS`).
+        server_view_models = config._AVAILABLE_MODELS
+        server_view_map = config._MODEL_TO_BACKEND
+
+        with mock.patch.object(
+            config, "_fetch_models", return_value=[{"id": "m1"}, {"id": "m2"}]
+        ):
+            config._init_multi_backends(str(yaml_file))
+
+        # Словари-объекты те же, содержимое новое (ссылки импортёров живые).
+        assert config._AVAILABLE_MODELS is server_view_models
+        assert config._MODEL_TO_BACKEND is server_view_map
+        assert set(server_view_models) == {"m1", "m2"}
+        assert set(server_view_map) == {"m1", "m2"}
 
 class TestRefreshModels:
     """Tests for refresh_models() — on-demand model cache refresh.

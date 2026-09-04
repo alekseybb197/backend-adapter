@@ -1,6 +1,119 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
-## v0.7.2 (WIP — накопление в feature/v0.7.2)
+## v0.7.2 (zero-config: консоль-логи и статус по умолчанию)
+
+### 2026-09-04 Фикс: init/refresh моделей мутируют кэш-словари на месте (живые ссылки server.py)
+
+**Проблема:** при старте против живого бэкенда адаптер после успешного probe
+отвечал на собственный `GET /v1/models` кодом **501**, а строгая валидация
+модели (`ADAPTER_STRICT_MODELS=1`) отвергала бы любой `POST /v1/messages`
+(400 «model is not available»). Причина — `_init_multi_backends()` и
+`refresh_models()` в `config.py` **переприсваивали** глобалы
+`_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` новым объектам словарей
+(`_AVAILABLE_MODELS, _MODEL_TO_BACKEND = _rebuild_index(...)`), тогда как
+`server.py`, `webui_status.py` и `backend-adapter.py` делают
+`from .config import _AVAILABLE_MODELS` на импорте и держат ссылку на
+**исходный (пустой) объект**. В тестах баг не проявлялся: фикстуры
+`isolate_logs`/интеграционные тесты чистят и наполняют те же глобалы
+мутацией на месте. Регрессия внесена в 72a81e0 (v0.6.0, первый
+multi-backend коммит).
+
+**Решение:** оба места (`_init_multi_backends`, `refresh_models`) теперь
+мутируют глобальные словари **на месте** (`clear()` + `update()`) — все
+импортированные на старте ссылки остаются живыми и видят обновлённый кэш.
+Переприсваивание сохранено только для `_BACKENDS`/`_BACKEND_BY_NAME`/
+`_DEFAULT_BACKEND` — их не импортируют по значению в server.py.
+
+**Изменения:** backend_adapter/config.py (мутация в месте + комментарий),
+tests/test_config.py (новый регресс-тест
+`test_init_multi_backends_mutates_global_dicts_in_place`: объекты словарей
+те же (`is`), содержимое обновлено), changelog.md.
+
+### 2026-09-04 Zero-config: минимальные дефолты ресурсов, статус по умолчанию
+
+**Проблема:** дефолты адаптера требовали ресурсов, которые уместны только
+при целенаправленном включении: при стандартном запуске (пустой
+`ADAPTER_DEBUG_LOGPATH`) создавалась папка `./tmp/logs`, ошибки
+инструментов обрабатывались по умолчанию (`ADAPTER_DEBUG_TOOLS_ERROR=1`),
+а веб-интерфейс — единственный способ увидеть состояние адаптера — был
+выключен (`ADAPTER_WEBUI_ENABLE=0`) и вдобавок зависел от лог-директории.
+Документация (docs/environment.md) не разделяла переменные на обязательные
+при старте и дефолтные.
+
+**Решение:** дефолты переработаны в zero-config — минимальный запуск
+только с `ADAPTER_BACKEND_CONFIG`:
+
+- **развязка консоль ↔ диск**: `_d()` печатает в stdout, гейтится только
+  `ADAPTER_DEBUG_ENABLE` (дефолт `1`); файловая запись — только при явно
+  заданном `ADAPTER_DEBUG_LOGPATH`. Из стартового блока убран
+  `os.makedirs("./tmp/logs")` — при пустом LOGPATH на диск ничего не
+  пишется и папка не создаётся; баннер при старте — `Logs: console only`;
+- **`ADAPTER_DEBUG_TOOLS_ERROR` default `1` → `0`** — zero-config не
+  обрабатывает собранные логи (`[TOOL_RESULT_ERROR]` не пишется);
+- **`ADAPTER_WEBUI_ENABLE` default `0` → `1`** — статус-страница `/`
+  поднята по умолчанию на `127.0.0.1:8765`; корень WEBUI — директория
+  `ADAPTER_DEBUG_LOGPATH`, если задана, иначе независимая `./tmp/webui`
+  (вкладка `/session` пуста — per-session логов нет);
+- `docs/environment.md` реструктурирован: группа «обязательные при старте»
+  (только `ADAPTER_BACKEND_CONFIG`) отделена от дефолтных (zero-config),
+  актуализированы таблицы дефолтов и сводная таблица режимов.
+
+**Изменения:** backend_adapter/config.py (дефолты TOOLS_ERROR/WEBUI_ENABLE +
+комментарии), backend_adapter/logger.py, backend_adapter/session_log.py,
+backend_adapter/tracer.py, backend-adapter.py (стартовый блок: без
+`os.makedirs` дефолтной папки, WEBUI-корень `./tmp/webui`, баннеры,
+версия 0.7.1 → 0.7.2), tests/ (conftest, test_config, test_logger,
+test_session_log, WEBUI-корень), backend-adapter.env, sample.adapter.env,
+README.md, docs/ (environment — реструктуризация; install, logging,
+architecture — синхронизация дефолтов), CLAUDE.md, changelog.md.
+
+### 2026-09-03 Настраиваемые адреса прослушивания ADAPTER_ENDPOINT_HOST / ADAPTER_WEBUI_HOST
+
+**Проблема:** адреса прослушивания обоих HTTP-серверов были жёстко заданы:
+адаптер слушал **все интерфейсы** (bind `("", PROXY_PORT)` → INADDR_ANY),
+WEBUI был привязан к `127.0.0.1` в коде. Нельзя было поднять адаптер в
+сети/контейнере на нужном адресе, а дефолт «все интерфейсы» небезопасен
+по умолчанию (доступ из сети без явного запроса).
+
+**Решение:**
+- `ADAPTER_ENDPOINT_HOST` — адрес, на котором слушает HTTP-эндпоинт
+  адаптера; `ADAPTER_WEBUI_HOST` — адрес веб-интерфейса; дефолт обеих —
+  `127.0.0.1` (localhost);
+- идиом `os.environ.get(name, "") or "127.0.0.1"`: пустая env-переменная
+  в bind-кортеже socketserver означала бы INADDR_ANY — с `or` и незаданная,
+  и пустая дают безопасный localhost;
+- `0.0.0.0` — осознанный выбор «слушать на всех интерфейсах» (прежнее
+  поведение адаптера); баннер при старте показывает реальный адрес.
+
+**Изменения:** backend_adapter/config.py (две константы + комментарии),
+backend-adapter.py (импорты, баннеры `Listening:`/`[WEBUI]`, bind сервера,
+вызов `webui_serve(...)`), tests/conftest.py (host-дефолты в обоих словарях),
+tests/test_config.py (класс TestHostVars: дефолты, пустое env → дефолт,
+явный `0.0.0.0`), sample.adapter.env, backend-adapter.env, docs/
+(environment, install, logging, architecture), CLAUDE.md, changelog.md.
+
+### 2026-09-03 Единая директория логов ADAPTER_DEBUG_LOGPATH
+
+**Проблема:** логирование сессий настраивалось двумя переменными —
+`ADAPTER_DEBUG_LOGFILE` (debug-блоки, dual-режим «файл или директория»)
+и `ADAPTER_TRACE_LOGFILE` (structured trace JSONL). Корень WEBUI и условие
+для per-session дампов привязывались к debug-переменной, что давало
+несколько путей «куда писать» и расхождения в документации.
+
+**Решение:** обе переменные заменены одной — `ADAPTER_DEBUG_LOGPATH`,
+путь к **директории** логов сессий: debug-логи (`session-*.log`),
+trace-логи (`session-*.jsonl`), `*.parts` дампы и корень WEBUI лежат
+в ней плоско. Пусто → дефолт `./tmp/logs` относительно папки запуска
+(лениво, на старте/при записи). `ADAPTER_DEBUG_ENABLE` — мастер-выключатель:
+при `0` ничего не пишется и папка не создаётся; при `1` папка создаётся
+при необходимости. LOGPATH на существующий файл → `[FATAL]` + подсказка +
+`sys.exit(1)`. Single-file режим удалён полностью.
+
+**Изменения:** backend_adapter/config.py, backend_adapter/session_log.py,
+backend_adapter/logger.py, backend_adapter/tracer.py, backend-adapter.py,
+backend_adapter/webserver.py (докстринг), tests/ (conftest, test_logger,
+test_tracer, test_session_log), sample.adapter.env, backend-adapter.env,
+docs/ (environment, install, logging, architecture), CLAUDE.md, changelog.md.
 
 ### 2026-09-03 Удалён legacy-режим конфигурации бэкенда
 

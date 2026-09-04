@@ -111,6 +111,7 @@ class TestWriteDebugJson:
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
         config.ADAPTER_DEBUG_TAGS_OUT = True
+        config.ADAPTER_DEBUG = True
         # Force parts dir creation
         session_log._parts_dir["sess1_jsonparts"] = tmp_path / "parts"
         session_log._parts_dir_ts["sess1"] = "20260831-120000"
@@ -137,6 +138,7 @@ class TestWriteDebugJson:
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
         config.ADAPTER_DEBUG_TAGS_OUT = False
+        config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}
@@ -147,7 +149,7 @@ class TestWriteDebugJson:
         assert len(files) == 0
 
     def test_no_dir_no_files(self, tmp_path):
-        """When ADAPTER_DEBUG_LOGFILE is not a directory, no dumps are written."""
+        """When ADAPTER_DEBUG_LOGPATH is not set / not a directory, no dumps are written."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -156,6 +158,7 @@ class TestWriteDebugJson:
         session_log._DEBUG_IS_DIR = False
         session_log._DEBUG_PATH = str(tmp_path / "not-a-dir.log")
         config.ADAPTER_DEBUG_TAGS_OUT = True
+        config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}
@@ -175,6 +178,7 @@ class TestWriteDebugJson:
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
         config.ADAPTER_DEBUG_TAGS_OUT = True
+        config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}
@@ -195,6 +199,7 @@ class TestWriteDebugJson:
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
         config.ADAPTER_DEBUG_TAGS_OUT = True
+        config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
         session_log._parts_dir = {"sess1_jsonparts": str(parts)}
@@ -203,6 +208,26 @@ class TestWriteDebugJson:
         session_log.write_debug_json("sess1", "TEST", b'{"key":"value"}')
         data = json.loads((tmp_path / "parts" / [f for f in (tmp_path / "parts").glob("*.json")][0]).read_text())
         assert data == {"key": "value"}
+
+    def test_master_switch_off_no_files(self, tmp_path):
+        """When ADAPTER_DEBUG_ENABLE=0 (master switch), no dumps are written."""
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log, config
+        session_log._DEBUG_IS_DIR = True
+        session_log._DEBUG_PATH = str(tmp_path)
+        config.ADAPTER_DEBUG_TAGS_OUT = True
+        config.ADAPTER_DEBUG = False
+        parts = tmp_path / "parts"
+        parts.mkdir(exist_ok=True)
+        session_log._parts_dir = {"sess1_jsonparts": str(parts)}
+        session_log._debug_json_seq = 0
+
+        session_log.write_debug_json("sess1", "TEST", {"key": "value"})
+        files = list(parts.glob("*.json"))
+        assert len(files) == 0
 
 
 class TestOpenSessionFile:
@@ -251,3 +276,22 @@ class TestOpenSessionFile:
         # Adding sess4 should trigger eviction of oldest
         fd = session_log._open_session_file("trace", "sess4")
         assert fd is not None
+
+    def test_no_logpath_no_file(self, tmp_path):
+        """Zero-config (ADAPTER_DEBUG_LOGPATH не задан — is_dir флаги falsy):
+        _open_session_file() возвращает None и ничего не создаёт на диске."""
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log
+        # Import-time defaults: env LOGPATH пуст → все четыре флага falsy
+        assert session_log._DEBUG_IS_DIR is False
+        assert session_log._TRACE_IS_DIR is False
+
+        fd = session_log._open_session_file("debug", "sess1")
+        assert fd is None
+        assert list(tmp_path.glob("session-*")) == []
+        # Оставляем глобалы девственно-чистыми (как инициализировал isolate_logs)
+        session_log._DEBUG_PATH = ""
+        session_log._TRACE_PATH = ""

@@ -1,7 +1,7 @@
 """Session-scoped log file management.
 
 Manages per-session debug/trace file handles with FIFO eviction.
-Reads log path settings from config at import time.
+Reads ADAPTER_DEBUG_LOGPATH from env at import time.
 """
 
 import contextlib
@@ -112,16 +112,26 @@ _debug_json_lock = threading.Lock()
 
 
 def _resolve_log_base():
-    """Прочитать env-переменные и вернуть (debug_is_dir, debug_path,
-    trace_is_dir, trace_path)."""
-    dbg = os.environ.get("ADAPTER_DEBUG_LOGFILE", "")
-    trc = os.environ.get("ADAPTER_TRACE_LOGFILE", "")
-    return (
-        os.path.isdir(dbg) if dbg else False,
-        dbg,
-        os.path.isdir(trc) if trc else False,
-        trc,
-    )
+    """Прочитать env ADAPTER_DEBUG_LOGPATH и вернуть (debug_is_dir,
+    debug_path, trace_is_dir, trace_path).
+
+    Путь всегда трактуется как ДИРЕКТОРИЯ логов сессий (debug-логи, trace,
+    *.parts дампы и корень веб-интерфейса — всё в одной папке). Режим
+    «один файл» удалён.
+
+    Zero-config: если env-переменная пуста / не задана — файловая запись
+    полностью ВЫКЛЮЧЕНА (все четыре значения falsy), дефолтного пути больше
+    нет, ничего на диск не пишется и папка не создаётся ни на импорте, ни
+    на старте. Консольные debug-блоки при этом видны (ADAPTER_DEBUG_ENABLE=1).
+
+    ``is_dir``-флаги становятся True, когда env-путь задан, — независимо от
+    того, существует ли папка на диске: отсутствие лечится os.makedirs(
+    exist_ok=True) при записи (см. _open_session_file / _body_tags_parts_dir).
+    """
+    p = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip()
+    if not p:
+        return (False, "", False, "")
+    return (True, p, True, p)
 
 
 _DEBUG_IS_DIR, _DEBUG_PATH, _TRACE_IS_DIR, _TRACE_PATH = _resolve_log_base()
@@ -141,7 +151,11 @@ def _make_session_file(base_path: str, session_id: str, ext: str):
 
 def _open_session_file(kind: str, session_id: str):
     """Открыть дескриптор для session_id (создать или вернуть существующий).
-    Returns open file handle (binary, "ab") или None, если режим «файл»."""
+    Returns open file handle (binary, "ab") или None, если лог-путь не задан.
+
+    Директория логов создаётся при необходимости (lazy): путь может быть
+    задан, но ещё не существовать на диске — os.makedirs(exist_ok=True)
+    до открытия файла сессии."""
     if kind == "debug":
         is_dir, path = _DEBUG_IS_DIR, _DEBUG_PATH
         ext = "log"
@@ -150,6 +164,7 @@ def _open_session_file(kind: str, session_id: str):
         ext = "jsonl"
     if not is_dir or not path:
         return None
+    os.makedirs(path, exist_ok=True)
     target = _make_session_file(path, session_id, ext)
     logs = _session_logs.setdefault(session_id, {})
     if target in logs:
@@ -193,6 +208,9 @@ def _body_tags_parts_dir(session_id: str) -> str | None:
         if session_id not in _parts_dir_ts:
             _parts_dir_ts[session_id] = time.strftime("%Y%m%d-%H%M%S")
         ts = _parts_dir_ts[session_id]
+        # Lazy: базовая директория логов может ещё не существовать —
+        # создаём и её, и вложенную .parts.
+        os.makedirs(_DEBUG_PATH, exist_ok=True)
         tags_path = os.path.join(_DEBUG_PATH, f"session-{ts}-{safe8}.parts")
         os.makedirs(tags_path, exist_ok=True)
         _parts_dir[tag_key] = tags_path
@@ -207,14 +225,20 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     ``data`` — dict, str, list или bytearray/bytes. При bytes/bytearray
     декодируется как UTF-8.
 
-    Файл пишется только если включён флаг ``config.ADAPTER_DEBUG_TAGS_OUT``
-    и per-session режим логов (``_DEBUG_IS_DIR`` — т.е. ADAPTER_DEBUG_LOGFILE
-    указывает на директорию). Для каждого тега пишутся парные файлы —
+    Файл пишется только если включён мастер-выключатель
+    ``config.ADAPTER_DEBUG`` (ADAPTER_DEBUG_ENABLE=1) и флаг
+    ``config.ADAPTER_DEBUG_TAGS_OUT``, и задан лог-путь (``_DEBUG_IS_DIR``
+    — т.е. ADAPTER_DEBUG_LOGPATH задаёт директорию логов сессий; папка
+    создаётся при необходимости). Для каждого тега пишутся парные файлы —
     ``.json`` и ``.yaml``.
     """
-    # Быстрая проверка — флаг выключен или лог-путь не директория
-    from .config import ADAPTER_DEBUG_TAGS_OUT
+    # Быстрая проверка — мастер-выключатель / флаг выключен или лог-путь
+    # не директория. Локальный импорт читает config на момент вызова, чтобы
+    # тесты могли переключать флаги без перезагрузки модуля.
+    from .config import ADAPTER_DEBUG, ADAPTER_DEBUG_TAGS_OUT
 
+    if not ADAPTER_DEBUG:
+        return
     if not ADAPTER_DEBUG_TAGS_OUT:
         return
     if not _DEBUG_IS_DIR or not _DEBUG_PATH:
