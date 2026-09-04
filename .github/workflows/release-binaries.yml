@@ -32,9 +32,6 @@ jobs:
           - os: macos-latest
             target: macos-arm64
             ext: ''
-          - os: macos-13
-            target: macos-x64
-            ext: ''
           - os: windows-latest
             target: windows-x64
             ext: '.exe'
