@@ -29,9 +29,9 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; доменный пакет `backend_adapter/`
-  (22 модуля, включая `__init__.py`; генератор дерева артефактов —
-  пакет `artifact_tree*` из 8 модулей, публичный API — `artifact_tree.generate()`;
-  см. `docs/architecture.md`).
+  (24 модуля, включая `__init__.py`; генератор дерева артефактов —
+  группа модулей `artifact_tree*.py` из 8 файлов, публичный API —
+  `artifact_tree.generate()`; см. `docs/architecture.md`).
 - **Python 3.10+** (аннотации `X | Y`).
 - Единственная внешняя зависимость — **PyYAML** (`requirements.txt`);
   всё остальное — стандартная библиотека.
@@ -42,11 +42,18 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `serve()`, CLI `python -m backend_adapter.webserver`) + эндпойнт-модули: `/` =
   `webui_status.py` (версия, LLM-эндпойнты, модели; обновление списка
   моделей при загрузке страницы и по кнопке — `config.refresh_models()`),
-  `/session` = `session_viewer.py` (вкладки + раздача файлов; корень — директория
+  `/session` = `session_viewer.py` (вкладки + раздача файлов + hash8-алиасы
+  `/session/<hash8>/...` и png/puml-шорткаты; корень — директория
   `ADAPTER_DEBUG_LOGPATH`, порт `ADAPTER_WEBUI_PORT`, адрес `ADAPTER_WEBUI_HOST`,
-  daemon-поток в процессе адаптера); адрес прослушивания самого адаптера —
-  `ADAPTER_ENDPOINT_HOST` (обе по умолчанию `127.0.0.1`);
-  `artifact_tree.py` — генерация дерева артефактов (`artefacts/tree.html`) на лету.
+  daemon-поток в процессе адаптера), `/config` = `webui_config_api.py`
+  (runtime-пул debug-переменных, см. `RUNTIME_CONFIG_POOL` в `config.py`).
+  Адрес прослушивания самого адаптера — `ADAPTER_ENDPOINT_HOST`
+  (обе по умолчанию `127.0.0.1`);
+  `artifact_tree.py` — генерация дерева артефактов (`artefacts/tree.html`)
+  на лету; повторные генерации инкрементальны: чекпоинт
+  `artefacts/.build_state.json` ограничивает пересборку новыми `*.parts`
+  файлами сессии; большие сессии разбиваются на страницы пагинации
+  `artefacts/pages/<N>/`.
   Новый эндпойнт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
   Per-session дампы частей протокола включаются флагом `ADAPTER_DEBUG_TAGS_OUT=1`
   (парные `.json`+`.yaml`, фиксированный список тегов), требуют
@@ -93,6 +100,39 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+### 2026-09-04 — WEBUI: инкрементальное дерево артефактов, пагинация, hash8-алиасы, runtime-конфиг `/config` (v0.8.0)
+
+**Контекст:** повторные заходы в WEBUI полностью пересобирали дерево
+сессии (дорого на больших сессиях), просмотр длинных диалогов требовал
+прокрутки огромной страницы, а объём debug-записи менялся только
+перезапуском адаптера.
+
+**Решение:**
+- **инкрементальная генерация** в `artifact_tree.py`: чекпоинт
+  `artefacts/.build_state.json` (последняя обработанная часть); при следующем
+  заходе пересобираются только новые `*.parts`, разметка (Finish/Superseded/
+  Title, ответы на запросы, границы страниц) пересчитывается по полному
+  состоянию. Чекпоинт битый/отсутствует — холодный полный пересбор с warning;
+- **пагинация**: `generate()` дополнительно считает границы страниц по
+  реальным пользовательским запросам и пишет `artefacts/pages/<N>/tree.{html,puml,png}`
+  + сводный `artefacts/pages/index.html` («по страницам»);
+- **короткие адреса**: hash8 из имени папки сессии — `/session/<hash8>/<rel_path>`,
+  дерево как картинка/PlantUML-исходник — `/session/<session_id|hash8>/png` и
+  `/puml` (`?page=N` — страницу пагинации);
+- **runtime-конфиг**: эндпойнт `/config` (`webui_config_api.py`) переключает
+  на лету узкий пул debug-переменных (`RUNTIME_CONFIG_POOL` в `config.py`:
+  4 bool — `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`, `ADAPTER_DEBUG_TOOLS`,
+  `ADAPTER_DEBUG_TOOLS_ERROR`; 3 int — `ADAPTER_TRACE_REASONING_MAX_CHARS`,
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM`); чтение пула
+  кодом переведено на живые `config.ADAPTER_X` (не снимок на импорте);
+  `set_runtime_config()` молча игнорирует неверные типы/неизвестные ключи.
+
+**Следствия:** повторные заходы в `/session` — быстрые; большие сессии
+читаются постранично; ссылки на сессии/артефакты стали короткими;
+объём debug-записи переключается с веб-страницы без рестарта.
+Сеть/бэкенды/модели/порты/`ADAPTER_DEBUG_LOGPATH` на лету не меняются.
+`__version__` поднята до 0.8.0.
 
 ### 2026-09-04 — Zero-config: консоль-логи по умолчанию, WEBUI включён, дефолты минимальных ресурсов (v0.7.2)
 

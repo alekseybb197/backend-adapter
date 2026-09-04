@@ -235,7 +235,8 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
 <h2>[CC]-adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
    <b>Режим:</b> {html.escape(snapshot["mode"])} &nbsp;·&nbsp;
-   <a href="/session">просмотр сессий →</a></p>
+   <a href="/session">просмотр сессий →</a> &nbsp;·&nbsp;
+   <a href="/config">runtime config →</a></p>
 {note_html}
 <table>
   <tr><th>Эндпойнт</th><th>Base URL</th><th>Статус</th><th>Модели</th></tr>

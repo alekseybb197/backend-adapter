@@ -66,16 +66,59 @@ reload было бы разрушительно; вместо этого — п�
 import html
 import logging
 import os
-import shutil
+import re
 import urllib.parse
 
 from . import artifact_tree, webserver
+from .artifact_tree_common import PART_RE
 
 SESSION_SUFFIX = ".parts"
 TREE_RELATIVE_PATH = os.path.join("artefacts", "tree.html")
 ARTEFACTS_DIRNAME = "artefacts"
 
 logger = logging.getLogger("session_viewer")
+
+# Хвостовой 8-символьный hex-хеш сессии, зашитый в имя директории адаптером
+# (например "session-20260901-103440-e034c295.parts" -> "e034c295") — тот
+# же хеш, что префиксом у всех raw part-файлов внутри (используется как
+# короткий алиас для /session/<hash8>/png и /puml, см. SessionEndpoint).
+_DIR_HASH_SUFFIX_RE = re.compile(r"-([0-9a-f]{8})" + re.escape(SESSION_SUFFIX) + r"$")
+
+
+def _session_hash(session_name: str, parts_dir: str):
+    """8-символьный hex-хеш сессии — сначала пытаемся вытащить из ИМЕНИ
+    ДИРЕКТОРИИ (дёшево, без обращения к диску), и только если оно не
+    подходит под стандартный паттерн адаптера — как fallback, сканируем
+    один raw part-файл внутри и берём префикс оттуда (PART_RE, тот же
+    паттерн, что разбирает сами part-файлы) — надёжнее для нестандартных/
+    старых имён директорий, ценой одного os.listdir. None, если не
+    получилось ни так, ни так (короткий алиас для этой сессии просто не
+    будет работать, полное имя — по-прежнему будет)."""
+    m = _DIR_HASH_SUFFIX_RE.search(session_name)
+    if m:
+        return m.group(1)
+    try:
+        for fname in os.listdir(parts_dir):
+            pm = PART_RE.match(fname)
+            if pm:
+                return pm.group("session")
+    except OSError:
+        pass
+    return None
+
+
+def _build_hash_index(sessions: list[tuple[str, str]]) -> dict[str, str]:
+    """{hash8: session_name} — для резолва короткого алиаса в do_GET.
+    Коллизии (два разных session_name с одним hash8 — теоретически
+    возможно, но крайне маловероятно) разрешаются в пользу ПЕРВОЙ найденной
+    сессии в отсортированном списке; остальные останутся доступны только
+    по полному имени, не по алиасу."""
+    index: dict[str, str] = {}
+    for name, parts_dir in sessions:
+        h = _session_hash(name, parts_dir)
+        if h and h not in index:
+            index[h] = name
+    return index
 
 
 def _is_stale(parts_dir: str, tree_html_path: str) -> bool:
@@ -112,10 +155,15 @@ def find_or_generate_sessions(root_dir: str, verbose: bool = False):
     неё всю свою URL-схему, поэтому дальше нужен именно корень, а не
     готовый файл. Для каждой *.parts-директории прямо внутри root_dir:
       - нет tree.html -> генерируем;
-      - tree.html есть, но устарел (см. _is_stale) -> перегенерируем
-        (сперва стерев старую artefacts/, чтобы не копились файлы-сироты
-        от предыдущей генерации, если дедупликация артефактов между
-        запусками сдвинулась);
+      - tree.html есть, но устарел (см. _is_stale) -> ПЕРЕГЕНЕРИРУЕМ, но
+        БЕЗ предварительного стирания artefacts/: artifact_tree.generate()
+        теперь сам инкрементально продолжает с чекпойнта
+        (artefacts/.build_state.json) — а раз он лежит ВНУТРИ artefacts/,
+        rmtree() здесь стёр бы его вместе со всем накопленным состоянием и
+        свёл на нет весь смысл инкрементальности (генерация снова
+        перечитывала бы ВСЕ part-файлы с нуля при каждом устаревании, что
+        при долгой сессии — как раз то замедление, ради которого
+        инкрементальность и делалась);
       - иначе -> используем как есть, без повторной генерации.
     Директория, для которой генерация не удалась, пропускается с
     предупреждением в лог — а не роняет страницу целиком.
@@ -137,9 +185,9 @@ def find_or_generate_sessions(root_dir: str, verbose: bool = False):
         if not exists or stale:
             if stale:
                 logger.info(
-                    f"[{entry}] tree.html устарел (появились новые part-файлы) — перегенерирую..."
+                    f"[{entry}] tree.html устарел (появились новые part-файлы) — "
+                    f"дозаписываю (инкрементально)..."
                 )
-                shutil.rmtree(os.path.join(full, ARTEFACTS_DIRNAME), ignore_errors=True)
             else:
                 logger.info(f"[{entry}] tree.html не найден — генерирую...")
             try:
@@ -167,6 +215,9 @@ SHELL_TEMPLATE = """<!DOCTYPE html>
   #status-link {{ background: #222; color: #8ab4f8; border: none; padding: 10px 16px; cursor: pointer;
                  font-size: 13px; text-decoration: none; border-right: 1px solid #444; }}
   #status-link:hover {{ background: #444; }}
+  #config-link {{ background: #222; color: #8ab4f8; border: none; padding: 10px 16px; cursor: pointer;
+                 font-size: 13px; text-decoration: none; border-right: 1px solid #444; }}
+  #config-link:hover {{ background: #444; }}
   #frame-wrap {{ position: absolute; top: 42px; left: 0; right: 0; bottom: 0; }}
   iframe {{ width: 100%; height: 100%; border: none; }}
   #empty {{ padding: 24px; color: #555; }}
@@ -205,13 +256,18 @@ def render_shell(sessions, root_dir):
             f"<code>{TREE_RELATIVE_PATH.replace(os.sep, '/')}</code>, он будет сгенерирован автоматически. "
             f"Перезапускать сервер не нужно.</div>"
         )
-        tabs = '<a id="status-link" href="/">← статус</a>'
+        tabs = (
+            '<a id="status-link" href="/">← статус</a><a id="config-link" href="/config">config</a>'
+        )
         body = f'<div id="tabs">{tabs}</div>' + body
         return SHELL_TEMPLATE.format(body=body)
 
     # Ссылка на статус-страницу "/" — первой в панели (как и на пустой
     # странице), затем вкладки сессий, справа (margin-left:auto) — reload.
-    tabs_html = ['<a id="status-link" href="/">← статус</a>']
+    tabs_html = [
+        '<a id="status-link" href="/">← статус</a>',
+        '<a id="config-link" href="/config">config</a>',
+    ]
     frames_html = []
     for i, (name, _) in enumerate(sessions):
         safe_id = "".join(c if c.isalnum() else "_" for c in name)
@@ -253,23 +309,44 @@ class SessionEndpoint(webserver.Endpoint):
             handler._write(200, "text/html; charset=utf-8", body.encode("utf-8"))
             return
 
-        # "/session/<имя сессии>/<путь>" — <путь> может быть как
-        # "artefacts/tree.html" или "artefacts/toolcall-1.yaml" (внутри
-        # производной директории), так и просто "bb1194de-...yaml"
+        # "/session/<имя сессии ИЛИ короткий hash8>/<путь>" — <путь> может
+        # быть как "artefacts/tree.html" / "artefacts/toolcall-1.yaml"
+        # (внутри производной директории), так и просто "bb1194de-...yaml"
         # (исходный raw part-файл на уровень выше artefacts/, на него
-        # ссылаются относительным "../..." из tree.html) — URL-схема
-        # НАМЕРЕННО зеркалит реальную структуру диска 1:1, см. докстринг.
-        session_name, _, rel_path = remainder.partition("/")
+        # ссылаются относительным "../..." из tree.html), либо специальным
+        # алиасом "png"/"puml" (см. ниже) — URL-схема НАМЕРЕННО зеркалит
+        # реальную структуру диска 1:1 для обычных путей, см. докстринг.
+        session_id, _, rel_path = remainder.partition("/")
         if not rel_path:
             # "/session/<имя>" без пути — отдаём дерево сессии (если есть);
             # это удобная форма для прямой ссылки на конкретную сессию
             rel_path = TREE_RELATIVE_PATH.replace(os.sep, "/")
 
         sessions_dict = dict(sessions)
-        parts_dir = sessions_dict.get(session_name)
-        if parts_dir is None:
+        # session_id может быть ЛИБО полным именем директории, ЛИБО коротким
+        # 8-символьным hash-алиасом (например "e034c295") — резолвим через
+        # индекс, только если это не сработало напрямую (полное имя,
+        # ожидаемо, встречается чаще — не тратим время на построение
+        # индекса зазря).
+        session_name = session_id if session_id in sessions_dict else None
+        if session_name is None:
+            hash_index = _build_hash_index(sessions)
+            session_name = hash_index.get(session_id)
+        if session_name is None:
             handler.send_error(404, "Session not found")
             return
+        parts_dir = sessions_dict[session_name]
+
+        # Короткие алиасы /png и /puml — на PNG/PUML последней (полной)
+        # сборки по умолчанию, либо конкретной страницы через ?page=N (см.
+        # artifact_tree._generate_pages — artefacts/pages/<N>/tree.{png,puml}).
+        if rel_path in ("png", "puml"):
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query)
+            page = (query.get("page") or [None])[0]
+            if page:
+                rel_path = f"{ARTEFACTS_DIRNAME}/pages/{page}/tree.{rel_path}"
+            else:
+                rel_path = f"{ARTEFACTS_DIRNAME}/tree.{rel_path}"
 
         # Защита от обхода пути: разрешаем вложенность (нужно для
         # "artefacts/имя.yaml"), но итоговый АБСОЛЮТНЫЙ путь после

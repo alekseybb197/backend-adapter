@@ -1,4 +1,19 @@
-"""artifact_tree_turnbuilder — связывание openai_body и fetch_raw в ходы."""
+"""artifact_tree_turnbuilder — связывание openai_body и fetch_raw в ходы.
+
+=== Инкрементальная сборка ===
+build_turns() умеет ПРОДОЛЖАТЬ с места последнего обработанного part-файла
+вместо того, чтобы каждый раз заново парсить и обрабатывать ВСЕ
+openai_body/fetch_raw в сессии — при долгой работе (сотни-тысячи part-
+файлов) именно повторный парсинг уже виденных файлов был основным
+источником замедления генерации дерева.
+
+Состояние, которое нужно для продолжения (registry, pending-очередь
+непогашенных openai_body, накопленные turns/orphans/resolution_edges,
+last_processed_part_id) сериализуется вызывающим (см.
+artifact_tree.generate()) между запусками. Здесь — только сама логика
+"обработать НОВЫЙ срез part-файлов и доклеить к уже накопленному состоянию",
+устроенная так, чтобы результат совпадал с холодной пересборкой с нуля
+(единственная разница — сколько файлов пришлось перечитать)."""
 
 import os
 
@@ -17,16 +32,16 @@ from .artifact_tree_registry import ArtifactRegistry
 # ==================== СВЯЗЫВАНИЕ openai_body <-> fetch_raw В ХОДЫ ====================
 
 
-def build_turns(parts_dir: str, registry: ArtifactRegistry):
-    found = discover_parts(parts_dir)
-
-    merged = sorted(
-        [("ob", pid, path) for pid, path in found["openai_body"]]
-        + [("fr", pid, path) for pid, path in found["fetch_raw"]],
-        key=lambda t: t[1],
-    )
-
-    resolution_edges: list[tuple[str, str]] = []  # п.5: [(toolcall_name, tool_result_name), ...]
+def _process_parts(
+    parts_dir: str, registry: ArtifactRegistry, merged: list, resolution_edges: list
+):
+    """Парсит и обрабатывает СРЕЗ part-файлов (``merged`` — уже
+    отфильтрованный и отсортированный список (etype, part_id, path)) в
+    ob_records/fr_records. Мутирует registry и resolution_edges (списком
+    добавляет новые связи toolcall->tool_result) — то же самое, что раньше
+    делал начальный цикл build_turns(), просто вынесено отдельно, чтобы
+    вызываться и на полном списке (холодный старт), и на срезе новых
+    файлов (продолжение)."""
     ob_records = []  # {part_id, kind, input_names, raw_file}
     fr_records = []  # {part_id, kind, reasoning_name, decision_names, raw_file}
     for etype, part_id, path in merged:
@@ -65,12 +80,17 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
                     **fr_out,
                 }
             )
+    return ob_records, fr_records
 
-    # Жадное сопоставление: очередь непогашенных openai_body на каждый kind
-    pending: dict[str, list] = {"agent_turn": [], "structured_output": []}
-    turns = []
-    orphans = []
 
+def _match_records(ob_records: list, fr_records: list, pending: dict, turns: list, orphans: list):
+    """Жадное сопоставление openai_body<->fetch_raw. ``pending`` — очередь
+    непогашенных openai_body НА ВХОДЕ (может быть непустой при продолжении
+    — например, ход из прошлого запуска, чей fetch_raw ещё не пришёл);
+    мутируется и остаётся актуальной на выходе (то, что всё ещё не
+    погашено — сохраняется в чекпойнт для следующего продолжения). ``turns``
+    и ``orphans`` — тоже мутируются добавлением новых записей поверх уже
+    накопленных."""
     all_events = sorted(
         [("ob", r["part_id"], r) for r in ob_records]
         + [("fr", r["part_id"], r) for r in fr_records],
@@ -113,38 +133,18 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
                 }
             )
 
-    turns.sort(key=lambda t: t["ob_part_id"])
 
-    # Дедупликация resolution_edges: тот же tool_result (тот же tool_call_id)
-    # ретранслируется в КАЖДОМ последующем openai_body по мере роста истории
-    # (тот же эффект, что мы уже разбирали для JSONL-трейса адаптера) — без
-    # дедупликации одна и та же связка toolcall->tool_result задваивалась бы
-    # на каждый ход, где она просто "проезжает" в контексте.
-    resolution_edges = list(dict.fromkeys(resolution_edges))
-
-    # system-артефакты целиком классифицируются в inline_labels (Session/
-    # Workflow) и вписываются в блок Ход — отдельного узла Harness для них
-    # больше нет.
-    inline_labels = compute_inline_labels(registry)
-
+def _finalize(turns: list, registry: ArtifactRegistry, inline_labels: dict):
+    """Финальная агрегация — сегментация по реальным запросам, Finish/
+    Superseded/SessionTitle и т.д. Всегда пересчитывается заново над ПОЛНЫМ
+    (резюмированным + новым) состоянием — это дешёвая фильтрация уже
+    готовых списков, а не повторный парсинг файлов, так что инкрементальность
+    выше по стеку сюда не распространяется (и не должна: тут нечего
+    экономить)."""
     # === Сегментация по РЕАЛЬНЫМ запросам пользователя ===
     # В сессии может быть НЕСКОЛЬКО настоящих обращений человека (не только
     # самое первое) — каждый неинлайненный user-артефакт (т.е. НЕ
     # "<system-reminder>"-инжекция) это отдельный, самостоятельный запрос.
-    # Раньше это не учитывалось: единственный global Start указывал только
-    # на самый ранний из них, а остальные повисали вообще без входящего
-    # ребра ("орфанные" user-узлы); и единственный global Finish/Superseded
-    # неверно считал ЛЮБОЙ не-последний финальный ответ "вытесненным
-    # дублем" — что верно только ВНУТРИ одного запроса, но ошибочно
-    # схлопывало ответы на РАЗНЫЕ последовательные запросы в одну кучу.
-    #
-    # Логика: сортируем реальные user-артефакты по part_id первого
-    # появления — каждый открывает свой "сегмент" вплоть до part_id
-    # следующего. Внутри сегмента отбираем agent_turn-ходы с финальным
-    # текстом (response без сопутствующего toolcall, т.е. не промежуточный
-    # ход) — последний по part_id это НАСТОЯЩИЙ ответ на этот запрос,
-    # остальные (если есть) — вытеснены повторным запросом ВНУТРИ этого же
-    # логического запроса (тот же эффект дублей, что мы уже находили).
     real_user_entries = sorted(
         (int(e["first_part_id"]), e["name"])
         for e in registry.by_hash.values()
@@ -187,10 +187,7 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
         finish_source = request_answers.get(last_uname)
 
     # "next request" рёбра: ответ на запрос i -> следующий реальный user-
-    # артефакт (i+1). Заменяет прежний одиночный Start->единственный вход:
-    # теперь видно, что второй и третий вопрос пользователя пришли ПОСЛЕ
-    # ответа на предыдущий, в рамках одного и того же диалога, а не
-    # появились ниоткуда.
+    # артефакт (i+1).
     next_request_edges = []
     for i in range(len(real_user_entries) - 1):
         uname_i = real_user_entries[i][1]
@@ -204,6 +201,94 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
         if t["kind"] == "structured_output":
             title_targets += [n for n in t["decision_names"] if n.startswith("response-")]
 
+    # Границы страниц (см. п.2/пагинация): страница N покрывает
+    # ob_part_id в [pid_N, pid_{N+1}) — те же границы, что и сегментация
+    # request_answers выше, просто отданные явно вызывающему.
+    page_boundaries = [
+        (pid, boundaries[i + 1], uname) for i, (pid, uname) in enumerate(real_user_entries)
+    ]
+
+    return (
+        start_target,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+        page_boundaries,
+    )
+
+
+def build_turns(parts_dir: str, registry: ArtifactRegistry, resume_state: dict | None = None):
+    """Строит (или ПРОДОЛЖАЕТ строить) дерево ходов для ``parts_dir``.
+
+    ``resume_state`` — None для холодной сборки с нуля (как раньше), либо
+    чекпойнт вида {"last_processed_part_id": int, "pending": {...},
+    "turns": [...], "orphans": [...], "resolution_edges": [[..],..]} —
+    тогда обрабатываются ТОЛЬКО part-файлы с part_id БОЛЬШЕ
+    last_processed_part_id, а остальное состояние продолжается с того, на
+    чём остановились. registry ТОЖЕ должен быть заранее восстановлен
+    вызывающим через ArtifactRegistry.from_dict() при resume — эта функция
+    сама реестр не восстанавливает, только пополняет.
+
+    Возвращает тот же кортеж, что и раньше, ПЛЮС предпоследним элементом —
+    page_boundaries (см. _finalize), и последним — checkpoint: dict для
+    сохранения на диск (см. artifact_tree.generate()), готовый скормить
+    обратно в следующий вызов как resume_state."""
+    found = discover_parts(parts_dir)
+
+    last_pid = (resume_state or {}).get("last_processed_part_id", -1)
+
+    merged = sorted(
+        [("ob", pid, path) for pid, path in found["openai_body"] if pid > last_pid]
+        + [("fr", pid, path) for pid, path in found["fetch_raw"] if pid > last_pid],
+        key=lambda t: t[1],
+    )
+
+    resolution_edges: list = [tuple(e) for e in (resume_state or {}).get("resolution_edges", [])]
+    pending: dict[str, list] = (resume_state or {}).get(
+        "pending", {"agent_turn": [], "structured_output": []}
+    )
+    turns: list = list((resume_state or {}).get("turns", []))
+    orphans: list = list((resume_state or {}).get("orphans", []))
+
+    ob_records, fr_records = _process_parts(parts_dir, registry, merged, resolution_edges)
+    _match_records(ob_records, fr_records, pending, turns, orphans)
+
+    turns.sort(key=lambda t: t["ob_part_id"])
+
+    # Дедупликация resolution_edges: тот же tool_result (тот же tool_call_id)
+    # ретранслируется в КАЖДОМ последующем openai_body по мере роста истории
+    # (тот же эффект, что мы уже разбирали для JSONL-трейса адаптера) — без
+    # дедупликации одна и та же связка toolcall->tool_result задваивалась бы
+    # на каждый ход, где она просто "проезжает" в контексте.
+    resolution_edges = list(dict.fromkeys(resolution_edges))
+
+    # system-артефакты целиком классифицируются в inline_labels (Session/
+    # Workflow) и вписываются в блок Ход — отдельного узла Harness для них
+    # больше нет. Пересчитывается по ПОЛНОМУ registry каждый раз — дёшево
+    # (просто фильтрация уже собранных артефактов, не парсинг файлов).
+    inline_labels = compute_inline_labels(registry)
+
+    (
+        start_target,
+        finish_source,
+        superseded_targets,
+        title_targets,
+        request_answers,
+        next_request_edges,
+        page_boundaries,
+    ) = _finalize(turns, registry, inline_labels)
+
+    new_last_pid = max([pid for _, pid, _ in merged], default=last_pid)
+    checkpoint = {
+        "last_processed_part_id": new_last_pid,
+        "pending": pending,
+        "turns": turns,
+        "orphans": orphans,
+        "resolution_edges": [list(e) for e in resolution_edges],
+    }
+
     return (
         turns,
         orphans,
@@ -215,4 +300,6 @@ def build_turns(parts_dir: str, registry: ArtifactRegistry):
         title_targets,
         request_answers,
         next_request_edges,
+        page_boundaries,
+        checkpoint,
     )

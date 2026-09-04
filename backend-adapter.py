@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.7.3
+"""[CC] <-> [OI]-backend adapter v0.8.0
 — changelog: ../changelog.md"""
 
-__version__ = "0.7.3"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold + zero-config defaults: console-only logs (no disk dir), TOOLS_ERROR off, WEBUI status page on by default + distribution: standalone binaries (PyInstaller), build script, CI release workflow, one-line installer install.sh"
+__version__ = "0.8.0"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold + zero-config defaults: console-only logs (no disk dir), TOOLS_ERROR off, WEBUI status page on by default + distribution: standalone binaries (PyInstaller), build script, CI release workflow, one-line installer install.sh + runtime-config endpoint /config (live reads config.X) + incremental artifact-tree builds with checkpoints (.build_state.json) + pagination pages artefacts/pages/<N>/ + /session hash8 URL aliases + png/puml shortcuts"
 
 import os
 import sys

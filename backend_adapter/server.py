@@ -14,20 +14,16 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import session_log
+from . import config, session_log
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
-    ADAPTER_DEBUG_TAGS_OUT,
-    ADAPTER_DEBUG_TOOLS,
-    ADAPTER_DEBUG_TOOLS_ERROR,
     ADAPTER_RETRY,
     ADAPTER_SENSITIVE_LOGGING_ENABLE,
     ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_STREAMING_ENABLE,
     ADAPTER_STRICT_MODELS,
     ADAPTER_TIMEOUT,
-    ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
     SSL_CTX,
     _cap,
     _resolve_backend,
@@ -192,7 +188,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             _dr(
                 req_id, f"[BODY] {(_body if (lim := _trim_limit('BODY')) is None else _body[:lim])}"
             )
-            if ADAPTER_DEBUG_TAGS_OUT:
+            if config.ADAPTER_DEBUG_TAGS_OUT:
                 write_debug_json(session_id, "BODY", _body)
 
             try:
@@ -318,8 +314,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             for tr in extract_tool_results(in_messages):
                 parent_req_id = _lookup_tool_use_producer(session_id, tr["tool_use_id"])
                 traced_content = tr["content"]
-                if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
-                    traced_content = _cap(traced_content, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
+                if config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
+                    traced_content = _cap(traced_content, config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
                 _trace(
                     session_id,
                     req_id,
@@ -341,7 +337,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     req_id,
                     f"[TOOL_RESULT] tool_name={_tool_name or '?'} tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}",
                 )
-                if ADAPTER_DEBUG_TAGS_OUT:
+                if config.ADAPTER_DEBUG_TAGS_OUT:
                     write_debug_json(
                         session_id,
                         "TOOL_RESULT",
@@ -355,7 +351,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     )
 
                 # ADAPTER_DEBUG_TOOLS=1 — писать полный content для всех результатов
-                if ADAPTER_DEBUG_TOOLS:
+                if config.ADAPTER_DEBUG_TOOLS:
                     _tool_content_full = tr["content"] or ""
                     _tool_content_snippet = (
                         _tool_content_full
@@ -366,7 +362,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[TOOL_RESULT] content={json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)}",
                     )
-                    if ADAPTER_DEBUG_TAGS_OUT:
+                    if config.ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(
                             session_id,
                             "TOOL_RESULT",
@@ -378,7 +374,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 # ADAPTER_DEBUG_TOOLS_ERROR=1 (default "0" — zero-config не
                 # обрабатывает собранные логи) — писать детальный лог ошибок
                 # инструментов ([TOOL_RESULT_ERROR])
-                if tr["is_error"] and ADAPTER_DEBUG_TOOLS_ERROR:
+                if tr["is_error"] and config.ADAPTER_DEBUG_TOOLS_ERROR:
                     # При ошибке — полная запись результата (аналог [RESPONSE])
                     # чтобы видеть что именно вернул инструмент, без копания
                     # в JSONL trace. Санитайзер через _dr() → redact().
@@ -401,7 +397,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[TOOL_RESULT_ERROR] {json.dumps(err_snapshot, ensure_ascii=False, default=str)}",
                     )
-                    if ADAPTER_DEBUG_TAGS_OUT:
+                    if config.ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "TOOL_RESULT_ERROR", err_snapshot)
 
             openai_body = {
@@ -460,7 +456,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if (lim := _trim_limit('OPENAI_BODY')) is None else json.dumps(openai_body, ensure_ascii=False)[:lim])}",
             )
 
-            if ADAPTER_DEBUG_TAGS_OUT:
+            if config.ADAPTER_DEBUG_TAGS_OUT:
                 write_debug_json(session_id, "OPENAI_BODY", openai_body)
 
             # Построить URL и Authorization из resolved backend-конфига.
@@ -731,7 +727,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[FETCH_RAW] {(raw.decode() if (lim := _trim_limit('FETCH_RAW')) is None else raw.decode()[:lim])}",
                     )
-                    if ADAPTER_DEBUG_TAGS_OUT:
+                    if config.ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "FETCH_RAW", raw.decode())
                     _trace(
                         session_id,
@@ -750,7 +746,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(anthropic_resp, ensure_ascii=False)[:lim])}",
                     )
-                    if ADAPTER_DEBUG_TAGS_OUT:
+                    if config.ADAPTER_DEBUG_TAGS_OUT:
                         write_debug_json(session_id, "RESPONSE", anthropic_resp)
                     self._send_json(200, anthropic_resp)
                     _dr(req_id, "[OK] Done")

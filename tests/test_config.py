@@ -610,3 +610,79 @@ class TestRefreshModels:
             assert m_urlopen.call_args.kwargs["timeout"] == config.ADAPTER_TIMEOUT
             config._fetch_models("http://x", "k", timeout=5.0)
             assert m_urlopen.call_args.kwargs["timeout"] == 5.0
+
+
+class TestRuntimeConfig:
+    """Tests for runtime config pool — get/set via /config endpoint."""
+
+    def setup_method(self):
+        _reload_config()
+        from backend_adapter import config
+        self.config = config
+
+    def test_valid_keys_applied(self):
+        """Valid bool/int values are applied and visible in get_runtime_config()."""
+        result = self.config.set_runtime_config(
+            ADAPTER_DEBUG=False,
+            ADAPTER_DEBUG_TAGS_OUT=True,
+            ADAPTER_TRACE_REASONING_MAX_CHARS=500,
+        )
+        assert result["ADAPTER_DEBUG"] is False
+        assert result["ADAPTER_DEBUG_TAGS_OUT"] is True
+        assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
+        # Проверка через get
+        current = self.config.get_runtime_config()
+        assert current["ADAPTER_DEBUG"] is False
+        assert current["ADAPTER_DEBUG_TAGS_OUT"] is True
+        assert current["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
+
+    def test_unknown_key_ignored(self):
+        """Unknown key is silently ignored."""
+        before = self.config.get_runtime_config()
+        result = self.config.set_runtime_config(UNKNOWN_KEY="value")
+        after = self.config.get_runtime_config()
+        assert result == before == after
+        assert "UNKNOWN_KEY" not in result
+
+    def test_key_outside_pool_ignored(self):
+        """Key outside RUNTIME_CONFIG_POOL is silently ignored."""
+        before = self.config.get_runtime_config()
+        webui_before = self.config.ADAPTER_WEBUI_ENABLE
+        result = self.config.set_runtime_config(ADAPTER_WEBUI_ENABLE=not webui_before)
+        after = self.config.get_runtime_config()
+        assert result == before == after
+        assert self.config.ADAPTER_WEBUI_ENABLE is webui_before  # не изменилось
+
+    def test_wrong_type_not_applied(self):
+        """Wrong type for known key is not applied; other keys still apply."""
+        debug_before = self.config.ADAPTER_DEBUG
+        result = self.config.set_runtime_config(
+            ADAPTER_DEBUG="not-a-bool",  # неверный тип
+            ADAPTER_DEBUG_TAGS_OUT=True,  # верный тип
+        )
+        assert result["ADAPTER_DEBUG"] is debug_before  # осталось прежнее значение
+        assert result["ADAPTER_DEBUG_TAGS_OUT"] is True  # применилось
+
+    def test_bool_not_passed_as_int(self):
+        """Bool is checked BEFORE int — bool doesn't pass as int field."""
+        result = self.config.set_runtime_config(
+            ADAPTER_TRACE_REASONING_MAX_CHARS=True  # bool, а не int
+        )
+        # Не применилось (int-поле отклоняет bool)
+        assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 0  # дефолт
+
+    def test_return_value_matches_sent(self):
+        """Return value reflects actual values after application."""
+        result = self.config.set_runtime_config(
+            ADAPTER_DEBUG=False,
+            ADAPTER_DEBUG_TRIM=1000,
+        )
+        assert result["ADAPTER_DEBUG"] is False
+        assert result["ADAPTER_DEBUG_TRIM"] == 1000
+        # Возвращает актуальные значения (могли отличаться от посланных, если что-то отклонилось)
+
+    def test_pool_not_extended(self):
+        """Return value has exactly 7 keys from RUNTIME_CONFIG_POOL."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
+        assert len(result) == 7
+        assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)

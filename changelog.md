@@ -1,5 +1,104 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.8.0 (наблюдаемость и работа с большими сессиями)
+
+### 2026-09-04 Инкрементальная генерация дерева артефактов + чекпоинт-файл
+
+**Цель:** при повторных генерациях дерева артефактов (`artefacts/`) на одной
+и той же сессии адаптер перечитывал и перестраивал все `*.parts` с нуля.
+На длинных сессиях (сотни частей, десятки МБ) это давало заметную задержку
+при каждом заходе на вкладку `/session`.
+
+**Решение:** `artifact_tree.generate()` теперь ведёт чекпоинт
+`artefacts/.build_state.json`: словарь состояния реестра
+(`ArtifactRegistry.to_dict()`/`from_dict()`, плоские JSON-безопасные поля) +
+хвост непарных записей (`pending`) + уже собранные `turns`/`orphans`/
+`resolution_edges` + номер последней обработанной части (`last_processed_part_id`).
+При повторном заходе обрабатываются только файлы с номером части больше
+чекпоинтного, а разметка (Finish/Superseded/Title, ответы на запросы,
+границы страниц) пересчитывается по полному состоянию. Чекпоинт битый или
+отсутствует — холодный полный пересбор (warning, не падение). Из
+`session_viewer.py` убран `shutil.rmtree(artefacts/)` перед регенерацией
+(стирал бы чекпоинт) — на лету теперь дозапись, а не полный rebuild.
+
+**Изменения:** `backend_adapter/artifact_tree_turnbuilder.py` (рефакторинг
+`build_turns()` на `_process_parts`/`_match_records`/`_finalize`, параметр
+`resume_state`), `backend_adapter/artifact_tree.py` (`_load_checkpoint`/
+`_save_checkpoint`, `_extract_part_id`, живой счётчик новых файлов),
+`backend_adapter/artifact_tree_registry.py` (`to_dict`/`from_dict`),
+`backend_adapter/session_viewer.py` (инкрементальная дозапись),
+`tests/test_artifact_tree.py`.
+
+### 2026-09-04 Пагинация дерева артефактов: `artefacts/pages/<N>/`
+
+**Цель:** одна огромная страница `tree.html` на сессию (сотни вершин,
+JS-граф-разметка) тяжело открывалась в браузере.
+
+**Решение:** `generate()` дополнительно размечает границы страниц по
+реальным пользовательским запросам (`page_boundaries` — тройки
+`(start_pid, end_pid, uname)`) и пишет `artefacts/pages/<N>/tree.{puml,png,html}`
++ `artefacts/pages/index.html` со ссылками на все страницы.
+
+**Изменения:** `backend_adapter/artifact_tree.py` (`_filter_for_page`,
+`_generate_pages`), `tests/test_artifact_tree.py`.
+
+### 2026-09-04 `/session`: hash8-алиасы сессий и png/puml-шорткаты
+
+**Цель:** (а) адресовать сессию коротким стабильным суффиксом без
+полного имени `session-*.parts`; (б) открывать картинку/PlantUML-исходник
+дерева из адресной строки без знания внутренней раскладки артефактов.
+
+**Решение:** имена сессий вида `*<hash8>.parts` адресуются и по hash8:
+`/session/<hash8>/<rel_path>` (хеш из имени директории, fallback — скан
+одного `.parts`-файла, коллизии — первый в списке). Второй путь `/session/
+<session_id|hash8>/png|puml` отдаёт картинку/диаграмму текущего дерева
+(`?page=N` — соответствующую страницу пагинации), самодостаточно вне
+файловой раскладки артефактов.
+
+**Изменения:** `backend_adapter/session_viewer.py` (`_session_hash`,
+`_build_hash_index`, резолв `session_id`/`hash8`, png/puml-блок),
+`backend_adapter/artifact_tree_common.py` (вынос `PART_RE`),
+`tests/test_session_viewer.py`.
+
+### 2026-09-04 Runtime-конфиг: эндпойнт `/config` (WEBUI)
+
+**Цель:** переключать объём debug-записи (логи, трейсы, `*.parts` дампы)
+без перезапуска адаптера — единственный способ ранее был правка
+env + рестарт.
+
+**Решение:** в `config.py` объявлен узкий пул `RUNTIME_CONFIG_POOL`
+(7 переменных: 4 bool — `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`,
+`ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR`; 3 int —
+`ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`,
+`ADAPTER_DEBUG_TRIM`) + `get_runtime_config()`/`set_runtime_config()`
+(тип-валидация, неизвестные ключи и значения неверного типа молча
+игнорируются). Все читатели пула переведены на живые чтения
+`config.ADAPTER_X` (модульный атрибут вместо `from .config import X` —
+снимок на импорте не видел бы runtime-изменений): `logger.py`,
+`server.py`, `convert.py`, `streaming.py`, `tracer.py`. Сеть/бэкенды/модели/
+порты в пул не входят — их смена на лету сорвала бы активные соединения.
+
+Новый эндпойнт `backend_adapter/webui_config_api.py` (`@webserver.register`,
+prefix `/config`): GET — HTML-форма с текущими значениями (4 checkbox +
+3 number), POST — `application/x-www-form-urlencoded` или JSON, применяет
+валидные значения через `config.set_runtime_config()`, сверяет ответ с
+посланным (flash «Применено»/«Игнорировано»). На страницы WEBUI добавлены
+ссылки: вкладки `/session` — ссылка «config» на панели, статус `/` —
+«runtime config →».
+
+**Изменения:** `backend_adapter/config.py`, `backend_adapter/webui_config_api.py`
+(новый), `backend_adapter/logger.py`, `backend_adapter/server.py`,
+`backend_adapter/convert.py`, `backend_adapter/streaming.py`,
+`backend_adapter/tracer.py`, `backend_adapter/webserver.py` (импорт
+эндпойнта в `serve()`), `backend_adapter/webui_status.py`,
+`backend_adapter/session_viewer.py`, `tests/test_config.py`,
+`tests/test_webui_config_api.py` (новый), `pyproject.toml`
+(per-file-ignore N802 для нового модуля).
+
+**Версия:** `__version__` поднята до 0.8.0; `pyproject.toml` синхронизирован
+(0.7.2 → 0.8.0). Ветка `feature/v0.8.0` готова; релиз-тег `v0.8.0` собирает
+бинарники и публикует GitHub Release (push тега делает автор).
+
 ## v0.7.3 (дистрибуция адаптера)
 
 ### 2026-09-04 Однострочный установщик: install.sh + раздел в install.md

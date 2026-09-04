@@ -6,8 +6,7 @@ ADAPTER_DEBUG_LOGPATH directory (see session_log).
 
 import time
 
-from . import session_log
-from .config import ADAPTER_DEBUG, ADAPTER_SENSITIVE_LOGGING_ENABLE
+from . import config, session_log
 from .redact import redact
 
 
@@ -22,10 +21,16 @@ def _d(msg: str) -> None:
     При ADAPTER_SENSITIVE_LOGGING_ENABLE=1 санитайзер отключается —
     строка записывается в лог без вызова redact(), т.е. полные токены,
     заголовки и ключи выводятся в открытом виде. По умолчанию санитайзер
-    активен, секреты маскируются."""
+    активен, секреты маскируются.
+
+    ВАЖНО: config.ADAPTER_DEBUG / config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+    читаются через МОДУЛЬНЫЙ атрибут (config.X), а не через
+    `from .config import X` на уровне модуля — второе сделало бы разовый
+    снимок значения при импорте, и переключение через /config API (см.
+    webui_config_api.py) ничего бы не меняло здесь до перезапуска процесса."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    line = f"[{ts}] {msg}" if ADAPTER_SENSITIVE_LOGGING_ENABLE else f"[{ts}] {redact(msg)}"
-    if ADAPTER_DEBUG:
+    line = f"[{ts}] {msg}" if config.ADAPTER_SENSITIVE_LOGGING_ENABLE else f"[{ts}] {redact(msg)}"
+    if config.ADAPTER_DEBUG:
         print(line)
         # Писать в сессионный файл (только если задана директория логов)
         if session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:

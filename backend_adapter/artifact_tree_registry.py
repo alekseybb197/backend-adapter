@@ -17,6 +17,30 @@ class ArtifactRegistry:
         self._name_counts = {}  # base_name -> counter
         self.protocol_id_to_artifact = {}  # protocol_id -> artifact_name
 
+    def to_dict(self) -> dict:
+        """Сериализуемый снимок состояния — для чекпойнта инкрементальной
+        сборки (см. artifact_tree.generate()). Все поля — плоские
+        JSON-совместимые структуры (строки/числа/словари), сериализация
+        без потерь."""
+        return {
+            "by_hash": self.by_hash,
+            "_name_counts": self._name_counts,
+            "protocol_id_to_artifact": self.protocol_id_to_artifact,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ArtifactRegistry":
+        """Восстанавливает реестр из to_dict(). Отсутствующие/повреждённые
+        ключи — не повод падать: пустой реестр эквивалентен холодному
+        старту (просто заново продедуплицируем то, что уже было сохранено
+        как готовые .yaml/.txt артефакты — сами файлы при этом не
+        трогаются)."""
+        obj = cls()
+        obj.by_hash = dict(data.get("by_hash") or {})
+        obj._name_counts = dict(data.get("_name_counts") or {})
+        obj.protocol_id_to_artifact = dict(data.get("protocol_id_to_artifact") or {})
+        return obj
+
     def register(self, domain: str, text: str, part_id: str) -> str:
         text = strip_trailing_line_whitespace(text)
         h = sha12(normalize_for_dedup(text))

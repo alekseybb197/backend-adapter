@@ -8,7 +8,8 @@ import json
 import re
 from typing import Any
 
-from .config import ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, _cap
+from . import config
+from .config import _cap
 from .skill import detect_skill
 from .tracer import _register_tool_use, _trace
 
@@ -277,10 +278,10 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
             _register_tool_use(session_id, tool_use_id, req_id, tool_name=name)
             skill, evidence = detect_skill(name, input_data)
             traced_input = input_data
-            if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
+            if config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
                 serialized = json.dumps(input_data, ensure_ascii=False, default=str)
-                if len(serialized) > ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
-                    traced_input = _cap(serialized, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
+                if len(serialized) > config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
+                    traced_input = _cap(serialized, config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
             tool_use_summaries.append(
                 {
                     "id": tool_use_id,
@@ -331,7 +332,7 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
         reasoning_len=len(reasoning),
         # Полный reasoning, а не reasoning[:500] — обрезка убивала как
         # раз ту часть рассуждения, где объясняется выбор ветки/тула.
-        reasoning=_cap(reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS),
+        reasoning=_cap(reasoning, config.ADAPTER_TRACE_REASONING_MAX_CHARS),
     )
 
     return {

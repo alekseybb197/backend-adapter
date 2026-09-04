@@ -89,6 +89,103 @@ ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() no
 )
 # Полный фиксированный список частей протокола, для которых пишутся дампы.
 ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
+
+# ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
+# Подмножество переменных выше, которые можно менять НЕ ПЕРЕЗАПУСКАЯ адаптер —
+# через HTTP API /config (webui_config_api.py), эндпойнт общего WEBUI-сервера
+# (тот всегда поднят, если ADAPTER_WEBUI_ENABLE=1 — см. backend-adapter.py).
+# Идея: включать накопление логов/трейсов/*.parts-дампов на время диагностики
+# конкретной проблемы и выключать обратно, без остановки самого прокси.
+#
+# Пул НАМЕРЕННО узкий — только то, что управляет ОБЪЁМОМ записи на диск
+# (логи/трейсы/дампы). Сеть, бэкенды, модели, порты сюда не входят — их
+# runtime-переключение существенно рискованнее (сорвёт активные соединения,
+# сменит маршрутизацию на лету) и не было целью этой задачи.
+#
+# ВАЖНО для того, кто ЧИТАЕТ эти переменные в других модулях: все места
+# использования (server.py, streaming.py, convert.py, tracer.py, logger.py)
+# переведены на "живое" чтение через `config.ADAPTER_X`, а НЕ через
+# `from .config import ADAPTER_X` на уровне модуля — второе сделало бы
+# разовый снимок при импорте, и set_runtime_config() ниже не имел бы эффекта
+# нигде, кроме этого файла. Если добавляете сюда новую переменную — проверьте
+# ВСЕ её точки чтения на этот же паттерн.
+#
+# ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — включение
+# записи "с нуля" (когда путь изначально пуст) потребовало бы ещё и создать
+# директорию/пересоздать session_log._DEBUG_IS_DIR и т.п. на лету, это уже не
+# "переключатель объёма", а смена самой точки хранения — за рамками задачи.
+# Если ADAPTER_DEBUG_LOGPATH изначально не задан, ADAPTER_DEBUG_TAGS_OUT/
+# ADAPTER_DEBUG=1 через /config ничего на диск не запишут (некуда), только
+# в консоль — это ожидаемо, а не баг.
+RUNTIME_CONFIG_POOL = (
+    "ADAPTER_DEBUG",
+    "ADAPTER_DEBUG_TAGS_OUT",
+    "ADAPTER_DEBUG_TOOLS",
+    "ADAPTER_DEBUG_TOOLS_ERROR",
+    "ADAPTER_TRACE_REASONING_MAX_CHARS",
+    "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
+    "ADAPTER_DEBUG_TRIM",
+)
+
+# Типы для валидации входа /config (POST) — bool или int, остальное отклоняем.
+_RUNTIME_CONFIG_TYPES = {
+    "ADAPTER_DEBUG": bool,
+    "ADAPTER_DEBUG_TAGS_OUT": bool,
+    "ADAPTER_DEBUG_TOOLS": bool,
+    "ADAPTER_DEBUG_TOOLS_ERROR": bool,
+    "ADAPTER_TRACE_REASONING_MAX_CHARS": int,
+    "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": int,
+    "ADAPTER_DEBUG_TRIM": int,
+}
+
+
+def get_runtime_config() -> dict:
+    """Текущие значения runtime-переключаемого пула — для GET /config."""
+    return {name: globals()[name] for name in RUNTIME_CONFIG_POOL}
+
+
+def set_runtime_config(**kwargs) -> dict:
+    """Меняет подмножество RUNTIME_CONFIG_POOL — для POST /config.
+
+    Тот же приём, что уже применяется в этом файле для _AVAILABLE_MODELS/
+    _MODEL_TO_BACKEND (см. refresh_models() ниже) — переприсваивание
+    модульных глобалов через `global`. Для _AVAILABLE_MODELS/_MODEL_TO_BACKEND
+    там используется МУТАЦИЯ НА МЕСТЕ (.clear()+.update()), т.к. это словари
+    и их импортируют по ссылке в других модулях; здесь же пул — bool/int
+    скаляры, которые в Python в принципе нельзя мутировать на месте, поэтому
+    единственный рабочий вариант — переприсваивание через `global` ЗДЕСЬ, в
+    сочетании с тем, что все читатели переведены на live-доступ `config.X`
+    (см. комментарий над RUNTIME_CONFIG_POOL).
+
+    Неизвестные ключи и ключи вне пула ИГНОРИРУЮТСЯ МОЛЧА (не 400 — иначе
+    один опечатанный лишний ключ в теле запроса откатил бы все остальные
+    валидные изменения; вызывающий (webui_config_api.py) сверяет ответ с тем,
+    что послал, и сам решает, как об этом сообщить). Значение неверного типа
+    для известного ключа — тоже игнорируется (не применяется), остальные
+    ключи всё равно применяются. Возвращает get_runtime_config() ПОСЛЕ
+    применения — вызывающий видит, что реально изменилось.
+    """
+    global ADAPTER_DEBUG, ADAPTER_DEBUG_TAGS_OUT, ADAPTER_DEBUG_TOOLS
+    global ADAPTER_DEBUG_TOOLS_ERROR, ADAPTER_TRACE_REASONING_MAX_CHARS
+    global ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, ADAPTER_DEBUG_TRIM
+
+    for name, value in kwargs.items():
+        if name not in RUNTIME_CONFIG_POOL:
+            continue
+        expected = _RUNTIME_CONFIG_TYPES[name]
+        # bool — подкласс int в Python: проверяем bool ДО int, иначе
+        # int-поле молча приняло бы True/False как 1/0.
+        if expected is bool and not isinstance(value, bool):
+            continue
+        if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
+            continue
+        globals()[name] = value
+
+    return get_runtime_config()
+
+
+# ===================================================
+
 # Веб-интерфейс — общий статус адаптера + просмотр сессий:
 #   ADAPTER_WEBUI_ENABLE=1 (по умолчанию) — поднять локальный веб-сервер;
 #   статус-страница "/" (версия, режим, LLM-эндпоинты) работает всегда,
