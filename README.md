@@ -1,6 +1,6 @@
 # backend-adapter — Claude Code ↔ OpenAI Backend Proxy
 
-> **v0.7.2** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **v0.7.3** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно реализует протокол Anthropic Messages API.
 

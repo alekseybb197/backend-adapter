@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.7.2) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **backend-adapter** (v0.7.3) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно обрабатывает протокол Anthropic Messages API.
 
@@ -116,13 +116,17 @@ backend-adapter/
 │   ├── environment.md         # Полный список env-переменных
 │   ├── logging.md             # Конфигурация логирования
 │   └── sanitizing.md          # Sanitization секретов
-├── backend-adapter.service    # systemd unit (Linux, продакшен)
+├── install.sh                   # Однострочный установщик (curl | bash)
+├── backend-adapter.service      # systemd unit (Linux, продакшен)
 ├── com.user.backend-adapter.plist  # launchd (macOS, продакшен)
-├── backend-adapter.env        # Пример env для сервиса
-├── sample.adapter.env         # Полный пример env (сервис + клиент)
-├── sample.adapter.yaml         # Пример YAML-конфига бэкендов
-├── requirements.txt           # Зависимости (единственная — PyYAML)
-└── changelog.md               # История версий
+├── backend-adapter.env          # Пример env для сервиса
+├── sample.adapter.env           # Полный пример env (сервис + клиент)
+├── sample.adapter.yaml          # Пример YAML-конфига бэкендов
+├── requirements.txt             # Зависимости (единственная — PyYAML)
+├── scripts/
+│   ├── build-binaries.sh        # Сборка standalone-бинарников (PyInstaller)
+│   └── dev-run.sh               # Запуск из исходников (venv + конфиг)
+└── changelog.md                 # История версий
 ```
 
 ---
@@ -147,7 +151,64 @@ backend-adapter/
 | macOS Intel | `backend-adapter-macos-x64` | ~15 МБ |
 | Windows x64 | `backend-adapter-windows-x64.exe` | ~15 МБ |
 
-### 4.2 Запуск
+### 4.2 Установка одной строкой (curl | bash)
+
+Быстрая установка бинарника с GitHub Releases — однострочным установщиком
+`install.sh` из корня репозитория. Скрипт сам определяет ОС/архитектуру,
+скачивает готовый бинарник и кладёт его в `/usr/local/bin` (или
+`~/.local/bin`, если нет прав на запись):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash
+```
+
+Установка бинарника **и** сервиса автозапуска одной командой:
+
+```bash
+# Linux: user-юнит systemd (systemctl --user); macOS: launchd-агент
+curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash -s -- --service
+```
+
+`--service` **не запускает** сервис сразу: он пишет свежий user-level юнит
+(указывающий на установленный бинарник), env-файл со значениями по
+умолчанию и пустым `ADAPTER_BACKEND_CONFIG` и включает автозапуск. После
+установки заполните `ADAPTER_BACKEND_CONFIG` (в env-файле на Linux / в
+`EnvironmentVariables` plist на macOS — launchd не читает env-файлы) и
+запустите сервис вручную. Системные шаблоны репозитория
+(`backend-adapter.service`, `com.user.backend-adapter.plist`) рассчитаны на
+запуск из исходников; для бинарника юнит генерируется установщиком.
+
+Опции:
+
+| Опция | Действие |
+|---|---|
+| `--prefix DIR` | Каталог установки (по умолчанию `/usr/local/bin`) |
+| `--service` | Дополнительно сгенерировать и включить сервис автозапуска: user-юнит systemd (Linux) / launchd-агент (macOS) |
+| `--pip` | Установить из исходников (git clone + venv), а не бинарник |
+| `--help` | Показать справку |
+
+Те же значения задаются переменными окружения `INSTALL_DIR`,
+`SERVICE_INSTALL`, `USE_PIP` (1/0).
+
+> **--pip — установка из исходников.** `pip install .` (wheel) не
+> поддерживается: в wheel входит только пакет `backend_adapter/`, а
+> консольная команда `backend-adapter` (`backend_adapter/cli.py`) исполняет
+> соседний `backend-adapter.py` через runpy — в wheel его нет. Поэтому
+> `--pip` клонирует репозиторий в `<prefix>/src` и ставит его в venv
+> в editable-режиме (`backend-adapter.py` остаётся рядом с пакетом).
+
+> **Security note.** Установщик общается только с github.com (официальные
+> релизы и файлы этого репозитория); установка и сервис — в пределах
+> текущего пользователя (user-level systemd/launchd, без root).
+> Перед выполнением просмотрите скрипт:
+> `curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | less`
+
+Установленному бинарнику нужен тот же конфиг, что и исходникам (см. ниже,
+раздел [4.3](#43-запуск)): YAML-файл бэкендов через `ADAPTER_BACKEND_CONFIG`
+плюс env-переменная токена из поля `key`. Скачайте `sample.adapter.yaml`
+из репозитория и заполните его.
+
+### 4.3 Запуск
 
 Бинарнику нужен тот же конфиг, что и исходникам: YAML-файл бэкендов через
 `ADAPTER_BACKEND_CONFIG` (см. [5.1](#51-конфигурация-бэкенда-yaml-файл-через-adapter_backend_config))
@@ -194,7 +255,7 @@ requirements.txt` или `./scripts/dev-run.sh`): бинарник собира�
 ОС/архитектуру и не подходит, если нужен нестандартный Python, свои правки
 кода или запуск на платформе вне таблицы выше.
 
-### 4.3 Локальная сборка
+### 4.4 Локальная сборка
 
 PyInstaller не кросскомпилирует — бинарник собирается **на той же
 платформе**, для которой предназначен. Для локальной сборки (в виртуальном
@@ -483,7 +544,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.7.2 (...
+Claude Code Adapter v0.7.3 (...
 Listening:  http://127.0.0.1:9999
 Logs:       console only (ADAPTER_DEBUG_ENABLE=1; диск: задайте ADAPTER_DEBUG_LOGPATH)
 Models:     strict validation
