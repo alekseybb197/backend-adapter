@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Launch backend-adapter: ensure venv, install deps, check config, run.
+# Launch backend-adapter from sources (dev convenience runner).
+# Usage: ./scripts/dev-run.sh            (run from the repo root)
+# Ensures venv, installs deps, checks config files, runs backend-adapter.py.
 # Exit on first error.
 set -euo pipefail
 
