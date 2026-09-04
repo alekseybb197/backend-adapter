@@ -35,6 +35,7 @@ backend_adapter/
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
 ├── webui_status.py         ← WEBUI endpoint "/": status page (version, LLM endpoints, models)
+├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
     artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
@@ -127,12 +128,14 @@ Claude Code (Anthropic API client)
    (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
    careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` when set,
    otherwise an independent `./tmp/webui` (created on demand — status page `/`
-   works out of the box; `/session` is empty until logs exist; endpoint `/` —
-   status, `/session` — session viewer). Each GET/POST to the status page `/`
-   re-probes the backends (`config.refresh_models`, 5 s timeout per endpoint) and
-   rebuilds the `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers
-   — models added by the backend after startup are picked up without restarting the
-   adapter.
+   works out of the box; `/session` is empty until logs exist; endpoints: `/` —
+   status, `/session` — session viewer, `/config` — runtime-config form).
+   Each GET/POST to the status page `/` re-probes the backends
+   (`config.refresh_models`, 5 s timeout per endpoint) and rebuilds the
+   `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers
+   — models added by the backend after startup are picked up without restarting
+   the adapter. The `/config` endpoint toggles the runtime debug-write pool
+   (`config.get_runtime_config`/`set_runtime_config`, see §8.6) without a restart.
 
 ### 4.2 POST /v1/messages (do_POST, server.py:148–581)
 
@@ -276,6 +279,9 @@ Trace event `tool_result` includes `parent_req_id` — `null` if the producer wa
   created) when `ADAPTER_DEBUG_ENABLE=1`
 - All messages pass through `redact()` to mask secrets (unless `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`)
 
+The write-volume flags below are **runtime-switchable**: the WEBUI endpoint
+`/config` re-reads them live (see §8.6) instead of restarting the adapter.
+
 Debug flags:
 
 | Flag | Purpose |
@@ -366,6 +372,35 @@ When enabled, writes complete OpenAI-format request bodies as numbered JSON file
 - Thread-safe: uses `threading.Lock` on the per-session counter
 - Uses `json.dump(indent=2)` for readable formatting
 
+### 8.6 Runtime config pool + WEBUI endpoint `/config` (`webui_config_api.py`)
+
+`config.py` keeps a narrow `RUNTIME_CONFIG_POOL` — variables controlling only the
+volume of disk writes, safe to flip without restarting the adapter:
+
+| Type | Variables |
+|---|---|
+| bool | `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`, `ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR` |
+| int | `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM` |
+
+- `get_runtime_config()` — snapshot dict `{name: value}`; `set_runtime_config(**kw)`
+  type-validates against `_RUNTIME_CONFIG_TYPES` and silently ignores out-of-pool
+  keys / wrong types (bool is checked before int — `bool` subclasses `int`), then
+  re-assigns `config` module globals. Returns the post-state dict.
+- **Readers must read live** — `config.ADAPTER_X` module attribute at call time,
+  not `from .config import X` import-time snapshots. All pool consumers were
+  refactored to live reads: `logger.py` (`_d` gating), `server.py`,
+  `convert.py`, `streaming.py`, `tracer.py`.
+- Deliberately **excluded** from the pool: network, backends, models, ports,
+  `ADAPTER_DEBUG_LOGPATH` (directory identity must not change mid-flight — the
+  session logger would write to a moving target).
+- Endpoint `webui_config_api.py` (`@webserver.register`, prefix `/config`): GET —
+  HTML form (4 bool checkboxes + 3 int inputs) with current pool values; POST —
+  `application/x-www-form-urlencoded` or JSON body → `set_runtime_config()`,
+  response re-renders with a flash «Применено»/«Игнорировано» split. Links to
+  the form: session tabs panel («config») and the status page `/` («runtime config →»).
+- The pool keys double as **env vars at startup** — the same names still read from
+  the environment by `config.py`; `/config` only overrides the process state.
+
 ---
 
 ## 9. Streaming architecture
@@ -430,10 +465,11 @@ backend-adapter.py
   ├── session_log.py     (no internal deps — PyYAML)
   ├── skill.py           → config
   ├── daemon.py          (no internal deps — stdlib only)
-  ├── webserver.py       → session_viewer, webui_status (WEBUI core: serve() импортирует
-  │                       встроенные эндпойнты; CLI python -m backend_adapter.webserver)
+  ├── webserver.py       → session_viewer, webui_status, webui_config_api (WEBUI core: serve()
+  │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
   ├── webui_status.py    → webserver (эндпойнт "/"), config
+  ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   └── artifact_tree*.py  (8 modules, layered):
       artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
       ├── artifact_tree_html.py      → common  (цвета ANCHOR/SINK/ORPHAN определены здесь)
@@ -461,5 +497,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 13. Version
 
-Current: **v0.7.3** (see `backend-adapter.py`).
+Current: **v0.8.0** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

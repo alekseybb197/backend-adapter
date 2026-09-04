@@ -9,13 +9,8 @@ message_delta / message_stop).
 import json
 import uuid
 
-from .config import (
-    ADAPTER_DEBUG_TAGS_OUT,
-    ADAPTER_TRACE_REASONING_MAX_CHARS,
-    ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
-    _cap,
-    _trim_limit,
-)
+from . import config
+from .config import _cap, _trim_limit
 from .logger import _dr
 from .session_log import write_debug_json
 from .skill import detect_skill
@@ -260,10 +255,10 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
             parsed_input = {}
         skill, evidence = detect_skill(st["name"], parsed_input)
         traced_input = parsed_input
-        if ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
+        if config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
             serialized = json.dumps(parsed_input, ensure_ascii=False, default=str)
-            if len(serialized) > ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
-                traced_input = _cap(serialized, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
+            if len(serialized) > config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
+                traced_input = _cap(serialized, config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
         tool_use_summaries.append(
             {"id": st["id"], "name": st["name"], "skill": skill, "input": traced_input}
         )
@@ -302,7 +297,7 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
         req_id,
         f"[RESPONSE] {(json.dumps(resp_snapshot, ensure_ascii=False, default=str) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(resp_snapshot, ensure_ascii=False, default=str)[:lim])}",
     )
-    if ADAPTER_DEBUG_TAGS_OUT:
+    if config.ADAPTER_DEBUG_TAGS_OUT:
         write_debug_json(session_id, "RESPONSE", resp_snapshot)
 
     _trace(
@@ -315,7 +310,7 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
         stop_reason_mapped=stop_reason,
         reasoning_present=bool(full_reasoning.strip()),
         reasoning_len=len(full_reasoning),
-        reasoning=_cap(full_reasoning, ADAPTER_TRACE_REASONING_MAX_CHARS),
+        reasoning=_cap(full_reasoning, config.ADAPTER_TRACE_REASONING_MAX_CHARS),
         streamed=True,
     )
 

@@ -10,8 +10,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from . import redact, session_log
-from .config import ADAPTER_DEBUG, ADAPTER_SENSITIVE_LOGGING_ENABLE
+from . import config, redact, session_log
 
 _trace_lock = threading.Lock()
 _session_seq: dict[str, int] = {}  # session_id -> next seq number
@@ -81,7 +80,10 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     # Мастер-выключатель: при ADAPTER_DEBUG_ENABLE=0 трасса не пишется.
     # Путь — всегда директория логов сессий (ADAPTER_DEBUG_LOGPATH);
     # запись — в per-session JSONL-файл, single-file режим удалён.
-    if not ADAPTER_DEBUG:
+    # config.ADAPTER_DEBUG читается ЖИВЫМ атрибутом модуля (а не разовым
+    # снимком при импорте) — иначе переключение через /config API (см.
+    # webui_config_api.py) не подействовало бы здесь до перезапуска.
+    if not config.ADAPTER_DEBUG:
         return
     if not (session_log._TRACE_IS_DIR and session_log._TRACE_PATH):
         return
@@ -98,7 +100,7 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     }
     record.update(fields)
     line = json.dumps(record, ensure_ascii=False, default=str)
-    if not ADAPTER_SENSITIVE_LOGGING_ENABLE:
+    if not config.ADAPTER_SENSITIVE_LOGGING_ENABLE:
         line = redact.redact(line)
     with _trace_lock:
         fd.write((line + "\n").encode())

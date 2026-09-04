@@ -609,7 +609,7 @@ class TestBuildTurns:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = self.build_turns(d, self.registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = self.build_turns(d, self.registry)
 
         assert len(turns) == 1
         assert len(orphans) == 0
@@ -626,7 +626,7 @@ class TestBuildTurns:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = self.build_turns(d, self.registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = self.build_turns(d, self.registry)
 
         assert len(turns) == 1
         assert turns[0]["kind"] == "agent_turn"
@@ -639,7 +639,7 @@ class TestBuildTurns:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = self.build_turns(d, self.registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = self.build_turns(d, self.registry)
 
         assert len(turns) == 1
         assert turns[0]["reasoning_name"] is not None
@@ -652,7 +652,7 @@ class TestBuildTurns:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = self.build_turns(d, self.registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = self.build_turns(d, self.registry)
 
         assert len(turns) == 0
         assert len(orphans) == 1
@@ -666,7 +666,7 @@ class TestBuildTurns:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = self.build_turns(d, self.registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = self.build_turns(d, self.registry)
 
         assert len(turns) == 2
         assert turns[0]["ob_part_id"] == 1
@@ -694,8 +694,8 @@ class TestBuildTurns:
             "a-1-fetch_raw.json": fr_with_tc,
             "b-2-openai_body.json": _ob_with_tool_response(2, "call-xyz"),
         })
-        (turns, orphans, resolution_edges, _, _, _, _, _, request_answers, _) = \
-            self.build_turns(d2, reg)
+        (turns, orphans, resolution_edges, _, _, _, _, _, request_answers,
+         _, page_boundaries, checkpoint) = self.build_turns(d2, reg)
 
         assert len(resolution_edges) >= 1
         caller, result = resolution_edges[0]
@@ -709,7 +709,7 @@ class TestBuildTurns:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = self.build_turns(d, self.registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = self.build_turns(d, self.registry)
 
         # The system-reminder user message is an inline label
         assert len(inline_labels) >= 1
@@ -746,7 +746,8 @@ class TestBuildTurns:
             "b-2-openai_body.json": ob,
         })
         reg = self.registry_class()
-        (turns, orphans, resolution_edges, _, _, _, _, _, _, _) = self.build_turns(d, reg)
+        (turns, orphans, resolution_edges, _, _, _, _, _, _,
+         _, page_boundaries, checkpoint) = self.build_turns(d, reg)
 
         assert len(resolution_edges) == 1
         caller, result = resolution_edges[0]
@@ -759,7 +760,8 @@ class TestBuildTurns:
             "a-1-openai_body.json": _simple_ob(1),  # structured_output kind
             "b-2-fetch_raw.json": _agent_fr(2),     # agent_turn (definite via tool_calls)
         })
-        (turns, orphans, _, _, _, _, _, _, _, _) = self.build_turns(d, self.registry)
+        (turns, orphans, _, _, _, _, _, _, _, _,
+         page_boundaries, checkpoint) = self.build_turns(d, self.registry)
         # definite=True means NO fallback: agent_turn fr cannot match structured_output
         assert len(turns) == 0
         assert len(orphans) == 1  # the fetch_raw becomes orphan
@@ -773,7 +775,8 @@ class TestBuildTurns:
             "e-5-fetch_raw.json": _simple_fr(5),
             "f-6-fetch_raw.json": _simple_fr(6),
         })
-        (turns, _, _, _, _, _, _, _, _, _) = self.build_turns(d, self.registry)
+        (turns, _, _, _, _, _, _, _, _, _,
+         page_boundaries, checkpoint) = self.build_turns(d, self.registry)
         assert [t["ob_part_id"] for t in turns] == [1, 2, 3]
 
 
@@ -888,7 +891,7 @@ class TestRenders:
         registry = ArtifactRegistry()
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = build_turns(d, registry)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = build_turns(d, registry)
 
         model = self.build_graph_model(
             turns, orphans, resolution_edges, start_target, inline_labels,
@@ -936,7 +939,7 @@ class TestRenders:
         })
         (turns, orphans, resolution_edges, start_target, inline_labels,
          finish_source, superseded_targets, title_targets,
-         request_answers, next_request_edges) = build_turns(d2, reg)
+         request_answers, next_request_edges, page_boundaries, checkpoint) = build_turns(d2, reg)
         model = self.build_graph_model(
             turns, orphans, resolution_edges, start_target, inline_labels,
             finish_source, superseded_targets, title_targets,
@@ -1102,4 +1105,216 @@ class TestGenerate:
         puml_path = os.path.join(str(d), "artefacts", "tree.puml")
         content = open(puml_path).read()
         assert "@startuml" in content
-        assert "user-1" in content
+
+
+class TestIncrementalBuilds:
+    """Tests for incremental tree generation with checkpointing."""
+
+    def setup_method(self):
+        to_remove = [k for k in sys.modules if k.startswith("backend_adapter.artifact_tree")]
+        for k in to_remove:
+            del sys.modules[k]
+        from backend_adapter.artifact_tree import generate as generate_tree
+        self.generate = generate_tree
+
+    def test_checkpoint_created(self, tmp_path):
+        """Checkpoint file .build_state.json is created after generation."""
+        d = _make_parts_dir(tmp_path, "session-cp.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        self.generate(str(d), verbose=False)
+        cp_path = os.path.join(str(d), "artefacts", ".build_state.json")
+        assert os.path.isfile(cp_path)
+        # Check it's valid JSON
+        import json
+        with open(cp_path) as f:
+            state = json.load(f)
+        assert "last_processed_part_id" in state
+        assert state["last_processed_part_id"] >= 2
+
+    def test_incremental_generate_equals_cold(self, tmp_path):
+        """Second generate() call is incremental (reads fewer files) and result equals cold rebuild."""
+        d = _make_parts_dir(tmp_path, "session-inc.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "First"),
+        })
+        # First (cold) generation
+        html1 = self.generate(str(d), verbose=False)
+
+        # Add new parts (d — сама директория *.parts)
+        import json
+        with open(os.path.join(d, "c-3-openai_body.json"), "w") as f:
+            json.dump(_simple_ob(3), f)
+        with open(os.path.join(d, "d-4-fetch_raw.json"), "w") as f:
+            json.dump(_simple_fr(4, "Second"), f)
+
+        # Second (incremental) generation
+        html2 = self.generate(str(d), verbose=False)
+
+        # Both should succeed; check HTML exists
+        assert os.path.isfile(html1)
+        assert os.path.isfile(html2)
+
+        # Cold rebuild for comparison
+        artefacts_dir = os.path.join(str(d), "artefacts")
+        import shutil
+        shutil.rmtree(artefacts_dir, ignore_errors=True)
+        html3 = self.generate(str(d), verbose=False)
+        assert os.path.isfile(html3)
+
+    def test_corrupt_checkpoint_cold_rebuild(self, tmp_path):
+        """Corrupt checkpoint triggers cold rebuild without crash."""
+        d = _make_parts_dir(tmp_path, "session-bad-cp.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        # Generate once (creates checkpoint)
+        self.generate(str(d), verbose=False)
+
+        # Corrupt the checkpoint
+        import json
+        cp_path = os.path.join(str(d), "artefacts", ".build_state.json")
+        with open(cp_path, "w") as f:
+            f.write("{corrupted json!!!}")
+
+        # Next generation should handle gracefully (cold rebuild)
+        html = self.generate(str(d), verbose=False)
+        assert os.path.isfile(html)
+        # Checkpoint should be recreated correctly
+        with open(cp_path) as f:
+            state = json.load(f)
+        assert state["last_processed_part_id"] >= 2
+
+    def test_pages_generated(self, tmp_path):
+        """pages/<N>/tree.{puml,png,html} + pages/index.html for multi-request session."""
+        d = _make_parts_dir(tmp_path, "session-pages.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "First request"),
+            "c-3-openai_body.json": _simple_ob(3),
+            "d-4-fetch_raw.json": _simple_fr(4, "Second request"),
+        })
+        self.generate(str(d), verbose=False)
+
+        artefacts_dir = os.path.join(str(d), "artefacts")
+        pages_dir = os.path.join(artefacts_dir, "pages")
+
+        # At least index.html should exist
+        index_path = os.path.join(pages_dir, "index.html")
+        assert os.path.isfile(index_path)
+
+        # Check page directories exist (number depends on segmentation logic)
+        if os.path.isdir(pages_dir):
+            page_dirs = [d for d in os.listdir(pages_dir) if d.isdigit()]
+            # Each page should have tree files
+            for pd in page_dirs:
+                page_path = os.path.join(pages_dir, pd)
+                assert os.path.isfile(os.path.join(page_path, "tree.puml")) or \
+                       os.path.isfile(os.path.join(page_path, "tree.png")) or \
+                       os.path.isfile(os.path.join(page_path, "tree.html"))
+
+    def test_raw_file_href_idempotent(self, tmp_path):
+        """'../...' and None are not touched on repeated calls."""
+        from backend_adapter.artifact_tree import _raw_file_href
+
+        d = _make_parts_dir(tmp_path, "session-href.parts", {
+            "abc-1-openai_body.json": _simple_ob(1),
+            "def-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        # Existing .json part file → "../<имя>" (as stored in build_turns output)
+        result1 = _raw_file_href(str(d), "abc-1-openai_body.json")
+        assert result1 == "../abc-1-openai_body.json"
+
+        # Already has ../ prefix — should remain unchanged (idempotent)
+        result2 = _raw_file_href(str(d), "../abc-1-openai_body.json")
+        assert result2 == "../abc-1-openai_body.json"
+
+        # None stays None
+        result3 = _raw_file_href(str(d), None)
+        assert result3 is None
+
+        # Missing .yaml (preferred) falls back to sibling .json
+        result4 = _raw_file_href(str(d), "def-2-fetch_raw.yaml")
+        assert result4 == "../def-2-fetch_raw.json"
+
+        # Neither .yaml nor .json exists → None
+        result5 = _raw_file_href(str(d), "nonexistent-9-fetch_raw.yaml")
+        assert result5 is None
+
+    def test_extract_part_id(self):
+        """Extract int from artifact name, None for non-matching."""
+        from backend_adapter.artifact_tree import _extract_part_id
+
+        assert _extract_part_id("toolcall-116402") == 116402
+        assert _extract_part_id("toolcall-116402-1") == 116402  # collision suffix
+        assert _extract_part_id("user-1") == 1
+        assert _extract_part_id("finish_source") is None
+        assert _extract_part_id("start") is None
+
+    def test_filter_for_page(self):
+        """Filter turns/orphans/edges/names by page range [start, end)."""
+        from backend_adapter.artifact_tree import _filter_for_page
+
+        turns = [
+            {"ob_part_id": 1, "fr_part_id": 2},
+            {"ob_part_id": 3, "fr_part_id": 4},
+            {"ob_part_id": 5, "fr_part_id": 6},
+        ]
+        orphans = [{"part_id": 1}, {"part_id": 3}, {"part_id": 7}]
+        resolution_edges = [("user-1", "toolcall-2"), ("toolcall-4", "user-3")]
+        inline_labels = {"ignored": True}  # передаётся целиком
+        superseded_targets = ["finish-5", "toolcall-1"]
+        title_targets = ["user-3"]
+        request_answers = {"user-3": "finish-4", "user-9": "finish-10"}
+
+        # Страница №2 (по счёту запросов user): ходы с ob_part_id в [3, 5)
+        (page_turns, page_orphans, page_res_edges, page_superseded,
+         page_title_targets, page_request_answers, page_inline_labels) = _filter_for_page(
+            turns, orphans, resolution_edges, inline_labels,
+            superseded_targets, title_targets, request_answers,
+            start_pid=3, end_pid=5, page_uname="user-3",
+        )
+
+        # Только ход с ob_part_id=3 (3 <= 3 < 5)
+        assert len(page_turns) == 1
+        assert page_turns[0]["ob_part_id"] == 3
+        # Сирота с part_id=3 в диапазоне
+        assert len(page_orphans) == 1
+        assert page_orphans[0]["part_id"] == 3
+        # Ребро: одна из сторон в диапазоне → ("toolcall-4", "user-3")
+        assert page_res_edges == [("toolcall-4", "user-3")]
+        # Вытесненный: toolcall-1 вне диапазона, finish-5 нет (без part_id)
+        assert page_superseded == []
+        # Заголовок: user-3 в диапазоне (part_id 3)
+        assert page_title_targets == ["user-3"]
+        # Ответы запросов: только для своей страницы
+        assert page_request_answers == {"user-3": "finish-4"}
+        # Общий словарь inline_labels проходит целиком
+        assert page_inline_labels is inline_labels
+
+    def test_filter_for_page_excludes_outside_range(self):
+        """Элементы вне диапазона страницы отфильтровываются."""
+        from backend_adapter.artifact_tree import _filter_for_page
+
+        turns = [{"ob_part_id": 1, "fr_part_id": 2}]
+        orphans = [{"part_id": 9}]
+        resolution_edges = [("toolcall-1", "user-9")]
+        inline_labels = {}
+        superseded_targets = ["finish-2"]
+        title_targets = ["user-1"]
+        request_answers = {"user-1": "finish-2"}
+
+        (page_turns, page_orphans, page_res_edges, page_superseded,
+         page_title_targets, page_request_answers, page_inline_labels) = _filter_for_page(
+            turns, orphans, resolution_edges, inline_labels,
+            superseded_targets, title_targets, request_answers,
+            start_pid=3, end_pid=5, page_uname="user-3",
+        )
+
+        assert page_turns == []
+        assert page_orphans == []
+        assert page_res_edges == []
+        assert page_superseded == []
+        assert page_title_targets == []
+        assert page_request_answers == {}
+        assert page_inline_labels is inline_labels

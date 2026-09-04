@@ -137,7 +137,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | `ADAPTER_DEBUG_TOOLS_ERROR` | `0` (выключено) | Если `1` — писать детальные ошибки инструментов в `[TOOL_RESULT_ERROR]` лог. По умолчанию выключено: zero-config не обрабатывает собранные логи. |
 | `ADAPTER_DEBUG_TAGS_FULL` | `""` (пусто) | Перечисление тегов через запятую, для которых **отключается** обрезка (trim). Например: `"BODY,TOOL_RESULT,RESPONSE"`. Пусто — trim включён везде. |
 | `ADAPTER_DEBUG_TAGS_OUT` | `0` (выключено) | **Флаг: включить per-session дампы всех частей протокола.**<br>• `1` — включено (значения `0`, `false`, `no`, пусто — выключено).<br>• Для каждого тега из фиксированного списка (`BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE`) пишется **пара файлов** (`.json` + `.yaml`).<br>• Дампы требуют `ADAPTER_DEBUG_ENABLE=1` и директорию логов `ADAPTER_DEBUG_LOGPATH` (создаётся при необходимости). |
-| `ADAPTER_WEBUI_ENABLE` | `1` (включено) | **Локальный веб-интерфейс** (ядро `backend_adapter/webserver.py` + эндпойнты `webui_status.py` `/` и `session_viewer.py` `/session`). По умолчанию **включён** — статус-страница доступна сразу (zero-config), значения `0`, `false`, `no`, пусто — выключено.<br>• Поднимает веб-сервер на `ADAPTER_WEBUI_HOST:ADAPTER_WEBUI_PORT`; корень — директория `ADAPTER_DEBUG_LOGPATH`, если задана (там лежат `*.parts` папки сессий); при пустом LOGPATH — независимая папка `./tmp/webui` (статус-страница работает всегда, вкладка `/session` пуста, т.к. per-session логов нет).<br>• `/` — статус-страница (версия, LLM-эндпойнты, модели; список моделей пере-опрошивается при каждой загрузке страницы и по кнопке «⟳ Проверить сейчас»); `/session` — просмотр сессий (вкладки по `session-*.log`/`*.jsonl`). |
+| `ADAPTER_WEBUI_ENABLE` | `1` (включено) | **Локальный веб-интерфейс** (ядро `backend_adapter/webserver.py` + эндпойнты `webui_status.py` `/`, `session_viewer.py` `/session`, `webui_config_api.py` `/config`). По умолчанию **включён** — статус-страница доступна сразу (zero-config), значения `0`, `false`, `no`, пусто — выключено.<br>• Поднимает веб-сервер на `ADAPTER_WEBUI_HOST:ADAPTER_WEBUI_PORT`; корень — директория `ADAPTER_DEBUG_LOGPATH`, если задана (там лежат `*.parts` папки сессий); при пустом LOGPATH — независимая папка `./tmp/webui` (статус-страница работает всегда, вкладка `/session` пуста, т.к. per-session логов нет).<br>• `/` — статус-страница (версия, LLM-эндпойнты, модели; список моделей пере-опрошивается при каждой загрузке страницы и по кнопке «⟳ Проверить сейчас»); `/session` — просмотр сессий (вкладки по `session-*.log`/`*.jsonl`); `/config` — runtime-переключение объёма debug-записи без перезапуска (см. §6, «Runtime-пул»). |
 | `ADAPTER_WEBUI_PORT` | `8765` | Порт веб-интерфейса (см. `ADAPTER_WEBUI_ENABLE`). |
 | `ADAPTER_WEBUI_HOST` | `127.0.0.1` | Адрес, на котором слушает веб-интерфейс. Дефолт — только локально; `0.0.0.0` — доступ из сети (внимание: содержимое сессий — git log, файлы, reasoning — не должно случайно утечь). |
 | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | `0` (санитайзер активен) | **Рубильник санитайзера.**<br>• `0` (по умолчанию) — санитайзер **активен**: все сообщения, проходящие через `_d()`, `_dr()` и `_trace()`, а также прямые вызовы `redact()` — маскируются (токены, заголовки, ключи).<br>• `1` — санитайзер **отключается полностью**: строки записываются в лог без вызова `redact()`, секреты выводятся в открытом виде. |
@@ -162,6 +162,31 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 - `...fields` — дополнительные поля в зависимости от события
 
 Записи проходят через `redact` — чувствительные данные (токены, ключи) автоматически заменяются на `***`.
+
+### Runtime-пул: переключение на лету без перезапуска
+
+Часть переменных debug-записи можно менять на **работающем** адаптере через
+веб-интерфейс — страница `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config`
+(эндпойнт `/config`, `webui_config_api.py`). На странице — форма с текущими
+значениями пула; POST применяет их через `config.set_runtime_config()`
+(неверные типы и неизвестные ключи молча игнорируются) и показывает, что
+применилось.
+
+В **runtime-пул** (`RUNTIME_CONFIG_POOL` в `config.py`) входят переменные,
+управляющие только объёмом записи на диск, — их чтение кодом переведено на
+живые обращения `config.ADAPTER_X` (не снимок на импорте):
+
+- **bool**: `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`, `ADAPTER_DEBUG_TOOLS`,
+  `ADAPTER_DEBUG_TOOLS_ERROR`;
+- **int**: `ADAPTER_TRACE_REASONING_MAX_CHARS`,
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM`.
+
+Переменные, менять которые на лету **нельзя** (влияют на активные соединения
+или раскладку файлов, в пул не входят): сеть (`ADAPTER_PROXY_PORT`,
+`ADAPTER_ENDPOINT_HOST`, таймауты/ретраи), бэкенды и модели
+(`ADAPTER_BACKEND_CONFIG`, `ADAPTER_STRICT_MODELS`, маппинг), WEBUI-адреса,
+`ADAPTER_DEBUG_LOGPATH` (идентичность директории логов не должна меняться
+посреди сессии).
 
 ---
 
@@ -224,6 +249,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | JSON+YAML дампы всех частей | `ADAPTER_DEBUG_TAGS_OUT` | `1` |
 | Веб-интерфейс: статус `/` по умолчанию (zero-config) | `ADAPTER_WEBUI_ENABLE` | `1` (дефолт) — корень `./tmp/webui`, `/session` пуст |
 | Веб-интерфейс: полный просмотр сессий | `ADAPTER_WEBUI_ENABLE` + `ADAPTER_DEBUG_LOGPATH` | `1` + `"/tmp/adapter-logs"` |
+| Runtime-пул: переключение debug-записи на лету (без рестарта) | `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config` | форма `RUNTIME_CONFIG_POOL` (7 переменных, см. §6) |
 | Отключить веб-интерфейс | `ADAPTER_WEBUI_ENABLE` | `0` |
 | Порт веб-интерфейса | `ADAPTER_WEBUI_PORT` | `8765` |
 | Адрес прослушивания адаптера (все интерфейсы) | `ADAPTER_ENDPOINT_HOST` | `"0.0.0.0"` (дефолт `127.0.0.1`) |

@@ -236,7 +236,7 @@ def serve(
     # внутри функции (не на верхнем уровне): эндпойнт-модули сами
     # импортируют webserver (register/Endpoint), верхнеуровневый импорт
     # создал бы цикл.
-    from . import session_viewer, webui_status  # noqa: F401  (регистрируют себя)
+    from . import session_viewer, webui_config_api, webui_status  # noqa: F401  (регистрируют себя)
 
     context = WebContext(root_dir=root_dir, version=version, verbose=verbose)
     Handler.context = context

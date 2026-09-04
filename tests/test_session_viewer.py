@@ -178,6 +178,10 @@ class TestFindOrGenerate:
         assert os.path.isfile(tree)
 
     def test_uses_existing_fresh_tree(self, tmp_path):
+        """Дерево есть, part-файлы не менялись — регенерации нет.
+
+        В новой инкрементальной модели tree.html НЕ стирается перед регенерацией,
+        а чекпойнт (.build_state.json) сохраняется — повторный вызов использует его."""
         parts_dir = _make_parts_dir(tmp_path, "fresh.parts", {
             "a-1-openai_body.json": _simple_ob(1),
         })
@@ -193,6 +197,8 @@ class TestFindOrGenerate:
         # tree.html НЕ перегенерирован (оригинальное содержимое цело)
         content = open(os.path.join(artefacts, "tree.html")).read()
         assert content == "ORIGINAL"
+        # Чекпойнта нет и не будет: generate() (единственный писатель
+        # .build_state.json) не вызывался — дерево свежее, регенерации не было
 
     def test_regenerates_when_tree_stale(self, tmp_path):
         parts_dir = _make_parts_dir(tmp_path, "stale.parts", {
@@ -424,3 +430,201 @@ class TestSessionHTTP:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+class TestSessionHash:
+    """_session_hash(): 8-hex-символьный хеш из имени директории, либо из
+    первого raw part-файла внутри (fallback для нестандартных имён)."""
+
+    def setup_method(self):
+        to_remove = [k for k in sys.modules if k.startswith("backend_adapter.session_viewer")]
+        for k in to_remove:
+            del sys.modules[k]
+        from backend_adapter.session_viewer import _session_hash, _build_hash_index
+        self._session_hash = _session_hash
+        self._build_hash_index = _build_hash_index
+
+    def test_hash_from_dir_name(self, tmp_path):
+        """Стандартное имя директории (…-<hash8>.parts) — хеш из имени, без диска."""
+        d = _make_parts_dir(tmp_path, "session-20260901-103440-e034c295.parts", {})
+        assert self._session_hash("session-20260901-103440-e034c295.parts", str(d)) == "e034c295"
+
+    def test_hash_fallback_from_part_file(self, tmp_path):
+        """Нестандартное имя директории — хеш из префикса первого part-файла."""
+        d = _make_parts_dir(tmp_path, "legacy-name.parts", {
+            "bb1194de-1-openai_body.json": _simple_ob(1),
+        })
+        assert self._session_hash("legacy-name.parts", str(d)) == "bb1194de"
+
+    def test_hash_none_when_no_sources(self, tmp_path):
+        """Ни имени, ни part-файлов — None (алиас не работает, полное имя — работает)."""
+        d = _make_parts_dir(tmp_path, "empty-dir.parts", {})
+        assert self._session_hash("empty-dir.parts", str(d)) is None
+
+    def test_build_hash_index(self, tmp_path):
+        """Индекс {hash8: имя} по списку сессий."""
+        d1 = _make_parts_dir(tmp_path, "session-20260901-103440-e034c295.parts", {})
+        d2 = _make_parts_dir(tmp_path, "session-20260901-111111-aabbccdd.parts", {})
+        index = self._build_hash_index([
+            ("session-20260901-103440-e034c295.parts", str(d1)),
+            ("session-20260901-111111-aabbccdd.parts", str(d2)),
+        ])
+        assert index["e034c295"] == "session-20260901-103440-e034c295.parts"
+        assert index["aabbccdd"] == "session-20260901-111111-aabbccdd.parts"
+
+    def test_collision_first_wins(self, tmp_path):
+        """Коллизия hash8 — первая (по порядку списка) побеждает, остальные не перетирают."""
+        # Обе директории получают один и тот же hash8 из имени — намеренная коллизия
+        d1 = _make_parts_dir(tmp_path, "session-00000000-e034c295.parts", {})
+        d2 = _make_parts_dir(tmp_path, "session-11111111-e034c295.parts", {})
+        index = self._build_hash_index([
+            ("session-00000000-e034c295.parts", str(d1)),
+            ("session-11111111-e034c295.parts", str(d2)),
+        ])
+        assert index["e034c295"] == "session-00000000-e034c295.parts"
+
+
+class TestSessionViewerShortcuts:
+    """HTTP shortcut endpoints /session/<id>/png и /session/<id>/puml
+    (с опциональным ?page=N → artefacts/pages/N/tree.*).
+
+    URL-схема зеркалит остальной роутинг эндпойнта: сессия идёт ПЕРВЫМ
+    компонентом пути (полное имя или hash8), png/puml — последним. В дереве
+    разметки ссылки ведут на /session/<session>/png|puml.
+    """
+
+    def test_png_shortcut_no_page(self, tmp_path):
+        """/session/<id>/png без ?page → artefacts/tree.png."""
+        _make_parts_dir(tmp_path, "session-P.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # Генерируем дерево сначала
+            status_tree, _ = _http_get(port, "/session/session-P.parts/artefacts/tree.html")
+            assert status_tree == 200
+
+            # Shortcut без page
+            status, _ = _http_get(port, "/session/session-P.parts/png")
+            # PNG генерируется только если в окружении есть plantuml/dot —
+            # иначе 404. Оба файла в этом окружении есть, но не закладываемся.
+            assert status in (200, 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_png_shortcut_with_page(self, tmp_path):
+        """/session/<id>/png?page=N → pages/N/tree.png (если страницы созданы)."""
+        _make_parts_dir(tmp_path, "session-Q.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "First"),
+            "c-3-openai_body.json": _simple_ob(3),
+            "d-4-fetch_raw.json": _simple_fr(4, "Second"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # Генерируем дерево (создаст страницы)
+            status_tree, _ = _http_get(port, "/session/session-Q.parts/artefacts/tree.html")
+            assert status_tree == 200
+
+            # Shortcut с page=1
+            status, _ = _http_get(port, "/session/session-Q.parts/png?page=1")
+            # Может быть 200 (если страница есть и PNG собрался) или 404
+            assert status in (200, 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_png_shortcut_hash8(self, tmp_path):
+        """/session/<hash8>/png — короткий алиас тоже работает."""
+        _make_parts_dir(tmp_path, "session-20260901-103440-e034c295.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status_tree, _ = _http_get(port, "/session/session-20260901-103440-e034c295.parts/artefacts/tree.html")
+            assert status_tree == 200
+
+            status, _ = _http_get(port, "/session/e034c295/png")
+            assert status in (200, 404)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_puml_shortcut(self, tmp_path):
+        """/session/<id>/puml без ?page → artefacts/tree.puml (текст)."""
+        _make_parts_dir(tmp_path, "session-R.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # Генерируем дерево
+            status_tree, _ = _http_get(port, "/session/session-R.parts/artefacts/tree.html")
+            assert status_tree == 200
+
+            # PUML shortcut — текст, отдаётся всегда (генерируется кодом,
+            # не внешними утилитами)
+            status, body = _http_get(port, "/session/session-R.parts/puml")
+            assert status == 200
+            assert "@startuml" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_puml_shortcut_hash8(self, tmp_path):
+        """/session/<hash8>/puml — алиас в puml-шорткате."""
+        _make_parts_dir(tmp_path, "session-20260901-111111-aabbccdd.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status_tree, _ = _http_get(port, "/session/session-20260901-111111-aabbccdd.parts/artefacts/tree.html")
+            assert status_tree == 200
+
+            status, body = _http_get(port, "/session/aabbccdd/puml")
+            assert status == 200
+            assert "@startuml" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class TestCheckpointSurvivesRegeneration:
+    """Checkpoint persists across multiple generate() calls."""
+
+    def test_checkpoint_survives_regeneration(self, tmp_path):
+        """Checkpoint file remains valid after incremental regeneration."""
+        from backend_adapter.session_viewer import find_or_generate_sessions
+
+        d = _make_parts_dir(tmp_path, "session-cp.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "First"),
+        })
+        root = str(tmp_path)
+
+        # First generation (cold)
+        sessions1 = find_or_generate_sessions(root, verbose=True)
+        cp_path = os.path.join(d, "artefacts", ".build_state.json")
+        assert os.path.isfile(cp_path)
+
+        import json
+        with open(cp_path) as f:
+            state1 = json.load(f)
+        last_pid1 = state1["last_processed_part_id"]
+
+        # Add new part
+        _write_json(os.path.join(d, "c-3-openai_body.json"), _simple_ob(3))
+
+        # Second generation (incremental)
+        sessions2 = find_or_generate_sessions(root, verbose=True)
+
+        # Checkpoint still exists and updated
+        assert os.path.isfile(cp_path)
+        with open(cp_path) as f:
+            state2 = json.load(f)
+        last_pid2 = state2["last_processed_part_id"]
+        assert last_pid2 > last_pid1

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backend-adapter"
-version = "0.7.2"
+version = "0.8.0"
 description = "Claude Code ↔ OpenAI Backend Proxy Adapter"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -85,6 +85,7 @@ ignore = [
 "backend_adapter/webserver.py" = ["N802"]
 "backend_adapter/webui_status.py" = ["N802"]
 "backend_adapter/session_viewer.py" = ["N802"]
+"backend_adapter/webui_config_api.py" = ["N802"]
 "backend-adapter.py" = ["F401", "I001"]
 
 [tool.ruff.lint.pydocstyle]
