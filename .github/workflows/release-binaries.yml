@@ -1,0 +1,120 @@
+name: Release binaries
+
+# Собирает self-contained бинарники (PyInstaller --onefile) под все
+# поддерживаемые платформы при push тега v* и публикует их в GitHub Release.
+#
+# PyInstaller не кросскомпилирует — каждый артефакт собирается на нативной
+# платформе (см. scripts/build-binaries.sh для локальной сборки). Точка входа
+# сборки — backend-adapter.py: консольная команда (backend_adapter/cli.py)
+# исполняет этот скрипт через runpy, и в frozen-окружении того файла нет.
+# Артефакты PyInstaller (build/, dist/) в .gitignore, в репозиторий не попадают.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            ext: ''
+          - os: ubuntu-latest
+            target: linux-arm64
+            ext: ''
+          - os: macos-latest
+            target: macos-arm64
+            ext: ''
+          - os: macos-13
+            target: macos-x64
+            ext: ''
+          - os: windows-latest
+            target: windows-x64
+            ext: '.exe'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build binary
+        run: |
+          pyinstaller --onefile --name backend-adapter \
+            --hidden-import yaml \
+            --hidden-import yaml.emitter \
+            backend-adapter.py
+
+      # Health check: бинарник должен стартовать далеко настолько, чтобы
+      # дойти до собственного раннего выхода без конфига — PyInstaller
+      # early-exit имел бы другой симптом. Запуск без ADAPTER_BACKEND_CONFIG:
+      # ожидается [FATAL] ... is not set в выводе и код выхода 1.
+      - name: Health check (missing config early-exit)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set +e
+          OUTPUT=$(./dist/backend-adapter 2>&1)
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 1 ]; then
+            echo "FAIL: expected exit code 1, got $STATUS" >&2
+            echo "$OUTPUT" >&2
+            exit 1
+          fi
+          if ! echo "$OUTPUT" | grep -q "ADAPTER_BACKEND_CONFIG is not set"; then
+            echo "FAIL: expected [FATAL] ADAPTER_BACKEND_CONFIG is not set in output" >&2
+            echo "$OUTPUT" >&2
+            exit 1
+          fi
+          echo "OK: binary starts and exits 1 on missing config"
+
+      # Приводим артефакт к единому имени для слияния в release-джобе.
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist/release
+          cp dist/backend-adapter${{ matrix.ext }} \
+             dist/release/backend-adapter-${{ matrix.target }}${{ matrix.ext }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/release/backend-adapter-${{ matrix.target }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          name: backend-adapter ${{ github.ref_name }}

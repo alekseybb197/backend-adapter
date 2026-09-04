@@ -12,6 +12,36 @@
 **Изменения:** `changelog.md` (WIP-запись), `scripts/run.sh` (новый, исполняемый).
 `install.md` не трогать — допиливаем в процессе.
 
+### 2026-09-04 Standalone-бинарники: скрипт сборки, install.md-раздел, CI release
+
+**Цель:** распространять адаптер как self-contained исполняемый файл
+(PyInstaller `--onefile`), не требующий Python/PyYAML на целевой машине;
+собирать все артефакты автоматически при push тега `v*`.
+
+**Решение:** входом сборки является сам `backend-adapter.py` (консольная
+команда `backend_adapter/cli.py` исполняет его через runpy — в frozen-окружении
+того файла нет), а не `cli.py`. Windows-оговорка: `ADAPTER_DETACH_ENABLE=1` не
+поддержан (нет `os.fork` в `daemon.py`) — задокументировано, код не менялся.
+
+**Изменения:** `scripts/build-binaries.sh` (новый, исполняемый: авто-определение
+платформы/явный target, `--specpath build/<target>`; self-check — запуск без
+`ADAPTER_BACKEND_CONFIG`, ожидается `[FATAL]` + exit 1), `docs/install.md` (новый
+раздел «4. Standalone-бинарники»: артефакты, запуск Linux/macOS/Windows через
+`ADAPTER_BACKEND_CONFIG`, локальная сборка; разделы 4–8 перенумерованы в 5–9),
+`.github/workflows/release-binaries.yml` (новый: matrix 5 артефактов, health-check
+бинарника — ожидаемый `[FATAL]`-early-exit без конфига, upload → merge →
+`softprops/action-gh-release`).
+
+**Проверочная сборка** (macOS arm64, PyInstaller 6.22.2): бинарник
+`dist/binaries/macos-arm64/backend-adapter` (~8.7 МБ) — без конфига даёт
+`[FATAL] ADAPTER_BACKEND_CONFIG is not set` и exit 1; со `sample.adapter.yaml`
+доходит до сетевого probing бэкенда (весь пакет внутри бинарника работает);
+WEBUI поднимается (`HTTP 200` на `127.0.0.1:8765`). В ходе сборки найден и
+исправлен дефект: исходный self-check скрипта звал `--help` (адаптер его не
+парсит — всегда `[FATAL]`+exit 1), т.е. проверка не отличала живую сборку от
+сломанной; заменён на содержательную проверку выхода без конфига.
+
+
 ## v0.7.2 (zero-config: консоль-логи и статус по умолчанию)
 
 ### 2026-09-04 Фикс: init/refresh моделей мутируют кэш-словари на месте (живые ссылки server.py)
