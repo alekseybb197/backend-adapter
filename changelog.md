@@ -1,5 +1,111 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.7.3 (дистрибуция адаптера)
+
+### 2026-09-04 Однострочный установщик: install.sh + раздел в install.md
+
+**Цель:** установка бинарника одной командой
+(`curl -fsSL .../main/install.sh | bash`) — без ручного скачивания из
+Releases; опциональная установка сервиса автозапуска тем же скриптом.
+
+**Решение:** `install.sh` по умолчанию скачивает готовый бинарник
+`backend-adapter-<platform>` (linux-x64/arm64, macos-x64/arm64) с GitHub
+Releases (`releases/latest/download`) в `/usr/local/bin` (fallback —
+`~/.local/bin` при отсутствии прав). Опции: `--prefix DIR`, `--service`,
+`--pip` (установка из исходников: git clone в `<prefix>/src` + venv +
+`pip install -e .`), `--help`; те же значения — env-переменными
+`INSTALL_DIR`/`SERVICE_INSTALL`/`USE_PIP`.
+
+**`--service` генерирует юниты сам** (user-level, без root): системные
+шаблоны репозитория (`backend-adapter.service`, `com.user.backend-adapter.plist`)
+рассчитаны на python-source раскладку (`/usr/bin/python3 %h/backend-adapter/
+backend-adapter.py`) и бинарнику не подходят. Для бинарника `install.sh`
+пишет свежий юнит heredoc'ом, указывающий на установленный бинарник:
+- **Linux** — user-юнит `~/.config/systemd/user/backend-adapter.service`
+  (systemd `systemctl --user`) + env-файл `~/.config/backend-adapter/
+  backend-adapter.env` (`EnvironmentFile`); выполняется `daemon-reload`
+  и `enable` (без `--now` — `ADAPTER_BACKEND_CONFIG` ещё пуст, юнит стартует
+  после заполнения env-файла);
+- **macOS** — launchd-агент `~/Library/LaunchAgents/com.user.backend-adapter.plist`
+  с переменными инлайн (launchd не читает env-файлы; env-файл рядом —
+  справочник для правки plist); `RunAtLoad=false`, `load` — вручную после
+  заполнения `ADAPTER_BACKEND_CONFIG` в plist.
+
+**Отклонено осознанно:** wheel-установка в `--pip` (в wheel входит только
+пакет `backend_adapter/`; консольная команда `cli.py` исполняет соседний
+`backend-adapter.py` через runpy — в wheel его нет, команда была бы
+сломана); legacy next-steps `ADAPTER_BACKEND_BASE`/`ADAPTER_BACKEND_KEY`
+(удалены в v0.7.2 — в финальных подсказках только `ADAPTER_BACKEND_CONFIG`
++ токен из поля `key`); self-check через `--version` (у адаптера нет флагов —
+проверка запуском без конфига: ожидается `[FATAL] ADAPTER_BACKEND_CONFIG
+is not set` + exit 1, живой early-exit доказывает работу бинарника).
+
+**Изменения:** `install.sh` (новый, исполняемый: детект платформы,
+скачивание curl/wget, verify-шаг, генерация systemd/launchd-юнитов под
+бинарник), `docs/install.md` (новый подраздел «4.2 Установка одной строкой»:
+curl-строка, `--service`, таблица опций, security note, оговорка про
+`--pip`; «4.2 Запуск» → «4.3 Запуск», «4.3 Локальная сборка» → «4.4
+Локальная сборка»; в структуру проекта добавлены `install.sh` и `scripts/`),
+`backend-adapter.py` (`__version__` 0.7.2 → 0.7.3), `changelog.md` (снят
+статус WIP с заголовка v0.7.3), `README.md` и `docs/architecture.md`/
+`docs/install.md` (версионные ссылки 0.7.2 → 0.7.3).
+
+**Версия:** `__version__` поднята до 0.7.3 — с этого коммита ветка
+`build/v0.7.3` готова; релиз-тег `v0.7.3` соберёт standalone-бинарники
+и опубликует GitHub Release (push тега делает автор).
+
+### 2026-09-04 `scripts/run.sh` → `scripts/dev-run.sh`
+
+**Цель:** уточнить назначение скрипта запуска из исходников — это
+developer-раннер (venv + зависимости + конфиг + `backend-adapter.py`), а не
+универсальная дистрибутивная точка входа (её роль в v0.7.3 выполняют
+standalone-бинарники). Запуск — `./scripts/dev-run.sh` из корня репозитория.
+
+**Изменения:** `scripts/run.sh` → `scripts/dev-run.sh` (rename через `git mv`,
+шапка обновлена под новый формат запуска), `docs/install.md` (упоминание
+`./scripts/run.sh` → `./scripts/dev-run.sh` в разделе 4.2), `changelog.md`
+(заголовок и текст записи о `run.sh` приведены к `dev-run.sh`).
+
+### 2026-09-04 Ветка `build/v0.7.3` — настройка дистрибуции: `scripts/dev-run.sh`
+
+**Цель:** удобная точка входа для разработки — один скрипт `./scripts/dev-run.sh`,
+который проверяет/создаёт виртуальное окружение, устанавливает зависимости
+из `requirements.txt`, проверяет наличие `adapter.env` и `adapter.yaml`,
+загружает env-файл и запускает `backend-adapter.py`.
+
+**Изменения:** `changelog.md` (запись), `scripts/run.sh` (новый, исполняемый;
+переименован в `scripts/dev-run.sh` на этой ветке, запуск — `./scripts/dev-run.sh`).
+`install.md` не трогать — допиливаем в процессе.
+
+### 2026-09-04 Standalone-бинарники: скрипт сборки, install.md-раздел, CI release
+
+**Цель:** распространять адаптер как self-contained исполняемый файл
+(PyInstaller `--onefile`), не требующий Python/PyYAML на целевой машине;
+собирать все артефакты автоматически при push тега `v*`.
+
+**Решение:** входом сборки является сам `backend-adapter.py` (консольная
+команда `backend_adapter/cli.py` исполняет его через runpy — в frozen-окружении
+того файла нет), а не `cli.py`. Windows-оговорка: `ADAPTER_DETACH_ENABLE=1` не
+поддержан (нет `os.fork` в `daemon.py`) — задокументировано, код не менялся.
+
+**Изменения:** `scripts/build-binaries.sh` (новый, исполняемый: авто-определение
+платформы/явный target, `--specpath build/<target>`; self-check — запуск без
+`ADAPTER_BACKEND_CONFIG`, ожидается `[FATAL]` + exit 1), `docs/install.md` (новый
+раздел «4. Standalone-бинарники»: артефакты, запуск Linux/macOS/Windows через
+`ADAPTER_BACKEND_CONFIG`, локальная сборка; разделы 4–8 перенумерованы в 5–9),
+`.github/workflows/release-binaries.yml` (новый: matrix 5 артефактов, health-check
+бинарника — ожидаемый `[FATAL]`-early-exit без конфига, upload → merge →
+`softprops/action-gh-release`).
+
+**Проверочная сборка** (macOS arm64, PyInstaller 6.22.2): бинарник
+`dist/binaries/macos-arm64/backend-adapter` (~8.7 МБ) — без конфига даёт
+`[FATAL] ADAPTER_BACKEND_CONFIG is not set` и exit 1; со `sample.adapter.yaml`
+доходит до сетевого probing бэкенда (весь пакет внутри бинарника работает);
+WEBUI поднимается (`HTTP 200` на `127.0.0.1:8765`). В ходе сборки найден и
+исправлен дефект: исходный self-check скрипта звал `--help` (адаптер его не
+парсит — всегда `[FATAL]`+exit 1), т.е. проверка не отличала живую сборку от
+сломанной; заменён на содержательную проверку выхода без конфига.
+
 ## v0.7.2 (zero-config: консоль-логи и статус по умолчанию)
 
 ### 2026-09-04 Фикс: init/refresh моделей мутируют кэш-словари на месте (живые ссылки server.py)

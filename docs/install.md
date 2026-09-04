@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.7.2) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **backend-adapter** (v0.7.3) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно обрабатывает протокол Anthropic Messages API.
 
@@ -116,22 +116,185 @@ backend-adapter/
 │   ├── environment.md         # Полный список env-переменных
 │   ├── logging.md             # Конфигурация логирования
 │   └── sanitizing.md          # Sanitization секретов
-├── backend-adapter.service    # systemd unit (Linux, продакшен)
+├── install.sh                   # Однострочный установщик (curl | bash)
+├── backend-adapter.service      # systemd unit (Linux, продакшен)
 ├── com.user.backend-adapter.plist  # launchd (macOS, продакшен)
-├── backend-adapter.env        # Пример env для сервиса
-├── sample.adapter.env         # Полный пример env (сервис + клиент)
-├── sample.adapter.yaml         # Пример YAML-конфига бэкендов
-├── requirements.txt           # Зависимости (единственная — PyYAML)
-└── changelog.md               # История версий
+├── backend-adapter.env          # Пример env для сервиса
+├── sample.adapter.env           # Полный пример env (сервис + клиент)
+├── sample.adapter.yaml          # Пример YAML-конфига бэкендов
+├── requirements.txt             # Зависимости (единственная — PyYAML)
+├── scripts/
+│   ├── build-binaries.sh        # Сборка standalone-бинарников (PyInstaller)
+│   └── dev-run.sh               # Запуск из исходников (venv + конфиг)
+└── changelog.md                 # История версий
 ```
 
 ---
 
-## 4. Конфигурация
+## 4. Standalone-бинарники
+
+Для каждого релиза публикуются готовые исполняемые файлы (PyInstaller
+`--onefile`), которые **не требуют Python или PyYAML** на целевой машине:
+внутри бинарника упакован интерпретатор и все зависимости. Весь конфиг —
+как обычно, через переменные окружения (раздел [5](#5-конфигурация)).
+
+### 4.1 Где скачать
+
+Зайдите на страницу [Releases](https://github.com/alekseybb197/backend-adapter/releases)
+и скачайте бинарник под вашу платформу:
+
+| Платформа | Файл | Размер |
+|---|---|---|
+| Linux x64 | `backend-adapter-linux-x64` | ~15 МБ |
+| Linux ARM64 | `backend-adapter-linux-arm64` | ~15 МБ |
+| macOS ARM64 (Apple Silicon) | `backend-adapter-macos-arm64` | ~15 МБ |
+| macOS Intel | `backend-adapter-macos-x64` | ~15 МБ |
+| Windows x64 | `backend-adapter-windows-x64.exe` | ~15 МБ |
+
+### 4.2 Установка одной строкой (curl | bash)
+
+Быстрая установка бинарника с GitHub Releases — однострочным установщиком
+`install.sh` из корня репозитория. Скрипт сам определяет ОС/архитектуру,
+скачивает готовый бинарник и кладёт его в `/usr/local/bin` (или
+`~/.local/bin`, если нет прав на запись):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash
+```
+
+Установка бинарника **и** сервиса автозапуска одной командой:
+
+```bash
+# Linux: user-юнит systemd (systemctl --user); macOS: launchd-агент
+curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash -s -- --service
+```
+
+`--service` **не запускает** сервис сразу: он пишет свежий user-level юнит
+(указывающий на установленный бинарник), env-файл со значениями по
+умолчанию и пустым `ADAPTER_BACKEND_CONFIG` и включает автозапуск. После
+установки заполните `ADAPTER_BACKEND_CONFIG` (в env-файле на Linux / в
+`EnvironmentVariables` plist на macOS — launchd не читает env-файлы) и
+запустите сервис вручную. Системные шаблоны репозитория
+(`backend-adapter.service`, `com.user.backend-adapter.plist`) рассчитаны на
+запуск из исходников; для бинарника юнит генерируется установщиком.
+
+Опции:
+
+| Опция | Действие |
+|---|---|
+| `--prefix DIR` | Каталог установки (по умолчанию `/usr/local/bin`) |
+| `--service` | Дополнительно сгенерировать и включить сервис автозапуска: user-юнит systemd (Linux) / launchd-агент (macOS) |
+| `--pip` | Установить из исходников (git clone + venv), а не бинарник |
+| `--help` | Показать справку |
+
+Те же значения задаются переменными окружения `INSTALL_DIR`,
+`SERVICE_INSTALL`, `USE_PIP` (1/0).
+
+> **--pip — установка из исходников.** `pip install .` (wheel) не
+> поддерживается: в wheel входит только пакет `backend_adapter/`, а
+> консольная команда `backend-adapter` (`backend_adapter/cli.py`) исполняет
+> соседний `backend-adapter.py` через runpy — в wheel его нет. Поэтому
+> `--pip` клонирует репозиторий в `<prefix>/src` и ставит его в venv
+> в editable-режиме (`backend-adapter.py` остаётся рядом с пакетом).
+
+> **Security note.** Установщик общается только с github.com (официальные
+> релизы и файлы этого репозитория); установка и сервис — в пределах
+> текущего пользователя (user-level systemd/launchd, без root).
+> Перед выполнением просмотрите скрипт:
+> `curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | less`
+
+Установленному бинарнику нужен тот же конфиг, что и исходникам (см. ниже,
+раздел [4.3](#43-запуск)): YAML-файл бэкендов через `ADAPTER_BACKEND_CONFIG`
+плюс env-переменная токена из поля `key`. Скачайте `sample.adapter.yaml`
+из репозитория и заполните его.
+
+### 4.3 Запуск
+
+Бинарнику нужен тот же конфиг, что и исходникам: YAML-файл бэкендов через
+`ADAPTER_BACKEND_CONFIG` (см. [5.1](#51-конфигурация-бэкенда-yaml-файл-через-adapter_backend_config))
+плюс env-переменная токена из поля `key`. Скачайте `sample.adapter.yaml`
+из репозитория, заполните и укажите на него:
+
+```yaml
+# adapter.yaml — один бэкенд; другие добавляются записями в тот же список
+backend:
+  - name: llm-service
+    base: https://llm.service.example.com
+    key: ADAPTER_BACKEND_KEY_LLM_SERVICE   # имя env-переменной токена
+```
+
+**Linux / macOS (bash):**
+
+```bash
+# Токен: имя переменной из поля key в YAML
+export ADAPTER_BACKEND_KEY_LLM_SERVICE="sk-..."
+export ADAPTER_BACKEND_CONFIG="/path/to/adapter.yaml"
+chmod +x backend-adapter-linux-x64        # только Linux; на macOS права обычно уже стоят
+./backend-adapter-linux-x64
+```
+
+**Windows (PowerShell):**
+
+```powershell
+$env:ADAPTER_BACKEND_KEY_LLM_SERVICE="sk-..."
+$env:ADAPTER_BACKEND_CONFIG="C:\path\to\adapter.yaml"
+.\backend-adapter-windows-x64.exe
+```
+
+**Ограничения Windows:** `ADAPTER_DETACH_ENABLE=1` не поддержан (режим detach
+использует `os.fork`, которого нет на Windows). Запускайте бинарник в
+foreground; для работы в фоне используйте фоновую задачу PowerShell или окно
+консоли. Остальные переменные работают одинаково на всех платформах.
+
+Дефолты не отличаются от исходников (zero-config): debug-блоки видны в консоли,
+на диск ничего не пишется, пока не задан `ADAPTER_DEBUG_LOGPATH`, статус-страница
+WEBUI доступна на `http://127.0.0.1:8765/`.
+
+Когда стоит предпочесть исходники (`git clone` + `pip install -r
+requirements.txt` или `./scripts/dev-run.sh`): бинарник собирается под конкретную
+ОС/архитектуру и не подходит, если нужен нестандартный Python, свои правки
+кода или запуск на платформе вне таблицы выше.
+
+### 4.4 Локальная сборка
+
+PyInstaller не кросскомпилирует — бинарник собирается **на той же
+платформе**, для которой предназначен. Для локальной сборки (в виртуальном
+окружении проекта):
+
+```bash
+venv/bin/pip install pyinstaller
+./scripts/build-binaries.sh            # платформа определяется автоматически
+# или явно:
+./scripts/build-binaries.sh macos-arm64
+# Результат: dist/binaries/<target>/backend-adapter
+```
+
+Ручной вариант той же команды:
+
+```bash
+pyinstaller --onefile \
+  --name backend-adapter \
+  --hidden-import yaml \
+  --hidden-import yaml.emitter \
+  backend-adapter.py
+```
+
+Точка входа сборки — `backend-adapter.py` (консольная команда
+`backend-adapter`, генерируемая при `pip install .` из `backend_adapter/cli.py`,
+исполняет этот же скрипт через runpy — в бинарнике он уже является кодом
+запуска).
+
+Все четыре артефакта (Linux x64, macOS ARM64/x64, Windows x64) для релизов
+собираются автоматически в CI при push тега `v*` — см.
+`.github/workflows/release-binaries.yml`.
+
+---
+
+## 5. Конфигурация
 
 Все настройки задаются через переменные окружения.
 
-### 4.1 Конфигурация бэкенда (YAML-файл через ADAPTER_BACKEND_CONFIG)
+### 5.1 Конфигурация бэкенда (YAML-файл через ADAPTER_BACKEND_CONFIG)
 
 Единственный способ указать подключение к бэкенду — переменная окружения
 `ADAPTER_BACKEND_CONFIG`, ссылающаяся на YAML-файл со структурой `backend:`
@@ -166,7 +329,7 @@ export ADAPTER_BACKEND_CONFIG="./sample.adapter.yaml"
 **Маршрутизация**: если модель содержит префикс `<name>.` (например `kl.qwen3.6-35b-a3b`),
 запрос отправляется на соответствующий бэкенд. Fallback — первый бэкенд в конфигурации.
 
-### 4.2 Настройка клиента Claude Code
+### 5.2 Настройка клиента Claude Code
 
 Для работы Claude Code через адаптер задайте:
 
@@ -193,7 +356,7 @@ export CLAUDE_CODE_DISABLE_THINKING="1"
 > а не адаптера. Адаптер их не читает, они задаются в окружении процесса Claude Code.
 > Полный список переменных адаптера — в [`docs/environment.md`](environment.md).
 
-### 4.3 Рекомендуемые параметры сети
+### 5.3 Рекомендуемые параметры сети
 
 ```bash
 # Таймаут запроса к бэкенду (сек)
@@ -210,7 +373,7 @@ export ADAPTER_PROXY_PORT=9999
 # export ADAPTER_ENDPOINT_HOST="127.0.0.1"
 ```
 
-### 4.4 Стриминг
+### 5.4 Стриминг
 
 ```bash
 # Включить SSE streaming passthrough
@@ -223,7 +386,7 @@ export ADAPTER_STREAM_INCLUDE_USAGE=1
 Если бэкенд некорректно стримит, отключите стриминг полностью:
 `ADAPTER_STREAMING_ENABLE=0` (аварийный режим — адаптер ждёт ответ целиком).
 
-### 4.5 Валидация моделей
+### 5.5 Валидация моделей
 
 ```bash
 # Строгий режим: адаптер опрашивает бэкенд (/v1/models) и принимает только известные модели
@@ -232,7 +395,7 @@ export ADAPTER_STRICT_MODELS=1
 # export ADAPTER_STRICT_MODELS=0
 ```
 
-### 4.6 Маппинг моделей
+### 5.6 Маппинг моделей
 
 При необходимости преобразования имён моделей:
 
@@ -243,7 +406,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 Формат: `agent_model:backend_model`. Применяется **до** валидации — преобразованная модель
 проверяется по новому имени.
 
-### 4.7 Отладка и трассировка
+### 5.7 Отладка и трассировка
 
 ```bash
 # Мастер-выключатель логирования: 1 — логи сессий/трейсы/дампы пишутся
@@ -312,7 +475,7 @@ export ADAPTER_DEBUG_ENABLE=1
 
 Подробнее про логирование — в [`docs/logging.md`](logging.md).
 
-### 4.8 Полный пример env-файла
+### 5.8 Полный пример env-файла
 
 ```bash
 # sample.adapter.env — полный пример
@@ -364,9 +527,9 @@ export CLAUDE_CODE_DISABLE_THINKING="1"
 
 ---
 
-## 5. Запуск
+## 6. Запуск
 
-### 5.1 В foreground (разработка)
+### 6.1 В foreground (разработка)
 
 ```bash
 # Загрузить переменные
@@ -381,7 +544,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.7.2 (...
+Claude Code Adapter v0.7.3 (...
 Listening:  http://127.0.0.1:9999
 Logs:       console only (ADAPTER_DEBUG_ENABLE=1; диск: задайте ADAPTER_DEBUG_LOGPATH)
 Models:     strict validation
@@ -397,7 +560,7 @@ Backends:   1 configured:
 
 Остановить: `Ctrl+C` (SIGINT).
 
-### 5.2 В фоне (detach-режим, для параллельной работы)
+### 6.2 В фоне (detach-режим, для параллельной работы)
 
 ```bash
 # Загрузить env
@@ -423,9 +586,9 @@ kill $(cat /tmp/adapter.pid)   # остановить
 ```
 
 > **Важно:** detach-режим не предназначен для продакшен-использования.
-> Для постоянной работы см. раздел 8 — systemd (Linux) или launchd (macOS).
+> Для постоянной работы см. раздел 9 — systemd (Linux) или launchd (macOS).
 
-### 5.3 Запуск Claude Code
+### 6.3 Запуск Claude Code
 
 После запуска адаптера, в другом терминале:
 
@@ -438,7 +601,7 @@ Claude Code автоматически подхватит `ANTHROPIC_BASE_URL` �
 
 ---
 
-## 6. Проверка
+## 7. Проверка
 
 ```bash
 # Адаптер запущен и слушает порт
@@ -461,7 +624,7 @@ curl -X POST http://localhost:9999/v1/messages \
 
 ---
 
-## 7. Устранение неполадок
+## 8. Устранение неполадок
 
 ### Порт уже занят
 
@@ -506,12 +669,12 @@ Adapter cannot start. Exiting.
 
 ---
 
-## 8. Переход в продакшен
+## 9. Переход в продакшен
 
 Для постоянной работы адаптера используйте системные сервисы. Для разработки и тестов —
-отладочный detach-режим (раздел 4.2).
+отладочный detach-режим (раздел 6.2).
 
-### 8.1 Linux — systemd
+### 9.1 Linux — systemd
 
 Системные файлы: `backend-adapter.service` и `backend-adapter.env`.
 
@@ -587,7 +750,7 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 | PID-файл вручную | systemd сам знает PID |
 | Подходит для тестов | **подходит для продакшена** |
 
-### 8.2 macOS — launchd
+### 9.2 macOS — launchd
 
 На macOS вместо systemd используется **launchd**. Системный файл:
 `com.user.backend-adapter.plist`.
