@@ -54,6 +54,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build binary
+        shell: bash
         run: |
           pyinstaller --onefile --name backend-adapter \
             --hidden-import yaml \
