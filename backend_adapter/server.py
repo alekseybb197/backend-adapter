@@ -375,8 +375,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             ),
                         )
 
-                # ADAPTER_DEBUG_TOOLS_ERROR=1 (по умолчанию) — писать детальный
-                # лог ошибок инструментов ([TOOL_RESULT_ERROR])
+                # ADAPTER_DEBUG_TOOLS_ERROR=1 (default "0" — zero-config не
+                # обрабатывает собранные логи) — писать детальный лог ошибок
+                # инструментов ([TOOL_RESULT_ERROR])
                 if tr["is_error"] and ADAPTER_DEBUG_TOOLS_ERROR:
                     # При ошибке — полная запись результата (аналог [RESPONSE])
                     # чтобы видеть что именно вернул инструмент, без копания
@@ -486,7 +487,11 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 # urlopen() (соединение/заголовки), а сбой уже во время самого
                 # чтения SSE (stream_openai_to_anthropic бросит исключение)
                 # обрабатывается отдельно -- событием SSE "error", без retry.
-                last_error = None
+                # Тип маркера последней ошибки -- int (HTTP-код из e.code)
+                # ИЛИ str ("timeout"/"error"); явная аннотация нужна, чтобы
+                # mypy не сузил переменную по первому присваиванию (e.code,
+                # int) и не ругался на последующие строковые маркеры.
+                last_error: tuple[int | str, str] | None = None
                 started = False
                 for attempt in range(1, ADAPTER_RETRY + 1):
                     try:
@@ -697,6 +702,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             # === Нестриминговая ветка (клиент явно не просил stream) ===
             # Retry loop -- оставлена как была: ждём ответ бэкенда целиком.
+            # last_error уже ОБЪЯВЛЕН с типом в стрим-ветке выше (объявление
+            # действует на всю функцию) -- здесь только присваивание, без
+            # повторной аннотации: mypy счёл бы её переопределением (no-redef).
             last_error = None
             for attempt in range(1, ADAPTER_RETRY + 1):
                 try:
@@ -820,7 +828,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         _dr(req_id, f"[RETRY] Waiting {delay}s...")
                         time.sleep(delay)
 
-            # Все попытки исчерпаны
+            # Все попытки исчерпаны.
+            # Тип final_status (int: HTTP-код для _trace) уже зафиксирован
+            # присваиваниями в стрим-ветке выше; здесь все ветки присваивают
+            # только int (504 / HTTP-код / 502), поэтому аннотация не нужна.
             if last_error:
                 code, msg = last_error
                 if code == "timeout":
@@ -832,7 +843,21 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 elif isinstance(code, int):
                     _dr(req_id, f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
                     self._send_json(code, {"error": f"Backend error: {msg}"})
-                final_status = code
+                    final_status = code
+                else:
+                    # Маркер "error": timeout не был (иначе обработали выше),
+                    # HTTP-кода нет (не был HTTPError) -- дошли сюда после
+                    # исчерпания ретраев на общем исключении. Раньше этот
+                    # случай НЕ отправлял клиенту ответ вовсе (мертвая строка
+                    # final_status = code после elif), а в trace уходил
+                    # строковый маркер вместо кода -- теперь честно отдаём
+                    # 502, как в соседней ветке else.
+                    _dr(req_id, f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
+                    self._send_json(
+                        502,
+                        {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"},
+                    )
+                    final_status = 502
             else:
                 _dr(req_id, f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
                 self._send_json(

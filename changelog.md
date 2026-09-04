@@ -1,5 +1,206 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.7.2 (zero-config: консоль-логи и статус по умолчанию)
+
+### 2026-09-04 Фикс: init/refresh моделей мутируют кэш-словари на месте (живые ссылки server.py)
+
+**Проблема:** при старте против живого бэкенда адаптер после успешного probe
+отвечал на собственный `GET /v1/models` кодом **501**, а строгая валидация
+модели (`ADAPTER_STRICT_MODELS=1`) отвергала бы любой `POST /v1/messages`
+(400 «model is not available»). Причина — `_init_multi_backends()` и
+`refresh_models()` в `config.py` **переприсваивали** глобалы
+`_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` новым объектам словарей
+(`_AVAILABLE_MODELS, _MODEL_TO_BACKEND = _rebuild_index(...)`), тогда как
+`server.py`, `webui_status.py` и `backend-adapter.py` делают
+`from .config import _AVAILABLE_MODELS` на импорте и держат ссылку на
+**исходный (пустой) объект**. В тестах баг не проявлялся: фикстуры
+`isolate_logs`/интеграционные тесты чистят и наполняют те же глобалы
+мутацией на месте. Регрессия внесена в 72a81e0 (v0.6.0, первый
+multi-backend коммит).
+
+**Решение:** оба места (`_init_multi_backends`, `refresh_models`) теперь
+мутируют глобальные словари **на месте** (`clear()` + `update()`) — все
+импортированные на старте ссылки остаются живыми и видят обновлённый кэш.
+Переприсваивание сохранено только для `_BACKENDS`/`_BACKEND_BY_NAME`/
+`_DEFAULT_BACKEND` — их не импортируют по значению в server.py.
+
+**Изменения:** backend_adapter/config.py (мутация в месте + комментарий),
+tests/test_config.py (новый регресс-тест
+`test_init_multi_backends_mutates_global_dicts_in_place`: объекты словарей
+те же (`is`), содержимое обновлено), changelog.md.
+
+### 2026-09-04 Zero-config: минимальные дефолты ресурсов, статус по умолчанию
+
+**Проблема:** дефолты адаптера требовали ресурсов, которые уместны только
+при целенаправленном включении: при стандартном запуске (пустой
+`ADAPTER_DEBUG_LOGPATH`) создавалась папка `./tmp/logs`, ошибки
+инструментов обрабатывались по умолчанию (`ADAPTER_DEBUG_TOOLS_ERROR=1`),
+а веб-интерфейс — единственный способ увидеть состояние адаптера — был
+выключен (`ADAPTER_WEBUI_ENABLE=0`) и вдобавок зависел от лог-директории.
+Документация (docs/environment.md) не разделяла переменные на обязательные
+при старте и дефолтные.
+
+**Решение:** дефолты переработаны в zero-config — минимальный запуск
+только с `ADAPTER_BACKEND_CONFIG`:
+
+- **развязка консоль ↔ диск**: `_d()` печатает в stdout, гейтится только
+  `ADAPTER_DEBUG_ENABLE` (дефолт `1`); файловая запись — только при явно
+  заданном `ADAPTER_DEBUG_LOGPATH`. Из стартового блока убран
+  `os.makedirs("./tmp/logs")` — при пустом LOGPATH на диск ничего не
+  пишется и папка не создаётся; баннер при старте — `Logs: console only`;
+- **`ADAPTER_DEBUG_TOOLS_ERROR` default `1` → `0`** — zero-config не
+  обрабатывает собранные логи (`[TOOL_RESULT_ERROR]` не пишется);
+- **`ADAPTER_WEBUI_ENABLE` default `0` → `1`** — статус-страница `/`
+  поднята по умолчанию на `127.0.0.1:8765`; корень WEBUI — директория
+  `ADAPTER_DEBUG_LOGPATH`, если задана, иначе независимая `./tmp/webui`
+  (вкладка `/session` пуста — per-session логов нет);
+- `docs/environment.md` реструктурирован: группа «обязательные при старте»
+  (только `ADAPTER_BACKEND_CONFIG`) отделена от дефолтных (zero-config),
+  актуализированы таблицы дефолтов и сводная таблица режимов.
+
+**Изменения:** backend_adapter/config.py (дефолты TOOLS_ERROR/WEBUI_ENABLE +
+комментарии), backend_adapter/logger.py, backend_adapter/session_log.py,
+backend_adapter/tracer.py, backend-adapter.py (стартовый блок: без
+`os.makedirs` дефолтной папки, WEBUI-корень `./tmp/webui`, баннеры,
+версия 0.7.1 → 0.7.2), tests/ (conftest, test_config, test_logger,
+test_session_log, WEBUI-корень), backend-adapter.env, sample.adapter.env,
+README.md, docs/ (environment — реструктуризация; install, logging,
+architecture — синхронизация дефолтов), CLAUDE.md, changelog.md.
+
+### 2026-09-03 Настраиваемые адреса прослушивания ADAPTER_ENDPOINT_HOST / ADAPTER_WEBUI_HOST
+
+**Проблема:** адреса прослушивания обоих HTTP-серверов были жёстко заданы:
+адаптер слушал **все интерфейсы** (bind `("", PROXY_PORT)` → INADDR_ANY),
+WEBUI был привязан к `127.0.0.1` в коде. Нельзя было поднять адаптер в
+сети/контейнере на нужном адресе, а дефолт «все интерфейсы» небезопасен
+по умолчанию (доступ из сети без явного запроса).
+
+**Решение:**
+- `ADAPTER_ENDPOINT_HOST` — адрес, на котором слушает HTTP-эндпоинт
+  адаптера; `ADAPTER_WEBUI_HOST` — адрес веб-интерфейса; дефолт обеих —
+  `127.0.0.1` (localhost);
+- идиом `os.environ.get(name, "") or "127.0.0.1"`: пустая env-переменная
+  в bind-кортеже socketserver означала бы INADDR_ANY — с `or` и незаданная,
+  и пустая дают безопасный localhost;
+- `0.0.0.0` — осознанный выбор «слушать на всех интерфейсах» (прежнее
+  поведение адаптера); баннер при старте показывает реальный адрес.
+
+**Изменения:** backend_adapter/config.py (две константы + комментарии),
+backend-adapter.py (импорты, баннеры `Listening:`/`[WEBUI]`, bind сервера,
+вызов `webui_serve(...)`), tests/conftest.py (host-дефолты в обоих словарях),
+tests/test_config.py (класс TestHostVars: дефолты, пустое env → дефолт,
+явный `0.0.0.0`), sample.adapter.env, backend-adapter.env, docs/
+(environment, install, logging, architecture), CLAUDE.md, changelog.md.
+
+### 2026-09-03 Единая директория логов ADAPTER_DEBUG_LOGPATH
+
+**Проблема:** логирование сессий настраивалось двумя переменными —
+`ADAPTER_DEBUG_LOGFILE` (debug-блоки, dual-режим «файл или директория»)
+и `ADAPTER_TRACE_LOGFILE` (structured trace JSONL). Корень WEBUI и условие
+для per-session дампов привязывались к debug-переменной, что давало
+несколько путей «куда писать» и расхождения в документации.
+
+**Решение:** обе переменные заменены одной — `ADAPTER_DEBUG_LOGPATH`,
+путь к **директории** логов сессий: debug-логи (`session-*.log`),
+trace-логи (`session-*.jsonl`), `*.parts` дампы и корень WEBUI лежат
+в ней плоско. Пусто → дефолт `./tmp/logs` относительно папки запуска
+(лениво, на старте/при записи). `ADAPTER_DEBUG_ENABLE` — мастер-выключатель:
+при `0` ничего не пишется и папка не создаётся; при `1` папка создаётся
+при необходимости. LOGPATH на существующий файл → `[FATAL]` + подсказка +
+`sys.exit(1)`. Single-file режим удалён полностью.
+
+**Изменения:** backend_adapter/config.py, backend_adapter/session_log.py,
+backend_adapter/logger.py, backend_adapter/tracer.py, backend-adapter.py,
+backend_adapter/webserver.py (докстринг), tests/ (conftest, test_logger,
+test_tracer, test_session_log), sample.adapter.env, backend-adapter.env,
+docs/ (environment, install, logging, architecture), CLAUDE.md, changelog.md.
+
+### 2026-09-03 Удалён legacy-режим конфигурации бэкенда
+
+**Проблема:** подключение к бэкенду задавалось двумя способами — парой
+env-переменных `ADAPTER_BACKEND_BASE`/`ADAPTER_BACKEND_KEY` (legacy) и
+YAML-файлом через `ADAPTER_BACKEND_CONFIG`. Двойной путь умножал ветки
+в `refresh_models`, `_resolve_backend`, стартовом блоке и webui_status,
+а также расходился в документации и env-примерах.
+
+**Решение:** конфигурация бэкенда — только через `ADAPTER_BACKEND_CONFIG`
+(структура `backend:`: список записей `name`/`base`/`key`; `key` — имя
+env-переменной токена, раскрывается при старте). Legacy-режим полностью
+удалён из кода, тестов, документации и env-примеров. Пустой
+`ADAPTER_BACKEND_CONFIG` на старте — явный `[FATAL]` с подсказкой
+(пример — `sample.adapter.yaml`) и `sys.exit(1)`. Недостижимый финальный
+return в `_resolve_backend` заменён на `RuntimeError`.
+
+**Изменения:** backend_adapter/config.py, backend_adapter/webui_status.py,
+backend-adapter.py, tests/, backend-adapter.env, sample.adapter.env,
+com.user.backend-adapter.plist, README.md, docs/ (architecture, environment,
+install, logging, sanitizing), CLAUDE.md, changelog.md; добавлен
+sample.adapter.yaml.
+
+### 2026-09-03 CLAUDE.md: в журнал ADR только существенные решения
+
+**Проблема:** в журнале решений `CLAUDE.md` наравне с changelog.md
+дублировались записи обо всех изменениях, включая процессные и мелкие
+(включение CLAUDE.md в репозиторий, чек-лист проверки перед коммитом) —
+хотя полная история изменений уже ведётся в changelog.md, а в журнале,
+по замыслу, должны оставаться только решения, затрагивающие архитектуру
+и существенный функционал.
+
+**Решение:** зафиксирован принцип отбора: в журнал вносятся только
+архитектурные/функциональные решения (новый компонент, контракты
+протокола, констрейнты зависимостей, каркас тестирования); мелкие правки
+(ссылки на страницах, форматирование, точечные багфиксы без смены
+контракта) — только в changelog.md. Две процессные записи (CLAUDE.md в
+репозитории, чек-лист перед коммитом) из журнала убраны — их содержание
+осталось в changelog.md и в теле самого файла (раздел «Проверка перед
+коммитом»); оставшиеся записи упорядочены по датам сверху вниз.
+
+**Изменения:** CLAUDE.md, changelog.md.
+
+### 2026-09-03 CLAUDE.md включён в репозиторий (снят запрет в .gitignore)
+
+**Проблема:** `CLAUDE.md` содержал проектный контекст и обязательный
+чек-лист проверки перед коммитом, но был исключён из git (`.gitignore`);
+контекст не доезжал до CI и до других участников, а история его правок
+(ADR-записи) не сохранялась в репозитории.
+
+**Решение:** запрет `CLAUDE.md` в `.gitignore` снят, файл введён в состав
+проекта (теперь `git status`/diff его видят, правки коммитятся вместе с
+кодом); шапка файла обновлена («Не коммитится» → «входит в состав
+репозитория»).
+
+**Изменения:** .gitignore, CLAUDE.md, changelog.md.
+
+### 2026-09-03 WEBUI /session: ссылка на статус, активная вкладка; чек-лист перед коммитом + строгий mypy
+
+**Проблема:** со страницы просмотра сессий (`/session`) нельзя было одним
+кликом вернуться к статус-странице `/` (доступность эндпойнтов, модели);
+после обновления страницы активность всегда перескакивала на первую
+вкладку, теряя выбранную сессию. Параллельно: обязательная проверка перед
+коммитом не была зафиксирована, а дословный `mypy --strict` на пакете
+падал (7 ошибок) — заявленный барьер был невыполним.
+
+**Решение:**
+- в панели вкладок `/session` слева добавлена ссылка «← статус» на `/`;
+  активная вкладка запоминается в `location.hash` (клик пишет hash,
+  при загрузке страницы вкладка из hash активируется заново — а не
+  первая попавшаяся);
+- в `CLAUDE.md` добавлен раздел «Проверка перед коммитом — обязательна»
+  с четырьмя командами дословно (ruff check, ruff format --check,
+  `mypy --strict --ignore-missing-imports backend_adapter/ backend-adapter.py`,
+  pytest);
+- 7 strict-ошибок починены без изменения семантики: в `convert.py`
+  аннотация `assistant_msg: dict[str, Any]` (иначе mypy сужает тип ключа
+  `tool_calls` до `str`); в `server.py` маркер ошибки
+  `last_error: tuple[int | str, str] | None` объявлен один раз (стрим-ветка,
+  действует на всю функцию — в нестрим-ветке только присваивание);
+  в финале нестрим-ветки убран мёртвый код `final_status = code` после
+  `elif isinstance(code, int)` (был недостижим и при маркере `"error"`
+  вообще не отправлял ответ клиенту) — теперь честно отдаётся 502.
+
+**Изменения:** backend_adapter/session_viewer.py, tests/test_session_viewer.py,
+backend_adapter/convert.py, backend_adapter/server.py, CLAUDE.md, changelog.md.
+
 ## v0.7.1 (консольный entry point, CI/PR-каркас, единая конфигурация тулинга, 2026-09-02)
 
 ### 2026-09-02 v0.7.1: консольный entry point, CI/PR-каркас, единая конфигурация тулинга

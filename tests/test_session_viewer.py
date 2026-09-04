@@ -255,6 +255,8 @@ class TestRenderShell:
         html = self.render_shell([], str(tmp_path))
         assert "Не найдено ни одной директории" in html
         assert ".parts" in html
+        # Ссылка на статус-страницу есть и на пустой странице
+        assert '<a id="status-link" href="/">← статус</a>' in html
 
     def test_shell_lists_session_names(self, tmp_path):
         d = _make_parts_dir(tmp_path, "session-A.parts", {
@@ -267,6 +269,39 @@ class TestRenderShell:
         assert "session-A" in html
         # Есть iframe с URL дерева
         assert 'src="/session/session-A.parts/artefacts/tree.html"' in html
+
+    def test_shell_has_status_link_and_first_tab_active(self, tmp_path):
+        """Панель вкладок: слева — ссылка на статус-страницу "/", активная
+        вкладка по умолчанию — первая (id tab-<safe_id> в location.hash)."""
+        _make_parts_dir(tmp_path, "session-A.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
+        })
+        _make_parts_dir(tmp_path, "session-B.parts", {
+            "c-1-openai_body.json": _simple_ob(1),
+        })
+        sessions = self.find(str(tmp_path), verbose=True)
+        html = self.render_shell(sessions, str(tmp_path))
+        # Ссылка на корень (статус-страницу) — первой в панели вкладок
+        assert '<div id="tabs"><a id="status-link" href="/">← статус</a>' in html
+        # Идентификаторы вкладок — транслитерация имени сессии: НЕ-alnum
+        # символы (точка ".parts", дефис) заменяются на "_".
+        assert 'id="tab-session_A_parts" class="tab active"' in html
+        assert 'id="frame-session_A_parts" src="/session/session-A.parts/artefacts/tree.html" style="display:block"' in html
+        assert 'id="tab-session_B_parts" class="tab"' in html
+        assert 'id="frame-session_B_parts"' in html and 'display:none' in html
+
+    def test_shell_tab_js_preserves_active_tab(self):
+        """JS сохраняет активную вкладку между обновлениями: клик по вкладке
+        пишет её id в location.hash, при загрузке страницы вкладка из hash
+        активируется заново (а не первая)."""
+        from backend_adapter.session_viewer import SHELL_TEMPLATE
+        assert "location.hash" in SHELL_TEMPLATE
+        # клик по вкладке обновляет hash
+        assert "if (location.hash !== '#' + id) location.hash = id;" in SHELL_TEMPLATE
+        # при загрузке — восстановление вкладки из hash
+        assert "window.addEventListener('DOMContentLoaded'" in SHELL_TEMPLATE
+        assert "document.getElementById('tab-' + id)" in SHELL_TEMPLATE
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +320,26 @@ class TestSessionHTTP:
             assert status == 200
             assert "text/html" in body.lower() or "<!DOCTYPE" in body
             assert "session-A" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_session_page_links_to_status_root(self, tmp_path):
+        """Ссылка «← статус» ведёт на корень сервера — статус-страницу "/",
+        которая в этом же процессе отвечает 200 (эндпойнт зарегистрирован)."""
+        _make_parts_dir(tmp_path, "session-A.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/session")
+            assert status == 200
+            assert '<a id="status-link" href="/">← статус</a>' in body
+            # Корень отвечает — ссылка не ведёт в никуда (в standalone root_dir
+            # без env-бэкендов статус-страница отдаёт подсказку, но 200)
+            status_root, _ = _http_get(port, "/")
+            assert status_root == 200
         finally:
             httpd.shutdown()
             httpd.server_close()

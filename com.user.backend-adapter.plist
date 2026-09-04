@@ -17,10 +17,8 @@
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>ADAPTER_BACKEND_BASE</key>
-        <string>https://llm.service.example.com</string>
-        <key>ADAPTER_BACKEND_KEY</key>
-        <string>your-api-key-here</string>
+        <key>ADAPTER_BACKEND_CONFIG</key>
+        <string>~/backend-adapter/sample.adapter.yaml</string>
         <key>ADAPTER_PROXY_PORT</key>
         <string>9999</string>
         <key>ADAPTER_DEBUG_ENABLE</key>

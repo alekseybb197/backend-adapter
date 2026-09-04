@@ -4,9 +4,9 @@
 
 | Механизм | Куда пишется | Функция |
 |---|---|---|
-| **Debug blocks** `[...]` | `session_log/debug-<session>.log` | `_dr(req_id, "[NAME] ...")` |
+| **Debug blocks** `[...]` | `<LOGPATH>/session-<ts>-<sid>.log` | `_dr(req_id, "[NAME] ...")` |
 | **Console-only blocks** | Stdout/stderr | `_d("[NAME] ...")` |
-| **Structured traces** | `session_log/trace-<session>.jsonl` | `_trace(...)` |
+| **Structured traces** | `<LOGPATH>/session-<ts>-<sid>.jsonl` | `_trace(...)` |
 
 Также дополнительные механизмы: **JSON/YAML дампы** per-session через `ADAPTER_DEBUG_TAGS_OUT`.
 
@@ -30,7 +30,17 @@
 
 ---
 
-## Debug blocks `[...]` — `session_log/debug-*.log`
+## Debug blocks `[...]` — `<LOGPATH>/session-*.log`
+
+Все три механизма (debug-логи, trace-логи, `.parts`-дампы) пишутся в
+**одну директорию** — `ADAPTER_DEBUG_LOGPATH`; пусто (дефолт) — **файловая
+запись выключена** (консольные debug-блоки видны при `ADAPTER_DEBUG_ENABLE=1`,
+диск не используется, папка не создаётся). Заданный путь — директория;
+создаётся при необходимости. Формат
+имени сессионного файла — `session-<YYYYMMDD-HHMMSS>-<session_id>.<ext>`
+(`.log` — debug, `.jsonl` — trace). Запись подчинена мастер-выключателю
+`ADAPTER_DEBUG_ENABLE`; при `ADAPTER_DEBUG_ENABLE=0` ничего не пишется и
+папка не создаётся.
 
 ### ← CLIENT — Данные от клиента
 
@@ -61,7 +71,7 @@
 |---|---|---|---|---|
 | 12 | `[TOOL_RESULT]` (summary) | ← CLIENT | всегда | `tool_name`, `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` |
 | 13 | `[TOOL_RESULT]` (content) | ← CLIENT | `ADAPTER_DEBUG_TOOLS=1` | Полный JSON content tool result. Дополнительно: при `ADAPTER_DEBUG_TAGS_OUT=1` пишутся JSON/YAML-файлы per-session |
-| 14 | `[TOOL_RESULT_ERROR]` | ← CLIENT | `ADAPTER_DEBUG_TOOLS_ERROR=1` (по умолчанию) | Полный JSON ошибки. Дополнительно: при `ADAPTER_DEBUG_TAGS_OUT=1` пишутся JSON/YAML-файлы per-session |
+| 14 | `[TOOL_RESULT_ERROR]` | ← CLIENT | `ADAPTER_DEBUG_TOOLS_ERROR=1` | Полный JSON ошибки. Дополнительно: при `ADAPTER_DEBUG_TAGS_OUT=1` пишутся JSON/YAML-файлы per-session |
 
 ### → BACKEND — FETCH (request phase, отправка запроса)
 
@@ -115,7 +125,7 @@
 | 3 | `[CLIENT_GONE]` | `server.py:84` | Client gone during JSON send |
 | 4 | `[WARN]` | `server.py:86` | Ошибка отправки ответа клиенту |
 | 5 | `[SKILL_PATTERNS]` | `skill.py:33` | Не удалось загрузить файлы паттернов скиллов |
-| 6 | `[INIT]` | `backend-adapter.py:100` | Старт multi-backend режима |
+| 6 | `[INIT]` | `backend-adapter.py:108` | Старт адаптера: путь к YAML-конфигу бэкендов |
 
 ---
 
@@ -124,18 +134,18 @@
 | Переменная | Default | Описание |
 |---|---|---|
 | `ADAPTER_DEBUG_TAGS_FULL` | `""` | Перечисление тегов через запятую, для которых **отключается** обрезка (trim). Например: `"BODY,TOOL_RESULT,RESPONSE"`. Если тег в списке — `_trim_limit(tag)` возвращает `None`, и данные записываются полностью в `_dr()` и в JSON-дамп. |
-| `ADAPTER_DEBUG_TAGS_OUT` | `0` (выключено) | **Флаг**: включить per-session дампы **всех** частей протокола (список фиксирован — см. ниже). Для каждого тега пишется **пара файлов**: `.json` (машиночитаемый, `json.dumps(indent=2)`) и `.yaml` (человекочитаемый, `yaml.dump(LiteralDumper)`). Файлы пишутся функцией `write_debug_json(session_id, tag, data)` из `session_log.py`. Срабатывает только если `ADAPTER_DEBUG_LOGFILE` указывает на директорию. |
+| `ADAPTER_DEBUG_TAGS_OUT` | `0` (выключено) | **Флаг**: включить per-session дампы **всех** частей протокола (список фиксирован — см. ниже). Для каждого тега пишется **пара файлов**: `.json` (машиночитаемый, `json.dumps(indent=2)`) и `.yaml` (человекочитаемый, `yaml.dump(LiteralDumper)`). Файлы пишутся функцией `write_debug_json(session_id, tag, data)` из `session_log.py`. Требует `ADAPTER_DEBUG_ENABLE=1` и директорию логов `ADAPTER_DEBUG_LOGPATH` (создаётся при необходимости). |
 
 **Тэги для дампов (фиксированный список):** `BODY`, `TOOL_RESULT`, `TOOL_RESULT_ERROR`, `OPENAI_BODY`, `FETCH_RAW`, `RESPONSE`.
 
 **Поведение:**
-- JSON/YAML файлы пишутся в ту же директорию, что и debug-логи (`ADAPTER_DEBUG_LOGFILE`).
-- Если `ADAPTER_DEBUG_LOGFILE` — файл, а не директория, дампы не пишутся (требуется per-session директория).
+- JSON/YAML файлы пишутся в ту же директорию, что и debug/trace-логи (`ADAPTER_DEBUG_LOGPATH`).
+- Дампы подчинены `ADAPTER_DEBUG_ENABLE` (мастер-выключатель): при `0` не пишутся.
 - JSON-дамп `RESPONSE` при stream-режиме также пишется агрегированный snapshot (см. `streaming.py`).
 
 ---
 
-## Structured trace events — `session_log/trace-*.jsonl`
+## Structured trace events — `<LOGPATH>/session-*.jsonl`
 
 JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event`.
 
@@ -192,7 +202,7 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | `[BODY]` | Исходное Anthropic-тело запроса клиента |
 | `[TOOL_RESULT]` (summary) | `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` (всегда) |
 | `[TOOL_RESULT]` (content) | Полный JSON content tool result (`ADAPTER_DEBUG_TOOLS=1`) |
-| `[TOOL_RESULT_ERROR]` | Снэпшот ошибки: `tool_use_id`, `parent_req_id`, `is_error`, `content` (`ADAPTER_DEBUG_TOOLS_ERROR=1`) |
+| `[TOOL_RESULT_ERROR]` | Снэпшот ошибки: `tool_use_id`, `parent_req_id`, `is_error`, `content` (`ADAPTER_DEBUG_TOOLS_ERROR=1`, по умолчанию `0` — выкл) |
 
 ### INTERNAL — мониторинг и отладка
 
@@ -224,8 +234,10 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 сессии строится дерево артефактов (`artefacts/tree.html`), страница
 открывается во вкладках.
 
-- Включается флагом `ADAPTER_WEBUI_ENABLE=1`, порт — `ADAPTER_WEBUI_PORT`
-  (по умолчанию `8765`), слушает только `127.0.0.1`.
+- Включается флагом `ADAPTER_WEBUI_ENABLE` (**по умолчанию `1`** —
+  статус-страница доступна сразу), порт — `ADAPTER_WEBUI_PORT`
+  (по умолчанию `8765`), слушает на `ADAPTER_WEBUI_HOST` (по умолчанию
+  `127.0.0.1` — только локально; `0.0.0.0` — доступ из сети).
 - Адреса: `http://127.0.0.1:<port>/` — статус-страница (версия кода,
   режим работы, LLM-эндпойнты с доступностью и списком моделей);
   `http://127.0.0.1:<port>/session` — вкладки просмотра сессий.
@@ -235,10 +247,17 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
   таймаут 5 с на эндпойнт), кэш моделей адаптера пересобирается из живых
   ответов. Провал опроса не роняет страницу — показывается прежний список
   и текст ошибки.
-- Корень веб-сервера — директория из `ADAPTER_DEBUG_LOGFILE` (там лежат
-  `*.parts` папки сессий); работает только если это директория.
+- Корень веб-сервера — директория логов `ADAPTER_DEBUG_LOGPATH`, если она
+  задана (там лежат `*.parts` папки сессий); при пустом LOGPATH (zero-config)
+  — независимая папка `./tmp/webui`: статус-страница работает, вкладка
+  `/session` пуста (per-session логов нет). Папка корня создаётся при
+  старте WEBUI.
 - Дерево генерируется на лету: если `artefacts/tree.html` устарел или
   отсутствует, `artifact_tree.generate()` пересоздаёт его при заходе на
-  страницу. Обновите страницу браузера, чтобы увидеть актуальное состояние.
+  страницу. Обновите страницу браузера, чтобы увидеть актуальное состояние
+  (активная вкладка при этом сохранится — см. ниже).
+- Вкладки `/session`: слева в панели — ссылка «← статус» на страницу `/`;
+  активная вкладка запоминается в `location.hash` — после обновления
+  страницы открывается та же вкладка, а не первая.
 - Стандартный запуск вне процесса адаптера (без данных адаптера — на
   статус-странице будет пометка): `python -m backend_adapter.webserver [КОРЕНЬ] [--port] [--host]`.

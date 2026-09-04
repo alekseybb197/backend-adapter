@@ -1,10 +1,9 @@
 """Human-readable per-session debug logging (_d, _dr).
 
-Calls config redaction, writes to console and/or session file (or single
-file) depending on ADAPTER_DEBUG_LOGFILE setting.
+Calls config redaction, writes to console and/or per-session file in the
+ADAPTER_DEBUG_LOGPATH directory (see session_log).
 """
 
-import os
 import time
 
 from . import session_log
@@ -13,11 +12,12 @@ from .redact import redact
 
 
 def _d(msg: str) -> None:
-    """Вывод лога: в консоль (если ADAPTER_DEBUG) и/или в файл (если задан
-    ADAPTER_DEBUG_LOGFILE).
-    Если ADAPTER_DEBUG_LOGFILE указывает на директорию — запись идёт в
-    сессионный файл session-<sessionID>.log (см. _open_session_file).
-    Если это полный путь — пишется в один файл (старое поведение).
+    """Вывод лога: в консоль и/или в сессионный файл.
+
+    Консоль — всегда при ADAPTER_DEBUG_ENABLE=1. Файловая запись — только
+    если явно задан ADAPTER_DEBUG_LOGPATH (директория логов сессий; при
+    пустом env-пути _DEBUG_IS_DIR/_DEBUG_PATH falsy и файл не пишется);
+    файл session-<sessionID>.log (см. session_log).
 
     При ADAPTER_SENSITIVE_LOGGING_ENABLE=1 санитайзер отключается —
     строка записывается в лог без вызова redact(), т.е. полные токены,
@@ -27,24 +27,15 @@ def _d(msg: str) -> None:
     line = f"[{ts}] {msg}" if ADAPTER_SENSITIVE_LOGGING_ENABLE else f"[{ts}] {redact(msg)}"
     if ADAPTER_DEBUG:
         print(line)
-    # Писать в сессионный файл?
-    if session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
-        sid = session_log._last_log_session_id or "unknown"
-        if sid == "unknown":
-            return  # сессия ещё не установлена — не создаём пустой файл
-        fd = session_log._open_session_file("debug", sid)
-        if fd:
-            fd.write((line + "\n").encode())
-            fd.flush()
-    elif not session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
-        # Режим «один файл» (старое поведение)
-        # Создаём директорию если её нет — иначе `open(".../nonexistent/foo.log",
-        # "a")` падает с FileNotFoundError (директория должна существовать)
-        parent = os.path.dirname(session_log._DEBUG_PATH)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(session_log._DEBUG_PATH, "a") as f:
-            f.write(line + "\n")
+        # Писать в сессионный файл (только если задана директория логов)
+        if session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
+            sid = session_log._last_log_session_id or "unknown"
+            if sid == "unknown":
+                return  # сессия ещё не установлена — не создаём пустой файл
+            fd = session_log._open_session_file("debug", sid)
+            if fd:
+                fd.write((line + "\n").encode())
+                fd.flush()
 
 
 def _dr(req_id: str, msg: str) -> None:

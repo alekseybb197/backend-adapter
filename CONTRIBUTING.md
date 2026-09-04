@@ -18,7 +18,7 @@ This prevents duplicate work and allows discussion before implementation.
 ### 2. Branch Naming
 
 Create a branch from `main` with a descriptive name (for ongoing work, you can
-also keep a long-lived feature branch like `feature/v0.7.1` and commit to it
+also keep a long-lived feature branch like `feature/v0.7.2` and commit to it
 directly — see the note in the project `CLAUDE.md`):
 
 ```bash

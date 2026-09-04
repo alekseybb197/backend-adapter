@@ -76,12 +76,17 @@ class TestTrace:
 
     def test_trace_writes_jsonl(self, tmp_path):
         _reload_all()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG = True
         from backend_adapter import session_log, tracer
-        trace_file = tmp_path / "trace.jsonl"
-        session_log._TRACE_PATH = str(trace_file)
-        session_log._TRACE_IS_DIR = False
+        trace_dir = tmp_path / "traces"
+        trace_dir.mkdir()
+        session_log._TRACE_PATH = str(trace_dir)
+        session_log._TRACE_IS_DIR = True
         tracer._trace("sess1", "req1", "test_event", field="value")
-        lines = trace_file.read_text().strip().split("\n")
+        files = list(trace_dir.glob("session-*.jsonl"))
+        assert len(files) == 1
+        lines = files[0].read_text().strip().split("\n")
         record = json.loads(lines[0])
         assert record["session_id"] == "sess1"
         assert record["req_id"] == "req1"
@@ -98,18 +103,25 @@ class TestTrace:
 
     def test_trace_redacts_secrets(self, tmp_path):
         _reload_all()
-        from backend_adapter import session_log, tracer, config
-        trace_file = tmp_path / "trace.jsonl"
-        session_log._TRACE_PATH = str(trace_file)
-        session_log._TRACE_IS_DIR = False
+        from backend_adapter import config
+        config.ADAPTER_DEBUG = True
         config.ADAPTER_SENSITIVE_LOGGING_ENABLE = False
+        from backend_adapter import session_log, tracer
+        trace_dir = tmp_path / "traces"
+        trace_dir.mkdir()
+        session_log._TRACE_PATH = str(trace_dir)
+        session_log._TRACE_IS_DIR = True
         tracer._trace("sess1", "req1", "test_event",
                       token="Bearer abc123xyz789")
-        line = trace_file.read_text().strip()
+        files = list(trace_dir.glob("session-*.jsonl"))
+        assert len(files) == 1
+        line = files[0].read_text().strip()
         assert "***REDACTED***" in line
 
     def test_trace_dir_mode(self, tmp_path):
         _reload_all()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG = True
         from backend_adapter import session_log, tracer
         trace_dir = tmp_path / "traces"
         trace_dir.mkdir()

@@ -6,6 +6,7 @@ response converter (which depends on tracer + skill packages).
 
 import json
 import re
+from typing import Any
 
 from .config import ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, _cap
 from .skill import detect_skill
@@ -128,6 +129,11 @@ def convert_messages_anthropic_to_openai(messages, system):
         elif role == "assistant":
             if isinstance(content, list):
                 text_parts = []
+                # assistant_msg собирает и строку текста, и список [OI]-tool_calls —
+                # гетерогенные значения под разными ключами; широкая аннотация
+                # (а не вывод dict[str, str] по первому литералу) нужна, чтобы
+                # mypy не сузил тип ключа "tool_calls" до str.
+                assistant_msg: dict[str, Any] = {"role": "assistant"}
                 tool_calls = []
                 for block in content:
                     if block.get("type") == "text":
@@ -143,7 +149,6 @@ def convert_messages_anthropic_to_openai(messages, system):
                                 },
                             }
                         )
-                assistant_msg = {"role": "assistant"}
                 if text_parts:
                     assistant_msg["content"] = "\n".join(text_parts)
                 if tool_calls:

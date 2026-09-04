@@ -14,42 +14,46 @@ class TestLog:
     """Tests for _d()."""
 
     def test_debug_disabled_no_output(self, tmp_path):
+        """ADAPTER_DEBUG_ENABLE=0 (master switch): _d() writes nothing,
+        session file is not created."""
         _reload_all()
         from backend_adapter import session_log, config
         config.ADAPTER_DEBUG = False
-        session_log._DEBUG_PATH = str(tmp_path / "debug.log")
-        session_log._DEBUG_IS_DIR = False
-        # Write something — should go to file even if debug disabled
-        # because _d() writes to file regardless of ADAPTER_DEBUG flag
-        # Actually looking at code: _d() only writes to file, not print
-        # ADAPTER_DEBUG only controls print()
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._DEBUG_IS_DIR = True
+        session_log._last_log_session_id = "sess1"
         from backend_adapter.logger import _d
         _d("test message")
-        log_content = (tmp_path / "debug.log").read_text()
-        assert "test message" in log_content
+        assert list(tmp_path.glob("session-*")) == []
 
     def test_debug_redacts_secrets(self, tmp_path):
         _reload_all()
         from backend_adapter import session_log, config, redact
-        config.ADAPTER_DEBUG = False
+        config.ADAPTER_DEBUG = True
         config.ADAPTER_SENSITIVE_LOGGING_ENABLE = False
-        session_log._DEBUG_PATH = str(tmp_path / "debug2.log")
-        session_log._DEBUG_IS_DIR = False
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._DEBUG_IS_DIR = True
+        session_log._last_log_session_id = "sess1"
         from backend_adapter.logger import _d
         _d("Bearer abc123xyz789")
-        log_content = (tmp_path / "debug2.log").read_text()
+        files = list(tmp_path.glob("session-*.log"))
+        assert len(files) == 1
+        log_content = files[0].read_text()
         assert "***REDACTED***" in log_content
 
     def test_debug_no_redaction_when_enabled(self, tmp_path):
         _reload_all()
         from backend_adapter import session_log, config
-        config.ADAPTER_DEBUG = False
+        config.ADAPTER_DEBUG = True
         config.ADAPTER_SENSITIVE_LOGGING_ENABLE = True
-        session_log._DEBUG_PATH = str(tmp_path / "debug3.log")
-        session_log._DEBUG_IS_DIR = False
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._DEBUG_IS_DIR = True
+        session_log._last_log_session_id = "sess1"
         from backend_adapter.logger import _d
         _d("Bearer abc123xyz789")
-        log_content = (tmp_path / "debug3.log").read_text()
+        files = list(tmp_path.glob("session-*.log"))
+        assert len(files) == 1
+        log_content = files[0].read_text()
         assert "abc123xyz789" in log_content
 
 
@@ -59,11 +63,14 @@ class TestLogReqId:
     def test_dr_prefix(self, tmp_path):
         _reload_all()
         from backend_adapter import session_log, config
-        config.ADAPTER_DEBUG = False
+        config.ADAPTER_DEBUG = True
         config.ADAPTER_SENSITIVE_LOGGING_ENABLE = True
-        session_log._DEBUG_PATH = str(tmp_path / "dr.log")
-        session_log._DEBUG_IS_DIR = False
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._DEBUG_IS_DIR = True
+        session_log._last_log_session_id = "sess1"
         from backend_adapter.logger import _dr
         _dr("req1", "test message")
-        log_content = (tmp_path / "dr.log").read_text()
+        files = list(tmp_path.glob("session-*.log"))
+        assert len(files) == 1
+        log_content = files[0].read_text()
         assert "[req1]" in log_content

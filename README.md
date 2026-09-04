@@ -1,6 +1,6 @@
 # backend-adapter — Claude Code ↔ OpenAI Backend Proxy
 
-> **v0.7.1** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **v0.7.2** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно реализует протокол Anthropic Messages API.
 
@@ -69,7 +69,7 @@ backend-adapter/
 ├── com.user.backend-adapter.plist  # launchd (macOS)
 ├── backend-adapter.env         # Пример env для сервиса
 ├── sample.adapter.env          # Полный пример env
-├── adapter.yaml                # Пример multi-backend YAML
+├── sample.adapter.yaml         # Пример YAML-конфига бэкендов
 └── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 

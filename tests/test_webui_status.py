@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Unit + HTTP tests for backend_adapter.webui_status — status page at "/".
 
-Tests cover: _config_snapshot() mode detection (legacy / multi-backend /
-standalone), _collect_endpoints() grouping, GET "/" and POST "/" — both
+Tests cover: _config_snapshot() mode detection (multi-backend / standalone),
+_collect_endpoints() grouping, GET "/" and POST "/" — both
 trigger config.refresh_models() (on-demand model cache refresh, mocked here)
 and render the page from the refreshed globals: success shows the new model
 list, failure keeps the old cache and shows the error text, standalone
@@ -16,11 +16,10 @@ from unittest import mock
 import pytest
 
 # Autouse fresh_env deletes all backend_adapter* modules and re-imports
-# config with the default test env (ADAPTER_BACKEND_BASE=http://localhost:9998,
-# ADAPTER_BACKEND_CONFIG=""). So config._BACKEND_LEGACY is True, BACKEND_BASE
-# is the env value, and _AVAILABLE_MODELS/_BACKENDS are empty. Tests assign
-# config globals directly on the *current* module instance (same one that
-# webui_status imported — fresh per test, so no cross-test pollution).
+# config with the default test env (ADAPTER_BACKEND_CONFIG=""). So
+# _AVAILABLE_MODELS/_BACKENDS are empty. Tests assign config globals
+# directly on the *current* module instance (same one that webui_status
+# imported — fresh per test, so no cross-test pollution).
 
 
 # ---------------------------------------------------------------------------
@@ -88,35 +87,28 @@ def _fail_refresh(count: int, errors) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# TestConfigSnapshot — режимы: legacy / multi / standalone
+# TestConfigSnapshot — режимы: multi / standalone
 # ---------------------------------------------------------------------------
 
 class TestConfigSnapshot:
-    def test_legacy_with_models(self):
-        # ADAPTER_BACKEND_BASE задан fresh_env (localhost:9998) и legacy
-        # включён (ADAPTER_BACKEND_CONFIG пуст). Модели — из _AVAILABLE_MODELS.
+    def test_multi_with_models(self):
+        # Один бэкенд в _BACKENDS, модели — из _MODEL_TO_BACKEND.
         config, ws = _fresh_modules()
-        config._AVAILABLE_MODELS["m-one"] = {"id": "m-one"}
-        config._AVAILABLE_MODELS["m-two"] = {"id": "m-two"}
+        cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [cfg]
+        config._MODEL_TO_BACKEND = {
+            "m-one": ("AAA", cfg),
+            "m-two": ("AAA", cfg),
+        }
         snap = ws._config_snapshot()
-        assert snap["mode"] == "legacy"
+        assert snap["mode"] == "multi-backend"
         assert len(snap["endpoints"]) == 1
         ep = snap["endpoints"][0]
-        assert ep["name"] == "legacy"
-        assert ep["base"] == "http://localhost:9998"
+        assert ep["name"] == "AAA"
+        assert ep["base"] == "http://aaa.local"
         assert ep["models"] == ["m-one", "m-two"]
         assert ep["status"] == "ok"
         assert snap["note"] is None
-
-    def test_legacy_env_unset_no_models(self, monkeypatch):
-        # ВАЖНО: BACKEND_BASE имеет дефолт config.py даже без env — страница
-        # не должна показывать фантомный бэкенд, если env реально не задан.
-        config, ws = _fresh_modules()
-        monkeypatch.delenv("ADAPTER_BACKEND_BASE", raising=False)
-        snap = ws._config_snapshot()
-        assert snap["endpoints"] == []
-        assert snap["mode"] == "standalone"
-        assert snap["note"] is not None
 
     def test_multi_backend_grouping(self):
         config, ws = _fresh_modules()
@@ -154,10 +146,11 @@ class TestConfigSnapshot:
         assert by_name["BBB"]["status"] == "не опрошен"
         assert by_name["BBB"]["models"] == []
 
-    def test_standalone_without_env(self, monkeypatch):
-        # Режим standalone: ни бэкендов, ни env бэкенда, ни моделей.
+    def test_standalone_without_env(self):
+        # Режим standalone: ни бэкендов, ни моделей, ни YAML-конфига —
+        # страница показывает подсказку (а не фантомный бэкенд).
         config, ws = _fresh_modules()
-        monkeypatch.delenv("ADAPTER_BACKEND_BASE", raising=False)
+        config.ADAPTER_BACKEND_CONFIG = ""
         snap = ws._config_snapshot()
         assert snap["mode"] == "standalone"
         assert snap["endpoints"] == []
@@ -317,11 +310,11 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
 
-    def test_get_root_standalone_notice_no_refresh(self, tmp_path, monkeypatch):
-        # Standalone без env-бэкенда: эндпойнтов нет — refresh не вызывается,
+    def test_get_root_standalone_notice_no_refresh(self, tmp_path):
+        # Standalone без конфига: эндпойнтов нет — refresh не вызывается,
         # страница показывает подсказку (а не фантомный example.com).
         config, ws = _fresh_modules()
-        monkeypatch.delenv("ADAPTER_BACKEND_BASE", raising=False)
+        config.ADAPTER_BACKEND_CONFIG = ""
         httpd, port = _start_server(str(tmp_path))
         try:
             status, body = _http_get(port, "/")
