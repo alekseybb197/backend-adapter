@@ -231,7 +231,35 @@ backend:
   - name: litellm
     base: "https://llm.example.com"
     key: ADAPTER_LITELLM_KEY
+    probe:                   # необязательно — модель на эндпоинт дымовой пробы
+      - completions: qwen3.6
+      - messages:
+      - responses: gpt-5-sol
+      - embeddings: text-embedding-3-small
 ```
+
+### 6.4 Дымовая проба API-эндпойнтов (`probe_endpoints`, config.py)
+
+Статус-страница WEBUI `/` показывает не только список моделей бэкенда, но и
+какие известные API-эндпойнты он реально обслуживает. Определение — короткими
+POST-запросами с `max_tokens:1` по фиксированному списку `ENDPOINT_PROBES`
+(`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`);
+классификация по HTTP-коду: `200` — работает, `400/401/405` — эндпоинт есть
+(тело/ключ не подошли), `404` — не реализован, сеть/таймаут — ошибка бэкенда.
+Модель на эндпоинт — из необязательного ключа `probe` YAML-записи (у разных
+эндпоинтов бэкенда свои модели), иначе первая модель бэкенда из `/v1/models`;
+заданная в `probe` модель, отсутствующая среди моделей бэкенда, пропускает
+только свой эндпоинт (`[WARN]` + текст в `errors`).
+
+Проба встроена в `config.refresh_models` (конец функции, после обновления кэша
+моделей): вызывается на каждом обновлении списка моделей (загрузка страницы,
+кнопка «⟳ Проверить сейчас»), результат добавляется в возвращаемый dict ключом
+`"probe"` (старые читатели `ok/count/errors` не ломаются) и кэшируется в
+`_ENDPOINT_STATE` (~60 с, `ENDPOINT_PROBE_TTL`); повторный заход в пределах TTL
+сеть не трогает. Мастер-флаг `ADAPTER_ENDPOINT_PROBE=0` отключает автопробу.
+Фактическая проба пишется в консоль блоком `[ENDPOINT_PROBE]` (print, гейт
+`ADAPTER_DEBUG_ENABLE`) — одна строка на бэкенд с сырыми HTTP-кодами; кэш-хиты
+не логируются. Проба чисто наблюдательная: на маршрутизацию запросов не влияет.
 
 ### 6.2 Разрешение коллизий имён моделей
 
@@ -433,7 +461,8 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 
 ```
 backend-adapter.py
-  ├── config.py          (no internal deps — stdlib only + os.environ)
+  ├── config.py          (no internal deps — stdlib only + os.environ;
+  │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
@@ -474,5 +503,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.1** (see `backend-adapter.py`).
+Current: **v0.8.2** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

@@ -125,6 +125,7 @@
 | 3 | `[CLIENT_GONE]` | `server.py:84` | Client gone during JSON send |
 | 4 | `[WARN]` | `server.py:86` | Ошибка отправки ответа клиенту |
 | 5 | `[INIT]` | `backend-adapter.py:108` | Старт адаптера: путь к YAML-конфигу бэкендов |
+| 6 | `[ENDPOINT_PROBE]` | `config.py` | Дымовая проба API-эндпойнтов бэкенда: одна строка на фактическую пробу — `backend '<имя>' (<base>): completions=200 messages=404 responses=… embeddings=…` (сырые HTTP-коды; при сетевой ошибке — `failed: <текст>`). Пишется `print`-ом при `ADAPTER_DEBUG_ENABLE=1`; кэш-хиты (повторный заход на страницу < 60 с) не логируются — лог даёт историю фактических проб, страница показывает последний результат |
 
 ---
 

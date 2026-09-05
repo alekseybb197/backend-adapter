@@ -12,12 +12,24 @@
 #     key:  — имя переменной окружения, в которой лежит токен
 #             (Bearer). Адаптер раскрывает её значение при старте;
 #             сам токен в YAML-файл писать не нужно.
+#     probe: (необязательно) — модель на каждый API-эндпоинт дымовой
+#             пробы (см. ADAPTER_ENDPOINT_PROBE в docs/environment.md):
+#             эндпоинт с моделью пробуется ею; с пустым значением или
+#             вовсе не перечисленный — моделью по умолчанию (первой из
+#             /v1/models бэкенда). Ключа нет — все 4 эндпоинта моделью
+#             по умолчанию. У разных эндпоинтов бэкенда свои модели
+#             (chat / responses / embeddings).
 # ============================================================
 
 backend:
   - name: llm-service
     base: https://llm.service.example.com
     key: ADAPTER_BACKEND_KEY_LLM_SERVICE
+    probe:
+      - completions: qwen3.6
+      - messages:claude-sonnet-5
+      - responses: gpt-5-sol
+      - embeddings: text-embedding-3-small
 
 # Дополнительные бэкенды добавляются записями в тот же список:
 #
