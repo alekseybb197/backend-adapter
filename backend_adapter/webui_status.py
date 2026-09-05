@@ -11,21 +11,26 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже).
 
 Откуда данные:
-  - GET "/" и POST "/" (кнопка «⟳ Проверить сейчас») делают ОДНО И ТО ЖЕ:
-    вызывают config.refresh_models() — живую пере-пробу каждого эндпойнта
-    с жёстким коротким таймаутом PROBE_TIMEOUT (5 с) и обновляют
-    конфиг-глобалы адаптера (_AVAILABLE_MODELS/_MODEL_TO_BACKEND/
-    _BACKENDS/_BACKEND_BY_NAME). Обновление происходит только по явному
-    сигналу (старт адаптера, загрузка страницы, кнопка) — периодического
-    фонового refresh НЕТ.
-  - Страница рендерится из обновлённых глобалов: бэкенд мог добавить
+  - Проверка бэкендов — ТОЛЬКО по кнопке «⟳ Проверить сейчас» (POST "/").
+    Она запускает ФОНОВУЮ проверку config.start_refresh(timeout=PROBE_TIMEOUT)
+    (см. config._refresh_worker) и отвечает сразу — HTTP-запрос не ждёт её
+    завершения. Загрузка страницы (GET "/") проверку НЕ запускает: показывает
+    текущее состояние — результат последней проверки из config.refresh_state().
+    Пока проверка выполняется, страница показывает баннер
+    «Проверка выполняется…» и опрашивает лёгкий JSON-эндпоинт
+    /api/refresh-state; по завершении проверки JS сам перезагружает страницу
+    (location.reload()) — она рендерит свежий результат. Авто-релоад
+    безопасен: GET проверку не запускает, зацикливания нет.
+  - Страница рендерится из конфиг-глобалов адаптера: бэкенд мог добавить
     новые модели между стартами адаптера (или после ошибки 400 «model is
     not available»), refresh подхватывает их без перезапуска — следующие
     запросы /v1/messages с новыми моделями проходят строгую валидацию.
-  - refresh_models возвращает {"ok", "count", "errors"}; при полном
-    провале старый список моделей сохраняется и показывается на странице
-    вместе с текстом ошибки; при частичном успехе страница показывает
-    свежий список ответивших бэкендов и тексты ошибок упавших.
+  - Футер «Список моделей обновлён в HH:MM:SS» и статусы строк берутся из
+    состояния последней проверки (config.refresh_state(): ok/count/errors/
+    checked_at); при полном провале старый список моделей сохраняется и
+    показывается на странице вместе с текстом ошибки; при частичном успехе
+    страница показывает свежий список ответивших бэкендов и тексты ошибок
+    упавших.
   - Дымовая проба API: refresh_models дополнительно несёт "probe" —
     результат config.probe_endpoints(): какие из известных эндпойнтов
     (/v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings)
@@ -40,15 +45,16 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
 вне процесса адаптера): конфиг-глобалы адаптера пусты (нет YAML-конфига),
 поэтому страница показывает режим standalone и подсказку, как получить
 живые данные, — вместо фантомного списка «example.com» из дефолтов env.
-Эндпойнты для refresh в этом режиме задаются той же переменной
+Эндпойнты для проверки в этом режиме задаются той же переменной
 окружения, что у адаптера, — ADAPTER_BACKEND_CONFIG (путь к YAML);
 модуль берёт её из config так же, как сам адаптер.
 
-Чистая логика (snapshot, refresh, рендер) вынесена в отдельные функции,
+Чистая логика (snapshot, состояние, рендер) вынесена в отдельные функции,
 чтобы её можно было тестировать без HTTP-сервера.
 """
 
 import html
+import json
 import logging
 import os
 import time
@@ -217,13 +223,18 @@ def _api_html(api: dict | None) -> str:
     return "<br>".join(parts)
 
 
-def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
+def _render_status_page(
+    context, refresh=None, checked_at=None, running=None, started_at=None
+) -> bytes:
     """HTML статус-страницы.
 
-    ``refresh`` — результат config.refresh_models(): {"ok", "count",
-    "errors": {имя_бэкенда: текст}} (или None — когда обновлять было нечего:
-    standalone без настроенных эндпойнтов). checked_at — время последнего
-    обновления (или None).
+    ``refresh`` — результат последней проверки из config.refresh_state():
+    {"ok", "count", "errors": {имя_бэкенда: текст}} (или None — когда
+    проверок ещё не было / обновлять было нечего: standalone без
+    настроенных эндпойнтов). checked_at — время последнего обновления
+    ("HH:MM:SS", или None). running — идёт ли проверка прямо сейчас
+    (показывается баннер). started_at — time.time() запуска идущей
+    проверки (для времени в баннере; None, если проверка не идёт).
 
     Статусы строк берутся из snapshot, но поверх: если бэкенд есть в
     refresh["errors"] — строка показывает «недоступен (текст ошибки)».
@@ -271,10 +282,11 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
 
     if refresh is None:
         footer = (
-            '<p style="color:#888">Список моделей обновляется при каждой '
-            "загрузке страницы (GET /v1/models, таймаут 5 с на эндпойнт); "
-            "заодно проверяются API-эндпойнты бэкендов (POST max_tokens:1, "
-            "кэш 60 с, ADAPTER_ENDPOINT_PROBE=0 — отключить).</p>"
+            '<p style="color:#888">Список моделей и API-эндпойнты бэкендов '
+            "проверяются по кнопке «⟳ Проверить сейчас» (GET /v1/models + "
+            "дымовые POST max_tokens:1, таймаут 5 с на эндпойнт; проба "
+            "кэшируется 60 с, ADAPTER_ENDPOINT_PROBE=0 — отключить). "
+            "Загрузка страницы проверку не запускает.</p>"
         )
     else:
         count = refresh.get("count", 0)
@@ -301,6 +313,37 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
         f'<p style="color:#b8860b">{html.escape(snapshot["note"])}</p>' if snapshot["note"] else ""
     )
 
+    # Баннер «проверка выполняется» + JS поллинга /api/refresh-state.
+    # Вставляются только при running=True: без идущей проверки поллинга
+    # нет (страница не перезагружается сама по себе). JS опрашивает
+    # состояние каждые 2 с; увидев завершение (running=false, done_at
+    # есть) — перезагружает страницу, чтобы показать свежий результат.
+    banner_html = ""
+    poll_script = ""
+    if running:
+        started = time.strftime("%H:%M:%S", time.localtime(started_at)) if started_at else ""
+        banner_html = (
+            '<p style="background:#fff8e1;border:1px solid #e0c060;'
+            f'padding:8px 12px;color:#8a6d1a">⟳ Проверка выполняется'
+            f"{(' (запущена в ' + started + ')') if started else ''}… "
+            "модели и API-эндпойнты пере-проверяются в фоне, страница "
+            "обновится автоматически по завершении.</p>"
+        )
+        poll_script = """
+<script>
+  function status_poll() {{
+    fetch("/api/refresh-state")
+      .then(function (r) {{ return r.json(); }})
+      .then(function (s) {{
+        if (!s.running && s.done_at) {{ location.reload(); }}
+        else {{ setTimeout(status_poll, 2000); }}
+      }})
+      .catch(function () {{ setTimeout(status_poll, 2000); }});
+  }}
+  window.addEventListener("load", status_poll);
+</script>
+"""
+
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -325,7 +368,7 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
     }}
   }}
 </script>
-</head>
+{poll_script}</head>
 <body>
 <h2>[CC]-adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
@@ -333,6 +376,7 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
    <a href="/session">просмотр сессий →</a> &nbsp;·&nbsp;
    <a href="/config">runtime config →</a></p>
 {note_html}
+{banner_html}
 <table>
   <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Endpoints</th><th>Models</th></tr>
   {"".join(rows)}
@@ -354,39 +398,78 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
 class StatusEndpoint(webserver.Endpoint):
     """Эндпойнт "/": статус-страница (версия, эндпойнты LLM, API, модели).
 
-    GET и POST делают одно и то же: обновляют список моделей
-    (config.refresh_models с коротким таймаутом PROBE_TIMEOUT; внутри —
-    и дымовая проба API-эндпойнтов, результат — в колонке «Доступные
-    API» из config._ENDPOINT_STATE) и рендерят страницу из обновлённых
-    глобалов. Обновление только по явному сигналу (загрузка страницы /
-    кнопка «⟳ Проверить сейчас») — никакого периодического refresh."""
+    Проверка бэкендов — ТОЛЬКО по кнопке «⟳ Проверить сейчас» (POST "/"):
+    запускает ФОНОВУЮ проверку config.start_refresh(timeout=PROBE_TIMEOUT)
+    и отвечает сразу (HTTP не ждёт её завершения). Загрузка страницы
+    (GET "/") проверку НЕ запускает — показывает состояние последней
+    проверки (config.refresh_state). Пока проверка идёт, страница
+    показывает баннер и авто-обновляется по завершении (JS status_poll →
+    /api/refresh-state → location.reload()). Периодического фонового
+    refresh нет — только явный POST."""
 
     prefix = "/"
 
     def __init__(self, context):
         self.context = context
 
-    def _refresh_and_render(self):
-        """Пере-опросить эндпойнты и отрендерить страницу с результатом.
+    def _render_from_state(self):
+        """Отрендерить страницу из текущего состояния проверки.
 
         Если настроенных эндпойнтов нет (standalone без env-бэкенда) —
-        refresh_models вызывать нечего: страница рендерится с подсказкой."""
-        if not _collect_endpoints():
-            return _render_status_page(self.context)
-        result = config.refresh_models(timeout=PROBE_TIMEOUT)
+        проверку запускать нечего: страница рендерится с подсказкой."""
+        state = config.refresh_state()
         return _render_status_page(
-            self.context, refresh=result, checked_at=time.strftime("%H:%M:%S")
+            self.context,
+            refresh=_last_result(state),
+            checked_at=state.get("checked_at"),
+            running=state.get("running"),
+            started_at=state.get("started_at"),
         )
 
     def GET(self, handler, remainder: str):
         if remainder:
             handler.send_error(404, "Not found")
             return
-        handler._write(200, "text/html; charset=utf-8", self._refresh_and_render())
+        handler._write(200, "text/html; charset=utf-8", self._render_from_state())
 
     def POST(self, handler, remainder: str):
-        # Тело формы не читаем — кнопка одна, действий нет.
-        handler._write(200, "text/html; charset=utf-8", self._refresh_and_render())
+        # Кнопка «⟳ Проверить сейчас»: запускаем фоновую проверку и
+        # отвечаем сразу. Если проверка уже идёт — start_refresh вернёт
+        # False, страница всё равно отрендерится с баннером. В standalone
+        # без настроенных эндпойнтов проверять нечего — не запускаем.
+        if _collect_endpoints():
+            config.start_refresh(timeout=PROBE_TIMEOUT)
+        handler._write(200, "text/html; charset=utf-8", self._render_from_state())
+
+
+@webserver.register
+class RefreshStateEndpoint(webserver.Endpoint):
+    """Эндпойнт "/api/refresh-state": состояние фоновой проверки (JSON).
+
+    Лёгкий ответ для JS status_poll на статус-странице: config.refresh_state()
+    — {"running", "started_at", "done_at", "ok", "count", "errors",
+    "checked_at"}. GET проверку не запускает и ничего не мутирует —
+    безопасно опрашивать каждые 2 с."""
+
+    prefix = "/api/refresh-state"
+
+    def __init__(self, context):
+        self.context = context
+
+    def GET(self, handler, remainder: str):
+        body = json.dumps(config.refresh_state()).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
+def _last_result(state: dict) -> dict | None:
+    """refresh-срез состояния для _render_status_page (или None).
+
+    Проверок ещё не было (ok/count/errors пусты) → None: футер показывает
+    подсказку, а не «обновлено 0 моделей». Иначе — {"ok", "count",
+    "errors"} как раньше приходил из refresh_models."""
+    if state.get("ok") is None and state.get("errors") is None:
+        return None
+    return {"ok": state.get("ok"), "count": state.get("count"), "errors": state.get("errors")}
 
 
 __all__ = [
@@ -398,4 +481,6 @@ __all__ = [
     "_api_html",
     "_render_status_page",
     "StatusEndpoint",
+    "RefreshStateEndpoint",
+    "_last_result",
 ]
