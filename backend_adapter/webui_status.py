@@ -58,7 +58,6 @@ from . import config, webserver
 logger = logging.getLogger("webui_status")
 
 PROBE_TIMEOUT = 5.0  # жёсткий таймаут живой пробы одного эндпойнта, сек
-MODEL_STRICT_CAP = 60  # потолок выводимых моделей на эндпойнт (не резать страницу)
 
 
 # ==================== ЧИСТАЯ ЛОГИКА ====================
@@ -161,13 +160,33 @@ def _config_snapshot() -> dict:
 # ==================== HTML-РЕНДЕР ====================
 
 
+MODEL_LINES = 4  # высота свёрнутого списка моделей: строк (каждый id — своя строка)
+
+
 def _models_html(models: list[str], status: str) -> str:
+    """HTML ячейки «Models»: каждый id модели — отдельная строка.
+
+    Если моделей больше MODEL_LINES — первые MODEL_LINES показываются,
+    остальные прячутся в <span class="models-extra" style="display:none">,
+    а кнопка «Показать ещё (N)» разворачивает список (JS models_toggle,
+    см. _render_status_page): при клике span получает display:block,
+    кнопка меняется на «Свернуть» и прячет его обратно."""
     if not models:
         return f'<span style="color:#999">{status}</span>'
-    if len(models) <= MODEL_STRICT_CAP:
-        return ", ".join(html.escape(m) for m in models)
-    shown = ", ".join(html.escape(m) for m in models[:MODEL_STRICT_CAP])
-    return f"{shown} <span style='color:#999'>(+{len(models) - MODEL_STRICT_CAP} ещё)</span>"
+    line = '<div style="line-height:1.5">{}</div>'
+    if len(models) <= MODEL_LINES:
+        return "".join(line.format(html.escape(m)) for m in models)
+    shown = "".join(line.format(html.escape(m)) for m in models[:MODEL_LINES])
+    extra = "".join(line.format(html.escape(m)) for m in models[MODEL_LINES:])
+    n = len(models) - MODEL_LINES
+    btn = (
+        f'<button type="button" onclick="models_toggle(this)" '
+        f'data-models-count="{len(models)}" '
+        f'style="color:#1a7f37;background:none;border:none;padding:0;'
+        f'font:inherit;cursor:pointer;text-decoration:underline">'
+        f"Показать ещё ({n})</button>"
+    )
+    return f'{shown}<span class="models-extra" style="display:none">{extra}</span>{btn}'
 
 
 def _api_html(api: dict | None) -> str:
@@ -294,6 +313,18 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
   th {{ background: #f5f5f5; }}
   code {{ font-size: 13px; }}
 </style>
+<script>
+  function models_toggle(btn) {{
+    var span = btn.previousElementSibling;
+    if (span && span.classList.contains("models-extra")) {{
+      var expanded = span.style.display !== "none";
+      span.style.display = expanded ? "none" : "block";
+      btn.textContent = expanded
+        ? "Показать ещё (" + (btn.dataset.modelsCount - {MODEL_LINES}) + ")"
+        : "Свернуть";
+    }}
+  }}
+</script>
 </head>
 <body>
 <h2>[CC]-adapter — статус</h2>
@@ -303,7 +334,7 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
    <a href="/config">runtime config →</a></p>
 {note_html}
 <table>
-  <tr><th>Эндпойнт</th><th>Base URL</th><th>Статус</th><th>Доступные API</th><th>Модели</th></tr>
+  <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Endpoints</th><th>Models</th></tr>
   {"".join(rows)}
 </table>
 {footer}
@@ -360,9 +391,10 @@ class StatusEndpoint(webserver.Endpoint):
 
 __all__ = [
     "PROBE_TIMEOUT",
-    "MODEL_STRICT_CAP",
+    "MODEL_LINES",
     "_collect_endpoints",
     "_config_snapshot",
+    "_models_html",
     "_api_html",
     "_render_status_page",
     "StatusEndpoint",

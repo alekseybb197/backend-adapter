@@ -8,7 +8,9 @@ refresh_models), GET "/" and POST "/" — both trigger
 config.refresh_models() (on-demand model cache refresh, mocked here)
 and render the page from the refreshed globals: success shows the new model
 list, failure keeps the old cache and shows the error text, standalone
-(no endpoints) renders the notice without any refresh call.
+(no endpoints) renders the notice without any refresh call. The Models cell
+(_models_html) is capped at MODEL_LINES rows with an expand/collapse button
+(JS models_toggle on the page) — see TestModelsCell.
 """
 import os
 import socket
@@ -277,7 +279,13 @@ class TestApiColumn:
     def test_header_and_api_cell_present(self):
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
-        assert "Доступные API" in body
+        # Заголовки колонок — английские: Backend/Base URL/Status/Endpoints/Models
+        assert "Backend" in body and "Endpoints" in body and "Models" in body
+        assert "<th>Backend</th>" in body
+        assert "<th>Base URL</th>" in body
+        assert "<th>Status</th>" in body
+        assert "<th>Endpoints</th>" in body
+        assert "<th>Models</th>" in body
 
     def test_standalone_renders_unprobed_without_refresh(self):
         # Standalone: refresh не делался — ячейки «не опрошено», никакой сети.
@@ -292,6 +300,61 @@ class TestApiColumn:
         config.ADAPTER_BACKEND_CONFIG = ""
         body = ws._render_status_page(self._ctx()).decode()
         assert "API-эндпойнтов" in body or "max_tokens" in body
+
+
+# ---------------------------------------------------------------------------
+# TestModelsCell — список моделей: 4 строки + кнопка «Показать ещё (N)»
+# ---------------------------------------------------------------------------
+
+class TestModelsCell:
+    def test_few_models_no_button(self):
+        # ≤ MODEL_LINES моделей — все видны, кнопки/span-хвоста нет.
+        config, ws = _fresh_modules()
+        models = [f"m{i}" for i in range(ws.MODEL_LINES)]
+        html = ws._models_html(models, "ok")
+        assert html.count('<div style="line-height:1.5">') == ws.MODEL_LINES
+        assert "models-extra" not in html
+        assert "Показать ещё" not in html
+
+    def test_many_models_limited_with_button(self):
+        # > MODEL_LINES моделей — видны первые MODEL_LINES, остальные в
+        # скрытом span, кнопка «Показать ещё (N)» с числом скрытых строк.
+        config, ws = _fresh_modules()
+        models = [f"m{i}" for i in range(7)]
+        html = ws._models_html(models, "ok")
+        # первые MODEL_LINES строк — видимые div'ы (вне скрытого span)
+        visible = html.split('<span class="models-extra"')[0]
+        assert visible.count('<div style="line-height:1.5">') == ws.MODEL_LINES
+        assert '<span class="models-extra" style="display:none">' in html
+        # в скрытом span — остальные (7 - MODEL_LINES) строк
+        extra = html.split('<span class="models-extra" style="display:none">')[1]
+        extra = extra.split("</span>")[0]
+        assert extra.count('<div style="line-height:1.5">') == 7 - ws.MODEL_LINES
+        assert f"Показать ещё ({7 - ws.MODEL_LINES})" in html
+        # кнопка вызывает models_toggle и несёт общее число моделей
+        assert 'onclick="models_toggle(this)"' in html
+        assert 'data-models-count="7"' in html
+
+    def test_empty_shows_status_text(self):
+        # Нет моделей — строка-заглушка со статусом (для колонки Models).
+        config, ws = _fresh_modules()
+        assert ws._models_html([], "недоступен") == (
+            '<span style="color:#999">недоступен</span>'
+        )
+
+    def test_page_contains_toggle_script(self):
+        # Полная страница несёт JS models_toggle (работа кнопки «Свернуть»),
+        # а модели рендерятся как отдельные строки (не запятыми).
+        config, ws = _fresh_modules()
+        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {f"m{i}": ("AAA", backend) for i in range(6)}
+        ctx = mock.Mock(version="0.0.0-test")
+        body = ws._render_status_page(ctx, refresh=_ok_refresh(6)).decode()
+        assert "function models_toggle(btn)" in body
+        assert "Свернуть" in body  # JS меняет текст кнопки на «Свернуть»
+        # первая модель видна строкой, а её хвост свёрнут в models-extra
+        assert "m0" in body and '<span class="models-extra" style="display:none">' in body
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +536,7 @@ class TestStatusHTTP:
             try:
                 status, body = _http_get(port, "/")
                 assert status == 200
-                assert "Доступные API" in body
+                assert "<th>Endpoints</th>" in body  # заголовок колонки API
                 assert "chat/completions ✓" in body
                 assert "messages —" in body
             finally:
