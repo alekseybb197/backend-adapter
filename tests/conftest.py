@@ -170,6 +170,7 @@ def isolate_logs(fresh_env):
     config._MODEL_TO_BACKEND.clear()
     config._DEFAULT_BACKEND = None
     config._ENDPOINT_STATE.clear()
+    config._REFRESH_JOB = None
 
     yield
 

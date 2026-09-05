@@ -3,6 +3,8 @@ import os
 import json
 import importlib
 import sys
+import threading
+import time
 from unittest import mock
 
 
@@ -614,6 +616,117 @@ class TestRefreshModels:
             assert m_urlopen.call_args.kwargs["timeout"] == config.ADAPTER_TIMEOUT
             config._fetch_models("http://x", "k", timeout=5.0)
             assert m_urlopen.call_args.kwargs["timeout"] == 5.0
+
+
+class TestBackgroundRefresh:
+    """Tests for the background refresh worker (start_refresh/refresh_state).
+
+    Contract: start_refresh() runs refresh_models in a daemon thread and
+    returns True only when *this* call started the check (False while one is
+    already running); refresh_state() is a copy of the immutable snapshot;
+    the worker always publishes running=False on completion (even on
+    exception)."""
+
+    def _config(self):
+        _reload_config()
+        from backend_adapter import config
+
+        config._REFRESH_JOB = None
+        return config
+
+    def _wait_for(self, cond, timeout=5.0):
+        """Дождаться cond()==True (поток-воркер завершает асинхронно)."""
+        deadline = time.monotonic() + timeout
+        while not cond():
+            assert time.monotonic() < deadline, "таймаут ожидания воркера"
+            time.sleep(0.01)
+
+    def test_initial_state_defaults(self):
+        config = self._config()
+        state = config.refresh_state()
+        assert state["running"] is False
+        assert state["started_at"] is None
+        assert state["done_at"] is None
+        assert state["ok"] is None
+        assert state["count"] is None
+        assert state["errors"] is None
+        assert state["checked_at"] is None
+
+    def test_state_is_a_copy(self):
+        config = self._config()
+        config._REFRESH_JOB = {"running": False, "ok": True, "x": 1}
+        state = config.refresh_state()
+        state["ok"] = False
+        state["x"] = 999
+        assert config._REFRESH_JOB["ok"] is True
+        assert config._REFRESH_JOB["x"] == 1
+
+    def test_start_runs_refresh_models_in_background(self):
+        config = self._config()
+        config._BACKENDS = [{"name": "AAA", "base": "http://aaa", "key": "k"}]
+        config._BACKEND_BY_NAME = {"AAA": config._BACKENDS[0]}
+        config._DEFAULT_BACKEND = config._BACKENDS[0]
+        result = {"ok": True, "count": 3, "errors": {}, "probe": {}}
+        with mock.patch.object(config, "refresh_models", return_value=result) as m_refresh:
+            assert config.start_refresh(timeout=5.0) is True
+            # вернулись сразу — воркер в фоне
+            self._wait_for(lambda: m_refresh.called)
+            self._wait_for(lambda: not config.refresh_state()["running"])
+        state = config.refresh_state()
+        assert m_refresh.call_args.kwargs.get("timeout") == 5.0
+        assert state["ok"] is True
+        assert state["count"] == 3
+        assert state["errors"] == {}
+        assert state["running"] is False
+        assert state["done_at"] is not None
+        assert state["checked_at"] == time.strftime("%H:%M:%S")
+
+    def test_second_start_while_running_returns_false(self):
+        config = self._config()
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocking_refresh(**kwargs):
+            started.set()
+            release.wait(5)
+
+        with mock.patch.object(config, "refresh_models", side_effect=blocking_refresh):
+            assert config.start_refresh() is True
+            assert started.wait(5) is True  # воркер вошёл в refresh_models
+            # пока проверка идёт — повторный запуск не создаёт поток
+            assert config.refresh_state()["running"] is True
+            assert config.start_refresh() is False
+            assert config.start_refresh() is False
+            release.set()
+        self._wait_for(lambda: not config.refresh_state()["running"])
+
+    def test_worker_publishes_failure_on_exception(self):
+        config = self._config()
+        with mock.patch.object(
+            config,
+            "refresh_models",
+            side_effect=RuntimeError("boom from test"),
+        ):
+            assert config.start_refresh() is True
+            self._wait_for(lambda: not config.refresh_state()["running"])
+        state = config.refresh_state()
+        assert state["ok"] is False
+        assert "__worker__" in (state["errors"] or {})
+        assert "boom from test" in state["errors"]["__worker__"]
+
+    def test_worker_publishes_ok_false_result(self):
+        # refresh_models вернул ok=False (полный провал — кэш не тронут):
+        # воркер публикует это как итог, не как исключение.
+        config = self._config()
+        config._AVAILABLE_MODELS["old-m"] = {"id": "old-m"}
+        result = {"ok": False, "count": 1, "errors": {"AAA": "down"}, "probe": {}}
+        with mock.patch.object(config, "refresh_models", return_value=result):
+            assert config.start_refresh() is True
+            self._wait_for(lambda: not config.refresh_state()["running"])
+        state = config.refresh_state()
+        assert state["ok"] is False
+        assert state["count"] == 1
+        assert state["errors"] == {"AAA": "down"}
 
 
 class TestRuntimeConfig:

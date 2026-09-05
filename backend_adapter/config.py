@@ -9,6 +9,7 @@ import os
 import re
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -918,6 +919,101 @@ def refresh_models(timeout: float | None = None) -> dict:
     # ключом "probe" — старые читатели полей ok/count/errors не ломаются.
     result["probe"] = probe_endpoints(timeout=timeout)
     return result
+
+
+# ==================== MULTI-BACKEND: ФОНОВАЯ ПРОВЕРКА ====================
+# Статус-страница WEBUI запускает refresh_models (модели + дымовая проба
+# эндпоинтов) в фоновом потоке, чтобы HTTP-ответ "/" не висел, пока бэкенды
+# опрашиваются. Состояние проверки — модульный снимок-словарь _REFRESH_JOB,
+# заменяемый ЦЕЛИКОМ (никогда не мутируется после публикации): читатели
+# (webui_status) берут refresh_state() без лока — замена ссылки атомарна.
+# Запуск сериализуется _REFRESH_LOCK: две кнопки подряд не создадут два потока.
+# Периодического фонового refresh нет — проверка строго по явному
+# start_refresh() (POST "/", кнопка «⟳ Проверить сейчас»).
+
+_REFRESH_JOB: dict | None = None
+_REFRESH_LOCK = threading.Lock()
+
+
+def _refresh_state_default() -> dict:
+    """Состояние «проверок ещё не было» — дефолт для refresh_state()."""
+    return {
+        "running": False,
+        "started_at": None,
+        "done_at": None,
+        "ok": None,
+        "count": None,
+        "errors": None,
+        "checked_at": None,
+    }
+
+
+def _refresh_worker(timeout: float | None) -> None:
+    """Тело фонового потока проверки: refresh_models + публикация результата.
+
+    refresh_models сам мутирует конфиг-глобалы (_AVAILABLE_MODELS/
+    _MODEL_TO_BACKEND/_ENDPOINT_STATE) — это уже было при синхронном вызове
+    со страницы, отдельный Lock вокруг них не добавляем (чтение словарей из
+    HTTP-потоков прокси при clear+update — существующий компромисс проекта).
+
+    ``finally`` гарантирует публикацию running=False даже при исключении
+    (проверка не может «зависнуть навсегда»: refresh_models ограничен
+    таймаутами запросов). Исключение логируется в состояние, а не роняет
+    поток."""
+    result = None
+    error_text = None
+    try:
+        result = refresh_models(timeout=timeout)
+    except Exception as e:  # noqa: BLE001 — воркер не должен ронять поток
+        error_text = str(e)
+    global _REFRESH_JOB
+    snapshot = _refresh_state_default()
+    snapshot["running"] = False
+    snapshot["started_at"] = (_REFRESH_JOB or {}).get("started_at")
+    snapshot["done_at"] = time.time()
+    if error_text is not None:
+        snapshot["errors"] = {"__worker__": error_text}
+        snapshot["ok"] = False
+        snapshot["count"] = (_REFRESH_JOB or {}).get("count")
+        print(f"[REFRESH] Worker failed: {error_text}")
+    elif result is not None:
+        snapshot["ok"] = result.get("ok")
+        snapshot["count"] = result.get("count")
+        snapshot["errors"] = result.get("errors")
+    snapshot["checked_at"] = time.strftime("%H:%M:%S")
+    _REFRESH_JOB = snapshot
+
+
+def start_refresh(timeout: float | None = None) -> bool:
+    """Запустить фоновую проверку бэкендов (модели + проба эндпоинтов).
+
+    Возвращает True, если проверка запущена этим вызовом; False — если она
+    уже выполняется (повторный запуск не создаёт второй поток). HTTP-ответ
+    страницы не блокируется: поток daemon, результат появится в состоянии
+    (refresh_state) по завершении. Никакого периодического refresh — только
+    явный вызов (кнопка «⟳ Проверить сейчас»)."""
+    global _REFRESH_JOB
+    with _REFRESH_LOCK:
+        if _REFRESH_JOB is not None and _REFRESH_JOB.get("running"):
+            return False
+        snapshot = _refresh_state_default()
+        snapshot["running"] = True
+        snapshot["started_at"] = time.time()
+        _REFRESH_JOB = snapshot
+        threading.Thread(target=_refresh_worker, args=(timeout,), daemon=True).start()
+        return True
+
+
+def refresh_state() -> dict:
+    """Снимок состояния проверки (копия — мутация результата безопасна).
+
+    Поля: running (идёт ли проверка), started_at/done_at (time.time()),
+    ok/count/errors — итог последней проверки refresh_models, checked_at —
+    "HH:MM:SS" её завершения. До первой проверки — дефолт (все None/False)."""
+    job = _REFRESH_JOB
+    if job is None:
+        return _refresh_state_default()
+    return dict(job)
 
 
 # ==================== MULTI-BACKEND: ROUTING ====================
