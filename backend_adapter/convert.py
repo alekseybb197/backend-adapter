@@ -1,7 +1,7 @@
 """Message format conversion: Anthropic <-> OpenAI.
 
 Includes pure conversion functions and the traced OpenAI->Anthropic
-response converter (which depends on tracer + skill packages).
+response converter (which depends on tracer package).
 """
 
 import json
@@ -10,7 +10,6 @@ from typing import Any
 
 from . import config
 from .config import _cap
-from .skill import detect_skill
 from .tracer import _register_tool_use, _trace
 
 
@@ -216,8 +215,7 @@ def parse_tool_calls_from_text(text):
 def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"):
     """OpenAI response -> Anthropic response.
     Дополнительно (по сравнению с v6): извлекает reasoning_content и
-    трассирует ветвления (fallback-парсинг, маппинг finish_reason,
-    skill-детекцию по каждому tool_use)."""
+    трассирует ветвления (fallback-парсинг, маппинг finish_reason)."""
     choice = o.get("choices", [{}])[0]
     message = choice.get("message", {}) or {}
     text = message.get("content") or ""
@@ -238,11 +236,11 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
             text = clean_text if clean_text else ""
 
     if used_text_fallback:
-        # ВАЖНО для оценки качества следования скиллам: модель не смогла
+        # ВАЖНО для оценки качества следования инструкциям: модель не смогла
         # (или харнесс не смог) использовать нативный tool-calling формат
         # backend'а и адаптеру пришлось парсить JSON из текста руками.
         # Это деградация, повышающая риск некорректного вызова инструмента
-        # скилла (обрезанный JSON, лишний текст рядом и т.п.). Это реальное
+        # (обрезанный JSON, лишний текст рядом и т.п.). Это реальное
         # ветвление поведения адаптера с последствиями — поэтому у него
         # собственное событие, а не общий "harness_branch".
         _trace(
@@ -276,7 +274,6 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
             # соответствующий tool_result (см. do_POST/extract_tool_results
             # и событие "tool_result" ниже).
             _register_tool_use(session_id, tool_use_id, req_id, tool_name=name)
-            skill, evidence = detect_skill(name, input_data)
             traced_input = input_data
             if config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
                 serialized = json.dumps(input_data, ensure_ascii=False, default=str)
@@ -286,7 +283,6 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
                 {
                     "id": tool_use_id,
                     "name": name,
-                    "skill": skill,
                     # Полные аргументы вызова, не только имя — без них нельзя
                     # отличить содержательно разные вызовы одного инструмента
                     # (см. пример с двумя разными "ls" из параллельных веток).
@@ -295,16 +291,6 @@ def convert_openai_to_anthropic(o, model, session_id="unknown", req_id="unknown"
                     "input": traced_input,
                 }
             )
-            if skill:
-                _trace(
-                    session_id,
-                    req_id,
-                    "skill_signal",
-                    tool_id=tool_use_id,
-                    tool_name=name,
-                    skill=skill,
-                    evidence=evidence[:200],
-                )
 
     if not content:
         content = [{"type": "text", "text": " "}]

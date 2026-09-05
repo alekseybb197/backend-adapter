@@ -153,7 +153,7 @@ def _d(msg: str) -> None:
 - Результаты resolve backend
 - Статусы стриминга
 - Таймауты и ошибки
-- Имена инструментов и скиллов
+- Имена инструментов
 
 **Что маскируется:** если в любом из этих сообщений случайно попадёт строка вида `ADAPTER_HOME_KEY=sk-xyz` или `Bearer abc123...` — она будет замаскирована.
 
@@ -176,7 +176,6 @@ def _trace(session_id, req_id, event, **fields):
 | `model_map` | agent_model, backend_model | Нет |
 | `tool_result` | content (результат выполнения tool) | **Да** — если content содержит `Bearer ...` или `KEY=value` |
 | `response_content` | text, input (аргументы tool call), reasoning | **Да** |
-| `skill_signal` | tool_name, evidence | **Да** |
 | `backend_result` | error | **Да** (явный вызов `redact()` в вызывающем коде) |
 
 **Как найти:**

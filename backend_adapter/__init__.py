@@ -4,7 +4,6 @@ Lazy proxies for module-level globals resolved at startup:
 - SSL_CTX, _AVAILABLE_MODELS from config
 - _d, _dr from logger
 - _trace, _register_tool_use, _lookup_tool_use_producer from tracer
-- SKILL_PATTERNS from skill
 - _session_logs, _session_file_ts, _last_log_session_id from session_log
 """
 

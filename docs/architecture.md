@@ -30,7 +30,6 @@ backend_adapter/
 ├── logger.py               ← human-readable debug logs (_d, _dr)
 ├── redact.py               ← secret masking (Bearer tokens, *_KEY, *_PAT, etc.)
 ├── session_log.py          ← per-session log file management with FIFO eviction
-├── skill.py                ← skill detection from tool call argument patterns
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
@@ -212,7 +211,7 @@ Reads SSE lines from OpenAI backend chunk-by-chunk and emits Anthropic SSE event
 | `data: {"choices":[{"finish_reason":"stop"}]}` | `message_delta` (stop_reason) + `message_stop` |
 | `data: {"usage":{"prompt_tokens":N,"completion_tokens":M}}` | merged into `message_delta.usage` |
 
-Accumulates text, reasoning_content, and tool_calls buffers across chunks, then emits aggregate trace/skill/log events at stream end.
+Accumulates text, reasoning_content, and tool_calls buffers across chunks, then emits aggregate trace/log events at stream end.
 
 **Usage fix**: requests `stream_options.include_usage=true` from backend (if `ADAPTER_STREAM_INCLUDE_USAGE=1`). If backend doesn't return usage, falls back to heuristic `chars // 4` and marks as estimated in trace.
 
@@ -326,7 +325,6 @@ Event types:
 | `response_content` | After non-stream response or stream end |
 | `tool_call` | (via tool_uses array in response_content) |
 | `tool_result` | Incoming tool_result with causality chain |
-| `skill_signal` | Skill detected in tool call |
 | `tool_call_fallback` | JSON extracted from text (not native tool calling) |
 | `usage_report` | Token usage (stream mode) |
 | `adapter_invariant_check` | System message position validation |
@@ -431,39 +429,18 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 
 ---
 
-## 10. Skill detection
-
-When the adapter receives a tool call from the backend, it extracts argument fields (`command`, `file_path`, `path`, `pattern`, `notebook_path`) and checks them against regex patterns.
-
-Default patterns:
-
-| Skill | Matches |
-|---|---|
-| `devtools` | `.claude/skills/devtools`, `.qwen/skills/devtools`, `chrome-devtools` |
-| `frontmatter` | `.claude/skills/frontmatter`, `.qwen/skills/frontmatter` |
-| `klast` | `.claude/skills/klast`, `.qwen/skills/klast`, `.klast/` |
-| `mytasks` | `.claude/skills/mytasks`, `.qwen/skills/mytasks` |
-| `prreview` | `.claude/skills/prreview`, `.qwen/skills/prreview` |
-
-Custom patterns loaded from JSON file via `ADAPTER_SKILL_PATTERNS`.
-
-When detected, a `skill_signal` trace event is emitted with the skill name and matching evidence.
-
----
-
-## 11. Dependency graph
+## 10. Dependency graph
 
 ```
 backend-adapter.py
   ├── config.py          (no internal deps — stdlib only + os.environ)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming
-  ├── convert.py         → tracer, skill, config
-  ├── streaming.py       → tracer, skill, config, logger
+  ├── convert.py         → tracer, config
+  ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact
   ├── logger.py          → config, redact, session_log
   ├── redact.py          (no internal deps — stdlib only)
   ├── session_log.py     (no internal deps — PyYAML)
-  ├── skill.py           → config
   ├── daemon.py          (no internal deps — stdlib only)
   ├── webserver.py       → session_viewer, webui_status, webui_config_api (WEBUI core: serve()
   │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
@@ -489,13 +466,13 @@ Entry point (WEBUI): `backend-adapter.py` импортирует `webserver.serv
 
 ---
 
-## 12. Configuration summary
+## 11. Configuration summary
 
 All configuration via `ADAPTER_*` environment variables. See `docs/environment.md` for full reference with defaults and descriptions.
 
 ---
 
-## 13. Version
+## 12. Version
 
-Current: **v0.8.0** (see `backend-adapter.py`).
+Current: **v0.8.1** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).
