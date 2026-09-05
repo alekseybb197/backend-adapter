@@ -38,8 +38,9 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     из необязательного ключа probe YAML-записи бэкенда, либо первая из
     /v1/models), результат кэшируется ~60 с (ENDPOINT_PROBE_TTL) и
     отключается флагом ADAPTER_ENDPOINT_PROBE=0. Для каждого бэкенда
-    колонка «Доступные API» показывает найденные/ненайденные пути
-    (из config._ENDPOINT_STATE).
+    колонка «Доступные API» показывает зелёным ✓ только реально
+    работающие пути (HTTP 200); непрошедшие проверку пути на странице
+    не показываются (из config._ENDPOINT_STATE).
 
 САМОСТОЯТЕЛЬНЫЙ ЗАПУСК (standalone — python -m backend_adapter.webserver
 вне процесса адаптера): конфиг-глобалы адаптера пусты (нет YAML-конфига),
@@ -200,10 +201,13 @@ def _api_html(api: dict | None) -> str:
 
     ``api`` — результат дымовой пробы из _collect_endpoints()
     ({короткий_путь: {"found": bool, "status": int|None}}), None — бэкенд
-    ещё не пробован (standalone / ADAPTER_ENDPOINT_PROBE=0). Найденные
-    эндпойнты — зелёным с ✓, ненайденные (404) — серым «—»; пропущенный
-    из-за отсутствующей probe-модели эндпойнт в api не значится и
-    показывается серым «—», остальные — по результатам. Порядок —
+    ещё не пробован (standalone / ADAPTER_ENDPOINT_PROBE=0). Зелёным с ✓
+    показываются ТОЛЬКО реально работающие эндпоинты (found=True ⇔ HTTP
+    200, см. классификацию в config._probe_backend_endpoints); непрошедшие
+    (любой не-200 код, сетевая ошибка) и пропущенные (нет probe-модели —
+    в api не значатся) на странице НЕ показываются вовсе. Проба была
+    (api не None), но ни один эндпоинт не ответил 200 — ячейка показывает
+    один серый «—» с пояснением вместо пустого места. Порядок —
     config.ENDPOINT_PROBES (тот же, что у самой пробы)."""
     if api is None:
         return '<span style="color:#999">не опрошено</span>'
@@ -211,15 +215,13 @@ def _api_html(api: dict | None) -> str:
     for _pname, path, _tpl in config.ENDPOINT_PROBES:
         label = path[len("/v1/") :]
         ep = api.get(label)
-        if ep is None:
-            parts.append(f'<span style="color:#aaa" title="эндпоинт не пробован">{label} —</span>')
-        elif ep["found"]:
-            extra = ""
-            if ep["status"] not in (None, 200):
-                extra = f' <span style="color:#aaa;font-size:12px">({ep["status"]})</span>'
-            parts.append(f'<span style="color:#1a7f37">{label} ✓</span>{extra}')
-        else:
-            parts.append(f'<span style="color:#aaa" title="HTTP {ep["status"]}">{label} —</span>')
+        if ep is not None and ep["found"]:
+            # found=True гарантированно значит HTTP 200 (см. config.py)
+            parts.append(f'<span style="color:#1a7f37">{label} ✓</span>')
+    if not parts:
+        parts.append(
+            '<span style="color:#aaa" title="ни один эндпоинт не ответил HTTP 200">—</span>'
+        )
     return "<br>".join(parts)
 
 

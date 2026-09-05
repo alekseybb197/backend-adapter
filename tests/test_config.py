@@ -811,10 +811,10 @@ class TestEndpointProbe:
     probe_endpoints() must: use per-endpoint models from the YAML ``probe``
     key (default model otherwise), skip ONLY endpoints whose probe-model is
     absent from the backend /v1/models, classify responses by HTTP code
-    (200/400-405 → found; 404 → not found; network → backend error), cache
-    results for ENDPOINT_PROBE_TTL (second call within TTL → no network),
-    log one [ENDPOINT_PROBE] line per real probe, and honor
-    ADAPTER_ENDPOINT_PROBE=0 (no network at all).
+    (found=True only for 200; any other code and 404 → not found; network →
+    backend error), cache results for ENDPOINT_PROBE_TTL (second call within
+    TTL → no network), log one [ENDPOINT_PROBE] line per real probe, and
+    honor ADAPTER_ENDPOINT_PROBE=0 (no network at all).
     """
 
     # -- Helpers -----------------------------------------------------------
@@ -950,9 +950,9 @@ class TestEndpointProbe:
         cfg = self._setup(models=["m"])
         codes = {
             "http://aaa.local/v1/chat/completions": 200,   # completions — работает
-            "http://aaa.local/v1/messages": 400,           # messages — есть, но ключ/тело не подошли
+            "http://aaa.local/v1/messages": 400,           # messages — ключ/тело не подошли
             "http://aaa.local/v1/responses": 404,          # responses — не реализован
-            "http://aaa.local/v1/embeddings": 404,         # embeddings — не реализован
+            "http://aaa.local/v1/embeddings": 501,         # embeddings — 5xx, тоже не работает
         }
         def fake_http(method, url, headers, body, timeout):
             return codes.get(url, 404), {}, None
@@ -961,19 +961,21 @@ class TestEndpointProbe:
                                                {p: "m" for _, p, _ in cfg.ENDPOINT_PROBES},
                                                timeout=None)
         eps = res["endpoints"]
+        # found=True ТОЛЬКО для HTTP 200; любой не-200 код (400, 404, 501) — False.
         assert eps["/v1/chat/completions"] == {"status": 200, "found": True}
-        # 400 — «эндпоинт есть», но тело/ключ не подошли (found=True)
-        assert eps["/v1/messages"] == {"status": 400, "found": True}
+        assert eps["/v1/messages"] == {"status": 400, "found": False}
         assert eps["/v1/responses"] == {"status": 404, "found": False}
-        assert eps["/v1/embeddings"] == {"status": 404, "found": False}
+        assert eps["/v1/embeddings"] == {"status": 501, "found": False}
         assert res["errors"] == {}
         self._assert_all_probed(m_http, codes)
 
-    def test_classification_401_405_found(self):
+    def test_classification_non_200_4xx_5xx_not_found(self):
         cfg = self._setup(models=["m"])
         codes = {
             "http://aaa.local/v1/chat/completions": 401,
             "http://aaa.local/v1/messages": 405,
+            "http://aaa.local/v1/responses": 500,
+            "http://aaa.local/v1/embeddings": 503,
         }
         def fake_http(method, url, headers, body, timeout):
             return codes.get(url, 404), {}, None
@@ -982,8 +984,11 @@ class TestEndpointProbe:
                                                {p: "m" for _, p, _ in cfg.ENDPOINT_PROBES},
                                                timeout=None)
         eps = res["endpoints"]
-        assert eps["/v1/chat/completions"]["found"] is True
-        assert eps["/v1/messages"]["found"] is True
+        assert all(e["found"] is False for e in eps.values())
+        assert eps["/v1/chat/completions"] == {"status": 401, "found": False}
+        assert eps["/v1/messages"] == {"status": 405, "found": False}
+        assert eps["/v1/responses"] == {"status": 500, "found": False}
+        assert eps["/v1/embeddings"] == {"status": 503, "found": False}
 
     def test_network_error_classified_backend_error(self):
         cfg = self._setup(models=["m"])

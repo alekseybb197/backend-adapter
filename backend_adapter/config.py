@@ -454,12 +454,11 @@ def _fetch_models(base: str, key: str, timeout: float | None = None) -> list[dic
 # ADAPTER_ENDPOINT_PROBE (0 — автопроба отключена).
 #
 # Классификация по HTTP-коду ответа (см. tmp/plan-llm-endpoints.md):
-#   200                  — эндпойнт работает;
-#   400/401/405          — эндпойнт ЕСТЬ (реализован), но тело/ключ не
-#                          подошли (настоящий бэкенд на несуществующем
-#                          пути отвечает 404);
-#   404                  — эндпойнт не реализован;
-#   сеть/таймаут         — ошибка бэкенда целиком.
+#   200                  — эндпоинт работает (found=True);
+#   прочие 4xx/5xx (вкл. 400/401/405/429) и 404 — эндпоинт НЕ работает
+#                         (found=False): тело/ключ не подошли, либо путь
+#                         не реализован — на странице такие не показываются;
+#   сеть/таймаут         — ошибка бэкенда целиком (found=False + текст).
 # Пары в YAML-конфиге (`probe` в записи backend) задают, КАКОЙ моделью
 # пробовать каждый эндпойнт; неперечисленные/пустые — моделью по умолчанию.
 # Модели, не найденные среди моделей бэкенда в /v1/models, пропускаются
@@ -496,7 +495,7 @@ def _http_json(
 
     Возвращает ``(status_code | None, json_data | None, err_str | None)``:
     - ``(code, тело, None)`` — сервер ответил (в т.ч. HTTPError 4xx/5xx —
-      это НЕ исключение для дыма: код 400/401/405 — признак «эндпоинт есть»);
+      это НЕ исключение для дыма: код несёт информацию о статусе эндпоинта);
     - ``(None, None, текст)`` — сетевая ошибка/таймаут/битый JSON."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -691,9 +690,9 @@ def _probe_backend_endpoints(backend: dict, probes: dict[str, str], timeout: flo
     модель на каждый эндпойнт, сверена с /v1/models бэкенда). Возвращает
     ``{"endpoints": {путь: {"status": int|None, "found": bool}},
     "errors": {короткое_имя: текст}}`` — endpoints только для реально
-    пробованных путей, найденные/ненайденные классифицированы по HTTP-коду
-    (200 → found; 400/401/405 → «эндпоинт есть» found=True; 404 → not found;
-    сеть/таймаут → ошибка бэкенда в errors)."""
+    пробованных путей, классифицированы по HTTP-коду: found=True только
+    для 200; любой другой код (400/401/405/429, 5xx, 404) → found=False;
+    сеть/таймаут → found=False + текст ошибки в errors."""
     base = backend["base"].rstrip("/")
     key = backend.get("key", "")
     endpoints: dict[str, dict] = {}
@@ -724,14 +723,13 @@ def _probe_backend_endpoints(backend: dict, probes: dict[str, str], timeout: flo
             errors[pname] = f"network error: {err}"
             continue
         assert code is not None
-        if code == 404:
-            endpoints[path] = {"status": code, "found": False}
-        elif code == 200:
+        if code == 200:
             endpoints[path] = {"status": code, "found": True}
         else:
-            # 400/401/405 и прочие 4xx/5xx: эндпоинт есть (настоящий бэкенд
-            # на несуществующем пути отвечает 404), но тело/ключ не подошли.
-            endpoints[path] = {"status": code, "found": True}
+            # Не-200 (404, 400/401/405/429, прочие 4xx/5xx): эндпоинт НЕ
+            # работает — тело/ключ не подошли либо путь не реализован.
+            # На странице такие не показываются (зелёный ✓ — только 200).
+            endpoints[path] = {"status": code, "found": False}
     return {"endpoints": endpoints, "errors": errors}
 
 

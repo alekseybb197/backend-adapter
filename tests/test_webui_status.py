@@ -4,7 +4,8 @@
 Tests cover: _config_snapshot() mode detection (multi-backend / standalone),
 _collect_endpoints() grouping, the «Доступные API» column (rendered from
 config._ENDPOINT_STATE — result of the smoke probe run inside
-refresh_models), the background-check contract (v0.8.2): GET "/" does NOT
+refresh_models; a green ✓ is shown only for endpoints that answered HTTP
+200 — failed probes are hidden), the background-check contract (v0.8.2): GET "/" does NOT
 start a check — it renders the current state from config.refresh_state()
 (seeded as _REFRESH_JOB here); POST "/" (the «⟳ Проверить сейчас» button)
 launches config.start_refresh(timeout=PROBE_TIMEOUT) and answers
@@ -259,27 +260,26 @@ class TestApiColumn:
         config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
         assert ws._collect_endpoints()[0]["api"] is None
 
-    def test_render_shows_found_and_not_found(self):
-        # Найденные пути зелёным с ✓, ненайденные — серым «—».
+    def test_render_shows_found_and_hides_not_found(self):
+        # Работающий путь (200) — зелёным с ✓; непрошедший (404) не показывается.
         config, ws = _fresh_modules()
         _seed_endpoint_state(config, "AAA", {
             "chat/completions": {"found": True, "status": 200},
             "messages": {"found": False, "status": 404},
         })
         body = self._seed(config, ws)
-        assert "chat/completions" in body and "✓" in body
-        # messages: 404 → найден не был → «—»
-        assert "messages" in body and "—" in body
+        assert "chat/completions ✓" in body
+        assert "messages" not in body
 
-    def test_render_status_400_shows_check_and_status(self):
-        # 400/401/405 классифицируются как «эндпоинт есть» — зелёный ✓ с кодом.
+    def test_render_status_400_hidden(self):
+        # 400 — эндпоинт не прошёл проверку (found=False): на странице его нет.
         config, ws = _fresh_modules()
         _seed_endpoint_state(config, "AAA", {
-            "messages": {"found": True, "status": 400},
+            "messages": {"found": False, "status": 400},
         })
         body = self._seed(config, ws)
-        assert "messages" in body and "✓" in body
-        assert "400" in body
+        assert "messages" not in body
+        assert "✓" not in body
 
     def test_render_unprobed_shows_not_probed(self):
         # Бэкенд вообще не пробован (нет записи в _ENDPOINT_STATE) — «не опрошено».
@@ -287,18 +287,32 @@ class TestApiColumn:
         body = self._seed(config, ws)
         assert "не опрошено" in body
 
-    def test_render_missing_endpoint_shows_dash(self):
+    def test_render_missing_endpoint_hidden(self):
         # Пропущенный эндпоинт (probe-модель не найдена → в результат не попал):
-        # в ячейке он «—», остальные — по результатам пробы.
+        # в ячейке не показывается; виден только реально работающий (200).
         config, ws = _fresh_modules()
         _seed_endpoint_state(config, "AAA", {
             "chat/completions": {"found": True, "status": 200},
         })
         body = self._seed(config, ws)
         assert "chat/completions ✓" in body
-        assert "messages —" in body
-        assert "responses —" in body
-        assert "embeddings —" in body
+        assert "messages" not in body
+        assert "responses" not in body
+        assert "embeddings" not in body
+
+    def test_render_all_unavailable_shows_placeholder(self):
+        # Проба была, но ни один эндпоинт не ответил 200 — серая «—» вместо
+        # пустой ячейки (никаких зелёных ✓).
+        config, ws = _fresh_modules()
+        _seed_endpoint_state(config, "AAA", {
+            "chat/completions": {"found": False, "status": 404},
+            "messages": {"found": False, "status": 501},
+            "responses": {"found": False, "status": 400},
+            "embeddings": {"found": False, "status": None},
+        })
+        body = self._seed(config, ws)
+        assert "ни один эндпоинт не ответил HTTP 200" in body
+        assert "✓" not in body
 
     def test_header_and_api_cell_present(self):
         config, ws = _fresh_modules()
@@ -589,7 +603,7 @@ class TestStatusHTTP:
             assert status == 200
             assert "<th>Endpoints</th>" in body  # заголовок колонки API
             assert "chat/completions ✓" in body
-            assert "messages —" in body
+            assert "messages" not in body  # 404 — на странице не показывается
         finally:
             httpd.shutdown()
             httpd.server_close()
