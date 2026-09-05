@@ -49,6 +49,10 @@ def fresh_env(monkeypatch):
         "ADAPTER_STREAM_INCLUDE_USAGE": "1",
         "ADAPTER_MODELS_MAPPING": "",
         "ADAPTER_BACKEND_CONFIG": "",
+        # Endpoint probe off by default in tests: probe tests opt in via
+        # _setup(probe_enabled=True); without this, refresh_models would fire
+        # real network smoke-probes in unrelated tests.
+        "ADAPTER_ENDPOINT_PROBE": "0",
         "ADAPTER_DEBUG_TAGS_OUT": "0",
         "ADAPTER_DEBUG_TAGS_FULL": "",
         "ADAPTER_WEBUI_ENABLE": "0",
@@ -94,6 +98,10 @@ def _default_config():
         "ADAPTER_STREAM_INCLUDE_USAGE": "1",
         "ADAPTER_MODELS_MAPPING": "",
         "ADAPTER_BACKEND_CONFIG": "",
+        # Endpoint probe off by default in tests: probe tests opt in via
+        # _setup(probe_enabled=True); without this, refresh_models would fire
+        # real network smoke-probes in unrelated tests.
+        "ADAPTER_ENDPOINT_PROBE": "0",
         "ADAPTER_DEBUG_TAGS_OUT": "0",
         "ADAPTER_DEBUG_TAGS_FULL": "",
         "ADAPTER_WEBUI_ENABLE": "0",
@@ -161,6 +169,8 @@ def isolate_logs(fresh_env):
     config._BACKEND_BY_NAME.clear()
     config._MODEL_TO_BACKEND.clear()
     config._DEFAULT_BACKEND = None
+    config._ENDPOINT_STATE.clear()
+    config._REFRESH_JOB = None
 
     yield
 
@@ -181,6 +191,7 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     models_response = None
     completions_response = None
     completions_status = 200
+    extra_post_paths = {}  # {path: status} — для endpoint-probe тестов
     request_count = 0
     requests = []  # list of all (path, method, body) requests
 
@@ -215,6 +226,12 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
             elif FakeBackendHandler.completions_status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
+        elif self.path in FakeBackendHandler.extra_post_paths:
+            # Дымовые пробы остальных эндпоинтов: /v1/messages, /v1/responses,
+            # /v1/embeddings — отвечаем настроенным статусом без тела.
+            self.send_response(FakeBackendHandler.extra_post_paths[self.path])
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
@@ -279,6 +296,14 @@ class FakeBackend:
     def requests(self):
         return FakeBackendHandler.requests
 
+    @property
+    def extra_post_paths(self):
+        return FakeBackendHandler.extra_post_paths
+
+    @extra_post_paths.setter
+    def extra_post_paths(self, value):
+        FakeBackendHandler.extra_post_paths = value
+
     def serve(self):
         """Start the fake backend server in a background thread."""
         self.server = ThreadingHTTPServer((self.host, 0), FakeBackendHandler)
@@ -310,6 +335,7 @@ def fake_backend():
     FakeBackendHandler.models_response = None
     FakeBackendHandler.completions_response = None
     FakeBackendHandler.completions_status = 200
+    FakeBackendHandler.extra_post_paths = {}
     FakeBackendHandler.request_count = 0
     FakeBackendHandler.requests = []
     yield backend

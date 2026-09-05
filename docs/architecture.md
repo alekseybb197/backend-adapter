@@ -33,7 +33,8 @@ backend_adapter/
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
-├── webui_status.py         ← WEBUI endpoint "/": status page (version, LLM endpoints, models)
+├── webui_status.py         ← WEBUI endpoints "/" + "/api/refresh-state": status page
+│                             (version, LLM endpoints, models) + background-check state
 ├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
@@ -128,12 +129,19 @@ Claude Code (Anthropic API client)
    careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` when set,
    otherwise an independent `./tmp/webui` (created on demand — status page `/`
    works out of the box; `/session` is empty until logs exist; endpoints: `/` —
-   status, `/session` — session viewer, `/config` — runtime-config form).
-   Each GET/POST to the status page `/` re-probes the backends
-   (`config.refresh_models`, 5 s timeout per endpoint) and rebuilds the
-   `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches from the live answers
-   — models added by the backend after startup are picked up without restarting
-   the adapter. The `/config` endpoint toggles the runtime debug-write pool
+   status, `/session` — session viewer, `/config` — runtime-config form,
+   `/api/refresh-state` — JSON state of the background check, see §6.5).
+   Loading the status page `/` (GET) does **not** probe the backends — it
+   renders the current state (`config.refresh_state()`: models from the startup
+   probe, or from the last check). A check is started only by the
+   «⟳ Проверить сейчас» button (POST `/`): `config.start_refresh` runs
+   `config.refresh_models` (5 s timeout per endpoint) in a background thread
+   and answers immediately — while it runs, the page shows a
+   «Проверка выполняется…» banner and polls `/api/refresh-state`; when the
+   check finishes, JS reloads the page (`location.reload()`), which renders
+   the fresh `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches — models added
+   by the backend after startup are picked up without restarting the adapter.
+   The `/config` endpoint toggles the runtime debug-write pool
    (`config.get_runtime_config`/`set_runtime_config`, see §8.6) without a restart.
 
 ### 4.2 POST /v1/messages (do_POST, server.py:148–581)
@@ -231,7 +239,71 @@ backend:
   - name: litellm
     base: "https://llm.example.com"
     key: ADAPTER_LITELLM_KEY
+    probe:                   # необязательно — модель на эндпоинт дымовой пробы
+      - completions: qwen3.6
+      - messages:
+      - responses: gpt-5-sol
+      - embeddings: text-embedding-3-small
 ```
+
+### 6.4 Дымовая проба API-эндпойнтов (`probe_endpoints`, config.py)
+
+Статус-страница WEBUI `/` показывает не только список моделей бэкенда, но и
+какие известные API-эндпойнты он реально обслуживает. Определение — короткими
+POST-запросами с `max_tokens:1` по фиксированному списку `ENDPOINT_PROBES`
+(`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`);
+классификация по HTTP-коду: `200` — работает, `400/401/405` — эндпоинт есть
+(тело/ключ не подошли), `404` — не реализован, сеть/таймаут — ошибка бэкенда.
+Модель на эндпоинт — из необязательного ключа `probe` YAML-записи (у разных
+эндпоинтов бэкенда свои модели), иначе первая модель бэкенда из `/v1/models`;
+заданная в `probe` модель, отсутствующая среди моделей бэкенда, пропускает
+только свой эндпоинт (`[WARN]` + текст в `errors`).
+
+Проба встроена в `config.refresh_models` (конец функции, после обновления кэша
+моделей): вызывается при каждой проверке бэкендов по кнопке «⟳ Проверить
+сейчас» (POST `/` → `config.start_refresh` → фоновый воркер, см. §6.5), её
+загрузка страницы (GET `/`) не запускает. Результат добавляется в
+возвращаемый dict ключом `"probe"` (старые читатели `ok/count/errors` не
+ломаются) и кэшируется в `_ENDPOINT_STATE` (~60 с, `ENDPOINT_PROBE_TTL`);
+повторная проверка в пределах TTL сеть не трогает. Мастер-флаг
+`ADAPTER_ENDPOINT_PROBE=0` отключает автопробу.
+Фактическая проба пишется в консоль блоком `[ENDPOINT_PROBE]` (print, гейт
+`ADAPTER_DEBUG_ENABLE`) — одна строка на бэкенд с сырыми HTTP-кодами; кэш-хиты
+не логируются. Проба чисто наблюдательная: на маршрутизацию запросов не влияет.
+
+### 6.5 Фоновая проверка бэкендов (start_refresh / refresh_state, config.py)
+
+Раньше каждый GET/POST статус-страницы `/` синхронно гонял
+`config.refresh_models` (опрос `/v1/models` всех бэкендов + дымовая проба), и
+при недоступном/медленном бэкенде HTTP-ответ висел (N бэкендов × 5 с на
+эндпоинт). Теперь проверка — **фоновая, строго по кнопке**:
+
+- **Состояние** — модульный снимок-словарь `_REFRESH_JOB` в `config.py`:
+  `running`, `started_at`/`done_at` (time.time), `ok`/`count`/`errors` (итог
+  последней `refresh_models`), `checked_at` («HH:MM:SS» завершения). Снимок
+  **иммутабелен** — заменяется целиком (атомарная замена ссылки), читатели
+  (`webui_status`) берут `refresh_state()` без лока. До первой проверки —
+  дефолт-словарь (все None/False).
+- **Запуск** — `start_refresh(timeout)` (POST `/`, кнопка «⟳ Проверить
+  сейчас»): под `_REFRESH_LOCK` публикует `running=True` и стартует daemon-
+  поток `_refresh_worker`; пока проверка идёт, повторный вызов возвращает
+  `False` (второй поток не создаётся). `_refresh_worker` зовёт
+  `refresh_models(timeout)` и в `finally` публикует финальный снимок
+  (`running=False`, результат или текст исключения в `errors["__worker__"]`) —
+  проверка не может «зависнуть навсегда». HTTP-ответ не блокируется.
+- **Страница** (`webui_status.py`): GET `/` читает `config.refresh_state()` и
+  рендерит последний результат (проверку не запускает); POST `/` вызывает
+  `start_refresh(timeout=PROBE_TIMEOUT)` и отвечает сразу. Пока проверка идёт,
+  страница показывает баннер «Проверка выполняется…» и JS `status_poll`
+  опрашивает JSON-эндпоинт **`/api/refresh-state`** (`RefreshStateEndpoint`,
+  тот же модуль) каждые ~2 с; как только `running=false` и есть `done_at` —
+  `location.reload()` рендерит свежий результат. Авто-релоад безопасен: GET
+  проверку не запускает, зацикливания нет.
+- `refresh_models` при этом мутирует конфиг-глобалы (`_AVAILABLE_MODELS` и
+  др.) из фонового потока — то же отношение, что было при синхронном
+  refresh; отдельный Lock вокруг внутренностей не добавляется (тот же
+  компромисс, что и раньше — см. комментарий у `_refresh_worker` в
+  config.py), менеджер синхронизирует только запуск и публикацию результата.
 
 ### 6.2 Разрешение коллизий имён моделей
 
@@ -433,7 +505,8 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 
 ```
 backend-adapter.py
-  ├── config.py          (no internal deps — stdlib only + os.environ)
+  ├── config.py          (no internal deps — stdlib only + os.environ;
+  │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
@@ -445,7 +518,7 @@ backend-adapter.py
   ├── webserver.py       → session_viewer, webui_status, webui_config_api (WEBUI core: serve()
   │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
-  ├── webui_status.py    → webserver (эндпойнт "/"), config
+  ├── webui_status.py    → webserver (эндпойнты "/", "/api/refresh-state"), config
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   └── artifact_tree*.py  (8 modules, layered):
       artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
@@ -474,5 +547,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.1** (see `backend-adapter.py`).
+Current: **v0.8.2** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).
