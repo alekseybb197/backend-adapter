@@ -2,8 +2,10 @@
 """Unit + HTTP tests for backend_adapter.webui_status — status page at "/".
 
 Tests cover: _config_snapshot() mode detection (multi-backend / standalone),
-_collect_endpoints() grouping, GET "/" and POST "/" — both
-trigger config.refresh_models() (on-demand model cache refresh, mocked here)
+_collect_endpoints() grouping, the «Доступные API» column (rendered from
+config._ENDPOINT_STATE — result of the smoke probe run inside
+refresh_models), GET "/" and POST "/" — both trigger
+config.refresh_models() (on-demand model cache refresh, mocked here)
 and render the page from the refreshed globals: success shows the new model
 list, failure keeps the old cache and shows the error text, standalone
 (no endpoints) renders the notice without any refresh call.
@@ -78,12 +80,27 @@ def _fresh_modules():
     return config, webui_status
 
 
-def _ok_refresh(count: int, errors=None) -> dict:
-    return {"ok": True, "count": count, "errors": errors or {}}
+def _ok_refresh(count: int, errors=None, probe=None) -> dict:
+    res = {"ok": True, "count": count, "errors": errors or {}}
+    if probe is not None:
+        res["probe"] = probe
+    return res
 
 
 def _fail_refresh(count: int, errors) -> dict:
     return {"ok": False, "count": count, "errors": errors}
+
+
+def _seed_endpoint_state(config, backend_name: str, paths: dict):
+    """Заполнить config._ENDPOINT_STATE результатом пробы (пути без /v1/).
+
+    ``paths`` — {короткий_путь: {"found": bool, "status": int|None}}; путь
+    отдаётся как есть (рендер сравнивает по коротким именам)."""
+    config._ENDPOINT_STATE[backend_name] = {
+        "at": 1.0,
+        "endpoints": {f"/v1/{p}": v for p, v in paths.items()},
+        "errors": {},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +182,116 @@ class TestConfigSnapshot:
         config._MODEL_TO_BACKEND = {"m1": ("AAA", config._BACKENDS[0])}
         endpoints = ws._collect_endpoints()
         assert endpoints[0]["key"] == "secret-aaa"
+
+
+# ---------------------------------------------------------------------------
+# Колонка «Доступные API»: из config._ENDPOINT_STATE (результат пробы)
+# ---------------------------------------------------------------------------
+
+class TestApiColumn:
+    def _ctx(self):
+        return mock.Mock(version="0.0.0-test")
+
+    def _seed(self, config, ws, found=None, api_state=None, refresh=None):
+        """Общий посев: бэкенд AAA, модели, проба-состояние и refresh."""
+        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
+        if api_state is not None:
+            config._ENDPOINT_STATE["AAA"] = api_state
+        if refresh is None:
+            refresh = _ok_refresh(1)
+        return ws._render_status_page(self._ctx(), refresh=refresh).decode()
+
+    def test_collect_endpoints_reads_probe_state(self):
+        # api берётся из config._ENDPOINT_STATE и нормализуется (пути без
+        # "/v1/"-префикса, порядок значений неважен — рендер восстановит).
+        config, ws = _fresh_modules()
+        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
+        config._ENDPOINT_STATE["AAA"] = {
+            "at": 1.0,
+            "endpoints": {
+                "/v1/chat/completions": {"found": True, "status": 200},
+                "/v1/messages": {"found": False, "status": 404},
+            },
+            "errors": {},
+        }
+        ep = ws._collect_endpoints()[0]
+        assert ep["api"] == {
+            "chat/completions": {"found": True, "status": 200},
+            "messages": {"found": False, "status": 404},
+        }
+
+    def test_collect_endpoints_no_state_means_none(self):
+        # Бэкенд без записи в _ENDPOINT_STATE — api None (не пробован:
+        # standalone / проба выключена).
+        config, ws = _fresh_modules()
+        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
+        assert ws._collect_endpoints()[0]["api"] is None
+
+    def test_render_shows_found_and_not_found(self):
+        # Найденные пути зелёным с ✓, ненайденные — серым «—».
+        config, ws = _fresh_modules()
+        _seed_endpoint_state(config, "AAA", {
+            "chat/completions": {"found": True, "status": 200},
+            "messages": {"found": False, "status": 404},
+        })
+        body = self._seed(config, ws)
+        assert "chat/completions" in body and "✓" in body
+        # messages: 404 → найден не был → «—»
+        assert "messages" in body and "—" in body
+
+    def test_render_status_400_shows_check_and_status(self):
+        # 400/401/405 классифицируются как «эндпоинт есть» — зелёный ✓ с кодом.
+        config, ws = _fresh_modules()
+        _seed_endpoint_state(config, "AAA", {
+            "messages": {"found": True, "status": 400},
+        })
+        body = self._seed(config, ws)
+        assert "messages" in body and "✓" in body
+        assert "400" in body
+
+    def test_render_unprobed_shows_not_probed(self):
+        # Бэкенд вообще не пробован (нет записи в _ENDPOINT_STATE) — «не опрошено».
+        config, ws = _fresh_modules()
+        body = self._seed(config, ws)
+        assert "не опрошено" in body
+
+    def test_render_missing_endpoint_shows_dash(self):
+        # Пропущенный эндпоинт (probe-модель не найдена → в результат не попал):
+        # в ячейке он «—», остальные — по результатам пробы.
+        config, ws = _fresh_modules()
+        _seed_endpoint_state(config, "AAA", {
+            "chat/completions": {"found": True, "status": 200},
+        })
+        body = self._seed(config, ws)
+        assert "chat/completions ✓" in body
+        assert "messages —" in body
+        assert "responses —" in body
+        assert "embeddings —" in body
+
+    def test_header_and_api_cell_present(self):
+        config, ws = _fresh_modules()
+        body = self._seed(config, ws)
+        assert "Доступные API" in body
+
+    def test_standalone_renders_unprobed_without_refresh(self):
+        # Standalone: refresh не делался — ячейки «не опрошено», никакой сети.
+        config, ws = _fresh_modules()
+        config.ADAPTER_BACKEND_CONFIG = ""
+        body = ws._render_status_page(self._ctx()).decode()
+        assert "нет данных" in body  # нет строк вообще
+
+    def test_render_page_footer_mentions_api_check(self):
+        # refresh is None (standalone без эндпойнтов) — футер про авто-проверку.
+        config, ws = _fresh_modules()
+        config.ADAPTER_BACKEND_CONFIG = ""
+        body = ws._render_status_page(self._ctx()).decode()
+        assert "API-эндпойнтов" in body or "max_tokens" in body
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +454,31 @@ class TestStatusHTTP:
             httpd.server_close()
         # Авторефреш не ушёл в сеть: в standalone нет эндпойнтов
         assert config._fetch_models is not None  # (заглушка: вызов был бы с сетью)
+
+    def test_get_root_shows_api_column_from_state(self, tmp_path):
+        # Полный путь: GET "/" → refresh_models (замокан) → страница рендерит
+        # колонку «Доступные API» из config._ENDPOINT_STATE (в проде туда
+        # пишет probe_endpoints, выполняющийся внутри refresh_models).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
+        _seed_endpoint_state(config, "AAA", {
+            "chat/completions": {"found": True, "status": 200},
+            "messages": {"found": False, "status": 404},
+        })
+        with mock.patch.object(config, "refresh_models", return_value=_ok_refresh(1)):
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, body = _http_get(port, "/")
+                assert status == 200
+                assert "Доступные API" in body
+                assert "chat/completions ✓" in body
+                assert "messages —" in body
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
     def test_post_live_refresh_success(self, tmp_path):
         config, ws = _fresh_modules()

@@ -6,7 +6,9 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
   - версию кода (из WebContext.version — в адаптере это __version__ из
     backend-adapter.py, единственный источник);
   - режим работы (multi-backend / standalone);
-  - каждый настроенный LLM-эндпойнт: доступность и список моделей.
+  - каждый настроенный LLM-эндпойнт: доступность, список моделей и
+    колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
+    обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже).
 
 Откуда данные:
   - GET "/" и POST "/" (кнопка «⟳ Проверить сейчас») делают ОДНО И ТО ЖЕ:
@@ -24,6 +26,15 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     провале старый список моделей сохраняется и показывается на странице
     вместе с текстом ошибки; при частичном успехе страница показывает
     свежий список ответивших бэкендов и тексты ошибок упавших.
+  - Дымовая проба API: refresh_models дополнительно несёт "probe" —
+    результат config.probe_endpoints(): какие из известных эндпойнтов
+    (/v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings)
+    бэкенд обслуживает. Проба — короткие POST с max_tokens:1 (модель —
+    из необязательного ключа probe YAML-записи бэкенда, либо первая из
+    /v1/models), результат кэшируется ~60 с (ENDPOINT_PROBE_TTL) и
+    отключается флагом ADAPTER_ENDPOINT_PROBE=0. Для каждого бэкенда
+    колонка «Доступные API» показывает найденные/ненайденные пути
+    (из config._ENDPOINT_STATE).
 
 САМОСТОЯТЕЛЬНЫЙ ЗАПУСК (standalone — python -m backend_adapter.webserver
 вне процесса адаптера): конфиг-глобалы адаптера пусты (нет YAML-конфига),
@@ -56,11 +67,15 @@ MODEL_STRICT_CAP = 60  # потолок выводимых моделей на �
 def _collect_endpoints() -> list[dict]:
     """Список настроенных LLM-эндпойнтов из конфиг-глобалов адаптера.
 
-    Каждый элемент: {"name", "base", "key", "models": [model_id, ...]}.
+    Каждый элемент: {"name", "base", "key", "models": [model_id, ...],
+    "api": {"путь_без_/v1": {"found": bool, "status": int|None}} | None}.
     models — модели, успешно опрошенные на старте адаптера (из
     _MODEL_TO_BACKEND, сгруппированные по бэкенду; это ровно те модели,
     что адаптер реально принимает в запросах). key — токен для живой
-    пробы (в HTML не выводится).
+    пробы (в HTML не выводится). api — результат дымовой пробы эндпойнтов
+    из config._ENDPOINT_STATE (нормализован: ключи без префикса "/v1/",
+    в порядке config.ENDPOINT_PROBES); None — бэкенд ещё не пробован
+    (standalone: refresh не делался; ADAPTER_ENDPOINT_PROBE=0).
 
     Режимы:
       - multi-backend в процессе адаптера (_BACKENDS заполнен при старте);
@@ -73,6 +88,13 @@ def _collect_endpoints() -> list[dict]:
     if config._BACKENDS:
         # Бэкенды из YAML, загружен адаптером при старте
         for b in config._BACKENDS:
+            api = None
+            ep_state = config._ENDPOINT_STATE.get(b["name"])
+            if ep_state and ep_state.get("endpoints"):
+                # Ключи результата — полные пути ("/v1/chat/completions");
+                # нормализуем до "chat/completions" (без "/v1/") — рендер
+                # сам восстановит порядок из ENDPOINT_PROBES.
+                api = {path[len("/v1/") :]: ep for path, ep in ep_state["endpoints"].items()}
             endpoints.append(
                 {
                     "name": b["name"],
@@ -83,6 +105,7 @@ def _collect_endpoints() -> list[dict]:
                         for mid, (bname, _) in config._MODEL_TO_BACKEND.items()
                         if bname == b["name"]
                     ),
+                    "api": api,
                 }
             )
         return endpoints
@@ -96,7 +119,15 @@ def _collect_endpoints() -> list[dict]:
     if cfg_path and os.path.isfile(cfg_path):
         blocks = config._parse_backend_yaml(cfg_path)
         for b in blocks or []:
-            endpoints.append({"name": b["name"], "base": b["base"], "key": b["key"], "models": []})
+            endpoints.append(
+                {
+                    "name": b["name"],
+                    "base": b["base"],
+                    "key": b["key"],
+                    "models": [],
+                    "api": None,
+                }
+            )
     return endpoints
 
 
@@ -139,6 +170,34 @@ def _models_html(models: list[str], status: str) -> str:
     return f"{shown} <span style='color:#999'>(+{len(models) - MODEL_STRICT_CAP} ещё)</span>"
 
 
+def _api_html(api: dict | None) -> str:
+    """HTML ячейки «Доступные API» для одного бэкенда.
+
+    ``api`` — результат дымовой пробы из _collect_endpoints()
+    ({короткий_путь: {"found": bool, "status": int|None}}), None — бэкенд
+    ещё не пробован (standalone / ADAPTER_ENDPOINT_PROBE=0). Найденные
+    эндпойнты — зелёным с ✓, ненайденные (404) — серым «—»; пропущенный
+    из-за отсутствующей probe-модели эндпойнт в api не значится и
+    показывается серым «—», остальные — по результатам. Порядок —
+    config.ENDPOINT_PROBES (тот же, что у самой пробы)."""
+    if api is None:
+        return '<span style="color:#999">не опрошено</span>'
+    parts = []
+    for _pname, path, _tpl in config.ENDPOINT_PROBES:
+        label = path[len("/v1/") :]
+        ep = api.get(label)
+        if ep is None:
+            parts.append(f'<span style="color:#aaa" title="эндпоинт не пробован">{label} —</span>')
+        elif ep["found"]:
+            extra = ""
+            if ep["status"] not in (None, 200):
+                extra = f' <span style="color:#aaa;font-size:12px">({ep["status"]})</span>'
+            parts.append(f'<span style="color:#1a7f37">{label} ✓</span>{extra}')
+        else:
+            parts.append(f'<span style="color:#aaa" title="HTTP {ep["status"]}">{label} —</span>')
+    return "<br>".join(parts)
+
+
 def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
     """HTML статус-страницы.
 
@@ -151,7 +210,9 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
     refresh["errors"] — строка показывает «недоступен (текст ошибки)».
     Модели — из обновлённых конфиг-глобалов: при полном провале refresh
     кэш не тронут (показывается прежний список), при частичном — упавший
-    бэкенд честно без моделей."""
+    бэкенд честно без моделей. Колонка «Доступные API» рендерится из
+    config._ENDPOINT_STATE через _collect_endpoints (сама проба выполняется
+    внутри refresh_models; refresh["probe"] отдельно не рендерится)."""
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
@@ -181,17 +242,20 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
         <td>{html.escape(ep["name"])}</td>
         <td><code>{html.escape(ep["base"])}</code></td>
         <td>{status_cell}</td>
+        <td>{_api_html(ep.get("api"))}</td>
         <td>{models_cell}</td>
       </tr>""")
 
     if not endpoints:
         rows.append("""
-      <tr><td colspan="4" style="color:#888">нет данных (см. примечание ниже)</td></tr>""")
+      <tr><td colspan="5" style="color:#888">нет данных (см. примечание ниже)</td></tr>""")
 
     if refresh is None:
         footer = (
             '<p style="color:#888">Список моделей обновляется при каждой '
-            "загрузке страницы (GET /v1/models, таймаут 5 с на эндпойнт).</p>"
+            "загрузке страницы (GET /v1/models, таймаут 5 с на эндпойнт); "
+            "заодно проверяются API-эндпойнты бэкендов (POST max_tokens:1, "
+            "кэш 60 с, ADAPTER_ENDPOINT_PROBE=0 — отключить).</p>"
         )
     else:
         count = refresh.get("count", 0)
@@ -239,7 +303,7 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
    <a href="/config">runtime config →</a></p>
 {note_html}
 <table>
-  <tr><th>Эндпойнт</th><th>Base URL</th><th>Статус</th><th>Модели</th></tr>
+  <tr><th>Эндпойнт</th><th>Base URL</th><th>Статус</th><th>Доступные API</th><th>Модели</th></tr>
   {"".join(rows)}
 </table>
 {footer}
@@ -257,13 +321,14 @@ def _render_status_page(context, refresh=None, checked_at=None) -> bytes:
 
 @webserver.register
 class StatusEndpoint(webserver.Endpoint):
-    """Эндпойнт "/": статус-страница (версия кода, эндпойнты LLM, модели).
+    """Эндпойнт "/": статус-страница (версия, эндпойнты LLM, API, модели).
 
     GET и POST делают одно и то же: обновляют список моделей
-    (config.refresh_models с коротким таймаутом PROBE_TIMEOUT) и рендерят
-    страницу из обновлённых глобалов. Обновление только по явному сигналу
-    (загрузка страницы / кнопка «⟳ Проверить сейчас») — никакого
-    периодического refresh."""
+    (config.refresh_models с коротким таймаутом PROBE_TIMEOUT; внутри —
+    и дымовая проба API-эндпойнтов, результат — в колонке «Доступные
+    API» из config._ENDPOINT_STATE) и рендерят страницу из обновлённых
+    глобалов. Обновление только по явному сигналу (загрузка страницы /
+    кнопка «⟳ Проверить сейчас») — никакого периодического refresh."""
 
     prefix = "/"
 
@@ -298,6 +363,7 @@ __all__ = [
     "MODEL_STRICT_CAP",
     "_collect_endpoints",
     "_config_snapshot",
+    "_api_html",
     "_render_status_page",
     "StatusEndpoint",
 ]
