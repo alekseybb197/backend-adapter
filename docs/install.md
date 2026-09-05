@@ -161,6 +161,17 @@ backend-adapter/
 curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash
 ```
 
+> **macOS: Gatekeeper (quarantine).** Скачанный браузером или curl бинарник
+> помечается атрибутом `com.apple.quarantine`; при первом запуске система заблокирует его
+> («damaged» / «cannot be opened because the developer cannot be verified»). Снять атрибут:
+>
+> ```bash
+> xattr -d com.apple.quarantine /usr/local/bin/backend-adapter
+> ```
+>
+> Атрибут ставится при скачивании; у файла, уже снявшего его, — команда вернёт ошибку
+> `No such xattr`, это нормально. Дальше запускайте обычным способом (раздел 4.3).
+
 Установка бинарника **и** сервиса автозапуска одной командой:
 
 ```bash
@@ -230,6 +241,13 @@ export ADAPTER_BACKEND_KEY_LLM_SERVICE="sk-..."
 export ADAPTER_BACKEND_CONFIG="/path/to/adapter.yaml"
 chmod +x backend-adapter-linux-x64        # только Linux; на macOS права обычно уже стоят
 ./backend-adapter-linux-x64
+```
+
+Если установщик клал бинарник в `/usr/local/bin` (или `~/.local/bin`) и запуск из этой
+папки падает с ошибкой Gatekeeper — снимите атрибут quarantine с установленного файла:
+
+```bash
+xattr -d com.apple.quarantine /usr/local/bin/backend-adapter   # или ~/.local/bin/backend-adapter
 ```
 
 **Windows (PowerShell):**

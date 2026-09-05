@@ -178,6 +178,17 @@ install_binary() {
   chmod +x "${tmpdir}/${BINARY_NAME}"
   mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
   ok "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
+
+  # macOS Gatekeeper: files downloaded via curl get the
+  # com.apple.quarantine attribute; the OS then blocks the first run
+  # ("damaged" / "developer cannot be verified"). Remove it from the
+  # installed copy (best-effort — files without the attribute make
+  # xattr fail with "No such xattr", which is fine).
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    if xattr -d com.apple.quarantine "${INSTALL_DIR}/${BINARY_NAME}" 2>/dev/null; then
+      ok "Removed com.apple.quarantine from ${INSTALL_DIR}/${BINARY_NAME}"
+    fi
+  fi
 }
 
 # ── Verify installation ────────────────────────────────────────────────
