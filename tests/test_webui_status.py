@@ -5,14 +5,15 @@ Tests cover: _config_snapshot() mode detection (multi-backend / standalone),
 _collect_endpoints() grouping, the «Доступные API» column (rendered from
 config._ENDPOINT_STATE — result of the smoke probe run inside
 refresh_models; a green ✓ is shown only for endpoints that answered HTTP
-200 — failed probes are hidden), the background-check contract (v0.8.2): GET "/" does NOT
-start a check — it renders the current state from config.refresh_state()
-(seeded as _REFRESH_JOB here); POST "/" (the «⟳ Проверить сейчас» button)
-launches config.start_refresh(timeout=PROBE_TIMEOUT) and answers
-immediately — while a check is running the page shows the
-«Проверка выполняется…» banner plus the status_poll JS (polls
-/api/refresh-state, reloads on completion). Success shows the new model
-list, failure keeps the old cache and shows the error text, standalone
+200 — failed probes are hidden), the background-check contract: GET "/"
+renders the current state from config.refresh_state() (seeded as
+_REFRESH_JOB here); POST "/" (the «⟳ Проверить сейчас» button) launches
+config.start_refresh(timeout=PROBE_TIMEOUT) and answers 303 See Other →
+GET "/" (PRG pattern: the page is shown via a plain GET, so reloads never
+repeat the POST and no «resubmit» dialog appears); while a check is running
+the page shows the «Проверка выполняется…» banner plus the status_poll JS
+(polls /api/refresh-state, reloads on completion). Success shows the new
+model list, failure keeps the old cache and shows the error text, standalone
 (no endpoints) renders the notice and does not start any check. The Models
 cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
 button (JS models_toggle on the page) — see TestModelsCell.
@@ -78,6 +79,41 @@ def _http_get(port: int, path: str):
 
 def _http_post(port: int, path: str):
     return _http_request(port, "POST", path)
+
+
+def _http_raw(port: int, method: str, path: str):
+    """Сырой ответ: (status, headers: dict, body) — для 303/Location-проверок.
+
+    _http_request возвращает только статус и тело; здесь нужны и заголовки
+    (Location редиректа POST "/"), поэтому парсим полный ответ сами."""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        body = ""
+        extra = "Content-Length: 0\r\n" if method == "POST" else ""
+        sock.sendall(
+            f"{method} {path} HTTP/1.0\r\nHost: localhost\r\n{extra}\r\n".encode()
+        )
+        response = b""
+        while True:
+            try:
+                sock.settimeout(3)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            except socket.timeout:
+                break
+        text = response.decode("utf-8", "replace")
+        head, _, body_text = text.partition("\r\n\r\n")
+        lines = head.split("\r\n")
+        status = int(lines[0].split(" ", 2)[1])
+        headers = {}
+        for line in lines[1:]:
+            name, _, value = line.partition(":")
+            headers[name.strip().lower()] = value.strip()
+        return status, headers, body_text
+    finally:
+        sock.close()
 
 
 def _fresh_modules():
@@ -469,7 +505,7 @@ class TestRenderAfterRefresh:
 
 
 # ---------------------------------------------------------------------------
-# HTTP: GET "/" читает состояние, POST "/" запускает фоновую проверку
+# HTTP: GET "/" читает состояние, POST "/" — PRG: 303 на GET "/"
 # ---------------------------------------------------------------------------
 
 def _start_httpd(tmp_path):
@@ -608,33 +644,43 @@ class TestStatusHTTP:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_post_starts_background_check_and_renders(self, tmp_path):
-        # POST "/" (кнопка) вызывает start_refresh(timeout=PROBE_TIMEOUT) и
-        # отвечает сразу. Замоканный start_refresh возвращает False — как
-        # если проверка уже шла: страница с баннером, второй не создан.
+    def test_post_starts_background_check_and_redirects(self, tmp_path):
+        # POST "/" (кнопка): PRG — вызывает start_refresh(timeout=
+        # PROBE_TIMEOUT), отвечает 303 See Other с Location "/"; следующий
+        # GET (куда уводит браузер) — обычная загрузка страницы, POST не
+        # повторяется. side_effect публикует running-снимок, как настоящий
+        # start_refresh: GET видит идущую проверку и вторую не запускает.
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
         ]
         config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
-        with mock.patch.object(
-            config, "start_refresh", return_value=False
-        ) as m_start:
+
+        def _start_running(timeout: float = 5.0):
+            config._REFRESH_JOB = _running_job()
+            return True
+
+        with mock.patch.object(config, "start_refresh", side_effect=_start_running) as m_start:
             httpd, port = _start_server(str(tmp_path))
             try:
-                status, body = _http_post(port, "/")
-                assert status == 200
-                assert "Список моделей обновлён" in body or "по кнопке" in body
+                status, headers, body = _http_raw(port, "POST", "/")
+                assert status == 303
+                assert headers.get("location") == "/"
+                assert body == ""
+                # GET после 303 — страница с баннером (проверка «идёт»)
+                status2, body2 = _http_get(port, "/")
+                assert status2 == 200
+                assert "Проверка выполняется" in body2
             finally:
                 httpd.shutdown()
                 httpd.server_close()
-        assert m_start.call_count == 1
+        assert m_start.call_count == 1  # GET вторую проверку не запустил
         assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
 
-    def test_post_when_check_running_shows_banner(self, tmp_path):
-        # Проверка уже идёт (running=True в состоянии): POST отвечает сразу
-        # с баннером «Проверка выполняется» (start_refresh не запускает
-        # второй поток — вернул бы False).
+    def test_post_when_check_running_redirects_then_banner(self, tmp_path):
+        # Проверка уже идёт (running=True в состоянии): POST — 303; GET после
+        # редиректа рендерит баннер «Проверка выполняется» (start_refresh не
+        # запускает второй поток — вернул бы False).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -644,15 +690,20 @@ class TestStatusHTTP:
         with mock.patch.object(config, "start_refresh", return_value=False):
             httpd, port = _start_server(str(tmp_path))
             try:
-                status, body = _http_post(port, "/")
-                assert status == 200
-                assert "Проверка выполняется" in body
+                status, headers, body = _http_raw(port, "POST", "/")
+                assert status == 303
+                assert headers.get("location") == "/"
+                assert body == ""
+                status2, body2 = _http_get(port, "/")
+                assert status2 == 200
+                assert "Проверка выполняется" in body2
             finally:
                 httpd.shutdown()
                 httpd.server_close()
 
-    def test_post_refresh_failure_does_not_crash(self, tmp_path):
-        # Провал фоновой проверки (состояние ok=False) не роняет POST.
+    def test_post_refresh_failure_redirects_then_error_page(self, tmp_path):
+        # Провал фоновой проверки (состояние ok=False) не роняет POST:
+        # 303 → GET показывает текст ошибки.
         config, _ = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -662,25 +713,31 @@ class TestStatusHTTP:
         with mock.patch.object(config, "start_refresh", return_value=False):
             httpd, port = _start_server(str(tmp_path))
             try:
-                status, body = _http_post(port, "/")
-                assert status == 200
-                assert "недоступен" in body
-                assert "Connection refused" in body
+                status, headers, body = _http_raw(port, "POST", "/")
+                assert status == 303
+                assert headers.get("location") == "/"
+                status2, body2 = _http_get(port, "/")
+                assert status2 == 200
+                assert "недоступен" in body2
+                assert "Connection refused" in body2
             finally:
                 httpd.shutdown()
                 httpd.server_close()
 
-    def test_post_standalone_does_not_start_check(self, tmp_path):
+    def test_post_standalone_redirects_without_check(self, tmp_path):
         # Standalone без конфига: эндпойнтов нет — кнопка проверку не
-        # запускает (нечего проверять), страница с подсказкой.
+        # запускает (нечего проверять); POST — 303, GET показывает подсказку.
         config, _ = _fresh_modules()
         config.ADAPTER_BACKEND_CONFIG = ""
         with mock.patch.object(config, "start_refresh", return_value=False) as m_start:
             httpd, port = _start_server(str(tmp_path))
             try:
-                status, body = _http_post(port, "/")
-                assert status == 200
-                assert "Данные адаптера недоступны" in body
+                status, headers, body = _http_raw(port, "POST", "/")
+                assert status == 303
+                assert headers.get("location") == "/"
+                status2, body2 = _http_get(port, "/")
+                assert status2 == 200
+                assert "Данные адаптера недоступны" in body2
             finally:
                 httpd.shutdown()
                 httpd.server_close()

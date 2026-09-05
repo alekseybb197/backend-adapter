@@ -135,6 +135,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _redirect(self, location: str, status: int = 303) -> None:
+        """303 See Other + Location, без тела — для PRG-паттерна (POST → GET).
+
+        Браузер после ответа сам делает GET на Location, поэтому страница
+        не переотправляет POST при обновлении/reload (иначе — диалог
+        «повторить действие» в Chrome/Firefox)."""
+        self.send_response(status)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _content_type_for(self, path: str) -> str:
         ext = os.path.splitext(path)[1].lower()
         return CONTENT_TYPES.get(ext, "application/octet-stream")
