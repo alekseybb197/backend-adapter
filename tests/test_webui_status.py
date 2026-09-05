@@ -7,7 +7,10 @@ config._ENDPOINT_STATE — result of the smoke probe run inside
 refresh_models; a green ✓ is shown only for endpoints that answered HTTP
 200 — failed probes are hidden), the background-check contract: GET "/"
 renders the current state from config.refresh_state() (seeded as
-_REFRESH_JOB here); POST "/" (the «⟳ Проверить сейчас» button) launches
+_REFRESH_JOB here); the first GET — if no check has ever completed and
+there is something to probe — auto-starts the FIRST check
+(_autostart_first_check: adapter start / first GET / button); POST "/"
+(the «⟳ Проверить сейчас» button) launches
 config.start_refresh(timeout=PROBE_TIMEOUT) and answers 303 See Other →
 GET "/" (PRG pattern: the page is shown via a plain GET, so reloads never
 repeat the POST and no «resubmit» dialog appears); while a check is running
@@ -432,6 +435,73 @@ class TestModelsCell:
 
 
 # ---------------------------------------------------------------------------
+# TestAutoStartFirstCheck — первый GET "/" запускает ПЕРВУЮ проверку
+# ---------------------------------------------------------------------------
+
+class TestAutoStartFirstCheck:
+    """Прямые вызовы webui_status._autostart_first_check() (без HTTP)."""
+
+    def test_no_endpoints_no_check(self):
+        # Standalone без конфига: эндпойнтов нет — проверку не запускаем.
+        config, ws = _fresh_modules()
+        with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
+            assert ws._autostart_first_check() is False
+        assert m_start.call_count == 0
+
+    def test_first_check_runs(self):
+        # Эндпойнты есть, проверок ещё не было (_REFRESH_JOB None): запускаем.
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
+        with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
+            assert ws._autostart_first_check() is True
+        assert m_start.call_count == 1
+        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+
+    def test_running_does_not_start_second(self):
+        # Проверка уже идёт (running=True): второй запуск не создаём.
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _running_job())
+        with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
+            assert ws._autostart_first_check() is False
+        assert m_start.call_count == 0
+
+    def test_done_does_not_start_again(self):
+        # Проверка уже завершалась (done_at есть): повторно не гоним —
+        # дальше только по кнопке «⟳ Проверить сейчас».
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
+            assert ws._autostart_first_check() is False
+        assert m_start.call_count == 0
+
+    def test_standalone_yaml_runs(self, tmp_path):
+        # Standalone с YAML в ADAPTER_BACKEND_CONFIG: _BACKENDS пуст, но
+        # эндпоинты читаются из YAML — первый заход запускает проверку.
+        config, ws = _fresh_modules()
+        config.ADAPTER_BACKEND_CONFIG = str(tmp_path / "backends.yaml")
+        (tmp_path / "backends.yaml").write_text(
+            "backend:\n"
+            "  - name: AAA\n"
+            '    base: "http://aaa.local"\n'
+            "    key: k-aaa\n"
+        )
+        with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
+            assert ws._autostart_first_check() is True
+        assert m_start.call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # Рендер после refresh: ошибки/успех по эндпойнтам
 # ---------------------------------------------------------------------------
 
@@ -515,8 +585,9 @@ def _start_httpd(tmp_path):
 
 class TestStatusHTTP:
     def test_get_root_renders_version_and_state(self, tmp_path):
-        # GET "/" НЕ запускает проверку: показывает состояние последней
-        # (посев _REFRESH_JOB). start_refresh/refresh_models не вызываются.
+        # Проверка уже завершалась (done-снимок в _REFRESH_JOB): GET "/"
+        # показывает состояние последней проверки и НЕ запускает новую
+        # (повторные проверки — только по кнопке).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -538,28 +609,81 @@ class TestStatusHTTP:
                 finally:
                     httpd.shutdown()
                     httpd.server_close()
-        assert m_start.call_count == 0   # GET проверку не запускает
+        assert m_start.call_count == 0   # done-снимок — GET проверку не запускает
         assert m_refresh.call_count == 0
 
-    def test_get_root_initial_state_no_check_hint(self, tmp_path):
-        # Проверок ещё не было (_REFRESH_JOB None): страница показывает
-        # snapshot и футер-подсказку «по кнопке», проверку не запускает.
+    def test_get_root_initial_state_starts_first_check(self, tmp_path):
+        # Проверок ещё не было (_REFRESH_JOB None): первый GET "/"
+        # запускает ПЕРВУЮ проверку автоматически (автостарт), страница
+        # рендерится с баннером «Проверка выполняется». side_effect
+        # публикует running-снимок, как настоящий start_refresh.
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
         ]
         config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
+
+        def _start_running(timeout: float = 5.0):
+            config._REFRESH_JOB = _running_job()
+            return True
+
+        with mock.patch.object(config, "start_refresh", side_effect=_start_running) as m_start:
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, body = _http_get(port, "/")
+                assert status == 200
+                assert "Проверка выполняется" in body
+                assert "Проверить сейчас" in body
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+        assert m_start.call_count == 1
+        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+
+    def test_get_root_running_state_does_not_start_check(self, tmp_path):
+        # Проверка уже ИДЁТ (running=True в состоянии): GET "/" новую не
+        # запускает — показывает баннер + поллинг (авто-релоад безопасен).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _running_job())
         with mock.patch.object(config, "start_refresh", return_value=False) as m_start:
             httpd, port = _start_server(str(tmp_path))
             try:
                 status, body = _http_get(port, "/")
                 assert status == 200
-                assert "по кнопке" in body
-                assert "Проверить сейчас" in body
+                assert "Проверка выполняется" in body
+                assert "status_poll" in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 0
+
+    def test_get_root_standalone_with_yaml_starts_check(self, tmp_path):
+        # Standalone с YAML в ADAPTER_BACKEND_CONFIG (адаптер не стартовал,
+        # _BACKENDS пуст, но эндпоинты читаются из YAML): первый GET "/"
+        # запускает первую проверку (см. _autostart_first_check).
+        config, ws = _fresh_modules()
+        config.ADAPTER_BACKEND_CONFIG = str(tmp_path / "backends.yaml")
+        (tmp_path / "backends.yaml").write_text(
+            "backend:\n"
+            "  - name: AAA\n"
+            '    base: "http://aaa.local"\n'
+            "    key: k-aaa\n"
+        )
+        with mock.patch.object(config, "start_refresh", return_value=False) as m_start:
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, body = _http_get(port, "/")
+                assert status == 200
+                assert "AAA" in body
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+        assert m_start.call_count == 1
+        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
 
     def test_get_root_multi_lists_backends_and_models(self, tmp_path):
         config, _ = _fresh_modules()
@@ -572,16 +696,17 @@ class TestStatusHTTP:
             "m-beta": ("BBB", config._BACKENDS[1]),
         }
         _seed_job(config, _done_job(True, 2))
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/")
-            assert status == 200
-            assert "AAA" in body and "BBB" in body
-            assert "m-alpha" in body and "m-beta" in body
-            assert "multi-backend" in body
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+        with mock.patch.object(config, "start_refresh", return_value=False):
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, body = _http_get(port, "/")
+                assert status == 200
+                assert "AAA" in body and "BBB" in body
+                assert "m-alpha" in body and "m-beta" in body
+                assert "multi-backend" in body
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
     def test_get_root_refresh_failure_keeps_old_models(self, tmp_path):
         # Провал проверки не роняет страницу: состояние ошибки из снимка.
@@ -591,15 +716,16 @@ class TestStatusHTTP:
         ]
         config._MODEL_TO_BACKEND = {"old-m": ("AAA", config._BACKENDS[0])}
         _seed_job(config, _done_job(False, 1, errors={"AAA": "boom"}))
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/")
-            assert status == 200
-            assert "old-m" in body
-            assert "Не удалось обновить" in body
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+        with mock.patch.object(config, "start_refresh", return_value=False):
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, body = _http_get(port, "/")
+                assert status == 200
+                assert "old-m" in body
+                assert "Не удалось обновить" in body
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
     def test_get_root_standalone_notice_no_check(self, tmp_path):
         # Standalone без конфига: эндпойнтов нет — start_refresh не
@@ -633,16 +759,17 @@ class TestStatusHTTP:
             "messages": {"found": False, "status": 404},
         })
         _seed_job(config, _done_job(True, 1))
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/")
-            assert status == 200
-            assert "<th>Endpoints</th>" in body  # заголовок колонки API
-            assert "chat/completions ✓" in body
-            assert "messages" not in body  # 404 — на странице не показывается
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+        with mock.patch.object(config, "start_refresh", return_value=False):
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, body = _http_get(port, "/")
+                assert status == 200
+                assert "<th>Endpoints</th>" in body  # заголовок колонки API
+                assert "chat/completions ✓" in body
+                assert "messages" not in body  # 404 — на странице не показывается
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
 
     def test_post_starts_background_check_and_redirects(self, tmp_path):
         # POST "/" (кнопка): PRG — вызывает start_refresh(timeout=

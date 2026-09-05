@@ -41,8 +41,10 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
 - **WEBUI** (`ADAPTER_WEBUI_ENABLE=1`): общее ядро `webserver.py` (роутинг эндпойнтов,
   `serve()`, CLI `python -m backend_adapter.webserver`) + эндпойнт-модули: `/` =
   `webui_status.py` (версия, LLM-эндпойнты, модели; проверка бэкендов —
-  фоновая, **только по кнопке** «⟳ Проверить сейчас» (POST `/`) →
-  `config.start_refresh()`; GET `/` проверку не запускает, показывает баннер
+  фоновая: при старте адаптера, на первом GET `/` и по кнопке
+  «⟳ Проверить сейчас» (POST `/`) → `config.start_refresh()`; POST отвечает
+  303 See Other на GET `/` (PRG — нет диалога «повторить действие»);
+  пока проверка идёт, страница показывает баннер
   «Проверка выполняется…» и авто-обновляется по завершении через
   `/api/refresh-state`), `/session` = `session_viewer.py` (вкладки + раздача файлов + hash8-алиасы
   `/session/<hash8>/...` и png/puml-шорткаты; корень — директория

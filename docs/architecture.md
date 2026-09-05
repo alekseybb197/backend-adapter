@@ -131,16 +131,20 @@ Claude Code (Anthropic API client)
    works out of the box; `/session` is empty until logs exist; endpoints: `/` —
    status, `/session` — session viewer, `/config` — runtime-config form,
    `/api/refresh-state` — JSON state of the background check, see §6.5).
-   Loading the status page `/` (GET) does **not** probe the backends — it
-   renders the current state (`config.refresh_state()`: models from the startup
-   probe, or from the last check). A check is started only by the
-   «⟳ Проверить сейчас» button (POST `/`): `config.start_refresh` runs
-   `config.refresh_models` (5 s timeout per endpoint) in a background thread
-   and answers immediately — while it runs, the page shows a
-   «Проверка выполняется…» banner and polls `/api/refresh-state`; when the
-   check finishes, JS reloads the page (`location.reload()`), which renders
-   the fresh `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches — models added
-   by the backend after startup are picked up without restarting the adapter.
+   Loading the status page `/` (GET) renders the current state
+   (`config.refresh_state()`: models from the startup probe, or from the last
+   check) and — if no check has run yet (`done_at` is empty) — starts the
+   **first** check automatically (`webui_status._autostart_first_check`).
+   Checks are background (`config.start_refresh` runs `config.refresh_models`,
+   5 s timeout per endpoint, in a daemon thread): started at adapter startup,
+   on the first GET `/`, and by the «⟳ Проверить сейчас» button (POST `/`),
+   which answers **303 See Other** → GET `/` (PRG pattern — page reloads
+   never repeat the POST, no «resubmit» dialog). While a check runs, the page
+   shows a «Проверка выполняется…» banner and polls `/api/refresh-state`;
+   when the check finishes, JS reloads the page (`location.reload()`), which
+   renders the fresh `_AVAILABLE_MODELS`/`_MODEL_TO_BACKEND` caches — models
+   added by the backend after startup are picked up without restarting the
+   adapter.
    The `/config` endpoint toggles the runtime debug-write pool
    (`config.get_runtime_config`/`set_runtime_config`, see §8.6) without a restart.
 
@@ -261,9 +265,9 @@ POST-запросами с `max_tokens:1` по фиксированному сп
 только свой эндпоинт (`[WARN]` + текст в `errors`).
 
 Проба встроена в `config.refresh_models` (конец функции, после обновления кэша
-моделей): вызывается при каждой проверке бэкендов по кнопке «⟳ Проверить
-сейчас» (POST `/` → `config.start_refresh` → фоновый воркер, см. §6.5), её
-загрузка страницы (GET `/`) не запускает. Результат добавляется в
+моделей): вызывается при каждой фоновой проверке бэкендов — при старте
+адаптера, на первом GET `/` и по кнопке «⟳ Проверить сейчас» (POST `/` →
+`config.start_refresh` → фоновый воркер, см. §6.5). Результат добавляется в
 возвращаемый dict ключом `"probe"` (старые читатели `ok/count/errors` не
 ломаются) и кэшируется в `_ENDPOINT_STATE` (~60 с, `ENDPOINT_PROBE_TTL`);
 повторная проверка в пределах TTL сеть не трогает. Мастер-флаг
@@ -277,7 +281,8 @@ POST-запросами с `max_tokens:1` по фиксированному сп
 Раньше каждый GET/POST статус-страницы `/` синхронно гонял
 `config.refresh_models` (опрос `/v1/models` всех бэкендов + дымовая проба), и
 при недоступном/медленном бэкенде HTTP-ответ висел (N бэкендов × 5 с на
-эндпоинт). Теперь проверка — **фоновая, строго по кнопке**:
+эндпоинт). Теперь проверка — **фоновая**, запускается при старте адаптера, на первом
+GET `/` и по кнопке:
 
 - **Состояние** — модульный снимок-словарь `_REFRESH_JOB` в `config.py`:
   `running`, `started_at`/`done_at` (time.time), `ok`/`count`/`errors` (итог
@@ -285,21 +290,29 @@ POST-запросами с `max_tokens:1` по фиксированному сп
   **иммутабелен** — заменяется целиком (атомарная замена ссылки), читатели
   (`webui_status`) берут `refresh_state()` без лока. До первой проверки —
   дефолт-словарь (все None/False).
-- **Запуск** — `start_refresh(timeout)` (POST `/`, кнопка «⟳ Проверить
-  сейчас»): под `_REFRESH_LOCK` публикует `running=True` и стартует daemon-
-  поток `_refresh_worker`; пока проверка идёт, повторный вызов возвращает
-  `False` (второй поток не создаётся). `_refresh_worker` зовёт
-  `refresh_models(timeout)` и в `finally` публикует финальный снимок
-  (`running=False`, результат или текст исключения в `errors["__worker__"]`) —
-  проверка не может «зависнуть навсегда». HTTP-ответ не блокируется.
+- **Запуск** — `start_refresh(timeout)`: при старте адаптера
+  (`backend-adapter.py` после поднятия WEBUI), на первом GET `/`
+  (автостарт, `webui_status._autostart_first_check`) и по кнопке
+  «⟳ Проверить сейчас» (POST `/`). Под `_REFRESH_LOCK` публикует
+  `running=True` и стартует daemon-поток `_refresh_worker`; пока проверка
+  идёт, повторный вызов возвращает `False` (второй поток не создаётся).
+  `_refresh_worker` зовёт `refresh_models(timeout)` и в `finally` публикует
+  финальный снимок (`running=False`, результат или текст исключения в
+  `errors["__worker__"]`) — проверка не может «зависнуть навсегда».
+  HTTP-ответ не блокируется.
 - **Страница** (`webui_status.py`): GET `/` читает `config.refresh_state()` и
-  рендерит последний результат (проверку не запускает); POST `/` вызывает
-  `start_refresh(timeout=PROBE_TIMEOUT)` и отвечает сразу. Пока проверка идёт,
-  страница показывает баннер «Проверка выполняется…» и JS `status_poll`
-  опрашивает JSON-эндпоинт **`/api/refresh-state`** (`RefreshStateEndpoint`,
-  тот же модуль) каждые ~2 с; как только `running=false` и есть `done_at` —
-  `location.reload()` рендерит свежий результат. Авто-релоад безопасен: GET
-  проверку не запускает, зацикливания нет.
+  рендерит последний результат; если проверок ещё не было (done_at пуст) и
+  есть что проверять — первый заход сам запускает ПЕРВУЮ проверку
+  (`_autostart_first_check`), повторные — только по кнопке. POST `/`
+  (кнопка «⟳ Проверить сейчас») вызывает `start_refresh(timeout=
+  PROBE_TIMEOUT)` и отвечает **303 See Other** на GET `/` (PRG: браузер
+  переходит на страницу GET-навигацией, авто-релоад не повторяет POST).
+  Пока проверка идёт, страница показывает баннер «Проверка выполняется…»
+  и JS `status_poll` опрашивает JSON-эндпоинт **`/api/refresh-state`**
+  (`RefreshStateEndpoint`, тот же модуль) каждые ~2 с; как только
+  `running=false` и есть `done_at` — `location.reload()` рендерит свежий
+  результат. Авто-релоад безопасен: он происходит на GET-документе,
+  повторного POST нет, зацикливания нет.
 - `refresh_models` при этом мутирует конфиг-глобалы (`_AVAILABLE_MODELS` и
   др.) из фонового потока — то же отношение, что было при синхронном
   refresh; отдельный Lock вокруг внутренностей не добавляется (тот же
