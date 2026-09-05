@@ -158,7 +158,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 - `session_id` — ID сессии
 - `req_id` — ID запроса
 - `seq` — монотонно возрастающий номер
-- `event` — тип события (`response_content`, `tool_call`, `skill_signal`, `usage_report` и др.)
+- `event` — тип события (`response_content`, `tool_call`, `usage_report` и др.)
 - `...fields` — дополнительные поля в зависимости от события
 
 Записи проходят через `redact` — чувствительные данные (токены, ключи) автоматически заменяются на `***`.
@@ -187,41 +187,6 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 (`ADAPTER_BACKEND_CONFIG`, `ADAPTER_STRICT_MODELS`, маппинг), WEBUI-адреса,
 `ADAPTER_DEBUG_LOGPATH` (идентичность директории логов не должна меняться
 посреди сессии).
-
----
-
-## 8. Дефолтные: детекция скиллов (skill detection)
-
-| Переменная | Default | Описание |
-|---|---|---|
-| `ADAPTER_SKILL_PATTERNS` | *(пусто)* | Путь к JSON-файлу с пользовательскими паттернами для детекции скиллов по содержимому tool call arguments. Пусто — используются встроенные паттерны по умолчанию. |
-
-### Встроенные паттерны (по умолчанию)
-
-| Скилл | Паттерны (regex) |
-|---|---|
-| `devtools` | `.claude/skills/devtools`, `.qwen/skills/devtools`, `chrome-devtools` |
-| `frontmatter` | `.claude/skills/frontmatter`, `.qwen/skills/frontmatter` |
-| `klast` | `.claude/skills/klast`, `.qwen/skills/klast`, `.klast/` |
-| `mytasks` | `.claude/skills/mytasks`, `.qwen/skills/mytasks` |
-| `prreview` | `.claude/skills/prreview`, `.qwen/skills/prreview` |
-
-Формат JSON-файла:
-
-```json
-{
-  "custom_skill": [".*/path/to/skill", "regex_pattern"],
-  "another_skill": ["pattern"]
-}
-```
-
-Регулярные выражения компилируются с флагом `re.IGNORECASE` (без учёта регистра).
-
-### Как работает детекция
-
-Когда адаптер получает tool call от бэкенда, он извлекает аргументы (поля `command`, `file_path`, `path`, `pattern`, `notebook_path`) и проверяет их против загруженных regex. Если совпадение найдено — в trace пишется событие `skill_signal` с именем скилла и найденным совпадением (`evidence`).
-
-Адаптер также отслеживает попытки чтения `SKILL.md` — если модель обращается к файлу описания скилла (но скилл не в списке паттернов), это отмечается как `unregistered:&lt;имя_скилла&gt;`.
 
 ---
 

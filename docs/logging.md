@@ -124,8 +124,7 @@
 | 2 | `[HTTP]` | `server.py:69` | Generic HTTP handler log |
 | 3 | `[CLIENT_GONE]` | `server.py:84` | Client gone during JSON send |
 | 4 | `[WARN]` | `server.py:86` | Ошибка отправки ответа клиенту |
-| 5 | `[SKILL_PATTERNS]` | `skill.py:33` | Не удалось загрузить файлы паттернов скиллов |
-| 6 | `[INIT]` | `backend-adapter.py:108` | Старт адаптера: путь к YAML-конфигу бэкендов |
+| 5 | `[INIT]` | `backend-adapter.py:108` | Старт адаптера: путь к YAML-конфигу бэкендов |
 
 ---
 
@@ -159,9 +158,8 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | 6 | `backend_result` | INTERNAL | `attempt`, `ok`, `status`, `error`, `elapsed_ms` |
 | 7 | `request_end` | → CLIENT / INTERNAL | `http_status`, `retries_used`, `total_elapsed_ms`, `streamed`, `failed`, `client_gone`, `failed_mid_stream` |
 | 8 | `tool_call_fallback` | INTERNAL | `parsed_count`, `raw_text_len` |
-| 9 | `skill_signal` | INTERNAL | `tool_id`, `tool_name`, `skill`, `evidence` |
-| 10 | `response_content` | → CLIENT | `text_len`, `tool_uses`, `finish_reason_raw`, `stop_reason_mapped`, `reasoning_present`, `reasoning_len`, `reasoning`, `streamed` |
-| 11 | `usage_report` | ← BACKEND / INTERNAL | `input_tokens`, `input_tokens_estimated`, `output_tokens`, `streamed` |
+| 9 | `response_content` | → CLIENT | `text_len`, `tool_uses`, `finish_reason_raw`, `stop_reason_mapped`, `reasoning_present`, `reasoning_len`, `reasoning`, `streamed` |
+| 10 | `usage_report` | ← BACKEND / INTERNAL | `input_tokens`, `input_tokens_estimated`, `output_tokens`, `streamed` |
 
 ---
 
@@ -222,7 +220,7 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | `[STREAM_WARN]` | SSE parse failures |
 | `[USAGE_WARN]` | Missing usage from backend |
 | `[ERROR]` | Валидация модели |
-| Console-only: `[CLIENT_GONE]`, `[HTTP]`, `[WARN]`, `[SKILL_PATTERNS]`, `[INIT]` | Системные логи |
+| Console-only: `[CLIENT_GONE]`, `[HTTP]`, `[WARN]`, `[INIT]` | Системные логи |
 | Все trace events | Структурированное журналирование (см. таблицу выше) |
 
 ---

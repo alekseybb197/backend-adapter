@@ -13,7 +13,6 @@ from . import config
 from .config import _cap, _trim_limit
 from .logger import _dr
 from .session_log import write_debug_json
-from .skill import detect_skill
 from .tracer import _register_tool_use, _trace
 
 
@@ -35,7 +34,7 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
     wfile сразу по мере поступления.
 
     Логика конвертации структуры контента (text / tool_use, fallback
-    tool-call'ов из текста, skill-детекция, trace) намеренно повторяет
+    tool-call'ов из текста, trace) намеренно повторяет
     convert_openai_to_anthropic — просто по кусочкам, а не одним объектом
     в конце. Бросает исключение наружу при обрыве соединения — вызывающий
     код (do_POST) решает, можно ли ещё retry или поток уже начался и надо
@@ -253,25 +252,12 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
             parsed_input = json.loads("".join(st["args_buf"]) or "{}")
         except json.JSONDecodeError:
             parsed_input = {}
-        skill, evidence = detect_skill(st["name"], parsed_input)
         traced_input = parsed_input
         if config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS > 0:
             serialized = json.dumps(parsed_input, ensure_ascii=False, default=str)
             if len(serialized) > config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS:
                 traced_input = _cap(serialized, config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS)
-        tool_use_summaries.append(
-            {"id": st["id"], "name": st["name"], "skill": skill, "input": traced_input}
-        )
-        if skill:
-            _trace(
-                session_id,
-                req_id,
-                "skill_signal",
-                tool_id=st["id"],
-                tool_name=st["name"],
-                skill=skill,
-                evidence=(evidence or "")[:200],
-            )
+        tool_use_summaries.append({"id": st["id"], "name": st["name"], "input": traced_input})
 
     full_text = "".join(text_buf)
     full_reasoning = "".join(reasoning_buf)

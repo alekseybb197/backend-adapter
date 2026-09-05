@@ -33,7 +33,6 @@ ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "")
 ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
 ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
-ADAPTER_SKILL_PATTERNS = os.environ.get("ADAPTER_SKILL_PATTERNS", "")
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
 # Логгирование результатов работы инструментов (обработка собранных логов —
 # по умолчанию выключена, zero-config: ничего лишнего не обрабатывается):

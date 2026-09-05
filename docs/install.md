@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.8.0) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **backend-adapter** (v0.8.1) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно обрабатывает протокол Anthropic Messages API.
 
@@ -89,14 +89,13 @@ pip install -r requirements.txt
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (20 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (23 модуля, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
 │   ├── session_log.py         # Per-session логи с FIFO eviction
-│   ├── skill.py               # Детекция скиллов по паттернам tool call arguments
 │   ├── daemon.py              # Detach (double fork)
 │   ├── logger.py              # Debug-логирование с redaction
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
@@ -465,14 +464,6 @@ export ADAPTER_DEBUG_ENABLE=1
 # export ADAPTER_SENSITIVE_LOGGING_ENABLE=0
 ```
 
-**Детекция скиллов** — адаптер проверяет аргументы tool calls по regex-паттернам:
-
-```bash
-# Встроенные паттерны: devtools, frontmatter, klast, mytasks, prreview
-# Путь к JSON-файлу с пользовательскими паттернами (по умолчанию встроены)
-# export ADAPTER_SKILL_PATTERNS=""
-```
-
 Подробнее про логирование — в [`docs/logging.md`](logging.md).
 
 ### 5.8 Полный пример env-файла
@@ -544,7 +535,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.8.0 (...
+Claude Code Adapter v0.8.1 (...
 Listening:  http://127.0.0.1:9999
 Logs:       console only (ADAPTER_DEBUG_ENABLE=1; диск: задайте ADAPTER_DEBUG_LOGPATH)
 Models:     strict validation

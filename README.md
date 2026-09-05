@@ -1,6 +1,6 @@
 # backend-adapter — Claude Code ↔ OpenAI Backend Proxy
 
-> **v0.8.0** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **v0.8.1** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно реализует протокол Anthropic Messages API.
 
@@ -52,14 +52,13 @@ claude
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (11 модулей)
+├── backend_adapter/            # Доменный пакет (23 модуля, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend, YAML
 │   ├── server.py               # HTTP-сервер
 │   ├── convert.py              # Anthropic ↔ OpenAI конвертация
 │   ├── streaming.py            # SSE streaming passthrough
 │   ├── tracer.py               # JSONL trace-логирование
 │   ├── session_log.py          # Per-session логи с FIFO eviction
-│   ├── skill.py                # Детекция скиллов
 │   ├── daemon.py               # Detach (double fork)
 │   ├── logger.py               # Debug-логирование
 │   ├── redact.py               # Маскирование секретов

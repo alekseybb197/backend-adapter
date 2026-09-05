@@ -59,7 +59,6 @@ def fresh_env(monkeypatch):
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "0",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
-        "ADAPTER_SKILL_PATTERNS": "",
         "ADAPTER_PIDFILE": "",
     }
 
@@ -105,7 +104,6 @@ def _default_config():
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "0",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
-        "ADAPTER_SKILL_PATTERNS": "",
         "ADAPTER_PIDFILE": "",
     }
     for k, v in defaults.items():
