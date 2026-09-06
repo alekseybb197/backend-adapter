@@ -265,7 +265,9 @@ foreground; для работы в фоне используйте фонову�
 
 Дефолты не отличаются от исходников (zero-config): debug-блоки видны в консоли,
 на диск ничего не пишется, пока не задан `ADAPTER_DEBUG_LOGPATH`, статус-страница
-WEBUI доступна на `http://127.0.0.1:8765/`.
+WEBUI доступна на `http://127.0.0.1:8765/`. Руководство по страницам и
+JSON-эндпоинтам (включая таблицу использованных моделей и файл
+`model-usage.yaml`) — `docs/webui.md`.
 
 Когда стоит предпочесть исходники (`git clone` + `pip install -r
 requirements.txt` или `./scripts/dev-run.sh`): бинарник собирается под конкретную
@@ -452,7 +454,9 @@ export ADAPTER_DEBUG_ENABLE=1
 # Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий.
 # Включён ПО УМОЛЧАНИЮ (ADAPTER_WEBUI_ENABLE=1) на 127.0.0.1:8765 — статус-страница
 # доступна сразу; корень — ADAPTER_DEBUG_LOGPATH (если задан, там *.parts сессии),
-# иначе ./tmp/webui (вкладка /session пуста). Отключить: ADAPTER_WEBUI_ENABLE=0.
+# иначе ./tmp/webui (вкладка /session пуста; там же живёт model-usage.yaml — таблица
+# использованных моделей). Отключить: ADAPTER_WEBUI_ENABLE=0. Руководство по
+# страницам и API — docs/webui.md.
 # export ADAPTER_WEBUI_PORT=8765
 # export ADAPTER_WEBUI_HOST="127.0.0.1"
 # Standalone-запуск вне процесса адаптера: python -m backend_adapter.webserver [ROOT] [--port] [--host]

@@ -35,10 +35,11 @@ backend_adapter/
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
 ├── model_usage.py          ← used-models table (см. §6.6): учёт моделей запросов +
 │                             трафик обмена (bytes sent/recv) + дымовая проба
-│                             эндпоинтов по каждой модели
-├── webui_status.py         ← WEBUI endpoints "/" + "/api/refresh-state": status page
-│                             (version, LLM endpoints, models) + background-check state +
-│                             секция «Использованные модели»
+│                             эндпоинтов по каждой модели; персистентный YAML
+├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
+│                             "/api/model-usage/reset": status page (version, LLM
+│                             endpoints, models) + background-check state +
+│                             секция «Использованные модели» (сброс строки)
 ├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
@@ -137,7 +138,9 @@ Claude Code (Anthropic API client)
    otherwise an independent `./tmp/webui` (created on demand — status page `/`
    works out of the box; `/session` is empty until logs exist; endpoints: `/` —
    status, `/session` — session viewer, `/config` — runtime-config form,
-   `/api/refresh-state` — JSON state of the background check, see §6.5).
+   `/api/refresh-state` — JSON state of the background check, see §6.5,
+   `/api/model-usage/reset` — used-models row reset, see §6.6).
+   The used-models table persists to `model-usage.yaml` in `root`.
    Loading the status page `/` (GET) renders the current state
    (`config.refresh_state()`: models from the startup probe, or from the last
    check) and — if no check has run yet (`done_at` is empty) — starts the
@@ -333,11 +336,13 @@ GET `/` и по кнопке:
 
 ### 6.6 Таблица использованных моделей (`model_usage.py`)
 
-Отдельный модуль-лист DAG (импортирует только `config`; его импортируют
-`server.py` и `webui_status.py` — цикла нет, `config.py` остаётся корнем).
-Ведёт **in-memory таблицу** клиентских моделей, к которым агент реально
-обращался, и для каждой — доступность 4 известных API-эндпоинтов бэкенда
-**именно этой моделью**:
+Отдельный модуль-лист DAG (импортирует только `config` и `yaml`; его
+импортируют `server.py` и `webui_status.py` — цикла нет, `config.py`
+остаётся корнем). Ведёт **персистентную таблицу** клиентских моделей, к
+которым агент реально обращался, и для каждой — доступность 4 известных
+API-эндпоинтов бэкенда **именно этой моделью**. Таблица сохраняется в
+YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Персистентность»)
+и переживает перезапуски адаптера:
 
 - **Точка учёта** — `server.do_POST`, сразу после strict-проверки модели
   (клиентское имя из BODY, **до** маппинга `_MAP`): `model_usage.record_
@@ -380,17 +385,36 @@ GET `/` и по кнопке:
   Гейт — тот же `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие
   strict-проверку (HTTP 400), и служебные дымовые пробы эндпоинтов в
   счётчики не попадают.
+- **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
+  в корне WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`); файл
+  несёт версию формата (`version: 1`, строки — под ключом `models`). Точка
+  синхронизации пути — `webserver.serve()` (`set_persist_path(root_dir)`;
+  в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении
+  к пустой таблице (`_ensure_loaded_locked` под `_TABLE_LOCK`): строки
+  нормализуются (`probing` всегда False, счётчики — неотрицательные int,
+  незнакомые pname/ключи отбрасываются); битый файл/незнакомая версия
+  игнорируются (таблица стартует пустой). Сохранение «грязной» таблицы —
+  не чаще раза в `config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL` (сек, дефолт
+  300); создание строки, сброс (`reset_model`) и завершение работы
+  (`flush_table`, в т.ч. Ctrl-C) сохраняют сразу. Строки с `probing: True`
+  на диск не попадают; запись атомарная (tmp + `os.replace`). Загруженные
+  строки не перепроверяются — fast-path на повторных обращениях (сброс
+  строки кнопкой + новое обращение — способ «освежить» результаты проб).
 - **Мастер-флаг `ADAPTER_MODEL_USAGE_ENABLE`** (config.py, дефолт `1`):
   `0` — пробы и накопление трафика отключены, учёт обращений остаётся
   (колонки эндпоинтов «—», «Отправлено/Получено» — «0 B»). Пробы по
   модели НЕ зависят от `ADAPTER_ENDPOINT_PROBE` (тот управляет только
   фоновой проверкой бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не
-  входит; таблица живёт в памяти процесса и сбрасывается при старте.
+  входит; персистентность работает независимо от мастер-флага.
 - **Вывод** — секция «Использованные модели» на статус-странице `/`
   (`webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
-  строк в порядке первого обращения): колонки Модель | Бэкенд | Вызовов |
-  Отправлено | Получено | 4 эндпоинта. Байтовые колонки рендерятся
+  строк в порядке первого обращения; первый вызов после старта загружает
+  таблицу из YAML): колонки Модель | Бэкенд | Вызовов | Отправлено |
+  Получено | 4 эндпоинта | Сброс. Сброс строки — POST `/api/model-usage/
+  reset?model=<имя>` (`ModelUsageResetEndpoint`, PRG-кнопка «Сбросить» в
+  последней ячейке; JSON 200/404/400). Байтовые колонки рендерятся
   форматтером `_fmt_bytes` (1024-единицы: «512 B», «1.5 KiB», «1.0 MiB»).
+  Подпись секции показывает путь файла (`usage_persist_file()`).
 
 ### 6.2 Разрешение коллизий имён моделей
 
@@ -603,7 +627,7 @@ backend-adapter.py
   ├── config.py          (no internal deps — stdlib only + os.environ;
   │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming, model_usage
-  ├── model_usage.py     → config (used-models table, см. §6.6)
+  ├── model_usage.py     → config, yaml (used-models table, см. §6.6)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact
@@ -614,7 +638,7 @@ backend-adapter.py
   ├── webserver.py       → session_viewer, webui_status, webui_config_api (WEBUI core: serve()
   │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
-  ├── webui_status.py    → webserver (эндпойнты "/", "/api/refresh-state"), config, model_usage
+  ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state", "/api/model-usage/reset"), config, model_usage
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   └── artifact_tree*.py  (8 modules, layered):
       artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
@@ -643,5 +667,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.3** (see `backend-adapter.py`).
+Current: **v0.8.4** (WIP, see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).
