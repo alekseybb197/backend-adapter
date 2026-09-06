@@ -16,9 +16,10 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     для каждой модели (результат дымовой пробы этой моделью при первом
     обращении; колонка Endpoints перечисляет только доступные).
     Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
-    WEBUI и переживает перезапуски адаптера; строка модели сбрасывается
-    кнопкой «Сбросить» в строке таблицы (POST /api/model-usage/reset,
-    см. ModelUsageResetEndpoint). Кнопка «Перепроверить» (POST
+    WEBUI и переживает перезапуски адаптера; кнопка «Сбросить» в строке
+    таблицы обнуляет счётчики строки (calls/input_tokens/output_tokens →
+    0; строка с результатами пробы эндпоинтов остаётся — POST
+    /api/model-usage/reset, см. ModelUsageResetEndpoint). Кнопка «Перепроверить» (POST
     /api/model-usage/reprobe, см. ModelUsageReprobeEndpoint) запускает
     фоновую повторную дымовую пробу эндпоинтов именно этой моделью — для
     строк с «—» в колонке Endpoints; проба не трогает счётчики и токены
@@ -291,8 +292,8 @@ def _actions_cell_html(model: str, reprobing: bool = False) -> str:
     Две form-кнопки целиком внутри своего <td> (валидный HTML — без
     вложенных форм и JS): «Перепроверить» (POST /api/model-usage/reprobe?model=…)
     запускает фоновую перепробу эндпоинтов строки, «Сбросить» (POST
-    /api/model-usage/reset?model=…) удаляет строку (оба эндпоинта по PRG
-    отвечают 303 на GET "/"). При reprobing=True (перепроверка этой модели
+    /api/model-usage/reset?model=…) обнуляет счётчики строки (оба эндпоинта
+    по PRG отвечают 303 на GET "/"). При reprobing=True (перепроверка этой модели
     уже идёт) вместо кнопок — серый текст «проверяется…»: повторный запуск
     невозможен, страница авто-обновится по завершении. Имя модели кодируется
     quote(safe="") для query-параметра и html.escape — для атрибута action."""
@@ -725,10 +726,10 @@ class RefreshStateEndpoint(webserver.Endpoint):
 
 @webserver.register
 class ModelUsageResetEndpoint(webserver.Endpoint):
-    """POST /api/model-usage/reset?model=<имя> — сброс строки модели.
+    """POST /api/model-usage/reset?model=<имя> — обнуление счётчиков строки.
 
     Кнопка «Сбросить» в таблице использованных моделей (form method=post)
-    работает по PRG-паттерну: сброс + 303 See Other на GET "/" — страница
+    работает по PRG-паттерну: обнуление + 303 See Other на GET "/" — страница
     показывается GET-навигацией, обновление не повторяет POST (как у
     кнопки «⟳ Проверить сейчас»). JSON-клиент (Content-Type:
     application/json) получает 200 {"ok": true, "model": ...} при успехе,

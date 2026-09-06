@@ -19,8 +19,9 @@ Tests cover:
     calls/endpoints/errors/first_seen survive, tokens start at 0; unknown
     version (> 2) ignored; loaded rows are never reprobed; usage_snapshot
     triggers the load; broken YAML → empty table without an exception and is
-    overwritten by the next save; reset_model removes a row from memory and
-    from the file; flush_table and the save interval gate periodic saves
+    overwritten by the next save; reset_model zeroes the row's counters
+    (calls/input_tokens/output_tokens → 0) and keeps the row in memory and in
+    the file; flush_table and the save interval gate periodic saves
   - reprobe («Перепроверить»): a background re-probe of a row's endpoints
     updates only endpoints/errors (calls/tokens untouched, file saved on
     persist); missing row / first probe in flight (probing) → False;
@@ -656,27 +657,34 @@ class TestPersistLoad:
 
 
 class TestResetModel:
-    def test_reset_removes_row_memory_and_file(self, tmp_path):
-        """reset_model → row gone from table and file; second reset False."""
+    def test_reset_zeroes_counters_keeps_row_memory_and_file(self, tmp_path):
+        """reset_model → calls/tokens zeroed, row stays in table and file."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = False
         persist_file = _persist_setup(config, mu, tmp_path)
-        mu.record_model_usage("m")
+        mu.record_model_usage("m")          # строка создана (calls=1)
+        mu._TABLE["m"]["calls"] = 7         # сид счётчиков напрямую
+        mu._TABLE["m"]["input_tokens"] = 300
+        mu._TABLE["m"]["output_tokens"] = 500
         assert mu.reset_model("m") is True
+        rows = mu.usage_snapshot()
+        assert len(rows) == 1               # строка осталась
+        assert rows[0]["calls"] == 0
+        assert rows[0]["input_tokens"] == 0
+        assert rows[0]["output_tokens"] == 0
+        # Бэкенд/endpoints первой пробы не тронуты (строка целиком на месте)
         with open(persist_file, encoding="utf-8") as f:
-            assert "m" not in yaml.safe_load(f)["models"]
-        assert mu.reset_model("m") is False
+            saved = yaml.safe_load(f)["models"]["m"]
+        assert saved["calls"] == 0 and saved["input_tokens"] == 0
+        assert saved["output_tokens"] == 0 and saved["model"] == "m"
+        # повторный сброс существующей строки — True (строка жива)
+        assert mu.reset_model("m") is True
 
-    def test_reset_row_in_file_only(self, tmp_path):
-        """Row in the file but not in memory (post-restart) is still resettable."""
+    def test_reset_missing_row_returns_false(self, tmp_path):
+        """reset_model for a row that is not in the table → False."""
         config, mu = _fresh()
-        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
-        mu.set_persist_path(persist_file)
-        with open(persist_file, "w", encoding="utf-8") as f:
-            yaml.safe_dump({"models": {"m1": {"model": "m1", "calls": 5}}}, f)
-        assert mu.reset_model("m1") is True
-        with open(persist_file, encoding="utf-8") as f:
-            assert "m1" not in yaml.safe_load(f)["models"]
+        persist_file = _persist_setup(config, mu, tmp_path)
+        assert mu.reset_model("nope") is False
 
     def test_flush_writes_dirty_table(self, tmp_path):
         """flush_table after mutations writes the file."""

@@ -1227,21 +1227,23 @@ class TestStatusHTTP:
 
 
 # ---------------------------------------------------------------------------
-# /api/model-usage/reset: POST — сброс строки модели (PRG-кнопка + JSON API)
+# /api/model-usage/reset: POST — обнуление счётчиков строки (PRG-кнопка + JSON API)
 # ---------------------------------------------------------------------------
 
 class TestModelUsageResetAPI:
-    def _seed_row(self, model="m-reset"):
+    def _seed_row(self, model="m-reset", calls=5, input_tokens=0,
+                  output_tokens=0):
         from backend_adapter import model_usage
         _seed_usage_rows(model_usage, [{
-            "model": model, "backend": "AAA", "calls": 5,
-            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
+            "model": model, "backend": "AAA", "calls": calls,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "endpoints": {}, "errors": {}, "first_seen": "10:00:00",
+            "probing": False,
         }])
 
     def test_post_form_resets_and_redirects(self, tmp_path):
         # HTML-кнопка (без JSON Content-Type): POST ?model=m → 303 See Other
-        # с Location "/" (PRG); после редиректа GET "/" строки нет.
+        # с Location "/" (PRG); счётчики строки обнулены, строка осталась.
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1260,14 +1262,15 @@ class TestModelUsageResetAPI:
             assert body == ""
             status2, body2 = _http_get(port, "/")
             assert status2 == 200
-            assert ">m-reset</td>" not in body2
+            assert ">m-reset</td>" in body2          # строка осталась
+            assert 'data-calls="0">0</td>' in body2  # счётчики обнулены
         finally:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_post_form_reset_then_row_gone_from_file(self, tmp_path):
-        # Сброс формы реально удаляет строку и из YAML-файла (serve включил
-        # persist на root_dir=tmp_path).
+    def test_post_form_reset_zeroes_counters_in_file(self, tmp_path):
+        # Сброс формы обнуляет счётчики и в YAML-файле; строка остаётся
+        # (serve включил persist на root_dir=tmp_path).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1292,16 +1295,21 @@ class TestModelUsageResetAPI:
             import yaml
             with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
                 data = yaml.safe_load(f)
-            assert "m-reset" not in (data or {}).get("models", {})
+            row = (data or {}).get("models", {}).get("m-reset")
+            assert row is not None        # строка осталась в файле
+            assert row["calls"] == 0      # счётчики обнулены
+            assert row["input_tokens"] == 0
+            assert row["output_tokens"] == 0
         finally:
             httpd.shutdown()
             httpd.server_close()
 
     def test_post_json_ok_then_404(self, tmp_path):
-        # JSON-клиент: 200 {"ok": true, ...}; повторный сброс — 404
-        # {"error": ...} (строки уже нет).
+        # JSON-клиент: 200 {"ok": true, ...}; повторный сброс той же модели —
+        # 200 (строка осталась, счётчики уже 0); сброс неизвестной модели —
+        # 404 {"error": ...}.
         config, ws = _fresh_modules()
-        self._seed_row()
+        self._seed_row(input_tokens=300, output_tokens=500)
         httpd, port = _start_server(str(tmp_path))
         try:
             status, headers, body = _http_post_body(
@@ -1311,12 +1319,23 @@ class TestModelUsageResetAPI:
             assert status == 200
             import json
             assert json.loads(body) == {"ok": True, "model": "m-reset"}
-            status2, _, body2 = _http_post_body(
+            from backend_adapter import model_usage
+            row = model_usage.usage_snapshot()[0]
+            assert row["calls"] == 0 and row["input_tokens"] == 0 \
+                and row["output_tokens"] == 0
+            # Повторный сброс существующей строки — успех (не 404)
+            status2, _, _ = _http_post_body(
                 port, "/api/model-usage/reset?model=m-reset", b"",
                 "application/json",
             )
-            assert status2 == 404
-            assert "error" in json.loads(body2)
+            assert status2 == 200
+            # Сброс модели, которой нет — 404
+            status3, _, body3 = _http_post_body(
+                port, "/api/model-usage/reset?model=ghost", b"",
+                "application/json",
+            )
+            assert status3 == 404
+            assert "error" in json.loads(body3)
         finally:
             httpd.shutdown()
             httpd.server_close()

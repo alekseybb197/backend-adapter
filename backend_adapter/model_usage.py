@@ -20,7 +20,8 @@ WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`, та же, чт�
 веб-сервера) и при старте загружается из него, если файл есть — счётчики
 переживают перезапуски адаптера. Сохранение «грязной» таблицы — не чаще
 раза в config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL (сек); создание новой строки
-модели, сброс строки и завершение работы адаптера (в т.ч. Ctrl-C —
+модели, обнуление счётчиков строки (reset_model, кнопка «Сбросить») и
+завершение работы адаптера (в т.ч. Ctrl-C —
 flush_table в backend-adapter.py) сохраняют сразу. Строки, у которых
 `probing: True` (идёт первая синхронная проба), на диск не попадают —
 крах в это время теряет только саму новую строку. При жёстком kill потеря
@@ -28,6 +29,11 @@ flush_table в backend-adapter.py) сохраняют сразу. Строки, 
 версии 1 (байтовые счётчики `bytes_sent`/`bytes_recv`) при загрузке
 мигрируются: calls/backend/endpoints/errors/first_seen сохраняются, байты
 отбрасываются, токены стартуют с 0 (следующее сохранение пишет v2).
+
+«Сбросить» (reset_model, POST /api/model-usage/reset) ОБНУЛЯЕТ счётчики
+строки (calls/input_tokens/output_tokens → 0), а не удаляет её: строка с
+результатами пробы эндпоинтов остаётся, повторные обращения не делают новую
+пробу (fast-path).
 
 Точка учёта — server.do_POST: model_usage.record_model_usage(client_model)
 сразу после strict-проверки и ДО модельного маппинга — имя из BODY
@@ -278,7 +284,7 @@ def reset_model_usage() -> None:
 
     YAML-файл НЕ трогает: очистка памяти — для изоляции тестов; файл
     перезапишется следующим сохранением. Полного сброса счётчиков через API
-    нет — только per-model reset_model."""
+    нет — только per-model reset_model (обнуление счётчиков строки)."""
     global _LOADED, _DIRTY, _LAST_SAVE
     with _TABLE_LOCK:
         _TABLE.clear()
@@ -288,16 +294,24 @@ def reset_model_usage() -> None:
 
 
 def reset_model(model: str) -> bool:
-    """Удалить строку модели из таблицы и из YAML-файла.
+    """Обнулить счётчики строки модели: calls/input_tokens/output_tokens → 0.
 
-    Возвращает True, если строка существовала (в памяти или в файле).
-    Точка вызова — ModelUsageResetEndpoint (POST /api/model-usage/reset)."""
+    Строка (модель/бэкенд/endpoints/errors/first_seen) ОСТАЁТСЯ в таблице и
+    в YAML-файле — «Сбросить» очищает накопленные счётчики, а не удаляет
+    модель (для удаления строки полного сброса таблицы нет). Повторные
+    обращения к модели не перепроверяют эндпоинты (строка существует —
+    fast-path). Возвращает True, если строка существовала (в памяти или в
+    файле). Точка вызова — ModelUsageResetEndpoint (POST
+    /api/model-usage/reset)."""
     global _DIRTY
     with _TABLE_LOCK:
         _ensure_loaded_locked()
         existed = model in _TABLE
         if existed:
-            del _TABLE[model]
+            row = _TABLE[model]
+            row["calls"] = 0
+            row["input_tokens"] = 0
+            row["output_tokens"] = 0
             _DIRTY = True
     if existed:
         _save_table(force=True)

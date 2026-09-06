@@ -42,8 +42,8 @@ backend_adapter/
 │                             "/api/model-usage/reprobe-state",
 │                             "/api/model-usage/snapshot": status page (version,
 │                             LLM endpoints, models) + background-check state +
-│                             секция «Models in use» (live-счётчики, сброс/
-│                             перепроверка)
+│                             секция «Models in use» (live-счётчики, сброс
+│                             счётчиков/перепроверка)
 ├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
@@ -143,9 +143,9 @@ Claude Code (Anthropic API client)
    works out of the box; `/session` is empty until logs exist; endpoints: `/` —
    status, `/session` — session viewer, `/config` — runtime-config form,
    `/api/refresh-state` — JSON state of the background check, see §6.5,
-   `/api/model-usage/reset` — used-models row reset, `/api/model-usage/reprobe` —
-   background row re-probe, `/api/model-usage/reprobe-state` — its JSON state,
-   see §6.6).
+   `/api/model-usage/reset` — zeroes a used-model row's counters (row is kept),
+   `/api/model-usage/reprobe` — background row re-probe,
+   `/api/model-usage/reprobe-state` — its JSON state, see §6.6).
    The used-models table persists to `model-usage.yaml` (version: 2, v1 migrated)
    in `root`.
    Loading the status page `/` (GET) renders the current state
@@ -410,7 +410,8 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   в схеме), токены стартуют с 0; следующие сохранения пишут `version: 2`.
   Сохранение «грязной» таблицы — не чаще раза в
   `config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL` (сек, дефолт 300); создание
-  строки, сброс (`reset_model`), завершение перепроверки
+  строки, обнуление счётчиков строки (`reset_model`: calls/input_tokens/
+  output_tokens → 0, строка НЕ удаляется), завершение перепроверки
   (`_save_table(force=True)`) и завершение работы (`flush_table`, в т.ч.
   Ctrl-C) сохраняют сразу. Строки с `probing: True` на диск не попадают;
   запись атомарная (tmp + `os.replace`). Загруженные строки не
@@ -438,7 +439,8 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   опрашивает GET `/api/model-usage/snapshot` (`UsageSnapshotEndpoint` →
   `usage_snapshot()`, из памяти, сети к бэкендам нет) и обновляет только
   ячейки Вызовов/Input/Output (data-атрибуты на td; позиционный матчинг со
-  снимком); число строк изменилось (сброс/новая модель) — `location.reload()`.
+  снимком); число строк изменилось (строка удалена/новая модель) —
+  `location.reload()`.
 - **Перепроверка строки (reprobe)** — `POST /api/model-usage/reprobe?model=
   <имя>` (`ModelUsageReprobeEndpoint`): повторная дымовая проба 4 эндпоинтов
   **именно этой моделью** для строк с колонками «—» (первый запрос давно /
@@ -685,8 +687,9 @@ backend-adapter.py
   │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
   ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state",
-  │                       "/api/model-usage/reset", "/api/model-usage/reprobe",
-  │                       "/api/model-usage/reprobe-state"), config, model_usage
+  │                       "/api/model-usage/snapshot", "/api/model-usage/reset",
+  │                       "/api/model-usage/reprobe", "/api/model-usage/reprobe-state"),
+  │                       config, model_usage
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   └── artifact_tree*.py  (8 modules, layered):
       artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
