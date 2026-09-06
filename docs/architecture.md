@@ -34,7 +34,8 @@ backend_adapter/
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
 ├── model_usage.py          ← used-models table (см. §6.6): учёт моделей запросов +
-│                             дымовая проба эндпоинтов по каждой модели
+│                             трафик обмена (bytes sent/recv) + дымовая проба
+│                             эндпоинтов по каждой модели
 ├── webui_status.py         ← WEBUI endpoints "/" + "/api/refresh-state": status page
 │                             (version, LLM endpoints, models) + background-check state +
 │                             секция «Использованные модели»
@@ -162,7 +163,9 @@ Claude Code (Anthropic API client)
 3. Strict model validation (ADAPTER_STRICT_MODELS)
 4. Record usage of the client model (model_usage.record_model_usage — used-models
    table; at first use of a model this synchronously smoke-probes that model's
-   endpoints, see §6.6; accounting never affects the request)
+   endpoints, see §6.6; on every exit path do_POST's finally accumulates the
+   backend traffic bytes via model_usage.add_usage_bytes; accounting never
+   affects the request)
 5. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
 6. Backend resolution (_resolve_backend)
    - Explicit prefix (<backend>.model) → strip, route
@@ -343,6 +346,7 @@ GET `/` и по кнопке:
   роняет запрос (все исключения ловятся внутри).
 - **Схема строки** (`client_model` — ключ `_TABLE`): `backend` (имя из
   `_resolve_backend`), `calls` (счётчик обращений, растёт всегда),
+  `bytes_sent`/`bytes_recv` (байты обмена с бэкендом, см. ниже),
   `endpoints` (`{pname: {status, found}}` — только реально пробованные
   пути; `found` ⇔ HTTP 200), `errors` (тексты сетевых ошибок пробы),
   `first_seen` («HH:MM:SS»), `probing` (True, пока первый запрос выполняет
@@ -364,14 +368,29 @@ GET `/` и по кнопке:
   никогда не повторяется. Конкурентность: два одновременных первых
   обращения к одной модели дают одну пробу (вторая нить видит строку),
   к разным — пробы идут параллельно в потоках `ThreadingHTTPServer`.
+- **Счётчики трафика** — `bytes_sent`/`bytes_recv` копятся в локальных
+  переменных `do_POST` (обмен адаптер ↔ бэкенд) и фиксируются ОДИН раз в
+  существующем `finally` через `model_usage.add_usage_bytes(client_model,
+  sent, recv)` (единая точка на любой исход — успех, ошибка бэкенда,
+  исчерпание ретраев, исключение). `sent` учитывает байты тела
+  [OI]-запроса на КАЖДОЙ попытке (`out_body`, сериализуется один раз и
+  переиспользуется ретраями), `recv` — байты каждого полученного тела
+  ответа, включая тела ошибок 4xx/5xx. Стрим: сумма длин ВСЕХ сырых
+  SSE-строк ответа (параметр `bytes_sink` в `stream_openai_to_anthropic`).
+  Гейт — тот же `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие
+  strict-проверку (HTTP 400), и служебные дымовые пробы эндпоинтов в
+  счётчики не попадают.
 - **Мастер-флаг `ADAPTER_MODEL_USAGE_ENABLE`** (config.py, дефолт `1`):
-  `0` — пробы отключены, учёт обращений остаётся (колонки «—»). Пробы по
+  `0` — пробы и накопление трафика отключены, учёт обращений остаётся
+  (колонки эндпоинтов «—», «Отправлено/Получено» — «0 B»). Пробы по
   модели НЕ зависят от `ADAPTER_ENDPOINT_PROBE` (тот управляет только
   фоновой проверкой бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не
   входит; таблица живёт в памяти процесса и сбрасывается при старте.
 - **Вывод** — секция «Использованные модели» на статус-странице `/`
   (`webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
-  строк в порядке первого обращения).
+  строк в порядке первого обращения): колонки Модель | Бэкенд | Вызовов |
+  Отправлено | Получено | 4 эндпоинта. Байтовые колонки рендерятся
+  форматтером `_fmt_bytes` (1024-единицы: «512 B», «1.5 KiB», «1.0 MiB»).
 
 ### 6.2 Разрешение коллизий имён моделей
 
