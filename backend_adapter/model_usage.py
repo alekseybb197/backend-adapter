@@ -90,6 +90,13 @@ _DIRTY = False  # есть несохранённые мутации табли�
 _LAST_SAVE = 0.0  # time.time() последнего сохранения
 _FORMAT_VERSION = 2  # версия формата YAML-файла (поле version)
 
+# Перепроверка строки модели («Перепроверить»): фоновый снимок идущей пробы.
+# В таблицу НЕ пишется (в отличие от probing первичной пробы — reprobe не
+# блокирует сериализацию строки: файл принудительно сохраняется в finally
+# воркера, и строка в нём должна остаться на всё время пробы).
+_REPROBE: dict[str, dict] | None = None  # client_model → {"started_at": float}
+_REPROBE_LOCK = threading.Lock()
+
 
 # ==================== ПУБЛИЧНЫЙ API ====================
 
@@ -295,6 +302,97 @@ def reset_model(model: str) -> bool:
     if existed:
         _save_table(force=True)
     return existed
+
+
+def start_reprobe(client_model: str) -> bool:
+    """Запустить фоновую перепроверку эндпоинтов строки модели.
+
+    Возвращает True, если перепроверка запущена этим вызовом; False — строки
+    нет в таблице, у строки идёт первая (первичная) проба (probing=True) или
+    перепроверка этой модели уже выполняется. Поток — daemon. Точка вызова —
+    ModelUsageReprobeEndpoint (POST /api/model-usage/reprobe)."""
+    global _REPROBE
+    with _TABLE_LOCK:
+        _ensure_loaded_locked()
+        row = _TABLE.get(client_model)
+        if row is None or row.get("probing"):
+            return False
+    with _REPROBE_LOCK:
+        if _REPROBE is not None:
+            return False
+        _REPROBE = {client_model: {"started_at": time.time()}}
+    t = threading.Thread(
+        target=_reprobe_worker, args=(client_model,), name="model-usage-reprobe", daemon=True
+    )
+    t.start()
+    return True
+
+
+def reprobe_state() -> dict:
+    """Снимок перепроверки: {"running": bool, "model": str|None,
+    "started_at": float|None}. Для /api/model-usage/reprobe-state и баннера."""
+    with _REPROBE_LOCK:
+        if _REPROBE is None:
+            return {"running": False, "model": None, "started_at": None}
+        ((model, info),) = _REPROBE.items()
+        return {"running": True, "model": model, "started_at": info["started_at"]}
+
+
+def _reprobe_worker(client_model: str) -> None:
+    """Воркер фоновой перепроверки: проба эндпоинтов строки и публикация
+    результата; в finally — очистка снимка и принудительное сохранение."""
+    global _REPROBE
+    try:
+        reprobe_model(client_model)
+    finally:
+        with _REPROBE_LOCK:
+            if _REPROBE is not None and client_model in _REPROBE:
+                _REPROBE = None
+
+
+def reprobe_model(client_model: str) -> bool:
+    """Синхронная перепроба эндпоинтов строки модели (ядро, без сети — из
+    воркера). Обновляет только endpoints/errors строки (и backend, если резолв
+    сменился); calls/токены НЕ трогает. Возвращает True при успехе; False —
+    строки нет в таблице. Исключения ловятся (лог), состояние очищается."""
+    global _DIRTY
+    with _TABLE_LOCK:
+        _ensure_loaded_locked()
+        row = _TABLE.get(client_model)
+        if row is None:
+            return False
+        probing = row.get("probing")
+    if probing:
+        return False
+    result = None
+    backend_name = ""
+    try:
+        backend_cfg, resolved = config._resolve_backend(client_model)
+        backend_name = backend_cfg["name"]
+        if _backend_has_model(backend_cfg, resolved):
+            result = _probe_model_endpoints(backend_cfg, resolved)
+            _log_probe(client_model, backend_name, result)
+        else:
+            # Модели нет среди моделей бэкенда — пробовать нечем: колонки
+            # эндпоинтов остаются «—».
+            _log(
+                client_model,
+                f"reprobe skipped: model '{resolved}' not among backend '{backend_name}' models",
+            )
+    except Exception as e:  # noqa: BLE001 — перепроверка не должна валить
+        _log(client_model, f"reprobe failed: {e}")
+    finally:
+        with _TABLE_LOCK:
+            cur = _TABLE.get(client_model)
+            if cur is not None:
+                cur["backend"] = backend_name
+                if result is not None:
+                    cur["endpoints"] = result["endpoints"]
+                    cur["errors"] = result["errors"]
+                _DIRTY = True
+    # Сохранить сразу (сид/воркер): результат пробы виден и после kill.
+    _save_table(force=True)
+    return True
 
 
 # ==================== ПЕРСИСТЕНТНОСТЬ (YAML) ====================
@@ -581,4 +679,7 @@ __all__ = [
     "usage_snapshot",
     "reset_model_usage",
     "reset_model",
+    "start_reprobe",
+    "reprobe_state",
+    "reprobe_model",
 ]

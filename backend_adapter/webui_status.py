@@ -18,7 +18,13 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
     WEBUI и переживает перезапуски адаптера; строка модели сбрасывается
     кнопкой «Сбросить» в строке таблицы (POST /api/model-usage/reset,
-    см. ModelUsageResetEndpoint).
+    см. ModelUsageResetEndpoint). Кнопка «Перепроверить» (POST
+    /api/model-usage/reprobe, см. ModelUsageReprobeEndpoint) запускает
+    фоновую повторную дымовую пробу эндпоинтов именно этой моделью — для
+    строк, чьи колонки эндпоинтов «—»; проба не трогает счётчики и токены
+    строки. Пока перепроверка идёт, страница показывает баннер и ячейку
+    «проверяется…» и авто-обновляется по завершении (JS → /api/model-usage/
+    reprobe-state, см. ReprobeStateEndpoint).
 
 Откуда данные:
   - Проверка бэкендов запускается:
@@ -267,17 +273,31 @@ def _fmt_tokens(n: int) -> str:
     return f"{max(n, 0):,}".replace(",", " ")
 
 
-def _reset_cell_html(model: str) -> str:
-    """HTML ячейки «Сброс» строки таблицы использованных моделей.
+def _actions_cell_html(model: str, reprobing: bool = False) -> str:
+    """HTML ячейки действий строки таблицы использованных моделей.
 
-    Form-кнопка целиком внутри своего <td> (валидный HTML — без вложенных
-    форм и JS): POST /api/model-usage/reset?model=<имя> сбрасывает строку
-    модели (см. ModelUsageResetEndpoint; по PRG сервер отвечает 303 на
-    GET "/"). Имя модели кодируется quote(safe="") для query-параметра и
-    html.escape — для атрибута action."""
+    Две form-кнопки целиком внутри своего <td> (валидный HTML — без
+    вложенных форм и JS): «Перепроверить» (POST /api/model-usage/reprobe?model=…)
+    запускает фоновую перепробу эндпоинтов строки, «Сбросить» (POST
+    /api/model-usage/reset?model=…) удаляет строку (оба эндпоинта по PRG
+    отвечают 303 на GET "/"). При reprobing=True (перепроверка этой модели
+    уже идёт) вместо кнопок — серый текст «проверяется…»: повторный запуск
+    невозможен, страница авто-обновится по завершении. Имя модели кодируется
+    quote(safe="") для query-параметра и html.escape — для атрибута action."""
     q = quote(str(model), safe="")
+    if reprobing:
+        return (
+            '<td style="color:#888">'
+            '<span title="перепроверка эндпоинтов модели выполняется">'
+            "проверяется…</span></td>"
+        )
     return (
         "<td>"
+        f'<form method="post" action="/api/model-usage/reprobe?model={html.escape(q)}">'
+        '<button type="submit" style="color:#555;background:none;border:none;'
+        'padding:0 6px 0 0;font:inherit;cursor:pointer;text-decoration:underline">'
+        "Перепроверить</button>"
+        "</form>"
         f'<form method="post" action="/api/model-usage/reset?model={html.escape(q)}">'
         '<button type="submit" style="color:#c0392b;background:none;border:none;'
         'padding:0;font:inherit;cursor:pointer;text-decoration:underline">Сбросить</button>'
@@ -285,23 +305,26 @@ def _reset_cell_html(model: str) -> str:
     )
 
 
-def _usage_rows_html(rows: list[dict]) -> str:
+def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     """HTML строк таблицы «Использованные модели» (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
     Колонки: Модель | Бэкенд | Вызовов | Input | Output | эндпоинты
     ENDPOINT_PROBES (completions/messages/responses/embeddings — в порядке
-    config.ENDPOINT_PROBES, том же, что у пробы) | Сброс. input_tokens/
+    config.ENDPOINT_PROBES, том же, что у пробы) | Действия. input_tokens/
     output_tokens — токены из usage-блоков ответов бэкенда (см. _fmt_tokens);
-    поля отсутствуют у мигрировавших/старых сидов → 0. Модель/бэкенд —
-    html.escape; «Сбросить» — отдельная форма в последнем <td>
-    (см. _reset_cell_html)."""
+    поля отсутствуют у мигрировавших/старых сидов → 0. ``reprobing`` —
+    карта client_model → True: у строки идёт фоновая перепроверка (баннер +
+    авто-релоад); в ячейке действий вместо кнопок — «проверяется…».
+    Модель/бэкенд — html.escape; «Перепроверить»/«Сбросить» — отдельные
+    формы в последнем <td> (см. _actions_cell_html)."""
     body = []
     for r in rows:
         ep_cells = "".join(
             f"<td>{_usage_endpoint_html(r['endpoints'].get(pname))}</td>"
             for pname, _path, _tpl in config.ENDPOINT_PROBES
         )
+        reprobing_row = bool(reprobing and reprobing.get(r["model"]))
         body.append(
             "<tr>"
             f"<td>{html.escape(str(r['model']))}</td>"
@@ -310,12 +333,12 @@ def _usage_rows_html(rows: list[dict]) -> str:
             f"<td>{_fmt_tokens(r.get('input_tokens', 0))}</td>"
             f"<td>{_fmt_tokens(r.get('output_tokens', 0))}</td>"
             f"{ep_cells}"
-            f"{_reset_cell_html(r['model'])}"
+            f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="10" style="color:#888">пока нет данных — '
+            '<tr><td colspan="11" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -343,7 +366,11 @@ def _render_status_page(
     внутри refresh_models; refresh["probe"] отдельно не рендерится).
     Секция «Использованные модели» рендерится из model_usage.usage_snapshot()
     (см. _usage_rows_html) — таблица заполняется запросами агента в этом
-    процессе независимо от проверок бэкендов."""
+    процессе независимо от проверок бэкендов. Перепроверка строки (кнопка
+    «Перепроверить», model_usage.reprobe_state()) — отдельный фоновый процесс
+    (см. ModelUsageReprobeEndpoint): пока идёт, страница показывает свой
+    баннер и авто-обновляется по завершении (JS reprobe_poll →
+    /api/model-usage/reprobe-state → location.reload())."""
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
@@ -456,6 +483,47 @@ def _render_status_page(
 </script>
 """
 
+    # Баннер «перепроверка строки идёт» + JS поллинга /api/model-usage/
+    # reprobe-state. По образцу баннера проверки бэкендов выше, но состояние
+    # живёт в model_usage (reprobe_state), а не в config.refresh_state():
+    # перепроверка запускается кнопкой «Перепроверить» строки таблицы
+    # использованных моделей, когда её колонки эндпоинтов «—». Пока идёт —
+    # ячейка действий строки показывает «проверяется…» (см. _actions_cell_html)
+    # и JS перезагружает страницу по завершении.
+    reprobe = model_usage.reprobe_state()
+    reprobing = None
+    reprobe_banner_html = ""
+    reprobe_poll_script = ""
+    if reprobe.get("running"):
+        reprobing = {reprobe.get("model"): True}
+        started = (
+            time.strftime("%H:%M:%S", time.localtime(reprobe["started_at"]))
+            if reprobe.get("started_at")
+            else ""
+        )
+        model_txt = html.escape(str(reprobe.get("model") or ""))
+        reprobe_banner_html = (
+            '<p style="background:#eef4fb;border:1px solid #9db8d9;'
+            f'padding:8px 12px;color:#34506e">⟳ Перепроверка модели '
+            f"<code>{model_txt}</code>{(' (запущена в ' + started + ')') if started else ''}… "
+            "эндпоинты пере-проверяются этой моделью в фоне, страница "
+            "обновится автоматически по завершении.</p>"
+        )
+        reprobe_poll_script = """
+<script>
+  function reprobe_poll() {{
+    fetch("/api/model-usage/reprobe-state")
+      .then(function (r) {{ return r.json(); }})
+      .then(function (s) {{
+        if (!s.running) {{ location.reload(); }}
+        else {{ setTimeout(reprobe_poll, 2000); }}
+      }})
+      .catch(function () {{ setTimeout(reprobe_poll, 2000); }});
+  }}
+  window.addEventListener("load", reprobe_poll);
+</script>
+"""
+
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -480,7 +548,8 @@ def _render_status_page(
     }}
   }}
 </script>
-{poll_script}</head>
+{poll_script}
+{reprobe_poll_script}</head>
 <body>
 <h2>Backend-Adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
@@ -489,6 +558,7 @@ def _render_status_page(
    <a href="/config">runtime config →</a></p>
 {note_html}
 {banner_html}
+{reprobe_banner_html}
 <table>
   <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Endpoints</th><th>Models</th></tr>
   {"".join(rows)}
@@ -503,11 +573,16 @@ def _render_status_page(
   обрывы, бэкенд без usage-поддержки) в учёт не попадают. Служебные дымовые
   пробы эндпоинтов в них не входят. {usage_note} Строка модели
   сбрасывается кнопкой «Сбросить» справа (POST /api/model-usage/reset).
+  Кнопка «Перепроверить» запускает фоновую повторную пробу эндпоинтов
+  именно этой моделью (POST /api/model-usage/reprobe) — для строк, чьи
+  колонки эндпоинтов «—» (первый запрос был давно, бэкенд ожил, модель
+  появилась в /v1/models); счётчики «Вызовов»/токенов при этом не растут —
+  проба служебная.
   ADAPTER_MODEL_USAGE_ENABLE=0 — учёт остаётся, пробы выключены (колонки
   эндпоинтов «—»).</p>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th><th>Сброс</th></tr>
-  {_usage_rows_html(model_usage.usage_snapshot())}
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th><th>Действия</th></tr>
+  {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
 </table>
 {footer}
 <form method="POST" action="/" style="margin-top:12px">
@@ -644,6 +719,75 @@ class ModelUsageResetEndpoint(webserver.Endpoint):
         handler._write(200, "application/json; charset=utf-8", body)
 
 
+@webserver.register
+class ModelUsageReprobeEndpoint(webserver.Endpoint):
+    """POST /api/model-usage/reprobe?model=<имя> — фоновая перепроверка
+    эндпоинтов строки модели.
+
+    Кнопка «Перепроверить» в таблице использованных моделей (form
+    method=post) работает по PRG-паттерну: старт + 303 See Other на GET "/"
+    — страница показывается GET-навигацией, обновление не повторяет POST.
+    Проба идёт в фоновом потоке (model_usage.start_reprobe) — статус-страница
+    отвечает мгновенно; пока перепроверка выполняется, строка показывает
+    «проверяется…» и страница авто-обновляется по завершении (JS опрашивает
+    /api/model-usage/reprobe-state). JSON-клиент (Content-Type:
+    application/json) получает 202 {"ok": true, "model": ...} при запуске,
+    404 {"error": ...} — строки нет / уже перепроверяется / идёт первичная
+    проба, 400 {"error": ...} — нет query-параметра model (единый формат
+    ошибки, как у reset). 202 — «запущено в фоне» (в отличие от 200-«готово»
+    у reset). GET на префикс — 404 дефолтом Endpoint."""
+
+    prefix = "/api/model-usage/reprobe"
+
+    def __init__(self, context):
+        self.context = context
+
+    def POST(self, handler, remainder: str):
+        parsed = urlparse(handler.path)
+        model = parse_qs(parsed.query).get("model", [""])[0].strip()
+        ct = handler.headers.get("Content-Type", "")
+        if "application/json" not in ct:
+            # HTML-форма кнопки (application/x-www-form-urlencoded): PRG.
+            if not model:
+                handler._redirect("/")  # кнопка без model невозможна в норме
+                return
+            model_usage.start_reprobe(model)  # строка есть на живой странице
+            handler._redirect("/")  # 303 → GET "/" (PRG)
+            return
+        if not model:
+            body = b'{"error": "missing \'model\' query parameter"}'
+            handler._write(400, "application/json; charset=utf-8", body)
+            return
+        if not model_usage.start_reprobe(model):
+            body = json.dumps(
+                {"error": f"model '{model}' not in usage table or already reprobing"}
+            ).encode()
+            handler._write(404, "application/json; charset=utf-8", body)
+            return
+        body = json.dumps({"ok": True, "model": model}).encode("utf-8")
+        handler._write(202, "application/json; charset=utf-8", body)
+
+
+@webserver.register
+class ReprobeStateEndpoint(webserver.Endpoint):
+    """Эндпойнт "/api/model-usage/reprobe-state": состояние перепроверки (JSON).
+
+    Лёгкий ответ для JS status_poll на статус-странице:
+    model_usage.reprobe_state() — {"running", "model", "started_at"}. GET
+    перепроверку не запускает и ничего не мутирует — безопасно опрашивать
+    каждые 2 с (по образцу /api/refresh-state, но состояние живёт в
+    model_usage, а не в config)."""
+
+    prefix = "/api/model-usage/reprobe-state"
+
+    def __init__(self, context):
+        self.context = context
+
+    def GET(self, handler, remainder: str):
+        body = json.dumps(model_usage.reprobe_state()).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
 def _last_result(state: dict) -> dict | None:
     """refresh-срез состояния для _render_status_page (или None).
 
@@ -687,12 +831,14 @@ __all__ = [
     "_api_html",
     "_usage_endpoint_html",
     "_usage_rows_html",
-    "_reset_cell_html",
+    "_actions_cell_html",
     "_fmt_tokens",
     "_render_status_page",
     "StatusEndpoint",
     "RefreshStateEndpoint",
     "ModelUsageResetEndpoint",
+    "ModelUsageReprobeEndpoint",
+    "ReprobeStateEndpoint",
     "_last_result",
     "_autostart_first_check",
 ]

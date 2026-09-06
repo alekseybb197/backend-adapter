@@ -19,7 +19,14 @@ the page shows the «Проверка выполняется…» banner plus th
 model list, failure keeps the old cache and shows the error text, standalone
 (no endpoints) renders the notice and does not start any check. The Models
 cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
-button (JS models_toggle on the page) — see TestModelsCell.
+button (JS models_toggle on the page) — see TestModelsCell. The used-models
+table's actions cell holds two PRG forms — «Перепроверить» (POST
+/api/model-usage/reprobe) and «Сбросить» (POST /api/model-usage/reset) —
+and renders «проверяется…» (no forms) while that row is being re-probed;
+/reprobe answers 202 on launch / 404 / 400 for JSON clients and 303 for the
+HTML form; /api/model-usage/reprobe-state serves the reprobe snapshot for the
+page's reprobe_poll JS (banner + auto-reload while running) — see
+TestModelUsageReprobeAPI / TestReprobeStateAPI.
 """
 import os
 import socket
@@ -519,7 +526,7 @@ class TestUsageSection:
 
     def test_section_present_with_headers(self):
         # Заголовок секции + 10 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|4 эндпоинта|Сброс).
+        # Output|4 эндпоинта|Действия).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Использованные модели</h3>" in body
@@ -532,7 +539,7 @@ class TestUsageSection:
         assert "<th>messages</th>" in body
         assert "<th>responses</th>" in body
         assert "<th>embeddings</th>" in body
-        assert "<th>Сброс</th>" in body
+        assert "<th>Действия</th>" in body
 
     def test_empty_table_shows_placeholder(self):
         # Пустая таблица → строка «пока нет данных», никаких строк моделей.
@@ -600,12 +607,12 @@ class TestUsageSection:
         # _usage_rows_html: 4 ячейки эндпоинтов на строку + плейсхолдер пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"10\"" in html
+        assert "пока нет данных" in html and "<td colspan=\"11\"" in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+4 эндпоинта+Сброс = 10
+        # модель+бэкенд+вызовов+input+output+4 эндпоинта+Действия = 10
         assert html.count("<td>") == 10
         assert "completions" not in html  # короткие имена — только в шапке
 
@@ -617,36 +624,69 @@ class TestUsageSection:
         assert "1 536" in html
         assert "12 345" in html
 
-    def test_row_has_reset_form(self):
-        # Каждая строка модели несёт form-кнопку «Сбросить» (POST на
+    def test_row_has_actions_two_forms(self):
+        # Каждая строка модели несёт две form-кнопки: «Перепроверить» (POST
+        # на /api/model-usage/reprobe?model=<имя>) и «Сбросить» (POST на
         # /api/model-usage/reset?model=<имя>) — без JS, PRG через 303.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-reset")])
+        assert "Перепроверить" in body
         assert "Сбросить" in body
         assert (
             '<form method="post" action="/api/model-usage/reset?model=m-reset">'
             in body
         )
-        assert "color:#c0392b" in body  # красная ссылка-кнопка
+        assert (
+            '<form method="post" action="/api/model-usage/reprobe?model=m-reset">'
+            in body
+        )
+        assert "color:#c0392b" in body  # красная ссылка-кнопка сброса
+        # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
+        row_html = ws._usage_rows_html([self._row("m-reset")])
+        assert row_html.count("<td>") == 10  # в т.ч. ячейка действий — одна
 
-    def test_empty_table_no_reset_forms(self):
-        # У пустой таблицы (заглушка colspan=10) форм сброса нет (слово
-        # «Сбросить» остаётся только в подписи-абзаце).
-        config, ws = _fresh_modules()
-        body = self._seed(config, ws, usage_rows=[])
-        assert 'form method="post" action="/api/model-usage/reset' not in body
-        assert "colspan=\"10\"" in body
-
-    def test_reset_form_escapes_special_model_name(self):
-        # Имя модели со спецсимволами: в action — quote(safe="")+html.escape,
-        # спецсимволы не ломают query/атрибут и не исполняются браузером.
+    def test_row_actions_escapes_special_model_name(self):
+        # Имя модели со спецсимволами в обеих формах: quote(safe="") +
+        # html.escape, спецсимволы не ломают query/атрибут.
         config, ws = _fresh_modules()
         row = self._row('m & "x"/у=1')
         html = ws._usage_rows_html([row])
         from urllib.parse import quote as _quote
         q = _quote('m & "x"/у=1', safe="")
         assert f'action="/api/model-usage/reset?model={q}"' in html
+        assert f'action="/api/model-usage/reprobe?model={q}"' in html
         assert 'model=m & "' not in html  # сырые спецсимволы в action не выходят
+
+    def test_row_actions_hidden_while_reprobing(self):
+        # У строки с идущей перепроверкой (reprobing=True) вместо кнопок —
+        # серый текст «проверяется…» и НЕТ форм (повторный запуск невозможен).
+        config, ws = _fresh_modules()
+        html = ws._usage_rows_html([self._row("m-re")], reprobing={"m-re": True})
+        assert "проверяется…" in html
+        assert "Перепроверить" not in html
+        assert "Сбросить" not in html
+        assert "form method=\"post\"" not in html
+
+    def test_row_actions_normal_when_other_reprobing(self):
+        # Перепроверяется ДРУГАЯ модель — у строки обычные кнопки.
+        config, ws = _fresh_modules()
+        html = ws._usage_rows_html(
+            [self._row("m-a"), self._row("m-b")],
+            reprobing={"m-b": True},
+        )
+        # m-a — обычная ячейка действий с кнопками, m-b — «проверяется…»
+        assert "Перепроверить" in html and "Сбросить" in html
+        assert "проверяется…" in html
+        assert html.index("m-a") < html.index("проверяется…")
+
+    def test_empty_table_no_reset_forms(self):
+        # У пустой таблицы (заглушка colspan=11) форм сброса/перепроверки нет
+        # (слова остаются только в подписи-абзаце).
+        config, ws = _fresh_modules()
+        body = self._seed(config, ws, usage_rows=[])
+        assert 'form method="post" action="/api/model-usage/reset' not in body
+        assert 'form method="post" action="/api/model-usage/reprobe' not in body
+        assert "colspan=\"11\"" in body
 
     def test_page_header_is_backend_adapter(self):
         # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —
@@ -1261,6 +1301,212 @@ class TestModelUsageResetAPI:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
+# /api/model-usage/reprobe: POST — фоновая перепроверка эндпоинтов строки
+# ---------------------------------------------------------------------------
+
+class TestModelUsageReprobeAPI:
+    def _seed_row(self, model="m-re", endpoints=None):
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": model, "backend": "AAA", "calls": 5,
+            "input_tokens": 0, "output_tokens": 0,
+            "endpoints": endpoints if endpoints is not None else {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }])
+        return model_usage
+
+    def test_post_form_starts_and_redirects(self, tmp_path):
+        # HTML-кнопка (без JSON Content-Type): POST ?model=m → 303 See Other
+        # с Location "/" (PRG); старт реально вызван (start_reprobe → True).
+        config, ws = _fresh_modules()
+        from backend_adapter import model_usage
+        self._seed_row()
+        with mock.patch.object(model_usage, "start_reprobe", return_value=True) as m_start:
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, headers, body = _http_post_body(
+                    port, "/api/model-usage/reprobe?model=m-re", b"",
+                    "application/x-www-form-urlencoded",
+                )
+                assert status == 303
+                assert headers.get("location") == "/"
+                assert body == ""
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+        assert m_start.call_count == 1
+        assert m_start.call_args.args == ("m-re",)
+
+    def test_post_json_202_ok(self, tmp_path):
+        # JSON-клиент: 202 {"ok": true, ...} — «запущено в фоне».
+        config, ws = _fresh_modules()
+        from backend_adapter import model_usage
+        self._seed_row()
+        with mock.patch.object(model_usage, "start_reprobe", return_value=True):
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, _, body = _http_post_body(
+                    port, "/api/model-usage/reprobe?model=m-re", b"",
+                    "application/json",
+                )
+                assert status == 202
+                import json
+                assert json.loads(body) == {"ok": True, "model": "m-re"}
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_post_json_404_when_no_row_or_already_running(self, tmp_path):
+        # Строки нет (или уже перепроверяется) — start_reprobe False → 404.
+        config, ws = _fresh_modules()
+        from backend_adapter import model_usage
+        self._seed_row()
+        with mock.patch.object(model_usage, "start_reprobe", return_value=False):
+            httpd, port = _start_server(str(tmp_path))
+            try:
+                status, _, body = _http_post_body(
+                    port, "/api/model-usage/reprobe?model=m-re", b"",
+                    "application/json",
+                )
+                assert status == 404
+                import json
+                assert "error" in json.loads(body)
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+
+    def test_post_json_missing_model_400(self, tmp_path):
+        # Без query-параметра model — 400 {"error": ...} (JSON-клиент).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _, body = _http_post_body(
+                port, "/api/model-usage/reprobe", b"",
+                "application/json",
+            )
+            assert status == 400
+            import json
+            assert "error" in json.loads(body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_without_model_redirects(self, tmp_path):
+        # HTML-форма без model — 303 на "/" (в норме невозможно: кнопка
+        # всегда несёт model).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/reprobe", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_get_returns_404(self, tmp_path):
+        # GET на префикс перепроверки — 404 (дефолт Endpoint; только POST).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _ = _http_get(port, "/api/model-usage/reprobe?model=m")
+            assert status == 404
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_page_shows_banner_and_checking_cell_while_running(self, tmp_path):
+        # Живой reprobe (сид _REPROBE): GET "/" показывает баннер
+        # «Перепроверка … выполняется…», JS-поллинг /api/model-usage/
+        # reprobe-state и ячейку «проверяется…» у строки — без форм.
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-re": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        from backend_adapter import model_usage
+        self._seed_row("m-re")
+        model_usage._REPROBE = {"m-re": {"started_at": 1000.0}}
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/")
+            assert status == 200
+            assert "Перепроверка модели" in body
+            assert "выполняется" in body
+            assert "проверяется…" in body
+            assert "Перепроверить</button>" not in body
+            assert "Сбросить</button>" not in body
+            assert "fetch(\"/api/model-usage/reprobe-state\")" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            model_usage._REPROBE = None
+
+    def test_page_idle_no_reprobe_banner(self, tmp_path):
+        # Reprobe не идёт — баннера «Перепроверка» и reprobe-поллинга нет
+        # (кнопки «Перепроверить» на месте).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-re": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        self._seed_row("m-re")
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/")
+            assert status == 200
+            assert "Перепроверка модели" not in body
+            assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
+            assert "Перепроверить</button>" in body
+            assert "Сбросить</button>" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class TestReprobeStateAPI:
+    def test_returns_idle_json(self, tmp_path):
+        # Reprobe не идёт — дефолт {"running": false, ...}.
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/api/model-usage/reprobe-state")
+            assert status == 200
+            import json
+            assert json.loads(body) == {
+                "running": False, "model": None, "started_at": None,
+            }
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_returns_running_json(self, tmp_path):
+        # Живой reprobe — снимок с моделью и временем старта.
+        config, ws = _fresh_modules()
+        from backend_adapter import model_usage
+        model_usage._REPROBE = {"m-re": {"started_at": 1000.0}}
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/api/model-usage/reprobe-state")
+            assert status == 200
+            import json
+            state = json.loads(body)
+            assert state["running"] is True
+            assert state["model"] == "m-re"
+            assert state["started_at"] == 1000.0
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            model_usage._REPROBE = None
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,11 @@ Tests cover:
     triggers the load; broken YAML → empty table without an exception and is
     overwritten by the next save; reset_model removes a row from memory and
     from the file; flush_table and the save interval gate periodic saves
+  - reprobe («Перепроверить»): a background re-probe of a row's endpoints
+    updates only endpoints/errors (calls/tokens untouched, file saved on
+    persist); missing row / first probe in flight (probing) → False;
+    start_reprobe spawns the daemon worker and rejects a second run while one
+    is in flight; reprobe_state mirrors running/model
 """
 import os
 import threading
@@ -682,3 +687,163 @@ class TestResetModel:
         mu.flush_table()
         with open(persist_file, encoding="utf-8") as f:
             assert "m1" in yaml.safe_load(f)["models"]
+
+
+class TestReprobe:
+    """Фоновая перепроверка эндпоинтов строки (кнопка «Перепроверить»).
+
+    Ядро reprobe_model: endpoints/errors строки обновляются результатом
+    новой пробы, calls/токены НЕ растут; строки нет / идёт первичная проба
+    (probing=True) → False. start_reprobe: запуск daemon-потока, повторный
+    при идущем reprobe → False; reprobe_state — снимок running/model."""
+
+    def _seed_row(self, mu, model="m", backend="AAA", calls=5, probing=False,
+                  endpoints=None, input_tokens=10, output_tokens=20):
+        mu.reset_model_usage()
+        mu._TABLE[model] = {
+            "model": model,
+            "backend": backend,
+            "calls": calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "endpoints": endpoints if endpoints is not None else {},
+            "errors": {},
+            "first_seen": "10:00:00",
+            "probing": probing,
+        }
+
+    def test_reprobe_updates_endpoints_only(self):
+        """Проба возвращает endpoints/errors — строка обновляется ими, calls
+        и токены НЕ трогаются; файл сохраняется (force)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        self._seed_row(mu, calls=5, input_tokens=10, output_tokens=20)
+        result = {
+            "endpoints": {"completions": {"status": 200, "found": True}},
+            "errors": {},
+        }
+        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=True):
+                with mock.patch.object(mu, "_probe_model_endpoints", return_value=result) as m_probe:
+                    assert mu.reprobe_model("m") is True
+        assert m_probe.call_count == 1
+        row = mu.usage_snapshot()[0]
+        assert row["endpoints"] == {"completions": {"status": 200, "found": True}}
+        assert row["calls"] == 5      # счётчик не вырос
+        assert row["input_tokens"] == 10   # токены не выросли
+        assert row["output_tokens"] == 20
+        assert row["probing"] is False
+
+    def test_reprobe_updates_backend_name_on_resolve(self):
+        """Резолв сменился (бэкенд BBB) → backend строки обновляется."""
+        config, mu = _fresh()
+        self._seed_row(mu, backend="AAA")
+        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "BBB"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=False):
+                assert mu.reprobe_model("m") is True
+        assert mu.usage_snapshot()[0]["backend"] == "BBB"
+        # модели нет на бэкенде — пробу не делаем, endpoints не трогаем
+
+    def test_reprobe_no_row_false(self):
+        """Строки нет в таблице → False, исключений нет."""
+        config, mu = _fresh()
+        mu.reset_model_usage()
+        assert mu.reprobe_model("m") is False
+
+    def test_reprobe_probing_row_false(self):
+        """Идёт первичная (первая) проба строки (probing=True) → False."""
+        config, mu = _fresh()
+        self._seed_row(mu, probing=True)
+        assert mu.reprobe_model("m") is False
+
+    def test_reprobe_exception_swallowed(self):
+        """Исключение в пробе → лог, строка цела, endpoints не тронуты."""
+        config, mu = _fresh()
+        self._seed_row(mu)
+        with mock.patch.object(config, "_resolve_backend", side_effect=RuntimeError("boom")):
+            assert mu.reprobe_model("m") is True  # исключение поймано внутри
+        row = mu.usage_snapshot()[0]
+        assert row["calls"] == 5
+
+    def test_reprobe_writes_file_on_persist(self, tmp_path):
+        """При persist-пути результат reprobe сохраняется в файл сразу."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        persist_file = _persist(tmp_path, config, mu)
+        self._seed_row(mu)
+        result = {
+            "endpoints": {"completions": {"status": 200, "found": True}},
+            "errors": {},
+        }
+        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=True):
+                with mock.patch.object(mu, "_probe_model_endpoints", return_value=result):
+                    mu.reprobe_model("m")
+        with open(persist_file, encoding="utf-8") as f:
+            saved = yaml.safe_load(f)
+        assert saved["version"] == 2
+        assert saved["models"]["m"]["endpoints"]["completions"]["found"] is True
+
+    def test_start_reprobe_launches_worker(self):
+        """start_reprobe: строка есть → True, снимок running; воркер
+        (reprobe_model) отрабатывает и очищает снимок в finally."""
+        config, mu = _fresh()
+        self._seed_row(mu)
+        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=True):
+                with mock.patch.object(
+                    mu, "_probe_model_endpoints",
+                    return_value={"endpoints": {}, "errors": {}},
+                ):
+                    assert mu.start_reprobe("m") is True
+        state = mu.reprobe_state()
+        assert state["running"] is False  # воркер уже отработал и очистил
+        assert state["model"] is None
+
+    def test_start_reprobe_no_row_or_probing_false(self):
+        """start_reprobe: строки нет / probing-строка → False (без потока)."""
+        config, mu = _fresh()
+        mu.reset_model_usage()
+        assert mu.start_reprobe("m") is False
+        self._seed_row(mu, probing=True)
+        assert mu.start_reprobe("m") is False
+        assert mu.reprobe_state()["running"] is False
+
+    def test_start_reprobe_second_while_running_false(self):
+        """Повторный start_reprobe при уже идущем reprobe → False."""
+        config, mu = _fresh()
+        self._seed_row(mu)
+        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=True):
+                with mock.patch.object(
+                    mu, "_probe_model_endpoints",
+                    side_effect=lambda *a: time.sleep(0.15) or {"endpoints": {}, "errors": {}},
+                ) as m_probe:
+                    assert mu.start_reprobe("m") is True   # первый — запущен
+                    assert mu.start_reprobe("m") is False  # второй — уже идёт
+                    # дать воркеру завершиться и очистить снимок
+                    deadline = time.time() + 3
+                    while mu.reprobe_state()["running"] and time.time() < deadline:
+                        time.sleep(0.02)
+                    assert m_probe.call_count == 1
+        assert mu.reprobe_state()["running"] is False
+
+    def test_reprobe_state_snapshot(self):
+        """reprobe_state при идущем reprobe: running/model/started_at."""
+        config, mu = _fresh()
+        self._seed_row(mu)
+        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=True):
+                with mock.patch.object(
+                    mu, "_probe_model_endpoints",
+                    side_effect=lambda *a: time.sleep(0.3) or {"endpoints": {}, "errors": {}},
+                ):
+                    assert mu.start_reprobe("m") is True
+                    state = mu.reprobe_state()
+                    assert state["running"] is True
+                    assert state["model"] == "m"
+                    assert state["started_at"] is not None
+                    deadline = time.time() + 3
+                    while mu.reprobe_state()["running"] and time.time() < deadline:
+                        time.sleep(0.02)
+        assert mu.reprobe_state()["running"] is False
