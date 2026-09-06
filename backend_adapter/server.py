@@ -158,12 +158,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
         req_id = uuid.uuid4().hex[:12]
 
-        # Учёт трафика (таблица WEBUI «Использованные модели», колонки
-        # Отправлено/Получено): локальные аккумуляторы на время запроса,
-        # фиксация — в finally (см. внизу do_POST). Активен только для
-        # запросов, прошедших strict-проверку (usage_active ставится после
-        # record_model_usage) — 400-пути в счётчики не попадают.
-        usage_bytes = {"sent": 0, "recv": 0}
+        # Учёт usage (таблица WEBUI «Использованные модели», колонки
+        # Input/Output): локальные аккумуляторы токенов из usage-блоков
+        # ответов бэкенда на время запроса, фиксация — в finally (см. внизу
+        # do_POST). Активен только для запросов, прошедших strict-проверку
+        # (usage_active ставится после record_model_usage) — 400-пути в
+        # счётчики не попадают.
+        usage_tokens = {"input": 0, "output": 0}
         usage_active = False
 
         _req_ctx.req_id = req_id
@@ -474,7 +475,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # key -- уже раскрытый токен (раскрытие происходит в _parse_backend_yaml).
             # Тело сериализуется ОДИН раз в out_body (раньше — инлайн в
             # Request.data): те же байты переиспользуются всеми retry-
-            # попытками и дают точный размер «Отправлено» для учёта трафика.
+            # попытками.
             backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
             backend_key_val = backend_cfg["key"]
             out_body = json.dumps(openai_body, ensure_ascii=False).encode()
@@ -504,7 +505,6 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 # int) и не ругался на последующие строковые маркеры.
                 last_error: tuple[int | str, str] | None = None
                 started = False
-                recv_bytes = [0]  # байты сырых SSE-строк (учёт трафика)
                 for attempt in range(1, ADAPTER_RETRY + 1):
                     try:
                         _dr(
@@ -520,9 +520,6 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             streaming=True,
                         )
                         t0 = time.time()
-                        # Байты тела уходят в сокет на каждой попытке (даже
-                        # если ответ потом будет timeout/ошибкой) — учитываем.
-                        usage_bytes["sent"] += len(out_body)
                         resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
                         _dr(
                             req_id,
@@ -550,9 +547,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             session_id,
                             req_id,
                             approx_prompt_chars=approx_prompt_chars,
-                            bytes_sink=recv_bytes,
                         )
-                        usage_bytes["recv"] += recv_bytes[0]
+                        # usage — usage-блок последнего SSE-чанка (или {}):
+                        # считаем токены только из реального usage, эвристика
+                        # chars//4 (input_tokens_estimated) в учёт не попадает.
+                        if usage.get("prompt_tokens") or usage.get("completion_tokens"):
+                            usage_tokens["input"] += int(usage.get("prompt_tokens") or 0)
+                            usage_tokens["output"] += int(usage.get("completion_tokens") or 0)
                         _dr(req_id, f"[OK] Stream done, stop_reason={stop_reason}")
                         _trace(
                             session_id,
@@ -568,9 +569,6 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     except urllib.error.HTTPError as e:
                         err_raw = e.read()
                         err = err_raw.decode()
-                        usage_bytes["recv"] += len(
-                            err_raw
-                        )  # тело ответа ошибки — фактические байты
                         _dr(
                             req_id,
                             f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
@@ -743,12 +741,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         timeout=ADAPTER_TIMEOUT,
                     )
                     t0 = time.time()
-                    # Байты тела уходят в сокет на каждой попытке (даже если
-                    # ответ потом будет timeout/ошибкой) — учитываем.
-                    usage_bytes["sent"] += len(out_body)
                     resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
                     raw = resp.read()
-                    usage_bytes["recv"] += len(raw)
                     elapsed = time.time() - t0
                     _dr(
                         req_id,
@@ -773,6 +767,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     o = json.loads(raw)
                     anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
+                    # Учёт usage: токены из usage-блока ответа бэкенда.
+                    # Ответы без usage (ошибки, обрывы, бэкенд без usage) —
+                    # 0/0, счётчики не трогаются.
+                    u = o.get("usage") or {}
+                    if u.get("prompt_tokens") or u.get("completion_tokens"):
+                        usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
+                        usage_tokens["output"] += int(u.get("completion_tokens") or 0)
+
                     _dr(
                         req_id,
                         f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(anthropic_resp, ensure_ascii=False)[:lim])}",
@@ -794,7 +796,6 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 except urllib.error.HTTPError as e:
                     err_raw = e.read()
                     err = err_raw.decode()
-                    usage_bytes["recv"] += len(err_raw)  # тело ответа ошибки — фактические байты
                     _dr(req_id, f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
                     error_value = (
                         err[:500] if config.ADAPTER_SENSITIVE_LOGGING_ENABLE else redact(err[:500])
@@ -903,11 +904,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 failed=True,
             )
         finally:
-            # Фиксация учёта трафика (таблица WEBUI «Использованные модели»):
+            # Фиксация учёта usage (таблица WEBUI «Использованные модели»):
             # единственная точка записи на любой исход запроса (успех, ошибка,
             # исчерпание ретраев, исключение). Активно только для запросов,
-            # прошедших strict-проверку; add_usage_bytes не бросает исключений.
+            # прошедших strict-проверку; add_usage_tokens не бросает исключений.
             if usage_active:
-                model_usage.add_usage_bytes(client_model, usage_bytes["sent"], usage_bytes["recv"])
+                model_usage.add_usage_tokens(
+                    client_model, usage_tokens["input"], usage_tokens["output"]
+                )
             delattr(_req_ctx, "req_id")
             delattr(_req_ctx, "session_id")

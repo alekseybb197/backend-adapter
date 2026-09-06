@@ -9,17 +9,18 @@ Tests cover:
   - flag off: accounting kept, no probe
   - concurrency: two first calls to one model → one probe; distinct models
     both recorded
-  - add_usage_bytes: accumulates traffic counters (bytes_sent/bytes_recv),
-    flag off / zero / missing row → no-op
+  - add_usage_tokens: accumulates input/output usage tokens (input_tokens /
+    output_tokens), flag off / zero / missing row → no-op
   - snapshot is a copy in insertion order; reset clears
   - persistence (YAML in the WEBUI root, on tmp_path): disabled ("") does no
     file I/O; auto path = LOGPATH or ./tmp/webui; record writes the file with
-    {"version": 1, "models": ...} in insertion order; probing rows never hit
-    disk; dirty file is normalized on load; loaded rows are never reprobed;
-    usage_snapshot triggers the load; broken YAML → empty table without an
-    exception and is overwritten by the next save; reset_model removes a row
-    from memory and from the file; flush_table and the save interval gate
-    periodic saves
+    {"version": 2, "models": ...} in insertion order; probing rows never hit
+    disk; dirty file is normalized on load; v1 files (byte counters) migrate —
+    calls/endpoints/errors/first_seen survive, tokens start at 0; unknown
+    version (> 2) ignored; loaded rows are never reprobed; usage_snapshot
+    triggers the load; broken YAML → empty table without an exception and is
+    overwritten by the next save; reset_model removes a row from memory and
+    from the file; flush_table and the save interval gate periodic saves
 """
 import os
 import threading
@@ -107,15 +108,17 @@ class TestRecordBasic:
         rows = mu.usage_snapshot()
         assert len(rows) == 1
         assert rows[0]["calls"] == 2
-        assert rows[0]["bytes_sent"] == 0
-        assert rows[0]["bytes_recv"] == 0
+        assert rows[0]["input_tokens"] == 0
+        assert rows[0]["output_tokens"] == 0
         assert rows[0]["backend"] == "AAA"
         assert rows[0]["endpoints"] == {}
         assert rows[0]["probing"] is False
 
 
-class TestAddUsageBytes:
-    """add_usage_bytes: traffic counters accumulate on the existing row."""
+class TestAddUsageTokens:
+    """add_usage_tokens: input/output usage-token counters accumulate on the
+    existing row; zero in both → no-op; gate is on the SUM (input=0 with
+    output>0 must still count)."""
 
     def test_accumulates_on_existing_row(self):
         """Two calls add up; counters live independently."""
@@ -129,15 +132,15 @@ class TestAddUsageBytes:
                 return_value={"endpoints": {}, "errors": {}},
             ):
                 mu.record_model_usage("m")
-        mu.add_usage_bytes("m", 100, 50)
-        mu.add_usage_bytes("m", 20, 5)
+        mu.add_usage_tokens("m", 100, 50)
+        mu.add_usage_tokens("m", 20, 5)
         rows = mu.usage_snapshot()
-        assert rows[0]["bytes_sent"] == 120
-        assert rows[0]["bytes_recv"] == 55
-        assert rows[0]["calls"] == 1  # трафик счётчик вызовов не трогает
+        assert rows[0]["input_tokens"] == 120
+        assert rows[0]["output_tokens"] == 55
+        assert rows[0]["calls"] == 1  # токены счётчик вызовов не трогают
 
-    def test_zeros_are_noop(self):
-        """sent=0/recv=0 → counters unchanged."""
+    def test_input_zero_output_positive_counts(self):
+        """input=0 with output>0 passes the gate (usage with output only)."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = True
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
@@ -148,10 +151,27 @@ class TestAddUsageBytes:
                 return_value={"endpoints": {}, "errors": {}},
             ):
                 mu.record_model_usage("m")
-        mu.add_usage_bytes("m", 0, 0)
+        mu.add_usage_tokens("m", 0, 7)
         rows = mu.usage_snapshot()
-        assert rows[0]["bytes_sent"] == 0
-        assert rows[0]["bytes_recv"] == 0
+        assert rows[0]["input_tokens"] == 0
+        assert rows[0]["output_tokens"] == 7
+
+    def test_zeros_are_noop(self):
+        """input=0/output=0 → counters unchanged (no usage in the answer)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
+        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(
+                mu, "_probe_model_endpoints",
+                return_value={"endpoints": {}, "errors": {}},
+            ):
+                mu.record_model_usage("m")
+        mu.add_usage_tokens("m", 0, 0)
+        rows = mu.usage_snapshot()
+        assert rows[0]["input_tokens"] == 0
+        assert rows[0]["output_tokens"] == 0
 
     def test_flag_off_noop(self):
         """ADAPTER_MODEL_USAGE_ENABLE=False → nothing accumulates."""
@@ -165,16 +185,16 @@ class TestAddUsageBytes:
                 return_value={"endpoints": {}, "errors": {}},
             ):
                 mu.record_model_usage("m")
-        mu.add_usage_bytes("m", 100, 50)
+        mu.add_usage_tokens("m", 100, 50)
         rows = mu.usage_snapshot()
-        assert rows[0]["bytes_sent"] == 0
-        assert rows[0]["bytes_recv"] == 0
+        assert rows[0]["input_tokens"] == 0
+        assert rows[0]["output_tokens"] == 0
 
     def test_missing_row_noop(self):
         """No row for the model → nothing created, nothing raised."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = True
-        mu.add_usage_bytes("ghost", 100, 50)  # must not raise
+        mu.add_usage_tokens("ghost", 100, 50)  # must not raise
         assert mu.usage_snapshot() == []
 
 
@@ -400,8 +420,8 @@ class TestPersistPath:
 
 class TestPersistSave:
     def test_record_writes_versioned_yaml(self, tmp_path):
-        """record → file exists: {"version": 1, "models": ...}, probing False,
-        insertion order preserved."""
+        """record → file exists: {"version": 2, "models": ...}, probing False,
+        insertion order preserved, token fields present."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = False
         persist_file = _persist_setup(config, mu, tmp_path)
@@ -410,10 +430,14 @@ class TestPersistSave:
         mu.flush_table()   # инкрементные мутации — по периоду; flush форсирует
         with open(persist_file, encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        assert data["version"] == 1
+        assert data["version"] == 2
         assert list(data["models"].keys()) == ["m1", "m2"]
         assert data["models"]["m1"]["probing"] is False
         assert data["models"]["m1"]["calls"] == 1
+        assert data["models"]["m1"]["input_tokens"] == 0
+        assert data["models"]["m1"]["output_tokens"] == 0
+        assert "bytes_sent" not in data["models"]["m1"]
+        assert "bytes_recv" not in data["models"]["m1"]
 
     def test_probing_row_not_serialized(self, tmp_path):
         """A row with probing=True (first call, probe in flight) never hits disk.
@@ -429,8 +453,8 @@ class TestPersistSave:
                 "model": "m",
                 "backend": "",
                 "calls": 1,
-                "bytes_sent": 0,
-                "bytes_recv": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
                 "endpoints": {},
                 "errors": {},
                 "first_seen": "12:00:00",
@@ -483,14 +507,14 @@ class TestPersistLoad:
         persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
         mu.set_persist_path(persist_file)
         raw = {
-            "version": 1,
+            "version": 2,
             "models": {
                 "m1": {
                     "model": "m1",
                     "backend": "AAA",
                     "calls": "abc",
-                    "bytes_sent": -5,
-                    "bytes_recv": 3,
+                    "input_tokens": -5,
+                    "output_tokens": 3,
                     "endpoints": {
                         "completions": {"status": 200, "found": True},
                         "unknown-pname": {"status": 200, "found": True},
@@ -507,12 +531,94 @@ class TestPersistLoad:
         rows = mu.usage_snapshot()
         assert len(rows) == 1
         r = rows[0]
-        assert r["calls"] == 0 and r["bytes_sent"] == 0 and r["bytes_recv"] == 3
+        assert r["calls"] == 0 and r["input_tokens"] == 0 and r["output_tokens"] == 3
         assert r["endpoints"] == {"completions": {"status": 200, "found": True}}
         assert r["errors"] == {"completions": "boom"}
         assert r["probing"] is False
         assert "extra" not in r
         assert r["first_seen"]  # непустая строка (сейчас — текущее время)
+
+    def test_v1_file_migrates_tokens_start_at_zero(self, tmp_path):
+        """version: 1 (byte counters) loads: calls/endpoints/errors/first_seen
+        survive, bytes dropped, tokens start at 0."""
+        config, mu = _fresh()
+        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
+        mu.set_persist_path(persist_file)
+        raw = {
+            "version": 1,
+            "models": {
+                "m1": {
+                    "model": "m1",
+                    "backend": "AAA",
+                    "calls": 42,
+                    "bytes_sent": 1523400,
+                    "bytes_recv": 8123456,
+                    "endpoints": {"completions": {"status": 200, "found": True}},
+                    "errors": {},
+                    "first_seen": "14:32:05",
+                    "probing": False,
+                }
+            },
+        }
+        with open(persist_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump(raw, f)
+        rows = mu.usage_snapshot()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["model"] == "m1"
+        assert r["backend"] == "AAA"
+        assert r["calls"] == 42
+        assert r["input_tokens"] == 0
+        assert r["output_tokens"] == 0
+        assert "bytes_sent" not in r
+        assert "bytes_recv" not in r
+        assert r["endpoints"] == {"completions": {"status": 200, "found": True}}
+        assert r["errors"] == {}
+        assert r["first_seen"] == "14:32:05"
+        # Следующее сохранение переписывает файл в v2 без байтовых полей.
+        mu.record_model_usage("m1")   # fast-path: строка из файла
+        mu.flush_table()
+        with open(persist_file, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        assert data["version"] == 2
+        assert data["models"]["m1"]["calls"] == 43
+        assert "bytes_sent" not in data["models"]["m1"]
+
+    def test_flat_legacy_loads_like_v1(self, tmp_path):
+        """Flat legacy file (no version/models keys) still loads; tokens 0."""
+        config, mu = _fresh()
+        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
+        mu.set_persist_path(persist_file)
+        raw = {
+            "m1": {
+                "model": "m1",
+                "backend": "AAA",
+                "calls": 5,
+                "bytes_sent": 10,
+                "endpoints": {},
+                "errors": {},
+                "first_seen": "10:00:00",
+            }
+        }
+        with open(persist_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump(raw, f)
+        rows = mu.usage_snapshot()
+        assert len(rows) == 1
+        assert rows[0]["calls"] == 5
+        assert rows[0]["input_tokens"] == 0
+
+    def test_unknown_version_ignored(self, tmp_path):
+        """version: 3 (unknown future format) → file ignored, table empty."""
+        config, mu = _fresh()
+        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
+        mu.set_persist_path(persist_file)
+        raw = {
+            "version": 3,
+            "models": {"m1": {"model": "m1", "calls": 5}},
+        }
+        with open(persist_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump(raw, f)
+        assert mu.usage_snapshot() == []
 
     def test_loaded_rows_not_reprobed(self, tmp_path):
         """Loaded rows take the fast path — probe never fires, calls grow."""

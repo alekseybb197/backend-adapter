@@ -10,10 +10,11 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
     обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже);
   - таблицу «Использованные модели» — модели, к которым агент обращался
-    (см. model_usage.py): счётчик обращений, объёмы трафика обмена с
-    бэкендом (байты отправленных запросов и полученных ответов, включая
-    повторные попытки) и какие API-эндпоинты доступны именно для каждой
-    модели (результат дымовой пробы этой моделью при первом обращении).
+    (см. model_usage.py): счётчик обращений, токены из usage-блоков ответов
+    бэкенда (input_tokens/output_tokens — prompt_tokens/completion_tokens;
+    ответы без usage не считаются) и какие API-эндпоинты доступны именно
+    для каждой модели (результат дымовой пробы этой моделью при первом
+    обращении).
     Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
     WEBUI и переживает перезапуски адаптера; строка модели сбрасывается
     кнопкой «Сбросить» в строке таблицы (POST /api/model-usage/reset,
@@ -258,20 +259,12 @@ def _usage_endpoint_html(entry: dict | None) -> str:
     return '<span style="color:#aaa">—</span>'
 
 
-def _fmt_bytes(n: int) -> str:
-    """Компактный человекочитаемый размер: B / KiB / MiB / GiB (1024).
+def _fmt_tokens(n: int) -> str:
+    """Точное число токенов с разделителем тысяч («12 345»; 0 → «0»).
 
-    < 1024 — целые байты («512 B»); от 1024 — до одного десятичного знака
-    без дробной части у целых значений (1024 → «1.0 KiB», 1536 → «1.5 KiB»,
-    1048576 → «1.0 MiB»). Отрицательное значение — как 0 (не бывает)."""
-    if n < 1024:
-        return f"{max(n, 0)} B"
-    size = float(n)
-    for unit in ("KiB", "MiB", "GiB", "TiB"):
-        size /= 1024.0
-        if size < 1024:
-            return f"{size:.1f} {unit}"
-    return f"{size:.1f} PiB"
+    Неразрывный узкий пробел (U+202F) между разрядами — читаемо и не
+    переносится. Отрицательное значение — как 0 (не бывает)."""
+    return f"{max(n, 0):,}".replace(",", " ")
 
 
 def _reset_cell_html(model: str) -> str:
@@ -296,12 +289,13 @@ def _usage_rows_html(rows: list[dict]) -> str:
     """HTML строк таблицы «Использованные модели» (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
-    Колонки: Модель | Бэкенд | Вызовов | Отправлено | Получено | эндпоинты
+    Колонки: Модель | Бэкенд | Вызовов | Input | Output | эндпоинты
     ENDPOINT_PROBES (completions/messages/responses/embeddings — в порядке
-    config.ENDPOINT_PROBES, том же, что у пробы) | Сброс. bytes_sent/
-    bytes_recv — байты обмена с бэкендом (см. _fmt_bytes); поля отсутствуют
-    у старых сидов → 0. Модель/бэкенд — html.escape; «Сбросить» — отдельная
-    форма в последнем <td> (см. _reset_cell_html)."""
+    config.ENDPOINT_PROBES, том же, что у пробы) | Сброс. input_tokens/
+    output_tokens — токены из usage-блоков ответов бэкенда (см. _fmt_tokens);
+    поля отсутствуют у мигрировавших/старых сидов → 0. Модель/бэкенд —
+    html.escape; «Сбросить» — отдельная форма в последнем <td>
+    (см. _reset_cell_html)."""
     body = []
     for r in rows:
         ep_cells = "".join(
@@ -313,8 +307,8 @@ def _usage_rows_html(rows: list[dict]) -> str:
             f"<td>{html.escape(str(r['model']))}</td>"
             f"<td>{html.escape(str(r['backend']))}</td>"
             f"<td>{r['calls']}</td>"
-            f"<td>{_fmt_bytes(r.get('bytes_sent', 0))}</td>"
-            f"<td>{_fmt_bytes(r.get('bytes_recv', 0))}</td>"
+            f"<td>{_fmt_tokens(r.get('input_tokens', 0))}</td>"
+            f"<td>{_fmt_tokens(r.get('output_tokens', 0))}</td>"
             f"{ep_cells}"
             f"{_reset_cell_html(r['model'])}"
             "</tr>"
@@ -504,14 +498,15 @@ def _render_status_page(
   (после прохождения строгой проверки). Первое обращение к модели проверяет
   доступные API-эндпоинты короткими запросами именно этой моделью
   (до 4×10 с); повторные обращения не перепроверяются — растёт только
-  счётчик «Вызовов». «Отправлено/Получено» — байты тел запросов к бэкенду
-  и его ответов (включая повторные попытки и ответы ошибок); служебные
-  дымовые пробы эндпоинтов в них не входят. {usage_note} Строка модели
+  счётчик «Вызовов». «Input/Output» — токены из usage-блока ответов бэкенда
+  (usage.prompt_tokens / usage.completion_tokens); ответы без usage (ошибки,
+  обрывы, бэкенд без usage-поддержки) в учёт не попадают. Служебные дымовые
+  пробы эндпоинтов в них не входят. {usage_note} Строка модели
   сбрасывается кнопкой «Сбросить» справа (POST /api/model-usage/reset).
   ADAPTER_MODEL_USAGE_ENABLE=0 — учёт остаётся, пробы выключены (колонки
   эндпоинтов «—»).</p>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Отправлено</th><th>Получено</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th><th>Сброс</th></tr>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th><th>Сброс</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot())}
 </table>
 {footer}
@@ -693,7 +688,7 @@ __all__ = [
     "_usage_endpoint_html",
     "_usage_rows_html",
     "_reset_cell_html",
-    "_fmt_bytes",
+    "_fmt_tokens",
     "_render_status_page",
     "StatusEndpoint",
     "RefreshStateEndpoint",

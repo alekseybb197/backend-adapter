@@ -504,13 +504,13 @@ class TestUsageSection:
         return ws._render_status_page(self._ctx(), refresh=_done_job(True, 1)).decode()
 
     def _row(self, model, backend="AAA", calls=1, endpoints=None,
-             bytes_sent=0, bytes_recv=0):
+             input_tokens=0, output_tokens=0):
         return {
             "model": model,
             "backend": backend,
             "calls": calls,
-            "bytes_sent": bytes_sent,
-            "bytes_recv": bytes_recv,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
             "endpoints": endpoints or {},
             "errors": {},
             "first_seen": "10:00:00",
@@ -518,16 +518,16 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 10 колонок (Модель|Бэкенд|Вызовов|Отправлено|
-        # Получено|4 эндпоинта|Сброс).
+        # Заголовок секции + 10 колонок (Модель|Бэкенд|Вызовов|Input|
+        # Output|4 эндпоинта|Сброс).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Использованные модели</h3>" in body
         assert "<th>Модель</th>" in body
         assert "<th>Бэкенд</th>" in body
         assert "<th>Вызовов</th>" in body
-        assert "<th>Отправлено</th>" in body
-        assert "<th>Получено</th>" in body
+        assert "<th>Input</th>" in body
+        assert "<th>Output</th>" in body
         assert "<th>completions</th>" in body
         assert "<th>messages</th>" in body
         assert "<th>responses</th>" in body
@@ -555,16 +555,15 @@ class TestUsageSection:
         body = self._seed(config, ws, usage_rows=rows)
         assert "m-ok" in body and "m-none" in body
         # зелёный ✓ — только для found (один на обе строки)
-        # зелёный ✓ — только для found (один на обе строки)
         assert body.count('style="color:#1a7f37">✓</span>') == 1
         # серые «—»: m-ok (messages=404 + responses/embeddings не пробованы) = 3,
         # m-none (все 4 эндпоинта не пробованы) = 4 → всего 7; колонки
-        # Отправлено/Получено «—» не дают (там «0 B»)
+        # Input/Output «—» не дают (там «0»)
         assert body.count('style="color:#aaa">—</span>') == 7
-        # строка m-none: Вызовов == 1 (счётчик из сида), трафик 0 B/0 B
+        # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
         assert "<td>1</td>" in body  # calls строки m-none
-        assert "<td>0 B</td>" in body  # Отправлено/Получено строки m-none
+        assert "<td>0</td>" in body  # Input строки m-none
 
     def test_escapes_model_and_backend_names(self):
         # Имя модели/бэкенда с HTML-спецсимволами не исполняется браузером.
@@ -606,17 +605,17 @@ class TestUsageSection:
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+отправлено+получено+4 эндпоинта+Сброс = 10
+        # модель+бэкенд+вызовов+input+output+4 эндпоинта+Сброс = 10
         assert html.count("<td>") == 10
         assert "completions" not in html  # короткие имена — только в шапке
 
-    def test_row_renders_formatted_bytes(self):
-        # bytes_sent/bytes_recv форматируются _fmt_bytes (1024-единицы).
+    def test_row_renders_formatted_tokens(self):
+        # input_tokens/output_tokens форматируются _fmt_tokens (с разделителем).
         config, ws = _fresh_modules()
-        row = self._row("m-big", bytes_sent=1536, bytes_recv=1048576)
+        row = self._row("m-big", input_tokens=1536, output_tokens=12345)
         html = ws._usage_rows_html([row])
-        assert "1.5 KiB" in html
-        assert "1.0 MiB" in html
+        assert "1 536" in html
+        assert "12 345" in html
 
     def test_row_has_reset_form(self):
         # Каждая строка модели несёт form-кнопку «Сбросить» (POST на
@@ -660,36 +659,29 @@ class TestUsageSection:
 
 
 # ---------------------------------------------------------------------------
-# TestFmtBytes — формат байтов «Отправлено/Получено» (1024-единицы)
+# TestFmtTokens — формат токенов «Input/Output» (точное число с разделителем)
 # ---------------------------------------------------------------------------
 
-class TestFmtBytes:
+class TestFmtTokens:
     def _fmt(self, n):
         config, ws = _fresh_modules()
-        return ws._fmt_bytes(n)
+        return ws._fmt_tokens(n)
 
-    def test_below_kib_integer_bytes(self):
-        # < 1024 — целые байты без десятичной части и единицы-множителя.
-        assert self._fmt(0) == "0 B"
-        assert self._fmt(1) == "1 B"
-        assert self._fmt(512) == "512 B"
-        assert self._fmt(1023) == "1023 B"
+    def test_small_exact_integers(self):
+        # < 1000 — точное число без разделителя.
+        assert self._fmt(0) == "0"
+        assert self._fmt(1) == "1"
+        assert self._fmt(999) == "999"
 
-    def test_kib_one_decimal(self):
-        # от 1024 — один десятичный знак (включая .0 у целых значений).
-        assert self._fmt(1024) == "1.0 KiB"
-        assert self._fmt(1536) == "1.5 KiB"
-        assert self._fmt(2048) == "2.0 KiB"
-
-    def test_mib_and_gib(self):
-        # Переходы 1024 → следующая единица на границе.
-        assert self._fmt(1048576) == "1.0 MiB"
-        assert self._fmt(1073741824) == "1.0 GiB"
-        assert self._fmt(1572864) == "1.5 MiB"
+    def test_thousands_separator(self):
+        # Разделитель тысяч (неразрывный узкий пробел) с 4-го разряда.
+        assert self._fmt(1000) == "1 000"
+        assert self._fmt(12345) == "12 345"
+        assert self._fmt(1234567) == "1 234 567"
 
     def test_negative_treated_as_zero(self):
         # Отрицательных значений не бывает; защитно — как 0.
-        assert self._fmt(-10) == "0 B"
+        assert self._fmt(-10) == "0"
 
 
 # ---------------------------------------------------------------------------
@@ -1140,7 +1132,7 @@ class TestModelUsageResetAPI:
         from backend_adapter import model_usage
         _seed_usage_rows(model_usage, [{
             "model": model, "backend": "AAA", "calls": 5,
-            "bytes_sent": 0, "bytes_recv": 0, "endpoints": {},
+            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
             "errors": {}, "first_seen": "10:00:00", "probing": False,
         }])
 
@@ -1182,7 +1174,7 @@ class TestModelUsageResetAPI:
         from backend_adapter import model_usage
         _seed_usage_rows(model_usage, [{
             "model": "m-reset", "backend": "AAA", "calls": 5,
-            "bytes_sent": 0, "bytes_recv": 0, "endpoints": {},
+            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
             "errors": {}, "first_seen": "10:00:00", "probing": False,
         }])
         httpd, port = _start_server(str(tmp_path))

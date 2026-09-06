@@ -9,10 +9,11 @@
 responses/embeddings) — результат (found ⇔ HTTP 200) хранится в строке
 таблицы. Повторные обращения к уже внесённой модели никогда не
 перепроверяют (только инкремент счётчика вызовов). Помимо вызовов строка
-накапливает байты трафика обмена с бэкендом (add_usage_bytes: тела запросов
-к бэкенду и его ответов, включая повторные попытки). Состояние таблицы
-выводится секцией «Использованные модели» на статус-странице WEBUI "/"
-(см. webui_status._usage_rows_html).
+накапливает токены из usage-блоков ответов бэкенда (add_usage_tokens:
+input_tokens из usage.prompt_tokens, output_tokens из usage.completion_tokens;
+ответы без usage — ошибки, обрывы, бэкенд без usage-поддержки — токенов
+не дают). Состояние таблицы выводится секцией «Использованные модели» на
+статус-странице WEBUI "/" (см. webui_status._usage_rows_html).
 
 Персистентность: таблица сохраняется в YAML-файл `model-usage.yaml` в корне
 WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`, та же, что у корня
@@ -23,7 +24,10 @@ WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`, та же, чт�
 flush_table в backend-adapter.py) сохраняют сразу. Строки, у которых
 `probing: True` (идёт первая синхронная проба), на диск не попадают —
 крах в это время теряет только саму новую строку. При жёстком kill потеря
-хвоста ≤ периода сохранения. Файл несёт версию формата (`version: 1`).
+хвоста ≤ периода сохранения. Файл несёт версию формата (`version: 2`); файлы
+версии 1 (байтовые счётчики `bytes_sent`/`bytes_recv`) при загрузке
+мигрируются: calls/backend/endpoints/errors/first_seen сохраняются, байты
+отбрасываются, токены стартуют с 0 (следующее сохранение пишет v2).
 
 Точка учёта — server.do_POST: model_usage.record_model_usage(client_model)
 сразу после strict-проверки и ДО модельного маппинга — имя из BODY
@@ -62,9 +66,9 @@ MODEL_USAGE_PROBE_TIMEOUT = 10.0
 #   {"model": str,            # client_model (ключ == поле, для webui)
 #    "backend": str,          # имя бэкенда из config._resolve_backend
 #    "calls": int,            # счётчик обращений (растёт при каждом запросе)
-#    "bytes_sent": int,       # байты тел запросов → бэкенду (все попытки)
-#    "bytes_recv": int,       # байты тел ответов ← бэкенда (все попытки,
-#                             #   включая тела ошибок)
+#    "input_tokens": int,     # токены из usage.prompt_tokens ответов бэкенда
+#    "output_tokens": int,    # токены из usage.completion_tokens ответов
+#                             #   бэкенда (ответы без usage токенов не дают)
 #    "endpoints": {pname: {"status": int|None, "found": bool}},
 #                             # только реально пробованные пути; found ⇔ HTTP 200
 #    "errors": {pname: текст} # сетевые ошибки пробы
@@ -84,7 +88,7 @@ _PERSIST_LOCK = threading.Lock()
 _LOADED = False  # файл уже пытались загрузить
 _DIRTY = False  # есть несохранённые мутации таблицы
 _LAST_SAVE = 0.0  # time.time() последнего сохранения
-_FORMAT_VERSION = 1  # версия формата YAML-файла (поле version)
+_FORMAT_VERSION = 2  # версия формата YAML-файла (поле version)
 
 
 # ==================== ПУБЛИЧНЫЙ API ====================
@@ -148,8 +152,8 @@ def record_model_usage(client_model: str) -> None:
                 "model": client_model,
                 "backend": "",
                 "calls": 1,
-                "bytes_sent": 0,
-                "bytes_recv": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
                 "endpoints": {},
                 "errors": {},
                 "first_seen": now,
@@ -204,32 +208,39 @@ def record_model_usage(client_model: str) -> None:
         _save_table(force=False)
 
 
-def add_usage_bytes(client_model: str, sent: int, recv: int) -> None:
-    """Накопить байты обмена с бэкендом (тело запроса + тело ответа).
+def add_usage_tokens(client_model: str, input_tokens: int, output_tokens: int) -> None:
+    """Накопить токены из usage-блоков ответов бэкенда.
+
+    input_tokens — usage.prompt_tokens, output_tokens — usage.completion_tokens
+    (сервер берёт их из ответа бэкенда; для стрима — из финального usage-
+    чанка). Ответы без usage (ошибки, обрывы, бэкенд без usage-поддержки)
+    токенов не дают: вызывающий передаёт 0/0, счётчики не трогаются.
 
     Точка вызова — do_POST (фиксация в finally на любой исход запроса).
     Строка к этому моменту уже существует (record_model_usage вызывается
     раньше, до сетевых попыток); строки нет — пропускаем (no-op): защита от
     будущих точек вызова вне основного пути. Служебные дымовые пробы
     эндпоинтов сюда НЕ попадают (другой путь кода — config.probe_endpoints /
-    _probe_model_endpoints), т.е. счётчики = только запросы агента.
+    _probe_model_endpoints), т.е. счётчики = только запросы агента. Пробы
+    usage-блока не возвращают вовсе — токенов и не дают.
 
     Гейт: config.ADAPTER_MODEL_USAGE_ENABLE (живое чтение, как в
     record_model_usage). Не бросает исключений: учёт не должен влиять на
-    запрос. Значения неотрицательные, фактические байты (python-int не
-    переполняется — «крышки» не нужны)."""
+    запрос. Значения неотрицательные; 0 и в input, и в output — нет токенов
+    (не мутируем; гейт по сумме, а не по одному полю — input=0 при
+    output>0 валиден)."""
     global _DIRTY
     if not config.ADAPTER_MODEL_USAGE_ENABLE:
         return
-    if sent <= 0 and recv <= 0:
+    if input_tokens <= 0 and output_tokens <= 0:
         return
     with _TABLE_LOCK:
         _ensure_loaded_locked()
         row = _TABLE.get(client_model)
         if row is None:
             return
-        row["bytes_sent"] += sent
-        row["bytes_recv"] += recv
+        row["input_tokens"] += input_tokens
+        row["output_tokens"] += output_tokens
         _DIRTY = True
     _save_table(force=False)
 
@@ -308,7 +319,7 @@ def _effective_persist_file() -> str:
 
 def _ensure_loaded_locked() -> None:
     """Ленивая загрузка таблицы из YAML-файла. Вызывается ВНУТРИ _TABLE_LOCK
-    в начале record_model_usage / add_usage_bytes / usage_snapshot /
+    в начале record_model_usage / add_usage_tokens / usage_snapshot /
     reset_model (единая точка). Пропускается, если файл уже читали, таблица
     непуста (продолжение работы в рамках процесса) или персистентность
     выключена (""). Повреждённый/битый файл — таблица стартует пустой, файл
@@ -330,9 +341,13 @@ def _ensure_loaded_locked() -> None:
 
 def _read_persist_file(path: str) -> dict:
     """Прочитать YAML и вернуть {имя модели: сырая строка}. Поддерживает
-    текущий формат ({"version": 1, "models": {...}}) и плоский легаси
-    (строки прямо в корне, без version/models). Ошибки не бросает наружу:
-    не-dict/битый YAML → пусто (обрабатывается в _ensure_loaded_locked)."""
+    текущий формат ({"version": 2, "models": {...}}), формат версии 1
+    ({"version": 1, "models": {...}} — байтовые строки; мигрирует: читатель
+    возвращает строки как есть, _normalize_row отбрасывает bytes_*-поля,
+    токены стартуют с 0) и плоский легаси (строки прямо в корне, без
+    version/models — загружается как v1). Незнакомая версия (> 2) — файл
+    игнорируется. Ошибки не бросает наружу: не-dict/битый YAML → пусто
+    (обрабатывается в _ensure_loaded_locked)."""
     if not os.path.exists(path):
         return {}
     with open(path, encoding="utf-8") as f:
@@ -340,10 +355,15 @@ def _read_persist_file(path: str) -> dict:
     if not isinstance(data, dict):
         return {}
     version = data.get("version")
-    if version is not None and version != _FORMAT_VERSION:
-        # Незнакомая версия формата: файл игнорируется (читатель принимает
-        # только известные версии), будет перезаписан первым сохранением.
-        return {}
+    if version is not None:
+        try:
+            version = int(version)
+        except (TypeError, ValueError):
+            return {}
+        if version != 1 and version != _FORMAT_VERSION:
+            # Незнакомая версия формата: файл игнорируется (читатель принимает
+            # только известные версии), будет перезаписан первым сохранением.
+            return {}
     raw_models = data.get("models")
     if isinstance(raw_models, dict):
         return raw_models
@@ -357,13 +377,14 @@ def _read_persist_file(path: str) -> dict:
 def _normalize_row(model: str, raw: object) -> dict | None:
     """Привести строку из YAML к внутренней схеме; None — строка отбрасывается.
 
-    Нормализация: имя — str(raw["model"] or model); счётчики и байты —
+    Нормализация: имя — str(raw["model"] or model); счётчики и токены —
     неотрицательные int (иначе 0); endpoints — только dict, per-path
     status int|None и found bool (по status == 200, если нет), незнакомые
     pname отбрасываются (рендер ходит по config.ENDPOINT_PROBES с .get());
     errors — dict[str, str]; first_seen — строка HH:MM:SS (иначе текущее
     время); probing — всегда False (файл хранит только завершённые строки);
-    неизвестные ключи отбрасываются."""
+    неизвестные ключи (в т.ч. байтовые bytes_sent/bytes_recv из файлов
+    версии 1) отбрасываются — токены мигрировавшей строки стартуют с 0."""
     if not isinstance(raw, dict):
         return None
     name = str(raw.get("model", model) or model)
@@ -413,8 +434,8 @@ def _normalize_row(model: str, raw: object) -> dict | None:
         "model": name,
         "backend": str(raw.get("backend", "") or ""),
         "calls": _to_int(raw.get("calls")),
-        "bytes_sent": _to_int(raw.get("bytes_sent")),
-        "bytes_recv": _to_int(raw.get("bytes_recv")),
+        "input_tokens": _to_int(raw.get("input_tokens")),
+        "output_tokens": _to_int(raw.get("output_tokens")),
         "endpoints": endpoints,
         "errors": errors,
         "first_seen": first_seen,
@@ -423,7 +444,7 @@ def _normalize_row(model: str, raw: object) -> dict | None:
 
 
 def _serialize_table() -> dict:
-    """Снимок таблицы для записи: {"version": 1, "models": {...}}.
+    """Снимок таблицы для записи: {"version": 2, "models": {...}}.
     Строки с probing=True в файл не попадают (в dump-копии probing
     принудительно False): на диск — только завершённые строки."""
     with _TABLE_LOCK:
@@ -435,8 +456,8 @@ def _serialize_table() -> dict:
                 "model": r["model"],
                 "backend": r["backend"],
                 "calls": r["calls"],
-                "bytes_sent": r["bytes_sent"],
-                "bytes_recv": r["bytes_recv"],
+                "input_tokens": r["input_tokens"],
+                "output_tokens": r["output_tokens"],
                 "endpoints": {p: dict(ep) for p, ep in r["endpoints"].items()},
                 "errors": dict(r["errors"]),
                 "first_seen": r["first_seen"],
@@ -556,7 +577,7 @@ __all__ = [
     "usage_persist_file",
     "flush_table",
     "record_model_usage",
-    "add_usage_bytes",
+    "add_usage_tokens",
     "usage_snapshot",
     "reset_model_usage",
     "reset_model",

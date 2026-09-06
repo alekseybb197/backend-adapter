@@ -226,11 +226,36 @@ class TestServer:
             finally:
                 server.shutdown()
 
-    # -- Traffic counters (bytes sent/recv to/from the backend) -----------
+    # -- Usage counters (input/output tokens from backend usage blocks) ----
 
-    def test_post_records_usage_bytes(self, fake_backend):
-        """Non-stream POST: bytes_sent == backend request body actually sent,
-        bytes_recv == backend response body bytes."""
+    def test_post_records_usage_tokens(self, fake_backend):
+        """Non-stream POST with usage in the answer: input_tokens ==
+        usage.prompt_tokens, output_tokens == usage.completion_tokens."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 34},
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 200
+                from backend_adapter import model_usage as mu
+                rows = mu.usage_snapshot()
+                assert rows[0]["input_tokens"] == 12
+                assert rows[0]["output_tokens"] == 34
+            finally:
+                server.shutdown()
+
+    def test_post_without_usage_zero_tokens(self, fake_backend):
+        """Backend answer without usage → input/output stay 0 (not counted)."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
@@ -246,26 +271,23 @@ class TestServer:
                                         "messages": [{"role": "user", "content": "Hi"}],
                                         "max_tokens": 100})
                 assert resp["status"] == 200
-                # тело, которое реально ушло бэкенду (fake_backend его записал)
-                sent_body = fake_backend.requests[-1][2].encode()
                 from backend_adapter import model_usage as mu
                 rows = mu.usage_snapshot()
-                assert rows[0]["bytes_sent"] == len(sent_body)
-                # тело ответа бэкенда (как его сериализует FakeBackendHandler)
-                recv_expected = len(json.dumps(fake_backend.completions_response).encode())
-                assert rows[0]["bytes_recv"] == recv_expected
-                assert rows[0]["bytes_sent"] > 0 and rows[0]["bytes_recv"] > 0
+                assert rows[0]["calls"] == 1
+                assert rows[0]["input_tokens"] == 0
+                assert rows[0]["output_tokens"] == 0
             finally:
                 server.shutdown()
 
-    def test_repeat_post_increments_bytes(self, fake_backend):
-        """Two POSTs of the same model double the traffic counters."""
+    def test_repeat_post_increments_tokens(self, fake_backend):
+        """Two POSTs of the same model double the token counters."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "chat1", "model": "test-model",
             "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 34},
         }
         with fake_backend:
             server = self._setup_adapter(fake_backend)
@@ -276,19 +298,17 @@ class TestServer:
                 for _ in range(2):
                     resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages", body=body)
                     assert resp["status"] == 200
-                sent_body = fake_backend.requests[-1][2].encode()
                 from backend_adapter import model_usage as mu
                 rows = mu.usage_snapshot()
                 assert rows[0]["calls"] == 2
-                assert rows[0]["bytes_sent"] == 2 * len(sent_body)
-                recv_expected = len(json.dumps(fake_backend.completions_response).encode())
-                assert rows[0]["bytes_recv"] == 2 * recv_expected
+                assert rows[0]["input_tokens"] == 24
+                assert rows[0]["output_tokens"] == 68
             finally:
                 server.shutdown()
 
-    def test_backend_error_body_counts_as_received(self, fake_backend):
-        """Backend 400 (non-retry): client gets 400; the error response body
-        counts as bytes_recv (real traffic from the backend)."""
+    def test_backend_error_no_tokens(self, fake_backend):
+        """Backend 400 (non-retry): client gets 400; error bodies carry no
+        usage → input/output stay 0 (only the calls counter grows)."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
         # 400 не входит в retry-список (429/502/503/504) — ровно одна попытка
@@ -303,21 +323,17 @@ class TestServer:
                                         "messages": [{"role": "user", "content": "Hi"}],
                                         "max_tokens": 100})
                 assert resp["status"] == 400
-                sent_body = fake_backend.requests[-1][2].encode()
                 from backend_adapter import model_usage as mu
                 rows = mu.usage_snapshot()
                 assert rows[0]["calls"] == 1
-                assert rows[0]["bytes_sent"] == len(sent_body)
-                # FakeBackendHandler при статусе 400 отвечает без тела —
-                # фактические байты ответа равны 0 (assert на реальное
-                # поведение фейка, а не на гипотетическое тело ошибки).
-                assert rows[0]["bytes_recv"] == 0
+                assert rows[0]["input_tokens"] == 0
+                assert rows[0]["output_tokens"] == 0
             finally:
                 server.shutdown()
 
-    def test_backend_502_retries_accumulate_bytes(self, fake_backend):
-        """Backend 502 is retried (default ADAPTER_RETRY=3): each attempt's
-        request body counts as sent and each error body as received."""
+    def test_backend_502_retries_no_tokens(self, fake_backend):
+        """Backend 502 is retried (default ADAPTER_RETRY=3): every attempt
+        fails with an error body (no usage) → tokens stay 0, calls == 1."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
@@ -334,15 +350,13 @@ class TestServer:
                                         "max_tokens": 100},
                                   timeout=10)
                 assert resp["status"] == 502  # все 3 попытки исчерпаны
-                sent_body = fake_backend.requests[-1][2].encode()
                 attempts = len(fake_backend.requests)
                 assert attempts == 3  # было три HTTP-запроса к бэкенду
-                err_body = json.dumps({"error": "backend error"}).encode()
                 from backend_adapter import model_usage as mu
                 rows = mu.usage_snapshot()
                 assert rows[0]["calls"] == 1
-                assert rows[0]["bytes_sent"] == attempts * len(sent_body)
-                assert rows[0]["bytes_recv"] == attempts * len(err_body)
+                assert rows[0]["input_tokens"] == 0
+                assert rows[0]["output_tokens"] == 0
             finally:
                 server.shutdown()
 
