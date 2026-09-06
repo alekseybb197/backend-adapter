@@ -8,7 +8,11 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
   - режим работы (multi-backend / standalone);
   - каждый настроенный LLM-эндпойнт: доступность, список моделей и
     колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
-    обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже).
+    обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже);
+  - таблицу «Использованные модели» — модели, к которым агент обращался
+    после старта адаптера (см. model_usage.py): счётчик обращений и какие
+    API-эндпоинты доступны именно для каждой модели (результат дымовой
+    пробы этой моделью при первом обращении).
 
 Откуда данные:
   - Проверка бэкендов запускается:
@@ -69,7 +73,7 @@ import logging
 import os
 import time
 
-from . import config, webserver
+from . import config, model_usage, webserver
 
 logger = logging.getLogger("webui_status")
 
@@ -234,6 +238,49 @@ def _api_html(api: dict | None) -> str:
     return "<br>".join(parts)
 
 
+def _usage_endpoint_html(entry: dict | None) -> str:
+    """HTML ячейки эндпоинта в таблице «Использованные модели».
+
+    ``entry`` — элемент ``endpoints[pname]`` строки таблицы model_usage:
+    {"status": int|None, "found": bool} (found ⇔ HTTP 200); None — эндпоинт
+    не пробован (первый запрос ещё идёт — probing, или ADAPTER_MODEL_USAGE_
+    ENABLE=0, или модели нет у бэкенда). Зелёный ``✓`` — только found=True;
+    всё остальное (не-200, не пробован) — серая ``—`` (провал пробы детален
+    в логе/строке, страница — про факт доступности)."""
+    if entry is not None and entry["found"]:
+        return '<span style="color:#1a7f37">✓</span>'
+    return '<span style="color:#aaa">—</span>'
+
+
+def _usage_rows_html(rows: list[dict]) -> str:
+    """HTML строк таблицы «Использованные модели» (по строке на модель).
+
+    ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
+    Колонки: Модель | Бэкенд | Вызовов | эндпоинты ENDPOINT_PROBES
+    (completions/messages/responses/embeddings — в порядке config.
+    ENDPOINT_PROBES, том же, что у пробы). Модель/бэкенд — html.escape."""
+    body = []
+    for r in rows:
+        ep_cells = "".join(
+            f"<td>{_usage_endpoint_html(r['endpoints'].get(pname))}</td>"
+            for pname, _path, _tpl in config.ENDPOINT_PROBES
+        )
+        body.append(
+            "<tr>"
+            f"<td>{html.escape(str(r['model']))}</td>"
+            f"<td>{html.escape(str(r['backend']))}</td>"
+            f"<td>{r['calls']}</td>"
+            f"{ep_cells}"
+            "</tr>"
+        )
+    if not body:
+        body.append(
+            '<tr><td colspan="7" style="color:#888">пока нет данных — '
+            "таблица заполняется при первых запросах к моделям</td></tr>"
+        )
+    return "".join(body)
+
+
 def _render_status_page(
     context, refresh=None, checked_at=None, running=None, started_at=None
 ) -> bytes:
@@ -253,7 +300,10 @@ def _render_status_page(
     кэш не тронут (показывается прежний список), при частичном — упавший
     бэкенд честно без моделей. Колонка «Доступные API» рендерится из
     config._ENDPOINT_STATE через _collect_endpoints (сама проба выполняется
-    внутри refresh_models; refresh["probe"] отдельно не рендерится)."""
+    внутри refresh_models; refresh["probe"] отдельно не рендерится).
+    Секция «Использованные модели» рендерится из model_usage.usage_snapshot()
+    (см. _usage_rows_html) — таблица заполняется запросами агента в этом
+    процессе независимо от проверок бэкендов."""
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
@@ -393,6 +443,18 @@ def _render_status_page(
   <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Endpoints</th><th>Models</th></tr>
   {"".join(rows)}
 </table>
+<h3 style="margin-top:24px">Использованные модели</h3>
+<p style="color:#888;margin:4px 0 0 0">Модели, к которым агент обращался
+  после старта адаптера (после прохождения строгой проверки). Первое
+  обращение к модели проверяет доступные API-эндпоинты короткими запросами
+  именно этой моделью (до 4×5 с); повторные обращения не перепроверяются —
+  растёт только счётчик «Вызовов». Таблица живёт в памяти процесса и
+  сбрасывается при старте; ADAPTER_MODEL_USAGE_ENABLE=0 — учёт остаётся,
+  пробы выключены (колонки эндпоинтов «—»).</p>
+<table>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th></tr>
+  {_usage_rows_html(model_usage.usage_snapshot())}
+</table>
 {footer}
 <form method="POST" action="/" style="margin-top:12px">
   <button type="submit">⟳ Проверить сейчас</button>
@@ -524,6 +586,8 @@ __all__ = [
     "_config_snapshot",
     "_models_html",
     "_api_html",
+    "_usage_endpoint_html",
+    "_usage_rows_html",
     "_render_status_page",
     "StatusEndpoint",
     "RefreshStateEndpoint",

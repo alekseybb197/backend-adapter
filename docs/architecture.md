@@ -33,8 +33,11 @@ backend_adapter/
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
+├── model_usage.py          ← used-models table (см. §6.6): учёт моделей запросов +
+│                             дымовая проба эндпоинтов по каждой модели
 ├── webui_status.py         ← WEBUI endpoints "/" + "/api/refresh-state": status page
-│                             (version, LLM endpoints, models) + background-check state
+│                             (version, LLM endpoints, models) + background-check state +
+│                             секция «Использованные модели»
 ├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
@@ -76,6 +79,9 @@ Claude Code (Anthropic API client)
 │  do_GET  → /v1/models → return _AVAILABLE_MODELS │
 │  do_POST → /v1/messages                          │
 │    ├─ parse & validate                           │
+│    ├─ strict model check → record_model_usage    │
+│    │     (model_usage: учёт + проба эндпоинтов   │
+│    │      модели при первом обращении, см. §6.6) │
 │    ├─ model mapping (ADAPTER_MODELS_MAPPING)     │
 │    ├─ backend resolution (_resolve_backend)      │
 │    ├─ tool_result tracing (causality lookup)     │
@@ -154,20 +160,23 @@ Claude Code (Anthropic API client)
 1. Extract session_id, req_id, update session_log context
 2. Parse & validate request JSON (require "model" field)
 3. Strict model validation (ADAPTER_STRICT_MODELS)
-4. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
-5. Backend resolution (_resolve_backend)
+4. Record usage of the client model (model_usage.record_model_usage — used-models
+   table; at first use of a model this synchronously smoke-probes that model's
+   endpoints, see §6.6; accounting never affects the request)
+5. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
+6. Backend resolution (_resolve_backend)
    - Explicit prefix (<backend>.model) → strip, route
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
-6. Trace tool_results from incoming messages (causality: tool_use_id → parent req_id)
-7. Convert Anthropic → OpenAI (messages, tools, tool_choice, system)
-8. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
-9. Retry loop (ADAPTER_RETRY times, exponential backoff):
+7. Trace tool_results from incoming messages (causality: tool_use_id → parent req_id)
+8. Convert Anthropic → OpenAI (messages, tools, tool_choice, system)
+9. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
+10. Retry loop (ADAPTER_RETRY times, exponential backoff):
    ├─ Stream branch: urllib urlopen → _start_sse() → stream_openai_to_anthropic()
    │   └─ Chunk-by-chunk SSE conversion, write Anthropic SSE events to wfile
    └─ Non-stream branch: urllib urlopen → read full → convert_openai_to_anthropic()
        └─ Single JSON response → _send_json()
-10. Error handling:
+11. Error handling:
     ├─ HTTPError (retry on 429/502/503/504 only)
     ├─ TimeoutError (retry)
     ├─ BrokenPipe/ConnectionReset (client gone — silent log)
@@ -319,6 +328,51 @@ GET `/` и по кнопке:
   компромисс, что и раньше — см. комментарий у `_refresh_worker` в
   config.py), менеджер синхронизирует только запуск и публикацию результата.
 
+### 6.6 Таблица использованных моделей (`model_usage.py`)
+
+Отдельный модуль-лист DAG (импортирует только `config`; его импортируют
+`server.py` и `webui_status.py` — цикла нет, `config.py` остаётся корнем).
+Ведёт **in-memory таблицу** клиентских моделей, к которым агент реально
+обращался, и для каждой — доступность 4 известных API-эндпоинтов бэкенда
+**именно этой моделью**:
+
+- **Точка учёта** — `server.do_POST`, сразу после strict-проверки модели
+  (клиентское имя из BODY, **до** маппинга `_MAP`): `model_usage.record_
+  model_usage(client_model)`. Недопустимая модель (HTTP 400) в таблицу не
+  попадает — хук стоит после `return`; провал резолва/пробы никогда не
+  роняет запрос (все исключения ловятся внутри).
+- **Схема строки** (`client_model` — ключ `_TABLE`): `backend` (имя из
+  `_resolve_backend`), `calls` (счётчик обращений, растёт всегда),
+  `endpoints` (`{pname: {status, found}}` — только реально пробованные
+  пути; `found` ⇔ HTTP 200), `errors` (тексты сетевых ошибок пробы),
+  `first_seen` («HH:MM:SS»), `probing` (True, пока первый запрос выполняет
+  синхронную пробу). Колонки WEBUI-секции идут в порядке
+  `config.ENDPOINT_PROBES` (completions/messages/responses/embeddings).
+- **Поток первого обращения** — короткая критическая секция под
+  `_TABLE_LOCK` (только поиск/создание/инкремент), затем **вне лока**:
+  резолв бэкенда (`config._resolve_backend`, без сети — имя для колонки) и,
+  если `config.ADAPTER_MODEL_USAGE_ENABLE`, синхронная дымовая проба
+  `_probe_model_endpoints(backend_cfg, resolved)`. Та же низкоуровневая
+  `config._probe_backend_endpoints`, что у фоновой проверки бэкендов (§6.4),
+  но модель — resolved-имя ЗАПРОСА (не probe-модель бэкенда) и без
+  TTL-кэша (`_ENDPOINT_STATE` не используется — результат живёт только в
+  строке таблицы). Таймаут одного POST — `MODEL_USAGE_PROBE_TIMEOUT = 5.0`
+  (первый запрос новой модели ждёт до 4×5 с; осознанно, см. ADR). Если
+  resolved-модели нет среди моделей бэкенда в `_MODEL_TO_BACKEND` — проба
+  не выполняется (колонки эндпоинтов «—»).
+- **Повторные обращения** — строка уже есть → только `calls += 1`, проба
+  никогда не повторяется. Конкурентность: два одновременных первых
+  обращения к одной модели дают одну пробу (вторая нить видит строку),
+  к разным — пробы идут параллельно в потоках `ThreadingHTTPServer`.
+- **Мастер-флаг `ADAPTER_MODEL_USAGE_ENABLE`** (config.py, дефолт `1`):
+  `0` — пробы отключены, учёт обращений остаётся (колонки «—»). Пробы по
+  модели НЕ зависят от `ADAPTER_ENDPOINT_PROBE` (тот управляет только
+  фоновой проверкой бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не
+  входит; таблица живёт в памяти процесса и сбрасывается при старте.
+- **Вывод** — секция «Использованные модели» на статус-странице `/`
+  (`webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
+  строк в порядке первого обращения).
+
 ### 6.2 Разрешение коллизий имён моделей
 
 Когда одна и та же модель встречается на нескольких бэкендах, генерируется префиксный ID:
@@ -331,9 +385,9 @@ GET `/` и по кнопке:
 
 ### 6.3 Логика маршрутизации (`_resolve_backend`, config.py:435–475)
 
-1. **Явный префикс** — снять префикс `<backend_name>.`, направить на соответствующий бэкенд
-2. **Lookup по списку моделей** — поиск в `_MODEL_TO_BACKEND`
-3. **Fallback** — первый бэкенд в конфиге (`_DEFAULT_BACKEND`); если бэкенд не сконфигурирован/не найден — `RuntimeError`
+12. **Явный префикс** — снять префикс `<backend_name>.`, направить на соответствующий бэкенд
+13. **Lookup по списку моделей** — поиск в `_MODEL_TO_BACKEND`
+14. **Fallback** — первый бэкенд в конфиге (`_DEFAULT_BACKEND`); если бэкенд не сконфигурирован/не найден — `RuntimeError`
 
 ---
 
@@ -343,9 +397,9 @@ Claude Code's agent loop can send **parallel requests** within a single session 
 
 Solution: `tool_use_id` is the natural unique key.
 
-1. **Register** (`_register_tool_use`): when converting OpenAI → Anthropic response, record `(session_id, tool_use_id, req_id)` in an `OrderedDict` per session
-2. **Lookup** (`_lookup_tool_use_producer`): when processing incoming `tool_result`, find the `req_id` that produced the corresponding `tool_use`
-3. **Eviction**: FIFO eviction at `_TOOL_USE_INDEX_MAX_PER_SESSION` (2000 entries) to bound memory for long sessions
+15. **Register** (`_register_tool_use`): when converting OpenAI → Anthropic response, record `(session_id, tool_use_id, req_id)` in an `OrderedDict` per session
+16. **Lookup** (`_lookup_tool_use_producer`): when processing incoming `tool_result`, find the `req_id` that produced the corresponding `tool_use`
+17. **Eviction**: FIFO eviction at `_TOOL_USE_INDEX_MAX_PER_SESSION` (2000 entries) to bound memory for long sessions
 
 Trace event `tool_result` includes `parent_req_id` — `null` if the producer was evicted or never recorded.
 
@@ -529,7 +583,8 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 backend-adapter.py
   ├── config.py          (no internal deps — stdlib only + os.environ;
   │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
-  ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming
+  ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming, model_usage
+  ├── model_usage.py     → config (used-models table, см. §6.6)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact
@@ -540,7 +595,7 @@ backend-adapter.py
   ├── webserver.py       → session_viewer, webui_status, webui_config_api (WEBUI core: serve()
   │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
-  ├── webui_status.py    → webserver (эндпойнты "/", "/api/refresh-state"), config
+  ├── webui_status.py    → webserver (эндпойнты "/", "/api/refresh-state"), config, model_usage
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   └── artifact_tree*.py  (8 modules, layered):
       artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
