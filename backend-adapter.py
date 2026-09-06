@@ -83,7 +83,7 @@ if __name__ == "__main__":
         _write_pidfile()
 
     print(f"\n{'=' * 70}")
-    print(f"Claude Code Adapter v{__version__} ({__comment__})")
+    print(f"Backend-Adapter v{__version__}")
     print(f"Listening:  http://{ADAPTER_ENDPOINT_HOST}:{PROXY_PORT}")
     if not ADAPTER_DEBUG:
         log_status = "disabled (ADAPTER_DEBUG_ENABLE=0)"

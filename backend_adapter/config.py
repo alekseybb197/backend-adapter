@@ -866,11 +866,17 @@ def _init_multi_backends(config_path: str) -> None:
     # 1) Собрать все модели: (model_dict_copy, backend_config)
     all_models: list[tuple[dict, dict]] = []
     for b in blocks:
+        name, base = b["name"], b["base"]
+        # Начало/завершение проверки КАЖДОГО бэкенда из настроек — в лог
+        # (при старте адаптера; фоновая проверка WEBUI логируется своими
+        # [REFRESH]/[ENDPOINT_PROBE]-строками, см. refresh_models).
+        print(f"[INIT] Probing backend '{name}' at {base} ...")
         try:
-            bmodels = _fetch_models(b["base"], b["key"])
+            bmodels = _fetch_models(base, b["key"])
         except Exception as e:
-            print(f"[WARN] Failed to probe backend '{b['name']}' at {b['base']}: {e}")
+            print(f"[WARN] Failed to probe backend '{name}' at {base}: {e}")
             continue
+        print(f"[INIT] Backend '{name}' at {base}: ok ({len(bmodels)} models)")
         for m in bmodels:
             # Делаем копию, чтобы не мутировать оригинальный ответ бэкенда
             all_models.append((dict(m), b))
