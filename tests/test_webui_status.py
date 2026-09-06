@@ -466,11 +466,14 @@ class TestUsageSection:
             _seed_usage_rows(model_usage, usage_rows)
         return ws._render_status_page(self._ctx(), refresh=_done_job(True, 1)).decode()
 
-    def _row(self, model, backend="AAA", calls=1, endpoints=None):
+    def _row(self, model, backend="AAA", calls=1, endpoints=None,
+             bytes_sent=0, bytes_recv=0):
         return {
             "model": model,
             "backend": backend,
             "calls": calls,
+            "bytes_sent": bytes_sent,
+            "bytes_recv": bytes_recv,
             "endpoints": endpoints or {},
             "errors": {},
             "first_seen": "10:00:00",
@@ -478,13 +481,16 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 7 колонок (Модель|Бэкенд|Вызовов|4 эндпоинта).
+        # Заголовок секции + 9 колонок (Модель|Бэкенд|Вызовов|Отправлено|
+        # Получено|4 эндпоинта).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Использованные модели</h3>" in body
         assert "<th>Модель</th>" in body
         assert "<th>Бэкенд</th>" in body
         assert "<th>Вызовов</th>" in body
+        assert "<th>Отправлено</th>" in body
+        assert "<th>Получено</th>" in body
         assert "<th>completions</th>" in body
         assert "<th>messages</th>" in body
         assert "<th>responses</th>" in body
@@ -511,11 +517,16 @@ class TestUsageSection:
         body = self._seed(config, ws, usage_rows=rows)
         assert "m-ok" in body and "m-none" in body
         # зелёный ✓ — только для found (один на обе строки)
+        # зелёный ✓ — только для found (один на обе строки)
         assert body.count('style="color:#1a7f37">✓</span>') == 1
-        assert body.count('style="color:#aaa">—</span>') == 7  # 2+5 не-200/не пробованных
-        # строка m-none: Вызовов == 1 (счётчик из сида), 4 «—»-эндпоинта
+        # серые «—»: m-ok (messages=404 + responses/embeddings не пробованы) = 3,
+        # m-none (все 4 эндпоинта не пробованы) = 4 → всего 7; колонки
+        # Отправлено/Получено «—» не дают (там «0 B»)
+        assert body.count('style="color:#aaa">—</span>') == 7
+        # строка m-none: Вызовов == 1 (счётчик из сида), трафик 0 B/0 B
         assert ">m-none</td>" in body
         assert "<td>1</td>" in body  # calls строки m-none
+        assert "<td>0 B</td>" in body  # Отправлено/Получено строки m-none
 
     def test_escapes_model_and_backend_names(self):
         # Имя модели/бэкенда с HTML-спецсимволами не исполняется браузером.
@@ -552,13 +563,55 @@ class TestUsageSection:
         # _usage_rows_html: 4 ячейки эндпоинтов на строку + плейсхолдер пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"7\"" in html
+        assert "пока нет данных" in html and "<td colspan=\"9\"" in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        assert html.count("<td>") == 7  # модель+бэкенд+вызовов+4 эндпоинта
+        # модель+бэкенд+вызовов+отправлено+получено+4 эндпоинта = 9
+        assert html.count("<td>") == 9
         assert "completions" not in html  # короткие имена — только в шапке
+
+    def test_row_renders_formatted_bytes(self):
+        # bytes_sent/bytes_recv форматируются _fmt_bytes (1024-единицы).
+        config, ws = _fresh_modules()
+        row = self._row("m-big", bytes_sent=1536, bytes_recv=1048576)
+        html = ws._usage_rows_html([row])
+        assert "1.5 KiB" in html
+        assert "1.0 MiB" in html
+
+
+# ---------------------------------------------------------------------------
+# TestFmtBytes — формат байтов «Отправлено/Получено» (1024-единицы)
+# ---------------------------------------------------------------------------
+
+class TestFmtBytes:
+    def _fmt(self, n):
+        config, ws = _fresh_modules()
+        return ws._fmt_bytes(n)
+
+    def test_below_kib_integer_bytes(self):
+        # < 1024 — целые байты без десятичной части и единицы-множителя.
+        assert self._fmt(0) == "0 B"
+        assert self._fmt(1) == "1 B"
+        assert self._fmt(512) == "512 B"
+        assert self._fmt(1023) == "1023 B"
+
+    def test_kib_one_decimal(self):
+        # от 1024 — один десятичный знак (включая .0 у целых значений).
+        assert self._fmt(1024) == "1.0 KiB"
+        assert self._fmt(1536) == "1.5 KiB"
+        assert self._fmt(2048) == "2.0 KiB"
+
+    def test_mib_and_gib(self):
+        # Переходы 1024 → следующая единица на границе.
+        assert self._fmt(1048576) == "1.0 MiB"
+        assert self._fmt(1073741824) == "1.0 GiB"
+        assert self._fmt(1572864) == "1.5 MiB"
+
+    def test_negative_treated_as_zero(self):
+        # Отрицательных значений не бывает; защитно — как 0.
+        assert self._fmt(-10) == "0 B"
 
 
 # ---------------------------------------------------------------------------
