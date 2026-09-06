@@ -57,6 +57,9 @@ def fresh_env(monkeypatch):
         # model would fire real HTTP POSTs). Accounting itself stays on — the
         # flag only gates probes; tests enable it explicitly.
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
+        # Persistence of the used-models table: sane default for tests (probe
+        # of the interval value happens on config import).
+        "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         "ADAPTER_DEBUG_TAGS_OUT": "0",
         "ADAPTER_DEBUG_TAGS_FULL": "",
         "ADAPTER_WEBUI_ENABLE": "0",
@@ -108,6 +111,7 @@ def _default_config():
         "ADAPTER_ENDPOINT_PROBE": "0",
         # Used-models table: endpoint probes off by default (see fresh_env).
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
+        "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         "ADAPTER_DEBUG_TAGS_OUT": "0",
         "ADAPTER_DEBUG_TAGS_FULL": "",
         "ADAPTER_WEBUI_ENABLE": "0",
@@ -179,9 +183,12 @@ def isolate_logs(fresh_env):
     config._REFRESH_JOB = None
 
     # Reset used-models table (model_usage keeps its own module global).
+    # Persistence is OFF by default in all tests ("" — no file I/O); tests of
+    # persistence enable it themselves on tmp_path.
     from backend_adapter import model_usage
 
     model_usage.reset_model_usage()
+    model_usage.set_persist_path("")
 
     yield
 

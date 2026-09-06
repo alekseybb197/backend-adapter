@@ -179,3 +179,10 @@ if __name__ == "__main__":
             httpd.serve_forever()
         except KeyboardInterrupt:
             print("\n[EXIT] Bye")
+        finally:
+            # Финальный flush таблицы использованных моделей: штатное
+            # завершение (в т.ч. Ctrl-C) всегда сохраняет «грязный» хвост
+            # в model-usage.yaml (см. backend_adapter/model_usage.py).
+            from backend_adapter import model_usage as _model_usage
+
+            _model_usage.flush_table()

@@ -327,13 +327,23 @@ ADAPTER_ENDPOINT_PROBE = os.environ.get("ADAPTER_ENDPOINT_PROBE", "1").lower() i
 # повторные обращения не перепроверяют никогда. 1 — проба выполняется при
 # первом обращении ВСЕГДА, независимо от ADAPTER_ENDPOINT_PROBE (тот управляет
 # только фоновой пробой бэкендов refresh_models). 0 — пробы отключены, учёт
-# обращений остаётся (колонки эндпоинтов — «—»). Таблица живёт в памяти
-# процесса и сбрасывается при старте; в RUNTIME_CONFIG_POOL не входит.
+# обращений остаётся (колонки эндпоинтов — «—»). Таблица персистентна:
+# сохраняется в YAML-файл model-usage.yaml в корне WEBUI (см.
+# ADAPTER_MODEL_USAGE_SAVE_INTERVAL ниже) и загружается при старте;
+# в RUNTIME_CONFIG_POOL не входит.
 ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").lower() in (
     "1",
     "true",
     "yes",
 )
+
+# Период персистентного сохранения таблицы использованных моделей в YAML
+# (сек). «Грязная» таблица сохраняется не чаще раза в
+# ADAPTER_MODEL_USAGE_SAVE_INTERVAL; создание новой строки модели, сброс
+# строки и завершение работы адаптера сохраняют сразу (flush_table).
+# Дефолт 300 — приемлемая потеря хвоста ≤ 300 с (5 мин) при жёстком kill;
+# при штатном завершении таблица сохраняется всегда.
+ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
 
 # Глобальные структуры конфигурации бэкендов (единственный режим — YAML).
 # _BACKENDS — список [{name, base, key}, …]
