@@ -19,10 +19,6 @@ from .config import (
     _AVAILABLE_MODELS,
     _MAP,
     ADAPTER_RETRY,
-    ADAPTER_SENSITIVE_LOGGING_ENABLE,
-    ADAPTER_STREAM_INCLUDE_USAGE,
-    ADAPTER_STREAMING_ENABLE,
-    ADAPTER_STRICT_MODELS,
     ADAPTER_TIMEOUT,
     SSL_CTX,
     _cap,
@@ -171,7 +167,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             _d(f"\n{'=' * 70}")
             _dr(req_id, f"[REQ] {self.command} {self.path} session={session_id}")
-            if ADAPTER_SENSITIVE_LOGGING_ENABLE:
+            if config.ADAPTER_SENSITIVE_LOGGING_ENABLE:
                 for k, v in self.headers.items():
                     _dr(req_id, f"  {k}: {v}")
             else:
@@ -207,7 +203,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # (с возможными префиксами бэкендов для коллизирующих моделей).
             client_model = model
             if (
-                ADAPTER_STRICT_MODELS
+                config.ADAPTER_STRICT_MODELS
                 and _AVAILABLE_MODELS
                 and client_model not in _AVAILABLE_MODELS
             ):
@@ -276,7 +272,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # do_POST), либо, если клиент явно не просил стрим, работает как
             # раньше -- ждёт полный ответ.
             stream_requested = bool(anthropic_req.get("stream", False))
-            if stream_requested and not ADAPTER_STREAMING_ENABLE:
+            if stream_requested and not config.ADAPTER_STREAMING_ENABLE:
                 # Аварийный рубильник ADAPTER_STREAMING_ENABLE=0 -- принудительно
                 # откатываемся к старому поведению, даже если клиент просил
                 # stream=true. См. комментарий у переменной выше.
@@ -287,7 +283,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 stream_requested = False
             _dr(
                 req_id,
-                f"[STREAM_REQUESTED] anthropic_stream={anthropic_req.get('stream')} -> backend_stream={stream_requested} (streaming_mode={'on' if ADAPTER_STREAMING_ENABLE else 'off'})",
+                f"[STREAM_REQUESTED] anthropic_stream={anthropic_req.get('stream')} -> backend_stream={stream_requested} (streaming_mode={'on' if config.ADAPTER_STREAMING_ENABLE else 'off'})",
             )
 
             _trace(
@@ -411,7 +407,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 "stream": stream_requested,
             }
 
-            if stream_requested and ADAPTER_STREAM_INCLUDE_USAGE:
+            if stream_requested and config.ADAPTER_STREAM_INCLUDE_USAGE:
                 # Без этого поля OpenAI-совместимый стриминг НЕ присылает usage
                 # ни в одном SSE-чанке -- см. комментарий у ADAPTER_STREAM_INCLUDE_USAGE.
                 # Именно это было первопричиной input_tokens=0 в message_start/
@@ -551,7 +547,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
                         )
                         error_value = (
-                            err[:500] if ADAPTER_SENSITIVE_LOGGING_ENABLE else redact(err[:500])
+                            err[:500]
+                            if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                            else redact(err[:500])
                         )
                         _trace(
                             session_id,
@@ -764,7 +762,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     err = e.read().decode()
                     _dr(req_id, f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
                     error_value = (
-                        err[:500] if ADAPTER_SENSITIVE_LOGGING_ENABLE else redact(err[:500])
+                        err[:500] if config.ADAPTER_SENSITIVE_LOGGING_ENABLE else redact(err[:500])
                     )
                     _trace(
                         session_id,

@@ -50,7 +50,9 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `/session/<hash8>/...` и png/puml-шорткаты; корень — директория
   `ADAPTER_DEBUG_LOGPATH`, порт `ADAPTER_WEBUI_PORT`, адрес `ADAPTER_WEBUI_HOST`,
   daemon-поток в процессе адаптера), `/config` = `webui_config_api.py`
-  (runtime-пул debug-переменных, см. `RUNTIME_CONFIG_POOL` в `config.py`).
+  (runtime-пул из 12 переменных — объём debug-записи, санитайзер, рубильники
+  стриминга/usage и строгой валидации моделей; см. `RUNTIME_CONFIG_POOL`
+  в `config.py`; сеть/бэкенды/порты/`ADAPTER_DEBUG_LOGPATH` на лету не меняются).
   Адрес прослушивания самого адаптера — `ADAPTER_ENDPOINT_HOST`
   (обе по умолчанию `127.0.0.1`);
   `artifact_tree.py` — генерация дерева артефактов (`artefacts/tree.html`)

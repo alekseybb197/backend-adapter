@@ -195,28 +195,38 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 
 ### Runtime-пул: переключение на лету без перезапуска
 
-Часть переменных debug-записи можно менять на **работающем** адаптере через
-веб-интерфейс — страница `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config`
-(эндпойнт `/config`, `webui_config_api.py`). На странице — форма с текущими
-значениями пула; POST применяет их через `config.set_runtime_config()`
-(неверные типы и неизвестные ключи молча игнорируются) и показывает, что
-применилось.
+Часть переменных debug-записи и рубильников поведения НОВЫХ запросов можно
+менять на **работающем** адаптере через веб-интерфейс — страница
+`http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config` (эндпойнт `/config`,
+`webui_config_api.py`). На странице — форма с текущими значениями пула; POST
+применяет их через `config.set_runtime_config()` (неверные типы и неизвестные
+ключи молча игнорируются) и показывает, что применилось.
 
 В **runtime-пул** (`RUNTIME_CONFIG_POOL` в `config.py`) входят переменные,
-управляющие только объёмом записи на диск, — их чтение кодом переведено на
-живые обращения `config.ADAPTER_X` (не снимок на импорте):
+чьё значение безопасно применить на следующем же вызове/запросе — их чтение
+кодом переведено на живые обращения `config.ADAPTER_X` (не снимок на
+импорте):
 
-- **bool**: `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`, `ADAPTER_DEBUG_TOOLS`,
-  `ADAPTER_DEBUG_TOOLS_ERROR`;
-- **int**: `ADAPTER_TRACE_REASONING_MAX_CHARS`,
-  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM`.
+- **bool** — объём записи: `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`,
+  `ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR`;
+- **bool** — рубильники поведения новых запросов и логов:
+  `ADAPTER_SENSITIVE_LOGGING_ENABLE` (отключение санитайзера — секреты
+  выводятся в открытом виде), `ADAPTER_STREAMING_ENABLE`,
+  `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS`;
+- **int**: `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`,
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
+- **str** (единственная строковая): `ADAPTER_DEBUG_TAGS_FULL` — теги без
+  обрезки, строка env-формата `"TAG1,TAG2"`; пусто — сброс (trim для всех
+  тегов). Эффект виден в `_trim_limit()` и на форме /config.
 
-Переменные, менять которые на лету **нельзя** (влияют на активные соединения
-или раскладку файлов, в пул не входят): сеть (`ADAPTER_PROXY_PORT`,
-`ADAPTER_ENDPOINT_HOST`, таймауты/ретраи), бэкенды и модели
-(`ADAPTER_BACKEND_CONFIG`, `ADAPTER_STRICT_MODELS`, маппинг), WEBUI-адреса,
-`ADAPTER_DEBUG_LOGPATH` (идентичность директории логов не должна меняться
-посреди сессии).
+Переменные, менять которые на лету **нельзя** (влияют на активные соединения,
+раскладку файлов или структуру конфигурации, в пул не входят): сеть и адреса
+прослушивания (`ADAPTER_PROXY_PORT`, `ADAPTER_ENDPOINT_HOST`,
+`ADAPTER_WEBUI_PORT`, `ADAPTER_WEBUI_HOST`, `ADAPTER_WEBUI_ENABLE`),
+таймауты/ретраи (`ADAPTER_TIMEOUT`, `ADAPTER_RETRY_COUNT`), бэкенды
+(`ADAPTER_BACKEND_CONFIG`, `ADAPTER_MODELS_MAPPING`), стартовые режимы
+(`ADAPTER_DETACH_ENABLE`, `ADAPTER_PIDFILE`), `ADAPTER_DEBUG_LOGPATH`
+(идентичность директории логов не должна меняться посреди сессии).
 
 ---
 
@@ -245,7 +255,7 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 | JSON+YAML дампы всех частей | `ADAPTER_DEBUG_TAGS_OUT` | `1` |
 | Веб-интерфейс: статус `/` по умолчанию (zero-config) | `ADAPTER_WEBUI_ENABLE` | `1` (дефолт) — корень `./tmp/webui`, `/session` пуст |
 | Веб-интерфейс: полный просмотр сессий | `ADAPTER_WEBUI_ENABLE` + `ADAPTER_DEBUG_LOGPATH` | `1` + `"/tmp/adapter-logs"` |
-| Runtime-пул: переключение debug-записи на лету (без рестарта) | `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config` | форма `RUNTIME_CONFIG_POOL` (7 переменных, см. §6) |
+| Runtime-пул: переключение debug-записи и рубильников на лету (без рестарта) | `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config` | форма `RUNTIME_CONFIG_POOL` (12 переменных, см. §6) |
 | Отключить веб-интерфейс | `ADAPTER_WEBUI_ENABLE` | `0` |
 | Порт веб-интерфейса | `ADAPTER_WEBUI_PORT` | `8765` |
 | Адрес прослушивания адаптера (все интерфейсы) | `ADAPTER_ENDPOINT_HOST` | `"0.0.0.0"` (дефолт `127.0.0.1`) |

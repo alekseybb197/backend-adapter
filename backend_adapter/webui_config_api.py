@@ -2,14 +2,16 @@
 """
 webui_config_api.py — эндпойнт "/config" общего веб-сервера WEBUI.
 
-Контракт: runtime-переключение объёма debug-записи без перезапуска адаптера.
-Узкий пул переменных (RUNTIME_CONFIG_POOL в config.py), управляющих только
-объёмом записи на диск: логи, трейсы, *.parts дампы. Сеть/бэкенды/модели/порты
-не входят — их смена на лету сорвала бы активные соединения.
+Контракт: runtime-переключение debug-записи и поведения НОВЫХ запросов без
+перезапуска адаптера. Пул переменных (RUNTIME_CONFIG_POOL в config.py) —
+объём записи на диск (логи/трейсы/*.parts дампы), маскировка секретов
+(санитайзер), рубильники стриминга и строгая валидация моделей. Сеть/бэкенды/
+модели/порты/точка хранения не входят — их смена на лету требует пересоздания
+слушателей/переинициализации и сорвала бы активные соединения.
 
 Эндпойнт:
-  GET /config → HTML-форма с текущими значениями пула (7 полей: 4 bool checkbox
-                + 3 int input)
+  GET /config → HTML-форма с текущими значениями пула (12 полей: 8 bool
+                checkbox + 3 int input + 1 text для списка тегов без обрезки)
   POST /config → application/x-www-form-urlencoded или JSON, применяет валидные
                  значения через config.set_runtime_config(**...), сверяет ответ
                  с посланным, редирект на GET с flash-сообщением об успехе
@@ -41,12 +43,19 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_DEBUG_TAGS_OUT",
         "ADAPTER_DEBUG_TOOLS",
         "ADAPTER_DEBUG_TOOLS_ERROR",
+        "ADAPTER_SENSITIVE_LOGGING_ENABLE",
+        "ADAPTER_STREAMING_ENABLE",
+        "ADAPTER_STREAM_INCLUDE_USAGE",
+        "ADAPTER_STRICT_MODELS",
     ]
     int_fields = [
+        "ADAPTER_DEBUG_TRIM",
         "ADAPTER_TRACE_REASONING_MAX_CHARS",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
-        "ADAPTER_DEBUG_TRIM",
     ]
+    # Единственная строковая переменная пула — список тегов без обрезки
+    # (строка env-формата "TAG1,TAG2"; рабочий список живёт в config._SET).
+    str_field = "ADAPTER_DEBUG_TAGS_FULL"
 
     # Описания полей для подсказок
     field_descriptions = {
@@ -54,9 +63,14 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_DEBUG_TAGS_OUT": "Per-session дампы протокола (.json+.yaml парой)",
         "ADAPTER_DEBUG_TOOLS": "Логировать все результаты инструментов ([TOOL_RESULT])",
         "ADAPTER_DEBUG_TOOLS_ERROR": "Логировать ошибки инструментов ([TOOL_RESULT_ERROR])",
+        "ADAPTER_SENSITIVE_LOGGING_ENABLE": "Отключить санитайзер логов (секреты в открытом виде!)",
+        "ADAPTER_STREAMING_ENABLE": "Рубильник стриминга: 0 — всегда stream=False (аварийный)",
+        "ADAPTER_STREAM_INCLUDE_USAGE": "Передавать usage-токены в стриме (stream_options)",
+        "ADAPTER_STRICT_MODELS": "Строгая валидация моделей по списку бэкенда",
+        "ADAPTER_DEBUG_TRIM": "Порог обрезки логов (символы, 0=выкл.)",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "Макс. символов reasoning в трейсе (0=без ограничений)",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "Макс. символов tool-полей в трейсе (0=без ограничений)",
-        "ADAPTER_DEBUG_TRIM": "Порог обрезки логов (символы, 0=выкл.)",
+        "ADAPTER_DEBUG_TAGS_FULL": "Теги без обрезки (через запятую; пусто — trim везде)",
     }
 
     rows = []
@@ -81,6 +95,17 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         <td><input type="number" id="{name}" name="{name}" value="{value}" min="0" style="width: 120px"></td>
         <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
+      </tr>""")
+
+    # Строковое поле: text input с текущим env-формат-значением пула.
+    str_value = config._ADAPTER_DEBUG_TAGS_FULL_RAW
+    str_desc = field_descriptions.get(str_field, "")
+    rows.append(f"""
+      <tr>
+        <td><label for="{str_field}">{html.escape(str_field)}</label></td>
+        <td><input type="text" id="{str_field}" name="{str_field}" value="{html.escape(str_value)}" style="width: 220px" placeholder="BODY,TOOL_RESULT,RESPONSE"></td>
+        <td style="color:#666; font-size: 13px">{html.escape(str_desc)}</td>
+        <td style="color:#999; font-size: 12px">текущее: {html.escape(str_value or "—")}</td>
       </tr>""")
 
     # Flash-сообщение о применённых изменениях
@@ -137,7 +162,7 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 
 @webserver.register
 class ConfigEndpoint(webserver.Endpoint):
-    """Эндпойнт "/config": runtime-переключение объёма debug-записи.
+    """Эндпойнт "/config": runtime-переключение debug-записи и рубильников.
 
     GET → HTML-форма текущих значений RUNTIME_CONFIG_POOL
     POST → применение валидных значений, редирект на GET с сообщением
@@ -177,7 +202,10 @@ class ConfigEndpoint(webserver.Endpoint):
             # form-data (application/x-www-form-urlencoded)
             length = int(handler.headers.get("Content-Length", 0))
             body = handler.rfile.read(length).decode("utf-8")
-            parsed = parse_qs(body)
+            # keep_blank_values=True: пустое значение text-поля (например,
+            # ADAPTER_DEBUG_TAGS_FULL= — сброс списка тегов) должно ДОЙТИ
+            # как "", а не исчезнуть (иначе очистить поле формой нельзя).
+            parsed = parse_qs(body, keep_blank_values=True)
             # parse_qs возвращает списки значений; берём первое
             for key, values in parsed.items():
                 if values:

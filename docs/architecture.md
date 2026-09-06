@@ -458,13 +458,16 @@ When enabled, writes complete OpenAI-format request bodies as numbered JSON file
 
 ### 8.6 Runtime config pool + WEBUI endpoint `/config` (`webui_config_api.py`)
 
-`config.py` keeps a narrow `RUNTIME_CONFIG_POOL` — variables controlling only the
-volume of disk writes, safe to flip without restarting the adapter:
+`config.py` keeps a `RUNTIME_CONFIG_POOL` — variables whose value safely applies
+to the *next* call/request (volume of disk writes, log sanitizing, streaming
+and strict-models switches), flip-able without restarting the adapter:
 
 | Type | Variables |
 |---|---|
 | bool | `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`, `ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR` |
-| int | `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM` |
+| bool | `ADAPTER_SENSITIVE_LOGGING_ENABLE`, `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS` |
+| int | `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS` |
+| str | `ADAPTER_DEBUG_TAGS_FULL` (env-format `"TAG1,TAG2"`; empty = reset) |
 
 - `get_runtime_config()` — snapshot dict `{name: value}`; `set_runtime_config(**kw)`
   type-validates against `_RUNTIME_CONFIG_TYPES` and silently ignores out-of-pool
@@ -473,10 +476,15 @@ volume of disk writes, safe to flip without restarting the adapter:
 - **Readers must read live** — `config.ADAPTER_X` module attribute at call time,
   not `from .config import X` import-time snapshots. All pool consumers were
   refactored to live reads: `logger.py` (`_d` gating), `server.py`,
-  `convert.py`, `streaming.py`, `tracer.py`.
-- Deliberately **excluded** from the pool: network, backends, models, ports,
-  `ADAPTER_DEBUG_LOGPATH` (directory identity must not change mid-flight — the
-  session logger would write to a moving target).
+  `convert.py`, `streaming.py`, `tracer.py`. The single non-scalar pool member,
+  `ADAPTER_DEBUG_TAGS_FULL`, is stored as the env-format string (the pool's
+  public value) plus a live `frozenset` `_ADAPTER_DEBUG_TAGS_FULL_SET` that
+  `_trim_limit()` consults — `set_runtime_config()` recomputes it in place.
+- Deliberately **excluded** from the pool: network, backend config/mapping,
+  listen addresses/ports (`ADAPTER_PROXY_PORT`, `ADAPTER_ENDPOINT_HOST`,
+  `ADAPTER_WEBUI_*`), timeouts/retries, detach/pidfile, `ADAPTER_DEBUG_LOGPATH`
+  (directory identity must not change mid-flight — the session logger would
+  write to a moving target).
 - Endpoint `webui_config_api.py` (`@webserver.register`, prefix `/config`): GET —
   HTML form (4 bool checkboxes + 3 int inputs) with current pool values; POST —
   `application/x-www-form-urlencoded` or JSON body → `set_runtime_config()`,

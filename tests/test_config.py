@@ -753,6 +753,24 @@ class TestRuntimeConfig:
         assert current["ADAPTER_DEBUG_TAGS_OUT"] is True
         assert current["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
 
+    def test_new_bool_keys_applied(self):
+        """Новые bool-переменные пула применяются и видны в get_runtime_config()."""
+        result = self.config.set_runtime_config(
+            ADAPTER_SENSITIVE_LOGGING_ENABLE=True,
+            ADAPTER_STREAMING_ENABLE=False,
+            ADAPTER_STREAM_INCLUDE_USAGE=False,
+            ADAPTER_STRICT_MODELS=False,
+        )
+        assert result["ADAPTER_SENSITIVE_LOGGING_ENABLE"] is True
+        assert result["ADAPTER_STREAMING_ENABLE"] is False
+        assert result["ADAPTER_STREAM_INCLUDE_USAGE"] is False
+        assert result["ADAPTER_STRICT_MODELS"] is False
+        current = self.config.get_runtime_config()
+        assert current["ADAPTER_SENSITIVE_LOGGING_ENABLE"] is True
+        assert current["ADAPTER_STREAMING_ENABLE"] is False
+        assert current["ADAPTER_STREAM_INCLUDE_USAGE"] is False
+        assert current["ADAPTER_STRICT_MODELS"] is False
+
     def test_unknown_key_ignored(self):
         """Unknown key is silently ignored."""
         before = self.config.get_runtime_config()
@@ -788,6 +806,29 @@ class TestRuntimeConfig:
         # Не применилось (int-поле отклоняет bool)
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 0  # дефолт
 
+    def test_tags_full_str_applied_and_recomputed(self):
+        """ADAPTER_DEBUG_TAGS_FULL: строка применяется, live-_SET пересчитан."""
+        result = self.config.set_runtime_config(
+            ADAPTER_DEBUG_TAGS_FULL="BODY, TOOL_RESULT_ERROR"
+        )
+        assert result["ADAPTER_DEBUG_TAGS_FULL"] == "BODY, TOOL_RESULT_ERROR"
+        assert self.config._ADAPTER_DEBUG_TAGS_FULL_RAW == "BODY, TOOL_RESULT_ERROR"
+        # Live-эффект: trim отключён для перечисленных тегов, работает для прочих
+        assert self.config._trim_limit("BODY") is None
+        assert self.config._trim_limit("TOOL_RESULT_ERROR") is None
+        assert self.config._trim_limit("RESPONSE") == self.config.ADAPTER_DEBUG_TRIM
+        # Сброс пустой строкой возвращает trim везде (как env-дефолт)
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TAGS_FULL="")
+        assert result["ADAPTER_DEBUG_TAGS_FULL"] == ""
+        assert self.config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
+        assert self.config._trim_limit("BODY") == self.config.ADAPTER_DEBUG_TRIM
+
+    def test_tags_full_rejects_non_str(self):
+        """ADAPTER_DEBUG_TAGS_FULL принимает только str: bool/int игнорируются."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TAGS_FULL=True)
+        assert result["ADAPTER_DEBUG_TAGS_FULL"] == ""
+        assert self.config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
+
     def test_return_value_matches_sent(self):
         """Return value reflects actual values after application."""
         result = self.config.set_runtime_config(
@@ -799,10 +840,10 @@ class TestRuntimeConfig:
         # Возвращает актуальные значения (могли отличаться от посланных, если что-то отклонилось)
 
     def test_pool_not_extended(self):
-        """Return value has exactly 7 keys from RUNTIME_CONFIG_POOL."""
+        """Return value has exactly the RUNTIME_CONFIG_POOL keys (12)."""
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
-        assert len(result) == 7
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
+        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
 
 
 class TestEndpointProbe:
