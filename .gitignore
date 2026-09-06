@@ -3,6 +3,7 @@
 local-adapter.env
 local-adapter.yaml
 tmp/
+settings.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import config, session_log
+from . import config, model_usage, session_log
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
@@ -158,6 +158,15 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
         req_id = uuid.uuid4().hex[:12]
 
+        # Учёт usage (таблица WEBUI «Использованные модели», колонки
+        # Input/Output): локальные аккумуляторы токенов из usage-блоков
+        # ответов бэкенда на время запроса, фиксация — в finally (см. внизу
+        # do_POST). Активен только для запросов, прошедших strict-проверку
+        # (usage_active ставится после record_model_usage) — 400-пути в
+        # счётчики не попадают.
+        usage_tokens = {"input": 0, "output": 0}
+        usage_active = False
+
         _req_ctx.req_id = req_id
         _req_ctx.session_id = session_id
         try:
@@ -215,6 +224,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 _dr(req_id, f"[ERROR] {msg}")
                 self._send_json(400, {"error": msg})
                 return
+
+            # Учёт использованной модели (таблица WEBUI «Использованные
+            # модели»): клиентское имя ДО маппинга; при первом обращении —
+            # синхронная проба эндпоинтов этой моделью (резолв внутри
+            # функции). Учёт не влияет на запрос: провал пробы не роняет его.
+            model_usage.record_model_usage(client_model)
+            usage_active = True
 
             # === Модельный маппинг (agent-facing name -> backend name) ===
             original_model = client_model
@@ -457,11 +473,15 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             # Построить URL и Authorization из resolved backend-конфига.
             # key -- уже раскрытый токен (раскрытие происходит в _parse_backend_yaml).
+            # Тело сериализуется ОДИН раз в out_body (раньше — инлайн в
+            # Request.data): те же байты переиспользуются всеми retry-
+            # попытками.
             backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
             backend_key_val = backend_cfg["key"]
+            out_body = json.dumps(openai_body, ensure_ascii=False).encode()
             req = urllib.request.Request(
                 backend_url,
-                data=json.dumps(openai_body, ensure_ascii=False).encode(),
+                data=out_body,
                 headers={
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {backend_key_val}",
@@ -528,6 +548,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             req_id,
                             approx_prompt_chars=approx_prompt_chars,
                         )
+                        # usage — usage-блок последнего SSE-чанка (или {}):
+                        # считаем токены только из реального usage, эвристика
+                        # chars//4 (input_tokens_estimated) в учёт не попадает.
+                        if usage.get("prompt_tokens") or usage.get("completion_tokens"):
+                            usage_tokens["input"] += int(usage.get("prompt_tokens") or 0)
+                            usage_tokens["output"] += int(usage.get("completion_tokens") or 0)
                         _dr(req_id, f"[OK] Stream done, stop_reason={stop_reason}")
                         _trace(
                             session_id,
@@ -541,7 +567,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         return  # Успех -- выходим
 
                     except urllib.error.HTTPError as e:
-                        err = e.read().decode()
+                        err_raw = e.read()
+                        err = err_raw.decode()
                         _dr(
                             req_id,
                             f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
@@ -740,6 +767,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     o = json.loads(raw)
                     anthropic_resp = convert_openai_to_anthropic(o, model, session_id, req_id)
 
+                    # Учёт usage: токены из usage-блока ответа бэкенда.
+                    # Ответы без usage (ошибки, обрывы, бэкенд без usage) —
+                    # 0/0, счётчики не трогаются.
+                    u = o.get("usage") or {}
+                    if u.get("prompt_tokens") or u.get("completion_tokens"):
+                        usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
+                        usage_tokens["output"] += int(u.get("completion_tokens") or 0)
+
                     _dr(
                         req_id,
                         f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(anthropic_resp, ensure_ascii=False)[:lim])}",
@@ -759,7 +794,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     return  # Успех -- выходим
 
                 except urllib.error.HTTPError as e:
-                    err = e.read().decode()
+                    err_raw = e.read()
+                    err = err_raw.decode()
                     _dr(req_id, f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}")
                     error_value = (
                         err[:500] if config.ADAPTER_SENSITIVE_LOGGING_ENABLE else redact(err[:500])
@@ -868,5 +904,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 failed=True,
             )
         finally:
+            # Фиксация учёта usage (таблица WEBUI «Использованные модели»):
+            # единственная точка записи на любой исход запроса (успех, ошибка,
+            # исчерпание ретраев, исключение). Активно только для запросов,
+            # прошедших strict-проверку; add_usage_tokens не бросает исключений.
+            if usage_active:
+                model_usage.add_usage_tokens(
+                    client_model, usage_tokens["input"], usage_tokens["output"]
+                )
             delattr(_req_ctx, "req_id")
             delattr(_req_ctx, "session_id")

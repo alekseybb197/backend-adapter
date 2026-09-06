@@ -320,6 +320,31 @@ ADAPTER_ENDPOINT_PROBE = os.environ.get("ADAPTER_ENDPOINT_PROBE", "1").lower() i
     "yes",
 )
 
+# Таблица использованных моделей (см. backend_adapter/model_usage.py): учёт
+# клиентских моделей, прошедших strict-проверку (имя из BODY, до маппинга).
+# При ПЕРВОМ обращении к новой модели — синхронная дымовая проба 4 известных
+# эндпоинтов ИМЕННО этой моделью (первый запрос модели ждёт до 4×10 с);
+# повторные обращения не перепроверяют никогда. 1 — проба выполняется при
+# первом обращении ВСЕГДА, независимо от ADAPTER_ENDPOINT_PROBE (тот управляет
+# только фоновой пробой бэкендов refresh_models). 0 — пробы отключены, учёт
+# обращений остаётся (колонки эндпоинтов — «—»). Таблица персистентна:
+# сохраняется в YAML-файл model-usage.yaml в корне WEBUI (см.
+# ADAPTER_MODEL_USAGE_SAVE_INTERVAL ниже) и загружается при старте;
+# в RUNTIME_CONFIG_POOL не входит.
+ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# Период персистентного сохранения таблицы использованных моделей в YAML
+# (сек). «Грязная» таблица сохраняется не чаще раза в
+# ADAPTER_MODEL_USAGE_SAVE_INTERVAL; создание новой строки модели, сброс
+# строки и завершение работы адаптера сохраняют сразу (flush_table).
+# Дефолт 300 — приемлемая потеря хвоста ≤ 300 с (5 мин) при жёстком kill;
+# при штатном завершении таблица сохраняется всегда.
+ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
+
 # Глобальные структуры конфигурации бэкендов (единственный режим — YAML).
 # _BACKENDS — список [{name, base, key}, …]
 # _BACKEND_BY_NAME — name → config
@@ -841,11 +866,17 @@ def _init_multi_backends(config_path: str) -> None:
     # 1) Собрать все модели: (model_dict_copy, backend_config)
     all_models: list[tuple[dict, dict]] = []
     for b in blocks:
+        name, base = b["name"], b["base"]
+        # Начало/завершение проверки КАЖДОГО бэкенда из настроек — в лог
+        # (при старте адаптера; фоновая проверка WEBUI логируется своими
+        # [REFRESH]/[ENDPOINT_PROBE]-строками, см. refresh_models).
+        print(f"[INIT] Probing backend '{name}' at {base} ...")
         try:
-            bmodels = _fetch_models(b["base"], b["key"])
+            bmodels = _fetch_models(base, b["key"])
         except Exception as e:
-            print(f"[WARN] Failed to probe backend '{b['name']}' at {b['base']}: {e}")
+            print(f"[WARN] Failed to probe backend '{name}' at {base}: {e}")
             continue
+        print(f"[INIT] Backend '{name}' at {base}: ok ({len(bmodels)} models)")
         for m in bmodels:
             # Делаем копию, чтобы не мутировать оригинальный ответ бэкенда
             all_models.append((dict(m), b))

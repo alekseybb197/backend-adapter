@@ -33,8 +33,17 @@ backend_adapter/
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
-├── webui_status.py         ← WEBUI endpoints "/" + "/api/refresh-state": status page
-│                             (version, LLM endpoints, models) + background-check state
+├── model_usage.py          ← used-models table (см. §6.6): учёт моделей запросов +
+│                             токены usage ответов (input/output) + дымовая проба
+│                             эндпоинтов по каждой модели; перепроверка строки
+│                             (reprobe); персистентный YAML (version: 2, миграция v1)
+├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
+│                             "/api/model-usage/reset", "/api/model-usage/reprobe",
+│                             "/api/model-usage/reprobe-state",
+│                             "/api/model-usage/snapshot": status page (version,
+│                             LLM endpoints, models) + background-check state +
+│                             секция «Models in use» (live-счётчики, сброс
+│                             счётчиков/перепроверка)
 ├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
@@ -76,6 +85,9 @@ Claude Code (Anthropic API client)
 │  do_GET  → /v1/models → return _AVAILABLE_MODELS │
 │  do_POST → /v1/messages                          │
 │    ├─ parse & validate                           │
+│    ├─ strict model check → record_model_usage    │
+│    │     (model_usage: учёт + проба эндпоинтов   │
+│    │      модели при первом обращении, см. §6.6) │
 │    ├─ model mapping (ADAPTER_MODELS_MAPPING)     │
 │    ├─ backend resolution (_resolve_backend)      │
 │    ├─ tool_result tracing (causality lookup)     │
@@ -130,7 +142,12 @@ Claude Code (Anthropic API client)
    otherwise an independent `./tmp/webui` (created on demand — status page `/`
    works out of the box; `/session` is empty until logs exist; endpoints: `/` —
    status, `/session` — session viewer, `/config` — runtime-config form,
-   `/api/refresh-state` — JSON state of the background check, see §6.5).
+   `/api/refresh-state` — JSON state of the background check, see §6.5,
+   `/api/model-usage/reset` — zeroes a used-model row's counters (row is kept),
+   `/api/model-usage/reprobe` — background row re-probe,
+   `/api/model-usage/reprobe-state` — its JSON state, see §6.6).
+   The used-models table persists to `model-usage.yaml` (version: 2, v1 migrated)
+   in `root`.
    Loading the status page `/` (GET) renders the current state
    (`config.refresh_state()`: models from the startup probe, or from the last
    check) and — if no check has run yet (`done_at` is empty) — starts the
@@ -154,20 +171,25 @@ Claude Code (Anthropic API client)
 1. Extract session_id, req_id, update session_log context
 2. Parse & validate request JSON (require "model" field)
 3. Strict model validation (ADAPTER_STRICT_MODELS)
-4. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
-5. Backend resolution (_resolve_backend)
+4. Record usage of the client model (model_usage.record_model_usage — used-models
+   table; at first use of a model this synchronously smoke-probes that model's
+   endpoints, see §6.6; on every exit path do_POST's finally accumulates the
+   backend usage tokens via model_usage.add_usage_tokens; accounting never
+   affects the request)
+5. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
+6. Backend resolution (_resolve_backend)
    - Explicit prefix (<backend>.model) → strip, route
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
-6. Trace tool_results from incoming messages (causality: tool_use_id → parent req_id)
-7. Convert Anthropic → OpenAI (messages, tools, tool_choice, system)
-8. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
-9. Retry loop (ADAPTER_RETRY times, exponential backoff):
+7. Trace tool_results from incoming messages (causality: tool_use_id → parent req_id)
+8. Convert Anthropic → OpenAI (messages, tools, tool_choice, system)
+9. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
+10. Retry loop (ADAPTER_RETRY times, exponential backoff):
    ├─ Stream branch: urllib urlopen → _start_sse() → stream_openai_to_anthropic()
    │   └─ Chunk-by-chunk SSE conversion, write Anthropic SSE events to wfile
    └─ Non-stream branch: urllib urlopen → read full → convert_openai_to_anthropic()
        └─ Single JSON response → _send_json()
-10. Error handling:
+11. Error handling:
     ├─ HTTPError (retry on 429/502/503/504 only)
     ├─ TimeoutError (retry)
     ├─ BrokenPipe/ConnectionReset (client gone — silent log)
@@ -280,7 +302,7 @@ POST-запросами с `max_tokens:1` по фиксированному сп
 
 Раньше каждый GET/POST статус-страницы `/` синхронно гонял
 `config.refresh_models` (опрос `/v1/models` всех бэкендов + дымовая проба), и
-при недоступном/медленном бэкенде HTTP-ответ висел (N бэкендов × 5 с на
+при недоступном/медленном бэкенде HTTP-ответ висел (N бэкендов × 10 с на
 эндпоинт). Теперь проверка — **фоновая**, запускается при старте адаптера, на первом
 GET `/` и по кнопке:
 
@@ -319,6 +341,129 @@ GET `/` и по кнопке:
   компромисс, что и раньше — см. комментарий у `_refresh_worker` в
   config.py), менеджер синхронизирует только запуск и публикацию результата.
 
+### 6.6 Таблица использованных моделей («Models in use», `model_usage.py`)
+
+Отдельный модуль-лист DAG (импортирует только `config` и `yaml`; его
+импортируют `server.py` и `webui_status.py` — цикла нет, `config.py`
+остаётся корнем). Ведёт **персистентную таблицу** клиентских моделей, к
+которым агент реально обращался, и для каждой — доступность 4 известных
+API-эндпоинтов бэкенда **именно этой моделью**. Таблица сохраняется в
+YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Персистентность»)
+и переживает перезапуски адаптера:
+
+- **Точка учёта** — `server.do_POST`, сразу после strict-проверки модели
+  (клиентское имя из BODY, **до** маппинга `_MAP`): `model_usage.record_
+  model_usage(client_model)`. Недопустимая модель (HTTP 400) в таблицу не
+  попадает — хук стоит после `return`; провал резолва/пробы никогда не
+  роняет запрос (все исключения ловятся внутри).
+- **Схема строки** (`client_model` — ключ `_TABLE`): `backend` (имя из
+  `_resolve_backend`), `calls` (счётчик обращений, растёт всегда),
+  `input_tokens`/`output_tokens` (токены из usage-блоков ответов бэкенда,
+  см. ниже), `endpoints` (`{pname: {status, found}}` — только реально
+  пробованные пути; `found` ⇔ HTTP 200), `errors` (тексты сетевых ошибок
+  пробы), `first_seen` («HH:MM:SS»), `probing` (True, пока первый запрос
+  выполняет синхронную пробу). Колонки WEBUI-секции идут в порядке
+  `config.ENDPOINT_PROBES` (completions/messages/responses/embeddings).
+- **Поток первого обращения** — короткая критическая секция под
+  `_TABLE_LOCK` (только поиск/создание/инкремент), затем **вне лока**:
+  резолв бэкенда (`config._resolve_backend`, без сети — имя для колонки) и,
+  если `config.ADAPTER_MODEL_USAGE_ENABLE`, синхронная дымовая проба
+  `_probe_model_endpoints(backend_cfg, resolved)`. Та же низкоуровневая
+  `config._probe_backend_endpoints`, что у фоновой проверки бэкендов (§6.4),
+  но модель — resolved-имя ЗАПРОСА (не probe-модель бэкенда) и без
+  TTL-кэша (`_ENDPOINT_STATE` не используется — результат живёт только в
+  строке таблицы). Таймаут одного POST — `MODEL_USAGE_PROBE_TIMEOUT = 10.0`
+  (первый запрос новой модели ждёт до 4×10 с; осознанно, см. ADR). Если
+  resolved-модели нет среди моделей бэкенда в `_MODEL_TO_BACKEND` — проба
+  не выполняется (колонки эндпоинтов «—»).
+- **Повторные обращения** — строка уже есть → только `calls += 1`, проба
+  никогда не повторяется. Конкурентность: два одновременных первых
+  обращения к одной модели дают одну пробу (вторая нить видит строку),
+  к разным — пробы идут параллельно в потоках `ThreadingHTTPServer`.
+- **Счётчики токенов usage** — `input_tokens`/`output_tokens` копятся в
+  локальных переменных `do_POST` из **usage-блоков ответов бэкенда** и
+  фиксируются ОДИН раз в существующем `finally` через
+  `model_usage.add_usage_tokens(client_model, input, output)` (единая точка
+  на любой исход — успех, ошибка бэкенда, исчерпание ретраев, исключение).
+  Источники: non-stream — тело ответа после `convert_openai_to_anthropic`
+  (`usage.prompt_tokens` → input, `usage.completion_tokens` → output);
+  stream — `(stop_reason, usage)` из `stream_openai_to_anthropic` (последний
+  chunk.usage). Успешная попытка **без usage** токенов не даёт (0) — реальные
+  токены запроса заранее неизвестны, их сообщает только usage ответа (счёт
+  байтов тел и параметр `bytes_sink`, дававшие только объём обмена, удалены);
+  эвристика `chars/4` из streaming.py остаётся только для trace-поля
+  `input_tokens_estimated` клиента и в учёт не попадает. Гейт — тот же
+  `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие strict-проверку
+  (HTTP 400), и служебные дымовые пробы эндпоинтов токенов не дают.
+- **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
+  в корне WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`); файл
+  несёт версию формата (`version: 2`, строки — под ключом `models`). Точка
+  синхронизации пути — `webserver.serve()` (`set_persist_path(root_dir)`;
+  в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении
+  к пустой таблице (`_ensure_loaded_locked` под `_TABLE_LOCK`): строки
+  нормализуются (`probing` всегда False, счётчики/токены — неотрицательные
+  int, незнакомые pname/ключи отбрасываются); битый файл/незнакомая версия
+  (> 2) игнорируются (таблица стартует пустой). **Файл `version: 1`**
+  (учёт в байтах) при загрузке НЕ игнорируется — миграция:
+  `calls`/`endpoints`/`errors`/`first_seen` сохраняются, байтовые поля
+  (`bytes_sent`/`bytes_recv`) отбрасываются (`_normalize_row` не находит их
+  в схеме), токены стартуют с 0; следующие сохранения пишут `version: 2`.
+  Сохранение «грязной» таблицы — не чаще раза в
+  `config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL` (сек, дефолт 300); создание
+  строки, обнуление счётчиков строки (`reset_model`: calls/input_tokens/
+  output_tokens → 0, строка НЕ удаляется), завершение перепроверки
+  (`_save_table(force=True)`) и завершение работы (`flush_table`, в т.ч.
+  Ctrl-C) сохраняют сразу. Строки с `probing: True` на диск не попадают;
+  запись атомарная (tmp + `os.replace`). Загруженные строки не
+  перепроверяются — fast-path на повторных обращениях; «освежить» результаты
+  проб строки без сброса счётчиков — фоновая перепроверка
+  (`POST /api/model-usage/reprobe`, см. ниже).
+- **Мастер-флаг `ADAPTER_MODEL_USAGE_ENABLE`** (config.py, дефолт `1`):
+  `0` — пробы и накопление токенов отключены, учёт обращений остаётся
+  (колонки эндпоинтов «—», Input/Output — «0»). Пробы по модели НЕ зависят
+  от `ADAPTER_ENDPOINT_PROBE` (тот управляет только фоновой проверкой
+  бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не входит;
+  персистентность работает независимо от мастер-флага.
+- **Вывод** — секция «Models in use» на статус-странице `/` сразу под
+  кнопкой «⟳ Проверить сейчас» (подписи-абзаца перед ней нет; футер о
+  проверке и кнопка — под таблицей бэкендов), рендер —
+  `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
+  строк в порядке первого обращения; первый вызов после старта загружает
+  таблицу из YAML. Колонки: Модель | Бэкенд | Вызовов | Input | Output |
+  **Endpoints** | Действия (7). Endpoints — одна колонка: только доступные
+  эндпоинты строки короткими именами через запятую (зелёным, порядок
+  `config.ENDPOINT_PROBES`; ничего доступного — серая «—»). Токеновые
+  колонки рендерятся форматтером `_fmt_tokens` (точное число с неразрывным
+  пробелом-разделителем тысяч: «12 345»; «0» — usage в ответах не было).
+  **Live-счётчики**: JS `usage_poll` (безусловный, в <head>) каждые ~5 с
+  опрашивает GET `/api/model-usage/snapshot` (`UsageSnapshotEndpoint` →
+  `usage_snapshot()`, из памяти, сети к бэкендам нет) и обновляет только
+  ячейки Вызовов/Input/Output (data-атрибуты на td; позиционный матчинг со
+  снимком); число строк изменилось (строка удалена/новая модель) —
+  `location.reload()`.
+- **Перепроверка строки (reprobe)** — `POST /api/model-usage/reprobe?model=
+  <имя>` (`ModelUsageReprobeEndpoint`): повторная дымовая проба 4 эндпоинтов
+  **именно этой моделью** для строк с колонками «—» (первый запрос давно /
+  бэкенд ожил / модель появилась в `/v1/models`). Запуск — в фоне:
+  `model_usage.start_reprobe` публикует снимок `_REPROBE` (client_model →
+  `started_at`) под `_REPROBE_LOCK` (отдельный от `_TABLE` и от
+  `config._REFRESH_JOB`; НЕ ставит `probing` строки — перепроверка не
+  выкидывает строку из сериализации) и стартует daemon-поток `_reprobe_worker`
+  → `reprobe_model(client_model)` (ядро: строка есть и не `probing` →
+  резолв + `_backend_has_model` + `_probe_model_endpoints` с таймаутом
+  `MODEL_USAGE_PROBE_TIMEOUT`; обновляет только `backend`/`endpoints`/
+  `errors`, `_DIRTY = True` + `_save_table(force=True)`; **calls и токены не
+  трогает** — проба служебная, не обращение агента; исключения ловятся).
+  Не-JSON (кнопка «Перепроверить» в колонке «Действия» рядом со «Сбросить»,
+  две формы в одной ячейке) — 303 See Other на GET `/` (PRG); JSON — 202
+  «запущено», 404 «нет строки / уже идёт / первая проба ещё выполняется»,
+  400 «нет model». Пока перепроверка идёт: баннер «Перепроверка модели X…»,
+  в строке — серый «проверяется…» вместо кнопок; JS `reprobe_poll`
+  опрашивает GET `/api/model-usage/reprobe-state` (`ReprobeStateEndpoint`,
+  JSON из `model_usage.reprobe_state()`: running/model/started_at) каждые
+  ~2 с и делает `location.reload()` по завершении — состояние живёт в
+  `model_usage`, не в `config.refresh_state()`.
+
 ### 6.2 Разрешение коллизий имён моделей
 
 Когда одна и та же модель встречается на нескольких бэкендах, генерируется префиксный ID:
@@ -331,9 +476,9 @@ GET `/` и по кнопке:
 
 ### 6.3 Логика маршрутизации (`_resolve_backend`, config.py:435–475)
 
-1. **Явный префикс** — снять префикс `<backend_name>.`, направить на соответствующий бэкенд
-2. **Lookup по списку моделей** — поиск в `_MODEL_TO_BACKEND`
-3. **Fallback** — первый бэкенд в конфиге (`_DEFAULT_BACKEND`); если бэкенд не сконфигурирован/не найден — `RuntimeError`
+12. **Явный префикс** — снять префикс `<backend_name>.`, направить на соответствующий бэкенд
+13. **Lookup по списку моделей** — поиск в `_MODEL_TO_BACKEND`
+14. **Fallback** — первый бэкенд в конфиге (`_DEFAULT_BACKEND`); если бэкенд не сконфигурирован/не найден — `RuntimeError`
 
 ---
 
@@ -343,9 +488,9 @@ Claude Code's agent loop can send **parallel requests** within a single session 
 
 Solution: `tool_use_id` is the natural unique key.
 
-1. **Register** (`_register_tool_use`): when converting OpenAI → Anthropic response, record `(session_id, tool_use_id, req_id)` in an `OrderedDict` per session
-2. **Lookup** (`_lookup_tool_use_producer`): when processing incoming `tool_result`, find the `req_id` that produced the corresponding `tool_use`
-3. **Eviction**: FIFO eviction at `_TOOL_USE_INDEX_MAX_PER_SESSION` (2000 entries) to bound memory for long sessions
+15. **Register** (`_register_tool_use`): when converting OpenAI → Anthropic response, record `(session_id, tool_use_id, req_id)` in an `OrderedDict` per session
+16. **Lookup** (`_lookup_tool_use_producer`): when processing incoming `tool_result`, find the `req_id` that produced the corresponding `tool_use`
+17. **Eviction**: FIFO eviction at `_TOOL_USE_INDEX_MAX_PER_SESSION` (2000 entries) to bound memory for long sessions
 
 Trace event `tool_result` includes `parent_req_id` — `null` if the producer was evicted or never recorded.
 
@@ -529,7 +674,8 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 backend-adapter.py
   ├── config.py          (no internal deps — stdlib only + os.environ;
   │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
-  ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming
+  ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming, model_usage
+  ├── model_usage.py     → config, yaml (used-models table, см. §6.6)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact
@@ -540,7 +686,10 @@ backend-adapter.py
   ├── webserver.py       → session_viewer, webui_status, webui_config_api (WEBUI core: serve()
   │                       импортирует встроенные эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
-  ├── webui_status.py    → webserver (эндпойнты "/", "/api/refresh-state"), config
+  ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state",
+  │                       "/api/model-usage/snapshot", "/api/model-usage/reset",
+  │                       "/api/model-usage/reprobe", "/api/model-usage/reprobe-state"),
+  │                       config, model_usage
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   └── artifact_tree*.py  (8 modules, layered):
       artifact_tree.py (shim) → common, registry, parse, turnbuilder, plantuml, graphviz, html
@@ -569,5 +718,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.3** (see `backend-adapter.py`).
+Current: **v0.8.4** (WIP, see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

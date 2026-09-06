@@ -1,6 +1,6 @@
 # backend-adapter — Claude Code ↔ OpenAI Backend Proxy
 
-> **v0.8.3** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **v0.8.4** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно реализует протокол Anthropic Messages API.
 
@@ -46,6 +46,7 @@ claude
 | [docs/logging.md](docs/logging.md) | Конфигурация логирования и trace |
 | [docs/sanitizing.md](docs/sanitizing.md) | Санитизация и маскирование секретов |
 | [docs/architecture.md](docs/architecture.md) | Архитектура, диаграмма компонентов, lifecycle запросов |
+| [docs/webui.md](docs/webui.md) | WEBUI и API: страницы `/`, `/session`, `/config`, `/api/*`, секция «Models in use» (live-счётчики) |
 
 ## Структура проекта
 

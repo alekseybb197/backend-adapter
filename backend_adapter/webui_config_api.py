@@ -135,7 +135,7 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 </style>
 </head>
 <body>
-<h2>[CC]-adapter — runtime config</h2>
+<h2>Backend-Adapter — runtime config</h2>
 <p><a href="/">← статус</a> &nbsp;·&nbsp; <a href="/session">просмотр сессий →</a></p>
 {flash_html}
 <form method="POST" action="/config">

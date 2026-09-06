@@ -25,7 +25,9 @@ def _sse_write(wfile, event: str, data: dict) -> None:
     wfile.flush()
 
 
-def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_prompt_chars=0):
+def stream_openai_to_anthropic(
+    resp, wfile, model, session_id, req_id, approx_prompt_chars=0, bytes_sink=None
+):
     """Построчно читает SSE-ответ backend'а (OpenAI chat.completions
     streaming формат: строки ``data: {...}``, завершается ``data: [DONE]``)
     и на лету конвертирует каждый чанк в поток Anthropic-событий
@@ -38,7 +40,15 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
     convert_openai_to_anthropic — просто по кусочкам, а не одним объектом
     в конце. Бросает исключение наружу при обрыве соединения — вызывающий
     код (do_POST) решает, можно ли ещё retry или поток уже начался и надо
-    сообщить об ошибке SSE-событием "error"."""
+    сообщить об ошибке SSE-событием "error".
+
+    ``bytes_sink`` — необязательный список-ячейка [int]: если передан, в
+    bytes_sink[0] накапливается сумма длин ВСЕХ сырых строк ответа бэкенда
+    (включая пустые разделители и не-data-строки). Список (а не возврат
+    значения), чтобы не менять пару (stop_reason, usage), которую
+    распаковывают вызывающие и тесты. Сервер больше не использует его для
+    учёта (учёт переведён на токены usage), параметр сохранён как публичная
+    опция."""
     message_id = f"msg_stream_{req_id}"
     _sse_write(
         wfile,
@@ -76,6 +86,8 @@ def stream_openai_to_anthropic(resp, wfile, model, session_id, req_id, approx_pr
             block_open = None
 
     for raw_line in resp:
+        if bytes_sink is not None:
+            bytes_sink[0] += len(raw_line)
         line = raw_line.decode("utf-8", errors="replace").strip("\n").strip("\r")
         if not line or not line.startswith("data:"):
             continue

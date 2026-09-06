@@ -247,7 +247,14 @@ def serve(
     # внутри функции (не на верхнем уровне): эндпойнт-модули сами
     # импортируют webserver (register/Endpoint), верхнеуровневый импорт
     # создал бы цикл.
+    from . import model_usage as _model_usage
     from . import session_viewer, webui_config_api, webui_status  # noqa: F401  (регистрируют себя)
+
+    # Персистентный YAML таблицы использованных моделей лежит в корне WEBUI
+    # (тот же root_dir, что у *.parts сессий). Синхронизация здесь: корень
+    # уже abspath, а model_usage не импортирует webserver — цикла нет.
+    # Standalone (python -m webserver [ROOT]) кладёт файл в явный корень.
+    _model_usage.set_persist_path(os.path.join(root_dir, _model_usage.MODEL_USAGE_FILE))
 
     context = WebContext(root_dir=root_dir, version=version, verbose=verbose)
     Handler.context = context
