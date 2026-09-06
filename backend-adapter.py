@@ -166,7 +166,7 @@ if __name__ == "__main__":
             # API-эндпойнтов): первый GET "/" сразу показывает свежие данные,
             # а не пустую колонку Endpoints. Дублирует стартовый опрос
             # _init_multi_backends — приемлемо: один раз, фоново, с таймаутом
-            # PROBE_TIMEOUT (5 с на эндпоинт), не ADAPTER_TIMEOUT (300 с).
+            # PROBE_TIMEOUT (10 с на эндпоинт), не ADAPTER_TIMEOUT (300 с).
             # Локальные импорты: скрипт не импортирует webui_status; config
             # связан только именами (не модулем).
             from backend_adapter import config as _cfg
