@@ -29,7 +29,13 @@ forms) while that row is being re-probed; /reprobe answers 202 on launch /
 404 / 400 for JSON clients and 303 for the HTML form; /api/model-usage/
 reprobe-state serves the reprobe snapshot for the page's reprobe_poll JS
 (banner + auto-reload while running) — see TestModelUsageReprobeAPI /
-TestReprobeStateAPI.
+TestReprobeStateAPI. Live counters (Вызовов/Input/Output): usage rows carry
+id="usage-row-<i>" and data-calls/data-input/data-output (exact values), and
+the page embeds an unconditional usage_poll JS polling the lightweight
+/api/model-usage/snapshot every 5 s and updating only the counter cells
+(no location.reload, no network to backends, no start_refresh) — see
+TestUsageSection.test_rows_carry_data_attrs_and_page_has_usage_poll /
+TestUsageSnapshotAPI.
 """
 import os
 import socket
@@ -573,8 +579,8 @@ class TestUsageSection:
         assert body.count('style="color:#aaa">—</span>') == 1
         # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
-        assert "<td>1</td>" in body  # calls строки m-none
-        assert "<td>0</td>" in body  # Input строки m-none
+        assert 'data-calls="1">1</td>' in body  # calls строки m-none
+        assert 'data-input="0">0</td>' in body  # Input строки m-none
 
     def test_escapes_model_and_backend_names(self):
         # Имя модели/бэкенда с HTML-спецсимволами не исполняется браузером.
@@ -639,8 +645,10 @@ class TestUsageSection:
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+Endpoints+Действия = 7
-        assert html.count("<td>") == 7
+        # модель+бэкенд+вызовов+input+output+Endpoints+Действия = 7 ячеек
+        assert html.count("<td") == 7
+        assert 'id="usage-row-0"' in html
+        assert 'data-calls="1"' in html
         assert "completions" in html  # доступный эндпоинт — в ячейке Endpoints
 
     def test_row_renders_formatted_tokens(self):
@@ -650,6 +658,35 @@ class TestUsageSection:
         html = ws._usage_rows_html([row])
         assert "1 536" in html
         assert "12 345" in html
+
+    def test_rows_carry_data_attrs_and_page_has_usage_poll(self):
+        # Live-счётчики: строки несут id="usage-row-<i>" и data-атрибуты
+        # счётчиков с ТОЧНЫМИ значениями (data-calls/data-input/data-output),
+        # а страница — безусловный JS usage_poll → /api/model-usage/snapshot
+        # (обновление ячеек без перезагрузки страницы, таймер 5 с).
+        config, ws = _fresh_modules()
+        rows = [
+            self._row("m-live", calls=3, input_tokens=1536, output_tokens=12345),
+            self._row("m-live2", calls=1),
+        ]
+        body = self._seed(config, ws, usage_rows=rows)
+        # id строк — в порядке первого обращения (позиционный матчинг JS)
+        assert 'id="usage-row-0"' in body
+        assert 'id="usage-row-1"' in body
+        # data-атрибуты — точные значения; текст ячеек — форматированный
+        assert 'data-calls="3"' in body
+        assert 'data-input="1536"' in body
+        assert 'data-output="12345"' in body
+        assert 'data-calls="1"' in body
+        assert "1 536" in body and "12 345" in body
+        # usage_poll: функция, эндпоинт снимка, форматтер токенов, интервал
+        assert "function usage_poll" in body
+        assert "function usage_fmt" in body
+        assert 'fetch("/api/model-usage/snapshot")' in body
+        assert "setTimeout(usage_poll, 5000)" in body
+        # usage_poll безусловен: есть и на странице без строк моделей
+        empty = self._seed(config, ws, usage_rows=[])
+        assert "function usage_poll" in empty
 
     def test_row_has_actions_two_forms(self):
         # Каждая строка модели несёт две form-кнопки: «Перепроверить» (POST
@@ -670,7 +707,7 @@ class TestUsageSection:
         assert "color:#c0392b" in body  # красная ссылка-кнопка сброса
         # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
-        assert row_html.count("<td>") == 7  # в т.ч. ячейка действий — одна
+        assert row_html.count("<td") == 7  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
         # Имя модели со спецсимволами в обеих формах: quote(safe="") +
@@ -1647,3 +1684,77 @@ class TestRefreshStateAPI:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
+# /api/model-usage/snapshot: JSON-снимок таблицы Models in use для usage_poll
+# ---------------------------------------------------------------------------
+
+class TestUsageSnapshotAPI:
+    def _seed_row(self, model="m-snap", calls=5, input_tokens=1000,
+                  output_tokens=250, endpoints=None):
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": model, "backend": "AAA", "calls": calls,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "endpoints": endpoints if endpoints is not None else {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }])
+        return model_usage
+
+    def test_returns_json_snapshot(self, tmp_path):
+        # GET /api/model-usage/snapshot → 200 application/json, тело — список
+        # строк таблицы с точными счётчиками (как отдаёт usage_snapshot).
+        config, ws = _fresh_modules()
+        self._seed_row("m-snap", calls=7, input_tokens=1536, output_tokens=12345,
+                       endpoints={"completions": {"status": 200, "found": True}})
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            import json
+            rows = json.loads(body)
+            assert isinstance(rows, list) and len(rows) == 1
+            row = rows[0]
+            assert row["model"] == "m-snap"
+            assert row["calls"] == 7
+            assert row["input_tokens"] == 1536
+            assert row["output_tokens"] == 12345
+            assert row["endpoints"]["completions"]["found"] is True
+            assert row["backend"] == "AAA"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_returns_empty_list_when_no_rows(self, tmp_path):
+        # Пустая таблица → [] (JS usage_poll: число строк 0 == число строк
+        # в DOM заглушки нет — фактически tr нет, поллинг продолжается).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            import json
+            assert json.loads(body) == []
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_poll_does_not_touch_network_or_refresh(self, tmp_path):
+        # Поллинг — только чтение памяти: эндпоинт не вызывает start_refresh/
+        # refresh_models (сети к бэкендам нет) и не мутирует счётчики.
+        config, ws = _fresh_modules()
+        self._seed_row("m-snap", calls=3)
+        with mock.patch.object(config, "start_refresh", return_value=False) as m_start:
+            with mock.patch.object(config, "refresh_models", return_value={}) as m_refresh:
+                httpd, port = _start_server(str(tmp_path))
+                try:
+                    status, body = _http_get(port, "/api/model-usage/snapshot")
+                    assert status == 200
+                    import json
+                    assert json.loads(body)[0]["calls"] == 3
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+        assert m_start.call_count == 0
+        assert m_refresh.call_count == 0

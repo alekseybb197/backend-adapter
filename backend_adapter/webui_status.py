@@ -25,6 +25,12 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     строки. Пока перепроверка идёт, страница показывает баннер и ячейку
     «проверяется…» и авто-обновляется по завершении (JS → /api/model-usage/
     reprobe-state, см. ReprobeStateEndpoint).
+  - Счётчики строки (Вызовов/Input/Output) обновляются БЕЗ перезагрузки
+    страницы: JS usage_poll каждые ~5 с опрашивает лёгкий JSON-эндпоинт
+    /api/model-usage/snapshot (UsageSnapshotEndpoint → model_usage.
+    usage_snapshot(), снимок из памяти, сети к бэкендам нет) и обновляет
+    только ячейки счётчиков. Оверхед — один маленький JSON-ответ раз в 5 с
+    на открытую вкладку; при скрытой вкладке браузер сам троттлит таймеры.
 
 Откуда данные:
   - Проверка бэкендов запускается:
@@ -320,20 +326,27 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     (found=True) короткими именами через запятую (см. _endpoints_cell_html).
     input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
     _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
-    ``reprobing`` — карта client_model → True: у строки идёт фоновая
-    перепроверка (баннер + авто-релоад); в ячейке действий вместо кнопок —
-    «проверяется…». Модель/бэкенд — html.escape; «Перепроверить»/«Сбросить»
-    — отдельные формы в последнем <td> (см. _actions_cell_html)."""
+    Ячейки счётчиков несут data-атрибуты (data-calls/data-input/data-output)
+    с ТОЧНЫМИ значениями — JS usage_poll обновляет их textContent по
+    /api/model-usage/snapshot без перезагрузки страницы (см. usage_poll в
+    _render_status_page). ``reprobing`` — карта client_model → True: у строки
+    идёт фоновая перепроверка (баннер + авто-релоад); в ячейке действий
+    вместо кнопок — «проверяется…». Модель/бэкенд — html.escape;
+    «Перепроверить»/«Сбросить» — отдельные формы в последнем <td> (см.
+    _actions_cell_html)."""
     body = []
-    for r in rows:
+    for i, r in enumerate(rows):
         reprobing_row = bool(reprobing and reprobing.get(r["model"]))
+        calls = r.get("calls", 0)
+        input_tokens = r.get("input_tokens", 0)
+        output_tokens = r.get("output_tokens", 0)
         body.append(
-            "<tr>"
+            f'<tr id="usage-row-{i}">'
             f"<td>{html.escape(str(r['model']))}</td>"
             f"<td>{html.escape(str(r['backend']))}</td>"
-            f"<td>{r['calls']}</td>"
-            f"<td>{_fmt_tokens(r.get('input_tokens', 0))}</td>"
-            f"<td>{_fmt_tokens(r.get('output_tokens', 0))}</td>"
+            f'<td data-calls="{calls}">{calls}</td>'
+            f'<td data-input="{input_tokens}">{_fmt_tokens(input_tokens)}</td>'
+            f'<td data-output="{output_tokens}">{_fmt_tokens(output_tokens)}</td>'
             f"<td>{_endpoints_cell_html(r)}</td>"
             f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
@@ -375,7 +388,16 @@ def _render_status_page(
     model_usage.reprobe_state()) — отдельный фоновый процесс (см.
     ModelUsageReprobeEndpoint): пока идёт, страница показывает свой баннер
     и авто-обновляется по завершении (JS reprobe_poll → /api/model-usage/
-    reprobe-state → location.reload())."""
+    reprobe-state → location.reload()).
+    Счётчики строк секции «Models in use» обновляются без перезагрузки:
+    безусловный JS usage_poll (usage_poll_script в <head>) каждые 5 с
+    опрашивает /api/model-usage/snapshot (см. UsageSnapshotEndpoint) и
+    правит textContent ячеек Вызовов/Input/Output по data-атрибутам строк
+    (рендер — см. _usage_rows_html). Строки сопоставляются позиционно:
+    снимок идёт в порядке первого обращения, как и рендер. Число строк
+    изменилось (сброс/новая модель) — location.reload() перерисует
+    таблицу; эндпоинты строк в этом поллинге не трогаются (их меняет
+    только reprobe, у которого свой авто-релоад)."""
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
@@ -518,6 +540,51 @@ def _render_status_page(
 </script>
 """
 
+    # Live-счётчики секции Models in use: JS usage_poll каждые 5 с опрашивает
+    # лёгкий /api/model-usage/snapshot (model_usage.usage_snapshot() — копии
+    # строк из памяти, сети к бэкендам нет) и обновляет ТОЛЬКО ячейки
+    # счётчиков (Вызовов/Input/Output) — без перезагрузки страницы. Строки
+    # сопоставляются ПОЗИЦИОННО: и рендер, и снимок идут в порядке первого
+    # обращения (usage_snapshot), поэтому экранирование имён не мешает.
+    # Число строк изменилось (строка сброшена/добавлена) либо в таблице
+    # вообще нет строк — location.reload() перерисует таблицу целиком
+    # (редкое событие; reprobe перерисовывает страницу сам через reprobe_poll).
+    # Скрипт безусловный (в отличие от status_poll/reprobe_poll): поллинг
+    # нужен всегда, когда на странице есть таблица. Оверхед — один маленький
+    # JSON-ответ раз в 5 с на открытую вкладку; при скрытой вкладке браузер
+    # сам троттлит setTimeout (≥1/мин) — трафика нет.
+    usage_poll_script = """
+<script>
+  function usage_fmt(n) {{
+    return String(n).replace(/\\B(?=(\\d{{3}})+(?!\\d))/g, "\\u202f");
+  }}
+  function usage_poll() {{
+    fetch("/api/model-usage/snapshot")
+      .then(function (r) {{ return r.json(); }})
+      .then(function (rows) {{
+        var trs = document.querySelectorAll("tr[id^='usage-row-']");
+        if (trs.length !== rows.length) {{ location.reload(); return; }}
+        for (var i = 0; i < trs.length; i++) {{
+          var row = rows[i];
+          var cells = trs[i].getElementsByTagName("td");
+          // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output
+          var set = function (idx, val) {{
+            if (cells[idx] && String(cells[idx].textContent) !== String(val)) {{
+              cells[idx].textContent = val;
+            }}
+          }};
+          set(2, row["calls"]);
+          set(3, usage_fmt(row["input_tokens"]));
+          set(4, usage_fmt(row["output_tokens"]));
+        }}
+        setTimeout(usage_poll, 5000);
+      }})
+      .catch(function () {{ setTimeout(usage_poll, 5000); }});
+  }}
+  window.addEventListener("load", function () {{ setTimeout(usage_poll, 5000); }});
+</script>
+"""
+
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -543,7 +610,8 @@ def _render_status_page(
   }}
 </script>
 {poll_script}
-{reprobe_poll_script}</head>
+{reprobe_poll_script}
+{usage_poll_script}</head>
 <body>
 <h2>Backend-Adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
@@ -766,6 +834,26 @@ class ReprobeStateEndpoint(webserver.Endpoint):
         handler._write(200, "application/json; charset=utf-8", body)
 
 
+@webserver.register
+class UsageSnapshotEndpoint(webserver.Endpoint):
+    """Эндпойнт "/api/model-usage/snapshot": снимок таблицы Models in use (JSON).
+
+    Лёгкий ответ для JS usage_poll на статус-странице:
+    model_usage.usage_snapshot() — список строк таблицы (calls/input_tokens/
+    output_tokens/endpoints/…) в порядке первого обращения. GET ничего не
+    мутирует (кроме ленивой загрузки таблицы при первом обращении) и не
+    ходит в сеть к бэкендам — безопасно опрашивать каждые 5 с."""
+
+    prefix = "/api/model-usage/snapshot"
+
+    def __init__(self, context):
+        self.context = context
+
+    def GET(self, handler, remainder: str):
+        body = json.dumps(model_usage.usage_snapshot()).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
 def _last_result(state: dict) -> dict | None:
     """refresh-срез состояния для _render_status_page (или None).
 
@@ -817,6 +905,7 @@ __all__ = [
     "ModelUsageResetEndpoint",
     "ModelUsageReprobeEndpoint",
     "ReprobeStateEndpoint",
+    "UsageSnapshotEndpoint",
     "_last_result",
     "_autostart_first_check",
 ]
