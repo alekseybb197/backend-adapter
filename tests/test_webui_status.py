@@ -19,14 +19,17 @@ the page shows the «Проверка выполняется…» banner plus th
 model list, failure keeps the old cache and shows the error text, standalone
 (no endpoints) renders the notice and does not start any check. The Models
 cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
-button (JS models_toggle on the page) — see TestModelsCell. The used-models
-table's actions cell holds two PRG forms — «Перепроверить» (POST
-/api/model-usage/reprobe) and «Сбросить» (POST /api/model-usage/reset) —
-and renders «проверяется…» (no forms) while that row is being re-probed;
-/reprobe answers 202 on launch / 404 / 400 for JSON clients and 303 for the
-HTML form; /api/model-usage/reprobe-state serves the reprobe snapshot for the
-page's reprobe_poll JS (banner + auto-reload while running) — see
-TestModelUsageReprobeAPI / TestReprobeStateAPI.
+button (JS models_toggle on the page) — see TestModelsCell. The Models in use
+table (single Endpoints column — available endpoints only, comma-separated;
+footer and the «⟳ Проверить сейчас» button sit right under the backends
+table, before the section) — see TestUsageSection. Its actions cell holds
+two PRG forms — «Перепроверить» (POST /api/model-usage/reprobe) and
+«Сбросить» (POST /api/model-usage/reset) — and renders «проверяется…» (no
+forms) while that row is being re-probed; /reprobe answers 202 on launch /
+404 / 400 for JSON clients and 303 for the HTML form; /api/model-usage/
+reprobe-state serves the reprobe snapshot for the page's reprobe_poll JS
+(banner + auto-reload while running) — see TestModelUsageReprobeAPI /
+TestReprobeStateAPI.
 """
 import os
 import socket
@@ -354,7 +357,7 @@ class TestApiColumn:
         assert "chat/completions ✓" in body
         # непрошедший путь не рендерится в КОЛОНКЕ «Доступные API» — в теле
         # не должно быть ячейки «messages —»/«messages ✓»; слово messages
-        # допустимо лишь в шапке секции «Использованные модели»
+        # допустимо лишь в шапке секции Models in use
         assert ">messages ✓</span>" not in body
         assert ">messages —</span>" not in body
         assert "chat/completions ✓</span>" in body
@@ -486,7 +489,7 @@ class TestModelsCell:
 
 
 # ---------------------------------------------------------------------------
-# TestUsageSection — таблица «Использованные модели» (v0.8.4)
+# TestUsageSection — таблица Models in use (v0.8.4)
 # ---------------------------------------------------------------------------
 
 def _seed_usage_rows(model_usage_mod, rows):
@@ -525,20 +528,22 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 10 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|4 эндпоинта|Действия).
+        # Заголовок секции + 7 колонок (Модель|Бэкенд|Вызовов|Input|
+        # Output|Endpoints|Действия).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
-        assert "<h3 style=\"margin-top:24px\">Использованные модели</h3>" in body
+        assert "<h3 style=\"margin-top:24px\">Models in use</h3>" in body
+        assert "Использованные модели" not in body
         assert "<th>Модель</th>" in body
         assert "<th>Бэкенд</th>" in body
         assert "<th>Вызовов</th>" in body
         assert "<th>Input</th>" in body
         assert "<th>Output</th>" in body
-        assert "<th>completions</th>" in body
-        assert "<th>messages</th>" in body
-        assert "<th>responses</th>" in body
-        assert "<th>embeddings</th>" in body
+        assert "<th>Endpoints</th>" in body
+        assert "<th>completions</th>" not in body
+        assert "<th>messages</th>" not in body
+        assert "<th>responses</th>" not in body
+        assert "<th>embeddings</th>" not in body
         assert "<th>Действия</th>" in body
 
     def test_empty_table_shows_placeholder(self):
@@ -548,8 +553,9 @@ class TestUsageSection:
         assert "пока нет данных" in body
         assert "таблица заполняется при первых запросах к моделям" in body
 
-    def test_row_renders_cells_and_marks(self):
-        # found=True → зелёный ✓; found=False / не пробован → серая «—».
+    def test_row_renders_endpoints_cell_and_counters(self):
+        # Колонка Endpoints перечисляет только доступные (found=True): m-ok —
+        # «completions», у m-none (доступных нет) — серая «—».
         config, ws = _fresh_modules()
         rows = [
             self._row("m-ok", endpoints={
@@ -561,12 +567,10 @@ class TestUsageSection:
         ]
         body = self._seed(config, ws, usage_rows=rows)
         assert "m-ok" in body and "m-none" in body
-        # зелёный ✓ — только для found (один на обе строки)
-        assert body.count('style="color:#1a7f37">✓</span>') == 1
-        # серые «—»: m-ok (messages=404 + responses/embeddings не пробованы) = 3,
-        # m-none (все 4 эндпоинта не пробованы) = 4 → всего 7; колонки
-        # Input/Output «—» не дают (там «0»)
-        assert body.count('style="color:#aaa">—</span>') == 7
+        # доступные эндпоинты — зелёным именем (одно на обе строки)
+        assert body.count('style="color:#1a7f37">completions</span>') == 1
+        # серых «—» (пустая ячейка Endpoints) — ровно одна, у m-none
+        assert body.count('style="color:#aaa">—</span>') == 1
         # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
         assert "<td>1</td>" in body  # calls строки m-none
@@ -591,30 +595,53 @@ class TestUsageSection:
         assert body.index(">m0</td>") < body.index(">m1</td>") < body.index(">m2</td>")
 
     def test_section_after_backends_table(self):
-        # Секция рендерится ПОСЛЕ основной таблицы бэкендов и до кнопки.
+        # Порядок блоков: таблица бэкендов → футер «Список моделей обновлён»
+        # + кнопка «⟳ Проверить сейчас» → заголовок «Models in use» →
+        # usage-таблица (строки моделей).
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-a")])
-        assert body.index("</table>") < body.index("Использованные модели")
+        assert body.index("</table>") < body.index("Список моделей обновлён")
+        assert body.index("Список моделей обновлён") < body.index("⟳ Проверить сейчас")
+        assert body.index("⟳ Проверить сейчас") < body.index("Models in use")
+        assert body.index("Models in use") < body.index(">m-a</td>")
 
-    def test_cell_unit_found_and_missing(self):
-        # _usage_endpoint_html: found → ✓, иначе (False/None) — «—».
+    def test_endpoints_cell_lists_only_found(self):
+        # _endpoints_cell_html: доступные (found=True) — имена через запятую
+        # в порядке ENDPOINT_PROBES; не-200/непробованные не показываются.
         config, ws = _fresh_modules()
-        assert "✓" in ws._usage_endpoint_html({"status": 200, "found": True})
-        assert "—" in ws._usage_endpoint_html({"status": 404, "found": False})
-        assert "—" in ws._usage_endpoint_html(None)
+        cell = ws._endpoints_cell_html(self._row("m", endpoints={
+            "messages": {"status": 404, "found": False},
+            "completions": {"status": 200, "found": True},
+            "responses": {"status": 200, "found": True},
+        }))
+        # порядок — ENDPOINT_PROBES: completions раньше responses
+        assert cell.index("completions") < cell.index("responses")
+        assert 'style="color:#1a7f37">completions</span>' in cell
+        assert 'style="color:#1a7f37">responses</span>' in cell
+        assert "messages" not in cell
+
+    def test_endpoints_cell_none_available_placeholder(self):
+        # Пусто/все found=False — один серый «—» (никаких имён).
+        config, ws = _fresh_modules()
+        assert ws._endpoints_cell_html(self._row("m-a", endpoints={})) == (
+            '<span style="color:#aaa">—</span>'
+        )
+        assert ws._endpoints_cell_html(self._row("m-b", endpoints={
+            "completions": {"status": 404, "found": False},
+        })) == '<span style="color:#aaa">—</span>'
 
     def test_usage_rows_unit_empty_and_nonempty(self):
-        # _usage_rows_html: 4 ячейки эндпоинтов на строку + плейсхолдер пустого.
+        # _usage_rows_html: одна ячейка Endpoints на строку + плейсхолдер пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"11\"" in html
+        assert "пока нет данных" in html and "<td colspan=\"7\"" in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+4 эндпоинта+Действия = 10
-        assert html.count("<td>") == 10
-        assert "completions" not in html  # короткие имена — только в шапке
+        # модель+бэкенд+вызовов+input+output+Endpoints+Действия = 7
+        assert html.count("<td>") == 7
+        assert "completions" in html  # доступный эндпоинт — в ячейке Endpoints
 
     def test_row_renders_formatted_tokens(self):
         # input_tokens/output_tokens форматируются _fmt_tokens (с разделителем).
@@ -643,7 +670,7 @@ class TestUsageSection:
         assert "color:#c0392b" in body  # красная ссылка-кнопка сброса
         # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
-        assert row_html.count("<td>") == 10  # в т.ч. ячейка действий — одна
+        assert row_html.count("<td>") == 7  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
         # Имя модели со спецсимволами в обеих формах: quote(safe="") +
@@ -680,13 +707,12 @@ class TestUsageSection:
         assert html.index("m-a") < html.index("проверяется…")
 
     def test_empty_table_no_reset_forms(self):
-        # У пустой таблицы (заглушка colspan=11) форм сброса/перепроверки нет
-        # (слова остаются только в подписи-абзаце).
+        # У пустой таблицы (заглушка colspan=7) форм сброса/перепроверки нет.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[])
         assert 'form method="post" action="/api/model-usage/reset' not in body
         assert 'form method="post" action="/api/model-usage/reprobe' not in body
-        assert "colspan=\"11\"" in body
+        assert "colspan=\"7\"" in body
 
     def test_page_header_is_backend_adapter(self):
         # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —
@@ -1057,7 +1083,7 @@ class TestStatusHTTP:
                 assert "<th>Endpoints</th>" in body  # заголовок колонки API
                 assert "chat/completions ✓" in body
                 # 404-путь в колонке API не рисуется (слово messages остаётся
-                # только в шапке секции «Использованные модели»)
+                # только в шапке секции Models in use)
                 assert ">messages —</span>" not in body
             finally:
                 httpd.shutdown()

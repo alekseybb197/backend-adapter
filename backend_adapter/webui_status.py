@@ -9,19 +9,19 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
   - каждый настроенный LLM-эндпойнт: доступность, список моделей и
     колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
     обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже);
-  - таблицу «Использованные модели» — модели, к которым агент обращался
+  - таблицу «Models in use» — модели, к которым агент обращался
     (см. model_usage.py): счётчик обращений, токены из usage-блоков ответов
     бэкенда (input_tokens/output_tokens — prompt_tokens/completion_tokens;
     ответы без usage не считаются) и какие API-эндпоинты доступны именно
     для каждой модели (результат дымовой пробы этой моделью при первом
-    обращении).
+    обращении; колонка Endpoints перечисляет только доступные).
     Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
     WEBUI и переживает перезапуски адаптера; строка модели сбрасывается
     кнопкой «Сбросить» в строке таблицы (POST /api/model-usage/reset,
     см. ModelUsageResetEndpoint). Кнопка «Перепроверить» (POST
     /api/model-usage/reprobe, см. ModelUsageReprobeEndpoint) запускает
     фоновую повторную дымовую пробу эндпоинтов именно этой моделью — для
-    строк, чьи колонки эндпоинтов «—»; проба не трогает счётчики и токены
+    строк с «—» в колонке Endpoints; проба не трогает счётчики и токены
     строки. Пока перепроверка идёт, страница показывает баннер и ячейку
     «проверяется…» и авто-обновляется по завершении (JS → /api/model-usage/
     reprobe-state, см. ReprobeStateEndpoint).
@@ -251,18 +251,24 @@ def _api_html(api: dict | None) -> str:
     return "<br>".join(parts)
 
 
-def _usage_endpoint_html(entry: dict | None) -> str:
-    """HTML ячейки эндпоинта в таблице «Использованные модели».
+def _endpoints_cell_html(row: dict) -> str:
+    """HTML ячейки «Endpoints» строки таблицы Models in use.
 
-    ``entry`` — элемент ``endpoints[pname]`` строки таблицы model_usage:
-    {"status": int|None, "found": bool} (found ⇔ HTTP 200); None — эндпоинт
-    не пробован (первый запрос ещё идёт — probing, или ADAPTER_MODEL_USAGE_
-    ENABLE=0, или модели нет у бэкенда). Зелёный ``✓`` — только found=True;
-    всё остальное (не-200, не пробован) — серая ``—`` (провал пробы детален
-    в логе/строке, страница — про факт доступности)."""
-    if entry is not None and entry["found"]:
-        return '<span style="color:#1a7f37">✓</span>'
-    return '<span style="color:#aaa">—</span>'
+    Перечисляет ТОЛЬКО доступные эндпоинты (found=True ⇔ HTTP 200, см.
+    классификацию в config._probe_backend_endpoints): короткие имена через
+    запятую, зелёным, в порядке config.ENDPOINT_PROBES (том же, что у пробы).
+    Непрошедшие/непробованные пути (не-200, probing, ADAPTER_MODEL_USAGE_
+    ENABLE=0, модели нет у бэкенда) не показываются; если доступных нет —
+    один серый «—» вместо пустой ячейки."""
+    parts = []
+    endpoints = row.get("endpoints") or {}
+    for pname, _path, _tpl in config.ENDPOINT_PROBES:
+        ep = endpoints.get(pname)
+        if ep is not None and ep["found"]:
+            parts.append(f'<span style="color:#1a7f37">{pname}</span>')
+    if not parts:
+        return '<span style="color:#aaa">—</span>'
+    return ", ".join(parts)
 
 
 def _fmt_tokens(n: int) -> str:
@@ -306,24 +312,20 @@ def _actions_cell_html(model: str, reprobing: bool = False) -> str:
 
 
 def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
-    """HTML строк таблицы «Использованные модели» (по строке на модель).
+    """HTML строк таблицы Models in use (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
-    Колонки: Модель | Бэкенд | Вызовов | Input | Output | эндпоинты
-    ENDPOINT_PROBES (completions/messages/responses/embeddings — в порядке
-    config.ENDPOINT_PROBES, том же, что у пробы) | Действия. input_tokens/
-    output_tokens — токены из usage-блоков ответов бэкенда (см. _fmt_tokens);
-    поля отсутствуют у мигрировавших/старых сидов → 0. ``reprobing`` —
-    карта client_model → True: у строки идёт фоновая перепроверка (баннер +
-    авто-релоад); в ячейке действий вместо кнопок — «проверяется…».
-    Модель/бэкенд — html.escape; «Перепроверить»/«Сбросить» — отдельные
-    формы в последнем <td> (см. _actions_cell_html)."""
+    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Endpoints |
+    Действия. Колонка Endpoints перечисляет только доступные эндпоинты
+    (found=True) короткими именами через запятую (см. _endpoints_cell_html).
+    input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
+    _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
+    ``reprobing`` — карта client_model → True: у строки идёт фоновая
+    перепроверка (баннер + авто-релоад); в ячейке действий вместо кнопок —
+    «проверяется…». Модель/бэкенд — html.escape; «Перепроверить»/«Сбросить»
+    — отдельные формы в последнем <td> (см. _actions_cell_html)."""
     body = []
     for r in rows:
-        ep_cells = "".join(
-            f"<td>{_usage_endpoint_html(r['endpoints'].get(pname))}</td>"
-            for pname, _path, _tpl in config.ENDPOINT_PROBES
-        )
         reprobing_row = bool(reprobing and reprobing.get(r["model"]))
         body.append(
             "<tr>"
@@ -332,13 +334,13 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
             f"<td>{r['calls']}</td>"
             f"<td>{_fmt_tokens(r.get('input_tokens', 0))}</td>"
             f"<td>{_fmt_tokens(r.get('output_tokens', 0))}</td>"
-            f"{ep_cells}"
+            f"<td>{_endpoints_cell_html(r)}</td>"
             f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="11" style="color:#888">пока нет данных — '
+            '<tr><td colspan="7" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -364,27 +366,19 @@ def _render_status_page(
     бэкенд честно без моделей. Колонка «Доступные API» рендерится из
     config._ENDPOINT_STATE через _collect_endpoints (сама проба выполняется
     внутри refresh_models; refresh["probe"] отдельно не рендерится).
-    Секция «Использованные модели» рендерится из model_usage.usage_snapshot()
-    (см. _usage_rows_html) — таблица заполняется запросами агента в этом
-    процессе независимо от проверок бэкендов. Перепроверка строки (кнопка
-    «Перепроверить», model_usage.reprobe_state()) — отдельный фоновый процесс
-    (см. ModelUsageReprobeEndpoint): пока идёт, страница показывает свой
-    баннер и авто-обновляется по завершении (JS reprobe_poll →
-    /api/model-usage/reprobe-state → location.reload())."""
+    Сразу под таблицей бэкендов — футер о последней проверке ({footer},
+    «Список моделей обновлён…») и кнопка «⟳ Проверить сейчас» (POST "/").
+    Секция «Models in use» рендерится из model_usage.usage_snapshot() (см.
+    _usage_rows_html) — таблица заполняется запросами агента в этом процессе
+    независимо от проверок бэкендов; колонка Endpoints перечисляет только
+    доступные эндпоинты строки. Перепроверка строки (кнопка «Перепроверить»,
+    model_usage.reprobe_state()) — отдельный фоновый процесс (см.
+    ModelUsageReprobeEndpoint): пока идёт, страница показывает свой баннер
+    и авто-обновляется по завершении (JS reprobe_poll → /api/model-usage/
+    reprobe-state → location.reload())."""
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
-    # Подпись про персистентность: при выключенном persist-пути ("" — только
-    # тесты) usage_persist_file() вернёт None — файл не упоминаем.
-    usage_file = model_usage.usage_persist_file()
-    if usage_file:
-        usage_note = (
-            "Таблица сохраняется между запусками адаптера в файле "
-            f"<code>{html.escape(usage_file)}</code> (корень WEBUI)."
-        )
-    else:
-        usage_note = "Персистентность таблицы выключена."
-
     rows = []
     for ep in endpoints:
         err_text = errors.get(ep["name"])
@@ -563,31 +557,15 @@ def _render_status_page(
   <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Endpoints</th><th>Models</th></tr>
   {"".join(rows)}
 </table>
-<h3 style="margin-top:24px">Использованные модели</h3>
-<p style="color:#888;margin:4px 0 0 0">Модели, к которым агент обращался
-  (после прохождения строгой проверки). Первое обращение к модели проверяет
-  доступные API-эндпоинты короткими запросами именно этой моделью
-  (до 4×10 с); повторные обращения не перепроверяются — растёт только
-  счётчик «Вызовов». «Input/Output» — токены из usage-блока ответов бэкенда
-  (usage.prompt_tokens / usage.completion_tokens); ответы без usage (ошибки,
-  обрывы, бэкенд без usage-поддержки) в учёт не попадают. Служебные дымовые
-  пробы эндпоинтов в них не входят. {usage_note} Строка модели
-  сбрасывается кнопкой «Сбросить» справа (POST /api/model-usage/reset).
-  Кнопка «Перепроверить» запускает фоновую повторную пробу эндпоинтов
-  именно этой моделью (POST /api/model-usage/reprobe) — для строк, чьи
-  колонки эндпоинтов «—» (первый запрос был давно, бэкенд ожил, модель
-  появилась в /v1/models); счётчики «Вызовов»/токенов при этом не растут —
-  проба служебная.
-  ADAPTER_MODEL_USAGE_ENABLE=0 — учёт остаётся, пробы выключены (колонки
-  эндпоинтов «—»).</p>
-<table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th><th>Действия</th></tr>
-  {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
-</table>
 {footer}
 <form method="POST" action="/" style="margin-top:12px">
   <button type="submit">⟳ Проверить сейчас</button>
 </form>
+<h3 style="margin-top:24px">Models in use</h3>
+<table>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Endpoints</th><th>Действия</th></tr>
+  {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
+</table>
 <p style="color:#888;margin-top:12px;font-size:13px">
   <a href="https://github.com/alekseybb197/backend-adapter">backend-adapter на GitHub</a>
 </p>
@@ -829,7 +807,7 @@ __all__ = [
     "_config_snapshot",
     "_models_html",
     "_api_html",
-    "_usage_endpoint_html",
+    "_endpoints_cell_html",
     "_usage_rows_html",
     "_actions_cell_html",
     "_fmt_tokens",
