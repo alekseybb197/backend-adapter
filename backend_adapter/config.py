@@ -58,20 +58,43 @@ ADAPTER_DEBUG_TOOLS_ERROR = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "0").low
 )
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
+
+
 # ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
 # отключается обрезка (trim). Пусто / не задано — trim включён везде.
-_ADAPTER_DEBUG_TAGS_FULL_RAW = os.environ.get("ADAPTER_DEBUG_TAGS_FULL", "")
-ADAPTER_DEBUG_TAGS_FULL: list[str] = (
-    [t.strip() for t in _ADAPTER_DEBUG_TAGS_FULL_RAW.split(",") if t.strip()]
-    if _ADAPTER_DEBUG_TAGS_FULL_RAW.strip()
-    else []
+#   * _ADAPTER_DEBUG_TAGS_FULL_RAW — СНИМОК env на импорте: значение по
+#     умолчанию. set_runtime_config() меняет его как обычный строковый
+#     глобал пула; DEFAULT_... — запасное значение при сбросе в "".
+#   * _ADAPTER_DEBUG_TAGS_FULL_SET — рабочее frozenset-представление,
+#     живое: пересчитывается set_runtime_config() из _RAW при каждом
+#     применении (frozenset неизменяем — только переприсваивание).
+#     Читается в _trim_limit().
+# Чтение через _RAW/_SET (не через прямую env-переменную) — обязательное
+# следствие включения переменной в RUNTIME_CONFIG_POOL: иначе переключение
+# через /config не действовало бы дальше config.py (см. комментарий над
+# RUNTIME_CONFIG_POOL).
+def _parse_tags_full(raw: str) -> frozenset[str]:
+    """Разобрать строку env-формата ADAPTER_DEBUG_TAGS_FULL ("TAG1,TAG2")
+    в frozenset тегов. Пусто/не задано — пустой set (trim включён везде)."""
+    if not raw or not raw.strip():
+        return frozenset()
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
+_ADAPTER_DEBUG_TAGS_FULL_DEFAULT = ""
+_ADAPTER_DEBUG_TAGS_FULL_RAW = os.environ.get(
+    "ADAPTER_DEBUG_TAGS_FULL", _ADAPTER_DEBUG_TAGS_FULL_DEFAULT
 )
-_ADAPTER_DEBUG_TAGS_FULL_SET: frozenset[str] = frozenset(ADAPTER_DEBUG_TAGS_FULL)
+# Публичное имя пула (ADAPTER_DEBUG_TAGS_FULL) — та же строка env-формата:
+# по нему идёт get_runtime_config()/сверка POST; рабочий список читается
+# из _SET (см. комментарий над RUNTIME_CONFIG_POOL и _trim_limit).
+ADAPTER_DEBUG_TAGS_FULL = _ADAPTER_DEBUG_TAGS_FULL_RAW
+_ADAPTER_DEBUG_TAGS_FULL_SET: frozenset[str] = _parse_tags_full(_ADAPTER_DEBUG_TAGS_FULL_RAW)
 
 
 def _trim_limit(tag: str) -> int | None:
     """Return None if trim is OFF for this tag, or ADAPTER_DEBUG_TRIM if ON."""
-    if tag in _ADAPTER_DEBUG_TAGS_FULL_SET:
+    if tag in _ADAPTER_DEBUG_TAGS_FULL_SET:  # живое чтение (runtime-пул)
         return None
     return ADAPTER_DEBUG_TRIM
 
@@ -98,10 +121,14 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # Идея: включать накопление логов/трейсов/*.parts-дампов на время диагностики
 # конкретной проблемы и выключать обратно, без остановки самого прокси.
 #
-# Пул НАМЕРЕННО узкий — только то, что управляет ОБЪЁМОМ записи на диск
-# (логи/трейсы/дампы). Сеть, бэкенды, модели, порты сюда не входят — их
-# runtime-переключение существенно рискованнее (сорвёт активные соединения,
-# сменит маршрутизацию на лету) и не было целью этой задачи.
+# Пул управляет только тем, что БЕЗОПАСНО менять на лету: объём записи на
+# диск (логи/трейсы/дампы) и поведение НОВЫХ запросов (рубильники стриминга,
+# строгая валидация моделей, санитайзер логов). Принцип отбора — значение
+# применяется на следующем же вызове/запросе и не рвёт активные соединения.
+# Сеть/бэкенды/порты/адреса/точка хранения сюда не входят — их
+# runtime-переключение требует пересоздания слушателей, повторной
+# инициализации бэкендов или смены раскладки файлов посреди сессии
+# (подробный разбор — в docs/environment.md, «Runtime-пул»).
 #
 # ВАЖНО для того, кто ЧИТАЕТ эти переменные в других модулях: все места
 # использования (server.py, streaming.py, convert.py, tracer.py, logger.py)
@@ -109,7 +136,9 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # `from .config import ADAPTER_X` на уровне модуля — второе сделало бы
 # разовый снимок при импорте, и set_runtime_config() ниже не имел бы эффекта
 # нигде, кроме этого файла. Если добавляете сюда новую переменную — проверьте
-# ВСЕ её точки чтения на этот же паттерн.
+# ВСЕ её точки чтения на этот же паттерн. (Пример: ADAPTER_DEBUG_TAGS_FULL
+# хранит список тегов в _SET, но эта переменная — тоже НЕ список в пуле:
+# set_runtime_config() получает строку env-формата, а код читает _SET.)
 #
 # ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — включение
 # записи "с нуля" (когда путь изначально пуст) потребовало бы ещё и создать
@@ -123,20 +152,32 @@ RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG_TAGS_OUT",
     "ADAPTER_DEBUG_TOOLS",
     "ADAPTER_DEBUG_TOOLS_ERROR",
+    "ADAPTER_DEBUG_TAGS_FULL",
+    "ADAPTER_DEBUG_TRIM",
+    "ADAPTER_SENSITIVE_LOGGING_ENABLE",
+    "ADAPTER_STREAMING_ENABLE",
+    "ADAPTER_STREAM_INCLUDE_USAGE",
+    "ADAPTER_STRICT_MODELS",
     "ADAPTER_TRACE_REASONING_MAX_CHARS",
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
-    "ADAPTER_DEBUG_TRIM",
 )
 
-# Типы для валидации входа /config (POST) — bool или int, остальное отклоняем.
+# Типы для валидации входа /config (POST) — bool, int или str, остальное
+# отклоняем. Единственная str-переменная — ADAPTER_DEBUG_TAGS_FULL (строка
+# env-формата "TAG1,TAG2"); прочие — bool/int.
 _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
     "ADAPTER_DEBUG_TAGS_OUT": bool,
     "ADAPTER_DEBUG_TOOLS": bool,
     "ADAPTER_DEBUG_TOOLS_ERROR": bool,
+    "ADAPTER_DEBUG_TAGS_FULL": str,
+    "ADAPTER_DEBUG_TRIM": int,
+    "ADAPTER_SENSITIVE_LOGGING_ENABLE": bool,
+    "ADAPTER_STREAMING_ENABLE": bool,
+    "ADAPTER_STREAM_INCLUDE_USAGE": bool,
+    "ADAPTER_STRICT_MODELS": bool,
     "ADAPTER_TRACE_REASONING_MAX_CHARS": int,
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": int,
-    "ADAPTER_DEBUG_TRIM": int,
 }
 
 
@@ -153,10 +194,11 @@ def set_runtime_config(**kwargs) -> dict:
     модульных глобалов через `global`. Для _AVAILABLE_MODELS/_MODEL_TO_BACKEND
     там используется МУТАЦИЯ НА МЕСТЕ (.clear()+.update()), т.к. это словари
     и их импортируют по ссылке в других модулях; здесь же пул — bool/int
-    скаляры, которые в Python в принципе нельзя мутировать на месте, поэтому
-    единственный рабочий вариант — переприсваивание через `global` ЗДЕСЬ, в
-    сочетании с тем, что все читатели переведены на live-доступ `config.X`
-    (см. комментарий над RUNTIME_CONFIG_POOL).
+    скаляры плюс одна строка (ADAPTER_DEBUG_TAGS_FULL), которые в Python
+    в принципе нельзя мутировать на месте, поэтому единственный рабочий
+    вариант — переприсваивание через `global` ЗДЕСЬ, в сочетании с тем, что
+    все читатели переведены на live-доступ `config.X` (см. комментарий над
+    RUNTIME_CONFIG_POOL).
 
     Неизвестные ключи и ключи вне пула ИГНОРИРУЮТСЯ МОЛЧА (не 400 — иначе
     один опечатанный лишний ключ в теле запроса откатил бы все остальные
@@ -167,8 +209,11 @@ def set_runtime_config(**kwargs) -> dict:
     применения — вызывающий видит, что реально изменилось.
     """
     global ADAPTER_DEBUG, ADAPTER_DEBUG_TAGS_OUT, ADAPTER_DEBUG_TOOLS
-    global ADAPTER_DEBUG_TOOLS_ERROR, ADAPTER_TRACE_REASONING_MAX_CHARS
-    global ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS, ADAPTER_DEBUG_TRIM
+    global ADAPTER_DEBUG_TOOLS_ERROR, ADAPTER_DEBUG_TAGS_FULL
+    global ADAPTER_DEBUG_TRIM, ADAPTER_SENSITIVE_LOGGING_ENABLE
+    global ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE
+    global ADAPTER_STRICT_MODELS, ADAPTER_TRACE_REASONING_MAX_CHARS
+    global ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
 
     for name, value in kwargs.items():
         if name not in RUNTIME_CONFIG_POOL:
@@ -180,7 +225,17 @@ def set_runtime_config(**kwargs) -> dict:
             continue
         if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
             continue
+        if expected is str and not isinstance(value, str):
+            continue
         globals()[name] = value
+        # Единственный не-скаляр пула — список тегов без обрезки: помимо
+        # публичного строкового глобала (как у остальных ключей) пересчитываем
+        # и рабочее frozenset-представление _SET, которое читает _trim_limit()
+        # (frozenset неизменяем — только переприсваивание). Пустая строка =
+        # «сброс»: trim включается снова для всех тегов.
+        if name == "ADAPTER_DEBUG_TAGS_FULL":
+            globals()["_ADAPTER_DEBUG_TAGS_FULL_SET"] = _parse_tags_full(value)
+            globals()["_ADAPTER_DEBUG_TAGS_FULL_RAW"] = value
 
     return get_runtime_config()
 
@@ -447,19 +502,18 @@ def _fetch_models(base: str, key: str, timeout: float | None = None) -> list[dic
 # «Дымовая» проба API-эндпойнтов бэкенда: короткий POST (max_tokens:1) на
 # каждый известный путь — определить, какие эндпойнты бэкенд реально
 # обслуживает, не тратя токены на содержательный ответ. Выполняется при
-# каждом refresh_models — а тот теперь вызывается только из фонового
-# воркера проверки (start_refresh, кнопка «⟳ Проверить сейчас»), не при
-# загрузке страницы; результат — колонка «Доступные API» на странице
-# и лог-строка [ENDPOINT_PROBE] в консоли. Мастер-флаг —
-# ADAPTER_ENDPOINT_PROBE (0 — автопроба отключена).
+# каждом refresh_models — а тот вызывается из фонового воркера проверки
+# (start_refresh: при старте адаптера, на первом GET "/" и по кнопке
+# «⟳ Проверить сейчас»), не при каждой загрузке страницы; результат —
+# колонка «Доступные API» на странице и лог-строка [ENDPOINT_PROBE] в
+# консоли. Мастер-флаг — ADAPTER_ENDPOINT_PROBE (0 — автопроба отключена).
 #
 # Классификация по HTTP-коду ответа (см. tmp/plan-llm-endpoints.md):
-#   200                  — эндпойнт работает;
-#   400/401/405          — эндпойнт ЕСТЬ (реализован), но тело/ключ не
-#                          подошли (настоящий бэкенд на несуществующем
-#                          пути отвечает 404);
-#   404                  — эндпойнт не реализован;
-#   сеть/таймаут         — ошибка бэкенда целиком.
+#   200                  — эндпоинт работает (found=True);
+#   прочие 4xx/5xx (вкл. 400/401/405/429) и 404 — эндпоинт НЕ работает
+#                         (found=False): тело/ключ не подошли, либо путь
+#                         не реализован — на странице такие не показываются;
+#   сеть/таймаут         — ошибка бэкенда целиком (found=False + текст).
 # Пары в YAML-конфиге (`probe` в записи backend) задают, КАКОЙ моделью
 # пробовать каждый эндпойнт; неперечисленные/пустые — моделью по умолчанию.
 # Модели, не найденные среди моделей бэкенда в /v1/models, пропускаются
@@ -496,7 +550,7 @@ def _http_json(
 
     Возвращает ``(status_code | None, json_data | None, err_str | None)``:
     - ``(code, тело, None)`` — сервер ответил (в т.ч. HTTPError 4xx/5xx —
-      это НЕ исключение для дыма: код 400/401/405 — признак «эндпоинт есть»);
+      это НЕ исключение для дыма: код несёт информацию о статусе эндпоинта);
     - ``(None, None, текст)`` — сетевая ошибка/таймаут/битый JSON."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(
@@ -691,9 +745,9 @@ def _probe_backend_endpoints(backend: dict, probes: dict[str, str], timeout: flo
     модель на каждый эндпойнт, сверена с /v1/models бэкенда). Возвращает
     ``{"endpoints": {путь: {"status": int|None, "found": bool}},
     "errors": {короткое_имя: текст}}`` — endpoints только для реально
-    пробованных путей, найденные/ненайденные классифицированы по HTTP-коду
-    (200 → found; 400/401/405 → «эндпоинт есть» found=True; 404 → not found;
-    сеть/таймаут → ошибка бэкенда в errors)."""
+    пробованных путей, классифицированы по HTTP-коду: found=True только
+    для 200; любой другой код (400/401/405/429, 5xx, 404) → found=False;
+    сеть/таймаут → found=False + текст ошибки в errors."""
     base = backend["base"].rstrip("/")
     key = backend.get("key", "")
     endpoints: dict[str, dict] = {}
@@ -724,14 +778,13 @@ def _probe_backend_endpoints(backend: dict, probes: dict[str, str], timeout: flo
             errors[pname] = f"network error: {err}"
             continue
         assert code is not None
-        if code == 404:
-            endpoints[path] = {"status": code, "found": False}
-        elif code == 200:
+        if code == 200:
             endpoints[path] = {"status": code, "found": True}
         else:
-            # 400/401/405 и прочие 4xx/5xx: эндпоинт есть (настоящий бэкенд
-            # на несуществующем пути отвечает 404), но тело/ключ не подошли.
-            endpoints[path] = {"status": code, "found": True}
+            # Не-200 (404, 400/401/405/429, прочие 4xx/5xx): эндпоинт НЕ
+            # работает — тело/ключ не подошли либо путь не реализован.
+            # На странице такие не показываются (зелёный ✓ — только 200).
+            endpoints[path] = {"status": code, "found": False}
     return {"endpoints": endpoints, "errors": errors}
 
 
@@ -853,8 +906,9 @@ def refresh_models(timeout: float | None = None) -> dict:
     ``_MODEL_TO_BACKEND``.
 
     Вызывается только по явному сигналу: при старте адаптера (существующий
-    init/probe) и из фонового воркера проверки (config.start_refresh — POST
-    статус-страницы WEBUI, кнопка «⟳ Проверить сейчас»).
+    init/probe), из фонового воркера проверки (config.start_refresh — старт
+    адаптера / первый GET "/" статус-страницы WEBUI / кнопка
+    «⟳ Проверить сейчас»).
     Периодического фонового обновления НЕТ. Бэкенд может добавлять модели
     между стартами; refresh подхватывает их без перезапуска адаптера.
 
@@ -930,8 +984,9 @@ def refresh_models(timeout: float | None = None) -> dict:
 # заменяемый ЦЕЛИКОМ (никогда не мутируется после публикации): читатели
 # (webui_status) берут refresh_state() без лока — замена ссылки атомарна.
 # Запуск сериализуется _REFRESH_LOCK: две кнопки подряд не создадут два потока.
-# Периодического фонового refresh нет — проверка строго по явному
-# start_refresh() (POST "/", кнопка «⟳ Проверить сейчас»).
+# Периодического фонового refresh нет — проверка только по явному
+# start_refresh(): при старте адаптера, на первом GET "/" (автостарт) и по
+# кнопке «⟳ Проверить сейчас» (POST "/").
 
 _REFRESH_JOB: dict | None = None
 _REFRESH_LOCK = threading.Lock()
@@ -993,7 +1048,9 @@ def start_refresh(timeout: float | None = None) -> bool:
     уже выполняется (повторный запуск не создаёт второй поток). HTTP-ответ
     страницы не блокируется: поток daemon, результат появится в состоянии
     (refresh_state) по завершении. Никакого периодического refresh — только
-    явный вызов (кнопка «⟳ Проверить сейчас»)."""
+    явный вызов: старт адаптера (backend-adapter.py), первый GET "/"
+    (автостарт, webui_status._autostart_first_check) или кнопка
+    «⟳ Проверить сейчас» (POST "/")."""
     global _REFRESH_JOB
     with _REFRESH_LOCK:
         if _REFRESH_JOB is not None and _REFRESH_JOB.get("running"):

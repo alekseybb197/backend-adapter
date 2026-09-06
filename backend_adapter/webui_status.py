@@ -11,16 +11,25 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже).
 
 Откуда данные:
-  - Проверка бэкендов — ТОЛЬКО по кнопке «⟳ Проверить сейчас» (POST "/").
-    Она запускает ФОНОВУЮ проверку config.start_refresh(timeout=PROBE_TIMEOUT)
-    (см. config._refresh_worker) и отвечает сразу — HTTP-запрос не ждёт её
-    завершения. Загрузка страницы (GET "/") проверку НЕ запускает: показывает
-    текущее состояние — результат последней проверки из config.refresh_state().
-    Пока проверка выполняется, страница показывает баннер
-    «Проверка выполняется…» и опрашивает лёгкий JSON-эндпоинт
-    /api/refresh-state; по завершении проверки JS сам перезагружает страницу
-    (location.reload()) — она рендерит свежий результат. Авто-релоад
-    безопасен: GET проверку не запускает, зацикливания нет.
+  - Проверка бэкендов запускается:
+      * при старте адаптера (backend-adapter.py запускает config.
+        start_refresh(timeout=PROBE_TIMEOUT) после поднятия WEBUI) и
+      * по кнопке «⟳ Проверить сейчас» (POST "/") — работает по
+        PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(
+        timeout=PROBE_TIMEOUT) (см. config._refresh_worker) и отвечает
+        303 See Other на GET "/" — браузер переходит на страницу
+        GET-навигацией, HTTP-запрос не ждёт завершения проверки.
+        Поэтому обновление/авто-релоад страницы никогда не повторяет
+        POST (нет диалога «повторить действие?»).
+  - Первый заход на страницу (GET "/", _autostart_first_check)
+    запускает ПЕРВУЮ проверку автоматически, если проверок ещё не
+    было (done_at пуст) и есть что проверять; повторные проверки —
+    только по кнопке. Пока проверка выполняется, страница показывает
+    баннер «Проверка выполняется…» и опрашивает лёгкий JSON-эндпоинт
+    /api/refresh-state; по завершении проверки JS сам перезагружает
+    страницу (location.reload()) — она рендерит свежий результат.
+    Авто-релоад безопасен: он происходит на GET-документе, повторного
+    POST нет, зацикливания нет.
   - Страница рендерится из конфиг-глобалов адаптера: бэкенд мог добавить
     новые модели между стартами адаптера (или после ошибки 400 «model is
     not available»), refresh подхватывает их без перезапуска — следующие
@@ -38,8 +47,9 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     из необязательного ключа probe YAML-записи бэкенда, либо первая из
     /v1/models), результат кэшируется ~60 с (ENDPOINT_PROBE_TTL) и
     отключается флагом ADAPTER_ENDPOINT_PROBE=0. Для каждого бэкенда
-    колонка «Доступные API» показывает найденные/ненайденные пути
-    (из config._ENDPOINT_STATE).
+    колонка «Доступные API» показывает зелёным ✓ только реально
+    работающие пути (HTTP 200); непрошедшие проверку пути на странице
+    не показываются (из config._ENDPOINT_STATE).
 
 САМОСТОЯТЕЛЬНЫЙ ЗАПУСК (standalone — python -m backend_adapter.webserver
 вне процесса адаптера): конфиг-глобалы адаптера пусты (нет YAML-конфига),
@@ -200,10 +210,13 @@ def _api_html(api: dict | None) -> str:
 
     ``api`` — результат дымовой пробы из _collect_endpoints()
     ({короткий_путь: {"found": bool, "status": int|None}}), None — бэкенд
-    ещё не пробован (standalone / ADAPTER_ENDPOINT_PROBE=0). Найденные
-    эндпойнты — зелёным с ✓, ненайденные (404) — серым «—»; пропущенный
-    из-за отсутствующей probe-модели эндпойнт в api не значится и
-    показывается серым «—», остальные — по результатам. Порядок —
+    ещё не пробован (standalone / ADAPTER_ENDPOINT_PROBE=0). Зелёным с ✓
+    показываются ТОЛЬКО реально работающие эндпоинты (found=True ⇔ HTTP
+    200, см. классификацию в config._probe_backend_endpoints); непрошедшие
+    (любой не-200 код, сетевая ошибка) и пропущенные (нет probe-модели —
+    в api не значатся) на странице НЕ показываются вовсе. Проба была
+    (api не None), но ни один эндпоинт не ответил 200 — ячейка показывает
+    один серый «—» с пояснением вместо пустого места. Порядок —
     config.ENDPOINT_PROBES (тот же, что у самой пробы)."""
     if api is None:
         return '<span style="color:#999">не опрошено</span>'
@@ -211,15 +224,13 @@ def _api_html(api: dict | None) -> str:
     for _pname, path, _tpl in config.ENDPOINT_PROBES:
         label = path[len("/v1/") :]
         ep = api.get(label)
-        if ep is None:
-            parts.append(f'<span style="color:#aaa" title="эндпоинт не пробован">{label} —</span>')
-        elif ep["found"]:
-            extra = ""
-            if ep["status"] not in (None, 200):
-                extra = f' <span style="color:#aaa;font-size:12px">({ep["status"]})</span>'
-            parts.append(f'<span style="color:#1a7f37">{label} ✓</span>{extra}')
-        else:
-            parts.append(f'<span style="color:#aaa" title="HTTP {ep["status"]}">{label} —</span>')
+        if ep is not None and ep["found"]:
+            # found=True гарантированно значит HTTP 200 (см. config.py)
+            parts.append(f'<span style="color:#1a7f37">{label} ✓</span>')
+    if not parts:
+        parts.append(
+            '<span style="color:#aaa" title="ни один эндпоинт не ответил HTTP 200">—</span>'
+        )
     return "<br>".join(parts)
 
 
@@ -286,7 +297,8 @@ def _render_status_page(
             "проверяются по кнопке «⟳ Проверить сейчас» (GET /v1/models + "
             "дымовые POST max_tokens:1, таймаут 5 с на эндпойнт; проба "
             "кэшируется 60 с, ADAPTER_ENDPOINT_PROBE=0 — отключить). "
-            "Загрузка страницы проверку не запускает.</p>"
+            "Первый заход на страницу запускает первую проверку "
+            "автоматически; повторные — только по кнопке.</p>"
         )
     else:
         count = refresh.get("count", 0)
@@ -398,14 +410,16 @@ def _render_status_page(
 class StatusEndpoint(webserver.Endpoint):
     """Эндпойнт "/": статус-страница (версия, эндпойнты LLM, API, модели).
 
-    Проверка бэкендов — ТОЛЬКО по кнопке «⟳ Проверить сейчас» (POST "/"):
-    запускает ФОНОВУЮ проверку config.start_refresh(timeout=PROBE_TIMEOUT)
-    и отвечает сразу (HTTP не ждёт её завершения). Загрузка страницы
-    (GET "/") проверку НЕ запускает — показывает состояние последней
-    проверки (config.refresh_state). Пока проверка идёт, страница
-    показывает баннер и авто-обновляется по завершении (JS status_poll →
-    /api/refresh-state → location.reload()). Периодического фонового
-    refresh нет — только явный POST."""
+    Проверка бэкендов — по кнопке «⟳ Проверить сейчас» (POST "/") и при
+    автостарте (первый GET, см. _autostart_first_check). POST работает по
+    PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(timeout=
+    PROBE_TIMEOUT) и отвечает 303 See Other на GET "/" (HTTP не ждёт её
+    завершения; браузер переходит на страницу GET-навигацией, поэтому
+    авто-релоад не повторяет POST). Загрузка страницы (GET "/") показывает
+    состояние последней проверки (config.refresh_state). Пока проверка идёт,
+    страница показывает баннер и авто-обновляется по завершении (JS
+    status_poll → /api/refresh-state → location.reload()). Периодического
+    фонового refresh нет — только явный POST или автостарт."""
 
     prefix = "/"
 
@@ -430,16 +444,24 @@ class StatusEndpoint(webserver.Endpoint):
         if remainder:
             handler.send_error(404, "Not found")
             return
+        # Первый заход на страницу запускает первую проверку автоматически
+        # (см. _autostart_first_check); _render_from_state после вызова
+        # отрендерит баннер, если проверка реально стартовала.
+        _autostart_first_check()
         handler._write(200, "text/html; charset=utf-8", self._render_from_state())
 
     def POST(self, handler, remainder: str):
-        # Кнопка «⟳ Проверить сейчас»: запускаем фоновую проверку и
-        # отвечаем сразу. Если проверка уже идёт — start_refresh вернёт
-        # False, страница всё равно отрендерится с баннером. В standalone
-        # без настроенных эндпойнтов проверять нечего — не запускаем.
+        # Кнопка «⟳ Проверить сейчас»: PRG-паттерн — запускаем фоновую
+        # проверку и отвечаем 303 See Other на GET "/", чтобы браузер
+        # перешёл на неё GET-навигацией. Иначе авто-обновление страницы
+        # (location.reload()) повторяло бы POST, а браузер спрашивал бы
+        # «повторить действие?» (диалог Chrome/Firefox). Если проверка уже
+        # идёт — start_refresh вернёт False; редирект всё равно уводит на
+        # GET, который отрендерит баннер. В standalone без настроенных
+        # эндпойнтов проверять нечего — не запускаем (GET покажет подсказку).
         if _collect_endpoints():
             config.start_refresh(timeout=PROBE_TIMEOUT)
-        handler._write(200, "text/html; charset=utf-8", self._render_from_state())
+        handler._redirect("/")
 
 
 @webserver.register
@@ -472,6 +494,29 @@ def _last_result(state: dict) -> dict | None:
     return {"ok": state.get("ok"), "count": state.get("count"), "errors": state.get("errors")}
 
 
+def _autostart_first_check() -> bool:
+    """Запустить фоновую проверку на первом GET "/", если проверок ещё не
+    было и есть что проверять. Возвращает True, если запущена этим вызовом.
+
+    Сценарии:
+      - standalone (python -m backend_adapter.webserver) с YAML в
+        ADAPTER_BACKEND_CONFIG: _BACKENDS пуст (адаптер не стартовал), но
+        _collect_endpoints() вернёт список из YAML — первый GET запускает
+        проверку, чтобы колонка Endpoints и модели заполнились без клика;
+      - в процессе адаптера стартовую проверку уже запустил
+        backend-adapter.py (running=True) — повторно не гоним;
+      - проверка уже завершалась (done_at есть) — не гоним повторно:
+        повторные проверки — только по кнопке «⟳ Проверить сейчас»."""
+    if not _collect_endpoints():  # standalone без конфига — нечего проверять
+        return False
+    state = config.refresh_state()
+    if state.get("running"):
+        return False  # уже идёт (стартовая адаптера / по кнопке)
+    if state.get("done_at") is not None:
+        return False  # проверка уже завершалась — не гоним повторно
+    return config.start_refresh(timeout=PROBE_TIMEOUT)
+
+
 __all__ = [
     "PROBE_TIMEOUT",
     "MODEL_LINES",
@@ -483,4 +528,5 @@ __all__ = [
     "StatusEndpoint",
     "RefreshStateEndpoint",
     "_last_result",
+    "_autostart_first_check",
 ]

@@ -753,6 +753,24 @@ class TestRuntimeConfig:
         assert current["ADAPTER_DEBUG_TAGS_OUT"] is True
         assert current["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
 
+    def test_new_bool_keys_applied(self):
+        """Новые bool-переменные пула применяются и видны в get_runtime_config()."""
+        result = self.config.set_runtime_config(
+            ADAPTER_SENSITIVE_LOGGING_ENABLE=True,
+            ADAPTER_STREAMING_ENABLE=False,
+            ADAPTER_STREAM_INCLUDE_USAGE=False,
+            ADAPTER_STRICT_MODELS=False,
+        )
+        assert result["ADAPTER_SENSITIVE_LOGGING_ENABLE"] is True
+        assert result["ADAPTER_STREAMING_ENABLE"] is False
+        assert result["ADAPTER_STREAM_INCLUDE_USAGE"] is False
+        assert result["ADAPTER_STRICT_MODELS"] is False
+        current = self.config.get_runtime_config()
+        assert current["ADAPTER_SENSITIVE_LOGGING_ENABLE"] is True
+        assert current["ADAPTER_STREAMING_ENABLE"] is False
+        assert current["ADAPTER_STREAM_INCLUDE_USAGE"] is False
+        assert current["ADAPTER_STRICT_MODELS"] is False
+
     def test_unknown_key_ignored(self):
         """Unknown key is silently ignored."""
         before = self.config.get_runtime_config()
@@ -788,6 +806,29 @@ class TestRuntimeConfig:
         # Не применилось (int-поле отклоняет bool)
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 0  # дефолт
 
+    def test_tags_full_str_applied_and_recomputed(self):
+        """ADAPTER_DEBUG_TAGS_FULL: строка применяется, live-_SET пересчитан."""
+        result = self.config.set_runtime_config(
+            ADAPTER_DEBUG_TAGS_FULL="BODY, TOOL_RESULT_ERROR"
+        )
+        assert result["ADAPTER_DEBUG_TAGS_FULL"] == "BODY, TOOL_RESULT_ERROR"
+        assert self.config._ADAPTER_DEBUG_TAGS_FULL_RAW == "BODY, TOOL_RESULT_ERROR"
+        # Live-эффект: trim отключён для перечисленных тегов, работает для прочих
+        assert self.config._trim_limit("BODY") is None
+        assert self.config._trim_limit("TOOL_RESULT_ERROR") is None
+        assert self.config._trim_limit("RESPONSE") == self.config.ADAPTER_DEBUG_TRIM
+        # Сброс пустой строкой возвращает trim везде (как env-дефолт)
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TAGS_FULL="")
+        assert result["ADAPTER_DEBUG_TAGS_FULL"] == ""
+        assert self.config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
+        assert self.config._trim_limit("BODY") == self.config.ADAPTER_DEBUG_TRIM
+
+    def test_tags_full_rejects_non_str(self):
+        """ADAPTER_DEBUG_TAGS_FULL принимает только str: bool/int игнорируются."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TAGS_FULL=True)
+        assert result["ADAPTER_DEBUG_TAGS_FULL"] == ""
+        assert self.config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
+
     def test_return_value_matches_sent(self):
         """Return value reflects actual values after application."""
         result = self.config.set_runtime_config(
@@ -799,10 +840,10 @@ class TestRuntimeConfig:
         # Возвращает актуальные значения (могли отличаться от посланных, если что-то отклонилось)
 
     def test_pool_not_extended(self):
-        """Return value has exactly 7 keys from RUNTIME_CONFIG_POOL."""
+        """Return value has exactly the RUNTIME_CONFIG_POOL keys (12)."""
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
-        assert len(result) == 7
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
+        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
 
 
 class TestEndpointProbe:
@@ -811,10 +852,10 @@ class TestEndpointProbe:
     probe_endpoints() must: use per-endpoint models from the YAML ``probe``
     key (default model otherwise), skip ONLY endpoints whose probe-model is
     absent from the backend /v1/models, classify responses by HTTP code
-    (200/400-405 → found; 404 → not found; network → backend error), cache
-    results for ENDPOINT_PROBE_TTL (second call within TTL → no network),
-    log one [ENDPOINT_PROBE] line per real probe, and honor
-    ADAPTER_ENDPOINT_PROBE=0 (no network at all).
+    (found=True only for 200; any other code and 404 → not found; network →
+    backend error), cache results for ENDPOINT_PROBE_TTL (second call within
+    TTL → no network), log one [ENDPOINT_PROBE] line per real probe, and
+    honor ADAPTER_ENDPOINT_PROBE=0 (no network at all).
     """
 
     # -- Helpers -----------------------------------------------------------
@@ -950,9 +991,9 @@ class TestEndpointProbe:
         cfg = self._setup(models=["m"])
         codes = {
             "http://aaa.local/v1/chat/completions": 200,   # completions — работает
-            "http://aaa.local/v1/messages": 400,           # messages — есть, но ключ/тело не подошли
+            "http://aaa.local/v1/messages": 400,           # messages — ключ/тело не подошли
             "http://aaa.local/v1/responses": 404,          # responses — не реализован
-            "http://aaa.local/v1/embeddings": 404,         # embeddings — не реализован
+            "http://aaa.local/v1/embeddings": 501,         # embeddings — 5xx, тоже не работает
         }
         def fake_http(method, url, headers, body, timeout):
             return codes.get(url, 404), {}, None
@@ -961,19 +1002,21 @@ class TestEndpointProbe:
                                                {p: "m" for _, p, _ in cfg.ENDPOINT_PROBES},
                                                timeout=None)
         eps = res["endpoints"]
+        # found=True ТОЛЬКО для HTTP 200; любой не-200 код (400, 404, 501) — False.
         assert eps["/v1/chat/completions"] == {"status": 200, "found": True}
-        # 400 — «эндпоинт есть», но тело/ключ не подошли (found=True)
-        assert eps["/v1/messages"] == {"status": 400, "found": True}
+        assert eps["/v1/messages"] == {"status": 400, "found": False}
         assert eps["/v1/responses"] == {"status": 404, "found": False}
-        assert eps["/v1/embeddings"] == {"status": 404, "found": False}
+        assert eps["/v1/embeddings"] == {"status": 501, "found": False}
         assert res["errors"] == {}
         self._assert_all_probed(m_http, codes)
 
-    def test_classification_401_405_found(self):
+    def test_classification_non_200_4xx_5xx_not_found(self):
         cfg = self._setup(models=["m"])
         codes = {
             "http://aaa.local/v1/chat/completions": 401,
             "http://aaa.local/v1/messages": 405,
+            "http://aaa.local/v1/responses": 500,
+            "http://aaa.local/v1/embeddings": 503,
         }
         def fake_http(method, url, headers, body, timeout):
             return codes.get(url, 404), {}, None
@@ -982,8 +1025,11 @@ class TestEndpointProbe:
                                                {p: "m" for _, p, _ in cfg.ENDPOINT_PROBES},
                                                timeout=None)
         eps = res["endpoints"]
-        assert eps["/v1/chat/completions"]["found"] is True
-        assert eps["/v1/messages"]["found"] is True
+        assert all(e["found"] is False for e in eps.values())
+        assert eps["/v1/chat/completions"] == {"status": 401, "found": False}
+        assert eps["/v1/messages"] == {"status": 405, "found": False}
+        assert eps["/v1/responses"] == {"status": 500, "found": False}
+        assert eps["/v1/embeddings"] == {"status": 503, "found": False}
 
     def test_network_error_classified_backend_error(self):
         cfg = self._setup(models=["m"])

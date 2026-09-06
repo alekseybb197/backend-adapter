@@ -3,7 +3,7 @@
 
 Tests cover:
   - Unit: _render_config_page returns HTML with current values
-  - HTTP GET /config → 200, HTML with form (7 fields)
+  - HTTP GET /config → 200, HTML with form (12 fields: 8 bool + 3 int + str)
   - HTTP POST /config → applies valid, ignores invalid, redirects with message
 """
 import os
@@ -132,14 +132,21 @@ class TestConfigHTTPGet:
             status, body = _http_get(port, "/config")
             assert status == 200
             assert "<!DOCTYPE html>" in body or "<html" in body.lower()
-            # Form with 7 fields
+            # Form with 12 fields (8 bool + 3 int + 1 str)
             assert "ADAPTER_DEBUG" in body
             assert "ADAPTER_DEBUG_TAGS_OUT" in body
             assert "ADAPTER_DEBUG_TOOLS" in body
             assert "ADAPTER_DEBUG_TOOLS_ERROR" in body
+            assert "ADAPTER_SENSITIVE_LOGGING_ENABLE" in body
+            assert "ADAPTER_STREAMING_ENABLE" in body
+            assert "ADAPTER_STREAM_INCLUDE_USAGE" in body
+            assert "ADAPTER_STRICT_MODELS" in body
             assert "ADAPTER_TRACE_REASONING_MAX_CHARS" in body
             assert "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS" in body
             assert "ADAPTER_DEBUG_TRIM" in body
+            # Строковое поле списка тегов — как text input со значением env-формата
+            assert "ADAPTER_DEBUG_TAGS_FULL" in body
+            assert 'type="text"' in body
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -268,6 +275,76 @@ class TestConfigHTTPPost:
 
             # WEBUI_ENABLE should NOT change
             assert config.ADAPTER_WEBUI_ENABLE == before_webui
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_new_bool_fields_applied(self, tmp_path):
+        """/config POST (JSON) applies the 4 new bool flags (v0.8.3)."""
+        _reload_config()
+        from backend_adapter import config
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = json.dumps({
+                "ADAPTER_SENSITIVE_LOGGING_ENABLE": True,
+                "ADAPTER_STREAMING_ENABLE": False,
+                "ADAPTER_STREAM_INCLUDE_USAGE": False,
+                "ADAPTER_STRICT_MODELS": False,
+            }).encode()
+            status, response_body = _http_post(
+                port, "/config", "application/json", body
+            )
+            assert status == 200
+            current = config.get_runtime_config()
+            assert current["ADAPTER_SENSITIVE_LOGGING_ENABLE"] is True
+            assert current["ADAPTER_STREAMING_ENABLE"] is False
+            assert current["ADAPTER_STREAM_INCLUDE_USAGE"] is False
+            assert current["ADAPTER_STRICT_MODELS"] is False
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_tags_full_form_applies(self, tmp_path):
+        """/config POST (form) applies ADAPTER_DEBUG_TAGS_FULL as env-format str."""
+        _reload_config()
+        from backend_adapter import config
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = "ADAPTER_DEBUG_TAGS_FULL=BODY%2CTOOL_RESULT".encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            current = config.get_runtime_config()
+            assert current["ADAPTER_DEBUG_TAGS_FULL"] == "BODY,TOOL_RESULT"
+            # Live-эффект: trim отключён для перечисленных тегов
+            assert config._trim_limit("BODY") is None
+            assert config._trim_limit("RESPONSE") == config.ADAPTER_DEBUG_TRIM
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_tags_full_empty_resets(self, tmp_path):
+        """/config POST with empty ADAPTER_DEBUG_TAGS_FULL resets trim (all tags)."""
+        _reload_config()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG_TAGS_FULL = "BODY"
+        config._ADAPTER_DEBUG_TAGS_FULL_RAW = "BODY"
+        config._ADAPTER_DEBUG_TAGS_FULL_SET = config._parse_tags_full("BODY")
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            assert config._trim_limit("BODY") is None  # пред-условие
+            body = "ADAPTER_DEBUG_TAGS_FULL=".encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            assert config.ADAPTER_DEBUG_TAGS_FULL == ""
+            assert config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
+            assert config._trim_limit("BODY") == config.ADAPTER_DEBUG_TRIM
         finally:
             httpd.shutdown()
             httpd.server_close()
