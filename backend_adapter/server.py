@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import config, session_log
+from . import config, model_usage, session_log
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
@@ -215,6 +215,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 _dr(req_id, f"[ERROR] {msg}")
                 self._send_json(400, {"error": msg})
                 return
+
+            # Учёт использованной модели (таблица WEBUI «Использованные
+            # модели»): клиентское имя ДО маппинга; при первом обращении —
+            # синхронная проба эндпоинтов этой моделью (резолв внутри
+            # функции). Учёт не влияет на запрос: провал пробы не роняет его.
+            model_usage.record_model_usage(client_model)
 
             # === Модельный маппинг (agent-facing name -> backend name) ===
             original_model = client_model
