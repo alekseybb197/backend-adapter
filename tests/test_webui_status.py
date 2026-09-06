@@ -119,6 +119,43 @@ def _http_raw(port: int, method: str, path: str):
         sock.close()
 
 
+def _http_post_body(port: int, path: str, body: bytes, content_type: str):
+    """POST с телом (для JSON-запросов к /api/model-usage/reset).
+
+    Возвращает (status, headers, body_text) — как _http_raw."""
+    sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+    try:
+        sock.sendall(
+            (
+                f"POST {path} HTTP/1.0\r\n"
+                f"Host: localhost\r\n"
+                f"Content-Type: {content_type}\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode() + body
+        )
+        response = b""
+        while True:
+            try:
+                sock.settimeout(3)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            except socket.timeout:
+                break
+        text = response.decode("utf-8", "replace")
+        head, _, body_text = text.partition("\r\n\r\n")
+        lines = head.split("\r\n")
+        status = int(lines[0].split(" ", 2)[1])
+        headers = {}
+        for line in lines[1:]:
+            name, _, value = line.partition(":")
+            headers[name.strip().lower()] = value.strip()
+        return status, headers, body_text
+    finally:
+        sock.close()
+
+
 def _fresh_modules():
     """Переимпорт свежих модулей (после autouse fresh_env) в экземплярах."""
     from backend_adapter import config
@@ -481,8 +518,8 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 9 колонок (Модель|Бэкенд|Вызовов|Отправлено|
-        # Получено|4 эндпоинта).
+        # Заголовок секции + 10 колонок (Модель|Бэкенд|Вызовов|Отправлено|
+        # Получено|4 эндпоинта|Сброс).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Использованные модели</h3>" in body
@@ -495,6 +532,7 @@ class TestUsageSection:
         assert "<th>messages</th>" in body
         assert "<th>responses</th>" in body
         assert "<th>embeddings</th>" in body
+        assert "<th>Сброс</th>" in body
 
     def test_empty_table_shows_placeholder(self):
         # Пустая таблица → строка «пока нет данных», никаких строк моделей.
@@ -563,13 +601,13 @@ class TestUsageSection:
         # _usage_rows_html: 4 ячейки эндпоинтов на строку + плейсхолдер пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"9\"" in html
+        assert "пока нет данных" in html and "<td colspan=\"10\"" in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+отправлено+получено+4 эндпоинта = 9
-        assert html.count("<td>") == 9
+        # модель+бэкенд+вызовов+отправлено+получено+4 эндпоинта+Сброс = 10
+        assert html.count("<td>") == 10
         assert "completions" not in html  # короткие имена — только в шапке
 
     def test_row_renders_formatted_bytes(self):
@@ -579,6 +617,46 @@ class TestUsageSection:
         html = ws._usage_rows_html([row])
         assert "1.5 KiB" in html
         assert "1.0 MiB" in html
+
+    def test_row_has_reset_form(self):
+        # Каждая строка модели несёт form-кнопку «Сбросить» (POST на
+        # /api/model-usage/reset?model=<имя>) — без JS, PRG через 303.
+        config, ws = _fresh_modules()
+        body = self._seed(config, ws, usage_rows=[self._row("m-reset")])
+        assert "Сбросить" in body
+        assert (
+            '<form method="post" action="/api/model-usage/reset?model=m-reset">'
+            in body
+        )
+        assert "color:#c0392b" in body  # красная ссылка-кнопка
+
+    def test_empty_table_no_reset_forms(self):
+        # У пустой таблицы (заглушка colspan=10) форм сброса нет (слово
+        # «Сбросить» остаётся только в подписи-абзаце).
+        config, ws = _fresh_modules()
+        body = self._seed(config, ws, usage_rows=[])
+        assert 'form method="post" action="/api/model-usage/reset' not in body
+        assert "colspan=\"10\"" in body
+
+    def test_reset_form_escapes_special_model_name(self):
+        # Имя модели со спецсимволами: в action — quote(safe="")+html.escape,
+        # спецсимволы не ломают query/атрибут и не исполняются браузером.
+        config, ws = _fresh_modules()
+        row = self._row('m & "x"/у=1')
+        html = ws._usage_rows_html([row])
+        from urllib.parse import quote as _quote
+        q = _quote('m & "x"/у=1', safe="")
+        assert f'action="/api/model-usage/reset?model={q}"' in html
+        assert 'model=m & "' not in html  # сырые спецсимволы в action не выходят
+
+    def test_page_header_is_backend_adapter(self):
+        # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —
+        # ссылка на GitHub-репозиторий проекта.
+        config, ws = _fresh_modules()
+        body = self._seed(config, ws)
+        assert "Backend-Adapter — статус" in body
+        assert "[CC]-adapter" not in body
+        assert "https://github.com/alekseybb197/backend-adapter" in body
 
 
 # ---------------------------------------------------------------------------
@@ -1051,6 +1129,146 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# /api/model-usage/reset: POST — сброс строки модели (PRG-кнопка + JSON API)
+# ---------------------------------------------------------------------------
+
+class TestModelUsageResetAPI:
+    def _seed_row(self, model="m-reset"):
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": model, "backend": "AAA", "calls": 5,
+            "bytes_sent": 0, "bytes_recv": 0, "endpoints": {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }])
+
+    def test_post_form_resets_and_redirects(self, tmp_path):
+        # HTML-кнопка (без JSON Content-Type): POST ?model=m → 303 See Other
+        # с Location "/" (PRG); после редиректа GET "/" строки нет.
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-reset": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        self._seed_row()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/reset?model=m-reset", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+            status2, body2 = _http_get(port, "/")
+            assert status2 == 200
+            assert ">m-reset</td>" not in body2
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_reset_then_row_gone_from_file(self, tmp_path):
+        # Сброс формы реально удаляет строку и из YAML-файла (serve включил
+        # persist на root_dir=tmp_path).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-reset": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": "m-reset", "backend": "AAA", "calls": 5,
+            "bytes_sent": 0, "bytes_recv": 0, "endpoints": {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }])
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # принудительно сохранить (flush), чтобы строка была в файле
+            model_usage._DIRTY = True  # сид пишет _TABLE напрямую, без флага
+            model_usage.flush_table()
+            _http_post_body(
+                port, "/api/model-usage/reset?model=m-reset", b"",
+                "application/x-www-form-urlencoded",
+            )
+            import yaml
+            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            assert "m-reset" not in (data or {}).get("models", {})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_ok_then_404(self, tmp_path):
+        # JSON-клиент: 200 {"ok": true, ...}; повторный сброс — 404
+        # {"error": ...} (строки уже нет).
+        config, ws = _fresh_modules()
+        self._seed_row()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/reset?model=m-reset", b"",
+                "application/json",
+            )
+            assert status == 200
+            import json
+            assert json.loads(body) == {"ok": True, "model": "m-reset"}
+            status2, _, body2 = _http_post_body(
+                port, "/api/model-usage/reset?model=m-reset", b"",
+                "application/json",
+            )
+            assert status2 == 404
+            assert "error" in json.loads(body2)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_missing_model_400(self, tmp_path):
+        # Без query-параметра model — 400 {"error": ...} (JSON-клиент).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _, body = _http_post_body(
+                port, "/api/model-usage/reset", b"",
+                "application/json",
+            )
+            assert status == 400
+            import json
+            assert "error" in json.loads(body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_without_model_redirects(self, tmp_path):
+        # HTML-форма без model — 303 на "/" (в норме невозможно: кнопка
+        # всегда несёт model).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/reset", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_get_returns_404(self, tmp_path):
+        # GET на префикс сброса — 404 (дефолт Endpoint; сброс только POST).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _ = _http_get(port, "/api/model-usage/reset?model=m")
+            assert status == 404
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
 
 
 # ---------------------------------------------------------------------------

@@ -10,11 +10,14 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
     обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже);
   - таблицу «Использованные модели» — модели, к которым агент обращался
-    после старта адаптера (см. model_usage.py): счётчик обращений, объёмы
-    трафика обмена с бэкендом (байты отправленных запросов и полученных
-    ответов, включая повторные попытки) и какие API-эндпоинты доступны
-    именно для каждой модели (результат дымовой пробы этой моделью при
-    первом обращении).
+    (см. model_usage.py): счётчик обращений, объёмы трафика обмена с
+    бэкендом (байты отправленных запросов и полученных ответов, включая
+    повторные попытки) и какие API-эндпоинты доступны именно для каждой
+    модели (результат дымовой пробы этой моделью при первом обращении).
+    Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
+    WEBUI и переживает перезапуски адаптера; строка модели сбрасывается
+    кнопкой «Сбросить» в строке таблицы (POST /api/model-usage/reset,
+    см. ModelUsageResetEndpoint).
 
 Откуда данные:
   - Проверка бэкендов запускается:
@@ -74,6 +77,7 @@ import json
 import logging
 import os
 import time
+from urllib.parse import parse_qs, quote, urlparse
 
 from . import config, model_usage, webserver
 
@@ -270,15 +274,34 @@ def _fmt_bytes(n: int) -> str:
     return f"{size:.1f} PiB"
 
 
+def _reset_cell_html(model: str) -> str:
+    """HTML ячейки «Сброс» строки таблицы использованных моделей.
+
+    Form-кнопка целиком внутри своего <td> (валидный HTML — без вложенных
+    форм и JS): POST /api/model-usage/reset?model=<имя> сбрасывает строку
+    модели (см. ModelUsageResetEndpoint; по PRG сервер отвечает 303 на
+    GET "/"). Имя модели кодируется quote(safe="") для query-параметра и
+    html.escape — для атрибута action."""
+    q = quote(str(model), safe="")
+    return (
+        "<td>"
+        f'<form method="post" action="/api/model-usage/reset?model={html.escape(q)}">'
+        '<button type="submit" style="color:#c0392b;background:none;border:none;'
+        'padding:0;font:inherit;cursor:pointer;text-decoration:underline">Сбросить</button>'
+        "</form></td>"
+    )
+
+
 def _usage_rows_html(rows: list[dict]) -> str:
     """HTML строк таблицы «Использованные модели» (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
     Колонки: Модель | Бэкенд | Вызовов | Отправлено | Получено | эндпоинты
     ENDPOINT_PROBES (completions/messages/responses/embeddings — в порядке
-    config.ENDPOINT_PROBES, том же, что у пробы). bytes_sent/bytes_recv —
-    байты обмена с бэкендом (см. _fmt_bytes); поля отсутствуют у старых
-    сидов → 0. Модель/бэкенд — html.escape."""
+    config.ENDPOINT_PROBES, том же, что у пробы) | Сброс. bytes_sent/
+    bytes_recv — байты обмена с бэкендом (см. _fmt_bytes); поля отсутствуют
+    у старых сидов → 0. Модель/бэкенд — html.escape; «Сбросить» — отдельная
+    форма в последнем <td> (см. _reset_cell_html)."""
     body = []
     for r in rows:
         ep_cells = "".join(
@@ -293,11 +316,12 @@ def _usage_rows_html(rows: list[dict]) -> str:
             f"<td>{_fmt_bytes(r.get('bytes_sent', 0))}</td>"
             f"<td>{_fmt_bytes(r.get('bytes_recv', 0))}</td>"
             f"{ep_cells}"
+            f"{_reset_cell_html(r['model'])}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="9" style="color:#888">пока нет данных — '
+            '<tr><td colspan="10" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -329,6 +353,16 @@ def _render_status_page(
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
+    # Подпись про персистентность: при выключенном persist-пути ("" — только
+    # тесты) usage_persist_file() вернёт None — файл не упоминаем.
+    usage_file = model_usage.usage_persist_file()
+    if usage_file:
+        usage_note = (
+            "Таблица сохраняется между запусками адаптера в файле "
+            f"<code>{html.escape(usage_file)}</code> (корень WEBUI)."
+        )
+    else:
+        usage_note = "Персистентность таблицы выключена."
 
     rows = []
     for ep in endpoints:
@@ -454,7 +488,7 @@ def _render_status_page(
 </script>
 {poll_script}</head>
 <body>
-<h2>[CC]-adapter — статус</h2>
+<h2>Backend-Adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
    <b>Режим:</b> {html.escape(snapshot["mode"])} &nbsp;·&nbsp;
    <a href="/session">просмотр сессий →</a> &nbsp;·&nbsp;
@@ -467,23 +501,26 @@ def _render_status_page(
 </table>
 <h3 style="margin-top:24px">Использованные модели</h3>
 <p style="color:#888;margin:4px 0 0 0">Модели, к которым агент обращался
-  после старта адаптера (после прохождения строгой проверки). Первое
-  обращение к модели проверяет доступные API-эндпоинты короткими запросами
-  именно этой моделью (до 4×5 с); повторные обращения не перепроверяются —
-  растёт только счётчик «Вызовов». «Отправлено/Получено» — байты тел
-  запросов к бэкенду и его ответов (включая повторные попытки и ответы
-  ошибок); служебные дымовые пробы эндпоинтов в них не входят. Таблица
-  живёт в памяти процесса и сбрасывается при старте;
+  (после прохождения строгой проверки). Первое обращение к модели проверяет
+  доступные API-эндпоинты короткими запросами именно этой моделью
+  (до 4×5 с); повторные обращения не перепроверяются — растёт только
+  счётчик «Вызовов». «Отправлено/Получено» — байты тел запросов к бэкенду
+  и его ответов (включая повторные попытки и ответы ошибок); служебные
+  дымовые пробы эндпоинтов в них не входят. {usage_note} Строка модели
+  сбрасывается кнопкой «Сбросить» справа (POST /api/model-usage/reset).
   ADAPTER_MODEL_USAGE_ENABLE=0 — учёт остаётся, пробы выключены (колонки
   эндпоинтов «—»).</p>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Отправлено</th><th>Получено</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th></tr>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Отправлено</th><th>Получено</th><th>completions</th><th>messages</th><th>responses</th><th>embeddings</th><th>Сброс</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot())}
 </table>
 {footer}
 <form method="POST" action="/" style="margin-top:12px">
   <button type="submit">⟳ Проверить сейчас</button>
 </form>
+<p style="color:#888;margin-top:12px;font-size:13px">
+  <a href="https://github.com/alekseybb197/backend-adapter">backend-adapter на GitHub</a>
+</p>
 </body>
 </html>
 """
@@ -570,6 +607,48 @@ class RefreshStateEndpoint(webserver.Endpoint):
         handler._write(200, "application/json; charset=utf-8", body)
 
 
+@webserver.register
+class ModelUsageResetEndpoint(webserver.Endpoint):
+    """POST /api/model-usage/reset?model=<имя> — сброс строки модели.
+
+    Кнопка «Сбросить» в таблице использованных моделей (form method=post)
+    работает по PRG-паттерну: сброс + 303 See Other на GET "/" — страница
+    показывается GET-навигацией, обновление не повторяет POST (как у
+    кнопки «⟳ Проверить сейчас»). JSON-клиент (Content-Type:
+    application/json) получает 200 {"ok": true, "model": ...} при успехе,
+    404 {"error": ...} — строки нет, 400 {"error": ...} — нет query-
+    параметра model (единый формат ошибки, как в server.py). GET на
+    префикс — 404 дефолтом Endpoint."""
+
+    prefix = "/api/model-usage/reset"
+
+    def __init__(self, context):
+        self.context = context
+
+    def POST(self, handler, remainder: str):
+        parsed = urlparse(handler.path)
+        model = parse_qs(parsed.query).get("model", [""])[0].strip()
+        ct = handler.headers.get("Content-Type", "")
+        if "application/json" not in ct:
+            # HTML-форма кнопки (application/x-www-form-urlencoded): PRG.
+            if not model:
+                handler._redirect("/")  # кнопка без model невозможна в норме
+                return
+            model_usage.reset_model(model)  # строка есть на живой странице
+            handler._redirect("/")  # 303 → GET "/" (PRG)
+            return
+        if not model:
+            body = b'{"error": "missing \'model\' query parameter"}'
+            handler._write(400, "application/json; charset=utf-8", body)
+            return
+        if not model_usage.reset_model(model):
+            body = json.dumps({"error": f"model '{model}' not in usage table"}).encode()
+            handler._write(404, "application/json; charset=utf-8", body)
+            return
+        body = json.dumps({"ok": True, "model": model}).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
 def _last_result(state: dict) -> dict | None:
     """refresh-срез состояния для _render_status_page (или None).
 
@@ -613,10 +692,12 @@ __all__ = [
     "_api_html",
     "_usage_endpoint_html",
     "_usage_rows_html",
+    "_reset_cell_html",
     "_fmt_bytes",
     "_render_status_page",
     "StatusEndpoint",
     "RefreshStateEndpoint",
+    "ModelUsageResetEndpoint",
     "_last_result",
     "_autostart_first_check",
 ]
