@@ -39,9 +39,11 @@ backend_adapter/
 │                             (reprobe); персистентный YAML (version: 2, миграция v1)
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
 │                             "/api/model-usage/reset", "/api/model-usage/reprobe",
-│                             "/api/model-usage/reprobe-state": status page (version,
+│                             "/api/model-usage/reprobe-state",
+│                             "/api/model-usage/snapshot": status page (version,
 │                             LLM endpoints, models) + background-check state +
-│                             секция «Использованные модели» (сброс/перепроверка)
+│                             секция «Models in use» (live-счётчики, сброс/
+│                             перепроверка)
 ├── webui_config_api.py     ← WEBUI endpoint "/config": runtime-config form (RUNTIME_CONFIG_POOL)
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
@@ -339,7 +341,7 @@ GET `/` и по кнопке:
   компромисс, что и раньше — см. комментарий у `_refresh_worker` в
   config.py), менеджер синхронизирует только запуск и публикацию результата.
 
-### 6.6 Таблица использованных моделей (`model_usage.py`)
+### 6.6 Таблица использованных моделей («Models in use», `model_usage.py`)
 
 Отдельный модуль-лист DAG (импортирует только `config` и `yaml`; его
 импортируют `server.py` и `webui_status.py` — цикла нет, `config.py`
@@ -421,14 +423,22 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   от `ADAPTER_ENDPOINT_PROBE` (тот управляет только фоновой проверкой
   бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не входит;
   персистентность работает независимо от мастер-флага.
-- **Вывод** — секция «Использованные модели» на статус-странице `/`
-  (`webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
+- **Вывод** — секция «Models in use» на статус-странице `/` сразу под
+  кнопкой «⟳ Проверить сейчас» (подписи-абзаца перед ней нет; футер о
+  проверке и кнопка — под таблицей бэкендов), рендер —
+  `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
   строк в порядке первого обращения; первый вызов после старта загружает
-  таблицу из YAML): колонки Модель | Бэкенд | Вызовов | Input | Output |
-  4 эндпоинта | Действия. Токеновые колонки рендерятся форматтером
-  `_fmt_tokens` (точное число с неразрывным пробелом-разделителем тысяч:
-  «12 345»; «0» — usage в ответах не было). Подпись секции показывает путь
-  файла (`usage_persist_file()`).
+  таблицу из YAML. Колонки: Модель | Бэкенд | Вызовов | Input | Output |
+  **Endpoints** | Действия (7). Endpoints — одна колонка: только доступные
+  эндпоинты строки короткими именами через запятую (зелёным, порядок
+  `config.ENDPOINT_PROBES`; ничего доступного — серая «—»). Токеновые
+  колонки рендерятся форматтером `_fmt_tokens` (точное число с неразрывным
+  пробелом-разделителем тысяч: «12 345»; «0» — usage в ответах не было).
+  **Live-счётчики**: JS `usage_poll` (безусловный, в <head>) каждые ~5 с
+  опрашивает GET `/api/model-usage/snapshot` (`UsageSnapshotEndpoint` →
+  `usage_snapshot()`, из памяти, сети к бэкендам нет) и обновляет только
+  ячейки Вызовов/Input/Output (data-атрибуты на td; позиционный матчинг со
+  снимком); число строк изменилось (сброс/новая модель) — `location.reload()`.
 - **Перепроверка строки (reprobe)** — `POST /api/model-usage/reprobe?model=
   <имя>` (`ModelUsageReprobeEndpoint`): повторная дымовая проба 4 эндпоинтов
   **именно этой моделью** для строк с колонками «—» (первый запрос давно /
