@@ -8,7 +8,9 @@
 проба 4 известных API-эндпоинтов ИМЕННО этой моделью (completions/messages/
 responses/embeddings) — результат (found ⇔ HTTP 200) хранится в строке
 таблицы. Повторные обращения к уже внесённой модели никогда не
-перепроверяют (только инкремент счётчика вызовов). Состояние таблицы
+перепроверяют (только инкремент счётчика вызовов). Помимо вызовов строка
+накапливает байты трафика обмена с бэкендом (add_usage_bytes: тела запросов
+к бэкенду и его ответов, включая повторные попытки). Состояние таблицы
 выводится секцией «Использованные модели» на статус-странице WEBUI "/"
 (см. webui_status._usage_rows_html).
 
@@ -46,6 +48,9 @@ MODEL_USAGE_PROBE_TIMEOUT = 5.0
 #   {"model": str,            # client_model (ключ == поле, для webui)
 #    "backend": str,          # имя бэкенда из config._resolve_backend
 #    "calls": int,            # счётчик обращений (растёт при каждом запросе)
+#    "bytes_sent": int,       # байты тел запросов → бэкенду (все попытки)
+#    "bytes_recv": int,       # байты тел ответов ← бэкенда (все попытки,
+#                             #   включая тела ошибок)
 #    "endpoints": {pname: {"status": int|None, "found": bool}},
 #                             # только реально пробованные пути; found ⇔ HTTP 200
 #    "errors": {pname: текст} # сетевые ошибки пробы
@@ -79,6 +84,8 @@ def record_model_usage(client_model: str) -> None:
             "model": client_model,
             "backend": "",
             "calls": 1,
+            "bytes_sent": 0,
+            "bytes_recv": 0,
             "endpoints": {},
             "errors": {},
             "first_seen": now,
@@ -116,6 +123,32 @@ def record_model_usage(client_model: str) -> None:
                     cur["endpoints"] = result["endpoints"]
                     cur["errors"] = result["errors"]
                 cur["probing"] = False
+
+
+def add_usage_bytes(client_model: str, sent: int, recv: int) -> None:
+    """Накопить байты обмена с бэкендом (тело запроса + тело ответа).
+
+    Точка вызова — do_POST (фиксация в finally на любой исход запроса).
+    Строка к этому моменту уже существует (record_model_usage вызывается
+    раньше, до сетевых попыток); строки нет — пропускаем (no-op): защита от
+    будущих точек вызова вне основного пути. Служебные дымовые пробы
+    эндпоинтов сюда НЕ попадают (другой путь кода — config.probe_endpoints /
+    _probe_model_endpoints), т.е. счётчики = только запросы агента.
+
+    Гейт: config.ADAPTER_MODEL_USAGE_ENABLE (живое чтение, как в
+    record_model_usage). Не бросает исключений: учёт не должен влиять на
+    запрос. Значения неотрицательные, фактические байты (python-int не
+    переполняется — «крышки» не нужны)."""
+    if not config.ADAPTER_MODEL_USAGE_ENABLE:
+        return
+    if sent <= 0 and recv <= 0:
+        return
+    with _TABLE_LOCK:
+        row = _TABLE.get(client_model)
+        if row is None:
+            return
+        row["bytes_sent"] += sent
+        row["bytes_recv"] += recv
 
 
 def usage_snapshot() -> list[dict]:
@@ -207,6 +240,7 @@ def _log_probe(client_model: str, backend_name: str, result: dict) -> None:
 __all__ = [
     "MODEL_USAGE_PROBE_TIMEOUT",
     "record_model_usage",
+    "add_usage_bytes",
     "usage_snapshot",
     "reset_model_usage",
 ]

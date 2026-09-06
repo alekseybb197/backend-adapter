@@ -61,6 +61,42 @@ class TestStreamOpenAItoAnthropic:
         assert "content_block_stop" in output
         assert "message_stop" in output
 
+    def test_bytes_sink_accumulates_raw_lines(self):
+        """bytes_sink=[0] sums ALL raw lines (incl. blank / non-data)."""
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_to_anthropic
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "H"}, "index": 0}]}\n\n',
+            b"\n",
+            b': keepalive comment line\n\n',
+            b'data: {"choices": [{"delta": {"content": "i"}, "index": 0}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        wfile = FakeWfile()
+        stream = FakeRespStream(lines)
+        sink = [0]
+        stream_openai_to_anthropic(
+            stream, wfile, "test", "sess", "req",
+            approx_prompt_chars=20, bytes_sink=sink,
+        )
+        assert sink[0] == sum(len(l) for l in lines)
+
+    def test_bytes_sink_optional(self):
+        """Without bytes_sink the converter behaves exactly as before."""
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_to_anthropic
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "H"}, "index": 0}]}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+        wfile = FakeWfile()
+        stream = FakeRespStream(lines)
+        stop_reason, usage = stream_openai_to_anthropic(
+            stream, wfile, "test", "sess", "req", approx_prompt_chars=20
+        )
+        assert stop_reason == "stop"
+        assert "message_stop" in wfile.data.decode()
+
     def test_tool_calls_from_chunks(self):
         _reload_all()
         from backend_adapter.streaming import stream_openai_to_anthropic

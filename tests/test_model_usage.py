@@ -9,6 +9,8 @@ Tests cover:
   - flag off: accounting kept, no probe
   - concurrency: two first calls to one model → one probe; distinct models
     both recorded
+  - add_usage_bytes: accumulates traffic counters (bytes_sent/bytes_recv),
+    flag off / zero / missing row → no-op
   - snapshot is a copy in insertion order; reset clears
 """
 import threading
@@ -83,9 +85,75 @@ class TestRecordBasic:
         rows = mu.usage_snapshot()
         assert len(rows) == 1
         assert rows[0]["calls"] == 2
+        assert rows[0]["bytes_sent"] == 0
+        assert rows[0]["bytes_recv"] == 0
         assert rows[0]["backend"] == "AAA"
         assert rows[0]["endpoints"] == {}
         assert rows[0]["probing"] is False
+
+
+class TestAddUsageBytes:
+    """add_usage_bytes: traffic counters accumulate on the existing row."""
+
+    def test_accumulates_on_existing_row(self):
+        """Two calls add up; counters live independently."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
+        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(
+                mu, "_probe_model_endpoints",
+                return_value={"endpoints": {}, "errors": {}},
+            ):
+                mu.record_model_usage("m")
+        mu.add_usage_bytes("m", 100, 50)
+        mu.add_usage_bytes("m", 20, 5)
+        rows = mu.usage_snapshot()
+        assert rows[0]["bytes_sent"] == 120
+        assert rows[0]["bytes_recv"] == 55
+        assert rows[0]["calls"] == 1  # трафик счётчик вызовов не трогает
+
+    def test_zeros_are_noop(self):
+        """sent=0/recv=0 → counters unchanged."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
+        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(
+                mu, "_probe_model_endpoints",
+                return_value={"endpoints": {}, "errors": {}},
+            ):
+                mu.record_model_usage("m")
+        mu.add_usage_bytes("m", 0, 0)
+        rows = mu.usage_snapshot()
+        assert rows[0]["bytes_sent"] == 0
+        assert rows[0]["bytes_recv"] == 0
+
+    def test_flag_off_noop(self):
+        """ADAPTER_MODEL_USAGE_ENABLE=False → nothing accumulates."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
+        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(
+                mu, "_probe_model_endpoints",
+                return_value={"endpoints": {}, "errors": {}},
+            ):
+                mu.record_model_usage("m")
+        mu.add_usage_bytes("m", 100, 50)
+        rows = mu.usage_snapshot()
+        assert rows[0]["bytes_sent"] == 0
+        assert rows[0]["bytes_recv"] == 0
+
+    def test_missing_row_noop(self):
+        """No row for the model → nothing created, nothing raised."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        mu.add_usage_bytes("ghost", 100, 50)  # must not raise
+        assert mu.usage_snapshot() == []
 
 
 class TestRecordProbeModel:
