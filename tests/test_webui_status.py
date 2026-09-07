@@ -601,14 +601,14 @@ class TestUsageSection:
         assert body.index(">m0</td>") < body.index(">m1</td>") < body.index(">m2</td>")
 
     def test_section_after_backends_table(self):
-        # Порядок блоков: таблица бэкендов → футер «Список моделей обновлён»
-        # + кнопка «⟳ Проверить сейчас» → заголовок «Models in use» →
+        # Порядок блоков: таблица бэкендов → футер «Список провайдеров
+        # обновлён» + кнопка «⟳ Перепроверить» → заголовок «Models in use» →
         # usage-таблица (строки моделей).
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-a")])
-        assert body.index("</table>") < body.index("Список моделей обновлён")
-        assert body.index("Список моделей обновлён") < body.index("⟳ Проверить сейчас")
-        assert body.index("⟳ Проверить сейчас") < body.index("Models in use")
+        assert body.index("</table>") < body.index("Список провайдеров обновлён")
+        assert body.index("Список провайдеров обновлён") < body.index("⟳ Перепроверить")
+        assert body.index("⟳ Перепроверить") < body.index("Models in use")
         assert body.index("Models in use") < body.index(">m-a</td>")
 
     def test_endpoints_cell_lists_only_found(self):
@@ -873,7 +873,7 @@ class TestRenderAfterRefresh:
         body = ws._render_status_page(self._ctx(), refresh=_done_job(True, 1)).decode()
         assert "new-m1" in body
         assert "недоступен" not in body
-        assert "Список моделей обновлён" in body
+        assert "Список провайдеров обновлён" in body
 
     def test_partial_failure_shows_error_and_ok_row(self):
         # Частичный успех: упавший бэкенд — «недоступен (текст)», живые —
@@ -892,7 +892,7 @@ class TestRenderAfterRefresh:
         assert "недоступен" in body
         assert "Connection refused by test" in body
         assert "m-a" in body
-        assert "Список моделей обновлён" in body
+        assert "Список провайдеров обновлён" in body
 
     def test_full_failure_keeps_old_cache_shown(self):
         # ok=False: refresh кэш не тронул — страница показывает прежний
@@ -905,13 +905,13 @@ class TestRenderAfterRefresh:
         refresh = _done_job(False, 1, errors={"AAA": "Connection refused by test"})
         body = ws._render_status_page(self._ctx(), refresh=refresh).decode()
         assert "old-m" in body            # старый кэш не стёрт
-        assert "Не удалось обновить" in body
+        assert "Не удалось обновить список провайдеров" in body
         assert "Connection refused by test" in body
 
     def test_refresh_none_footer_mentions_button(self):
         config, ws = _fresh_modules()
         body = ws._render_status_page(self._ctx()).decode()
-        assert "по кнопке" in body and "Проверить сейчас" in body
+        assert "по кнопке" in body and "Перепроверить" in body
 
     def test_endpoint_absent_from_errors_after_partial_is_ok(self):
         # Бэкенд без ошибки в refresh — статус из snapshot («ok»), даже если
@@ -957,7 +957,7 @@ class TestStatusHTTP:
                     assert "0.0.0-test" in body       # версия из контекста сервера
                     assert "AAA" in body
                     assert "http://aaa.local" in body
-                    assert "Список моделей обновлён" in body
+                    assert "Список провайдеров обновлён" in body
                     assert "12:34:56" in body
                 finally:
                     httpd.shutdown()
@@ -986,7 +986,7 @@ class TestStatusHTTP:
                 status, body = _http_get(port, "/")
                 assert status == 200
                 assert "Проверка выполняется" in body
-                assert "Проверить сейчас" in body
+                assert "Перепроверить" in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -1075,7 +1075,7 @@ class TestStatusHTTP:
                 status, body = _http_get(port, "/")
                 assert status == 200
                 assert "old-m" in body
-                assert "Не удалось обновить" in body
+                assert "Не удалось обновить список провайдеров" in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -1524,8 +1524,8 @@ class TestModelUsageReprobeAPI:
             assert "Перепроверка модели" in body
             assert "выполняется" in body
             assert "проверяется…" in body
-            assert "Перепроверить</button>" not in body
-            assert "Сбросить</button>" not in body
+            assert ">Перепроверить</button>" not in body   # кнопки строки нет
+            assert ">Сбросить</button>" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" in body
         finally:
             httpd.shutdown()
@@ -1548,8 +1548,8 @@ class TestModelUsageReprobeAPI:
             assert status == 200
             assert "Перепроверка модели" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
-            assert "Перепроверить</button>" in body
-            assert "Сбросить</button>" in body
+            assert ">Перепроверить</button>" in body      # кнопка строки на месте
+            assert ">Сбросить</button>" in body
         finally:
             httpd.shutdown()
             httpd.server_close()

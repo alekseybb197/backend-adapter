@@ -282,6 +282,62 @@ class TestRecordProbeModel:
         assert rows[0]["probing"] is False
 
 
+class TestProbeModelEndpointsPolicy:
+    """Прямые тесты model_usage._probe_model_endpoints под политику «только
+    явно указанные пробы» (v0.8.5): эндпоинт пробуется ТОЛЬКО если он
+    перечислен в probe-ключе бэкенда с непустой моделью; пробуем resolved
+    (моделью запроса), а не probe-модель."""
+
+    def test_only_listed_endpoints_probed(self):
+        config, mu = _fresh()
+        backend_cfg = {
+            "name": "AAA", "base": "http://aaa.local", "key": "k",
+            "probe": {"completions": "some-model", "responses": "another"},
+        }
+        captured = {}
+
+        def recording_probe(backend, probes, timeout=None):
+            captured["probes"] = probes
+            return {"endpoints": {}, "errors": {}}
+
+        with mock.patch.object(config, "_probe_backend_endpoints",
+                               side_effect=recording_probe):
+            result = mu._probe_model_endpoints(backend_cfg, "resolved-m")
+        # Пробуются только пути, перечисленные в probe; модели — resolved
+        assert captured["probes"] == {
+            "/v1/chat/completions": "resolved-m",
+            "/v1/responses": "resolved-m",
+        }
+        assert result == {"endpoints": {}, "errors": {}}
+
+    def test_no_probe_key_returns_empty(self):
+        """Ключа probe нет вовсе → проб нет: пустой результат, сеть не ходила."""
+        config, mu = _fresh()
+        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
+        with mock.patch.object(config, "_probe_backend_endpoints") as m_probe:
+            result = mu._probe_model_endpoints(backend_cfg, "m")
+        m_probe.assert_not_called()
+        assert result == {"endpoints": {}, "errors": {}}
+
+    def test_empty_probe_values_not_probed(self):
+        """Пустые значения (messages:) — не пробуются (только непустые)."""
+        config, mu = _fresh()
+        backend_cfg = {
+            "name": "AAA", "base": "http://aaa.local", "key": "k",
+            "probe": {"completions": "m", "messages": ""},
+        }
+        captured = {}
+
+        def recording_probe(backend, probes, timeout=None):
+            captured["probes"] = probes
+            return {"endpoints": {}, "errors": {}}
+
+        with mock.patch.object(config, "_probe_backend_endpoints",
+                               side_effect=recording_probe):
+            mu._probe_model_endpoints(backend_cfg, "m")
+        assert set(captured["probes"]) == {"/v1/chat/completions"}
+
+
 class TestRecordConcurrency:
     def test_concurrent_first_calls_probe_once(self):
         """Two threads, same model: probe called once, calls==2."""

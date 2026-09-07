@@ -634,17 +634,31 @@ def _backend_has_model(backend_cfg: dict, resolved: str) -> bool:
 
 
 def _probe_model_endpoints(backend_cfg: dict, resolved: str) -> dict:
-    """Синхронная проба 4 эндпоинтов модели у бэкенда (вызывается вне лока).
+    """Синхронная проба эндпоинтов модели у бэкенда (вызывается вне лока).
 
-    Собирает probes {путь: resolved} на все config.ENDPOINT_PROBES и зовёт
-    низкоуровневую config._probe_backend_endpoints (та же классификация:
-    found ⇔ HTTP 200, сеть/таймаут — found=False + текст в errors). Возвращает
-    нормализованный к схеме записи результат:
+    Политика пробы — «только явно указанные» (единая с фоновой проверкой
+    config.probe_endpoints): эндпоинт пробуется ТОЛЬКО если он перечислен в
+    ключе probe YAML-записи бэкенда с НЕПУСТОЙ моделью. Неперечисленные,
+    пустые значения и отсутствие ключа probe вовсе — не пробуются. Пробуем
+    resolved (моделью ЗАПРОСА), но только для эндпоинтов из probe-перечня
+    бэкенда (политика «какие эндпоинты пробовать» едина с фоновой проверкой;
+    «кем» в usage-строке — фактическая модель запроса). Если проба не задана
+    ни для одного эндпоинта — возвращается пустой результат (модель учтена,
+    проб нет; колонки эндпоинтов «—»).
+
+    Зовёт низкоуровневую config._probe_backend_endpoints (та же
+    классификация: found ⇔ HTTP 200, сеть/таймаут — found=False + текст в
+    errors). Возвращает нормализованный к схеме записи результат:
       {"endpoints": {pname: {"status": int|None, "found": bool}}, "errors": {...}}
     — ключи по коротким именам ENDPOINT_PROBES (не пути), чтобы webui рендерил
     колонки без нормализации. Отдельная функция: её мокают тесты (в т.ч.
     _setup_adapter в test_server), не трогая config."""
-    probes = {path: resolved for _pname, path, _tpl in config.ENDPOINT_PROBES}
+    probe_cfg = backend_cfg.get("probe") or {}
+    probes = {
+        path: resolved for pname, path, _tpl in config.ENDPOINT_PROBES if probe_cfg.get(pname)
+    }
+    if not probes:
+        return {"endpoints": {}, "errors": {}}
     result = config._probe_backend_endpoints(backend_cfg, probes, timeout=MODEL_USAGE_PROBE_TIMEOUT)
     endpoints = {}
     for pname, path, _tpl in config.ENDPOINT_PROBES:
