@@ -31,6 +31,10 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     usage_snapshot(), снимок из памяти, сети к бэкендам нет) и обновляет
     только ячейки счётчиков. Оверхед — один маленький JSON-ответ раз в 5 с
     на открытую вкладку; при скрытой вкладке браузер сам троттлит таймеры.
+    Колонка Cost — стоимость накопленных токенов строки по тарифу модели
+    (ADAPTER_MODELS_TARIFFS, см. model_usage.lookup_tariff): считается на
+    лету из токенов и тарифа на момент отображения, поллингом НЕ
+    обновляется (производная — пересчитается при следующем рендере).
 
 Откуда данные:
   - Проверка бэкендов запускается:
@@ -266,6 +270,37 @@ def _api_html(api: dict | None) -> str:
     return "<br>".join(parts)
 
 
+def _cost_cell_html(row: dict) -> str:
+    """HTML ячейки «Cost» строки таблицы Models in use.
+
+    Стоимость считается НА ЛЕТУ из токенов строки и тарифа на момент
+    отображения: cost = input_tokens×input_price/price_per +
+    output_tokens×output_price/price_per (model_usage.lookup_tariff —
+    кэш, без сети и диска; см. формат тарифов в config.
+    ADAPTER_MODELS_TARIFFS). Модели нет в тарифах / нулевая цена
+    (бесплатная модель) / токены ещё не накоплены (0/0 — после «Сбросить»)
+    → серая «—»: рендер различать эти случаи не обязан, главное — нулевая
+    цена не роняет рендер. Серая «—» выводится и при нечитаемом/пустом
+    файле тарифов. Ячейка НЕ несёт data-атрибута и не обновляется JS
+    usage_poll (счётчики обновляются; Cost — производная, пересчитается
+    при следующем полноценном рендере страницы)."""
+    tokens_in = max(int(row.get("input_tokens", 0) or 0), 0)
+    tokens_out = max(int(row.get("output_tokens", 0) or 0), 0)
+    if tokens_in <= 0 and tokens_out <= 0:
+        return '<span style="color:#aaa">—</span>'
+    tariff = model_usage.lookup_tariff(str(row.get("model", "")), str(row.get("backend", "")))
+    if tariff is None:
+        return '<span style="color:#aaa">—</span>'
+    cost = (
+        tokens_in * tariff["input_price"] / tariff["price_per"]
+        + tokens_out * tariff["output_price"] / tariff["price_per"]
+    )
+    if cost <= 0:
+        # Нулевая цена (бесплатная модель) — «—», как «нет тарифа/токенов».
+        return '<span style="color:#aaa">—</span>'
+    return _fmt_cost(cost, tariff["currency"])
+
+
 def _endpoints_cell_html(row: dict) -> str:
     """HTML ячейки «Endpoints» строки таблицы Models in use.
 
@@ -309,6 +344,24 @@ def _compact_number(n: int) -> str:
         return str(n)
 
 
+def _fmt_cost(cost: float, currency: str) -> str:
+    """Формат стоимости для колонки Cost: «0,25 USD», «133 RUB».
+
+    Стоимость ≤ 0 (нет токенов / бесплатная модель — нулевая цена) → «--»:
+    рендер различает «нет данных» и «бесплатно» не обязан (см.
+    _usage_rows_html — нулевая цена не роняет рендер). До 10 000 — точное
+    число с запятой-разделителем и ДВУМЯ знаками («1234,56 USD»): деньги
+    принято писать точно. ≥ 10 000 — компактно как токены (_compact_number
+    на округлённом целом): колонка остаётся узкой на больших суммах
+    («12k3 USD»). locale НЕ используется — формат свой (запятая — десятичный
+    разделитель, как в тарифах YAML-файла)."""
+    if cost <= 0 or not currency:
+        return "—"
+    if cost < 10_000:
+        return f"{cost:.2f}".replace(".", ",") + " " + currency
+    return _compact_number(int(cost)) + " " + currency
+
+
 def _actions_cell_html(model: str, reprobing: bool = False) -> str:
     """HTML ячейки действий строки таблицы использованных моделей.
 
@@ -345,19 +398,21 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     """HTML строк таблицы Models in use (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
-    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Endpoints |
+    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Endpoints |
     Действия. Колонка Endpoints перечисляет только доступные эндпоинты
     (found=True) короткими именами через запятую (см. _endpoints_cell_html).
     input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
     _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
-    Ячейки счётчиков несут data-атрибуты (data-calls/data-input/data-output)
-    с ТОЧНЫМИ значениями — JS usage_poll обновляет их textContent по
-    /api/model-usage/snapshot без перезагрузки страницы (см. usage_poll в
-    _render_status_page). ``reprobing`` — карта client_model → True: у строки
-    идёт фоновая перепроверка (баннер + авто-релоад); в ячейке действий
-    вместо кнопок — «проверяется…». Модель/бэкенд — html.escape;
-    «Перепроверить»/«Сбросить» — отдельные формы в последнем <td> (см.
-    _actions_cell_html)."""
+    Колонка Cost — стоимость накопленных токенов по тарифу модели на момент
+    отображения (см. _cost_cell_html / _fmt_cost; «--» — модели нет в
+    тарифах, бесплатная модель или токенов ещё нет). Ячейки счётчиков несут
+    data-атрибуты (data-calls/data-input/data-output) с ТОЧНЫМИ значениями —
+    JS usage_poll обновляет их textContent по /api/model-usage/snapshot без
+    перезагрузки страницы (см. usage_poll в _render_status_page). ``reprobing``
+    — карта client_model → True: у строки идёт фоновая перепроверка (баннер +
+    авто-релоад); в ячейке действий вместо кнопок — «проверяется…».
+    Модель/бэкенд — html.escape; «Перепроверить»/«Сбросить» — отдельные
+    формы в последнем <td> (см. _actions_cell_html)."""
     body = []
     for i, r in enumerate(rows):
         reprobing_row = bool(reprobing and reprobing.get(r["model"]))
@@ -371,13 +426,14 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
             f'<td data-calls="{calls}">{calls}</td>'
             f'<td data-input="{input_tokens}">{_compact_number(input_tokens)}</td>'
             f'<td data-output="{output_tokens}">{_compact_number(output_tokens)}</td>'
+            f"<td>{_cost_cell_html(r)}</td>"
             f"<td>{_endpoints_cell_html(r)}</td>"
             f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="7" style="color:#888">пока нет данных — '
+            '<tr><td colspan="8" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -425,6 +481,13 @@ def _render_status_page(
     изменилось (сброс/новая модель) — location.reload() перерисует
     таблицу; эндпоинты строк в этом поллинге не трогаются (их меняет
     только reprobe, у которого свой авто-релоад)."""
+    # Колонка Cost строк Models in use считается по тарифу на момент
+    # отображения: каждый полноценный рендер страницы (GET "/", перезагрузка)
+    # перечитывает маленький файл тарифов с диска (model_usage.
+    # ensure_tariffs_loaded — см. ADAPTER_MODELS_TARIFFS). Лёгкий поллинг
+    # usage_poll (снимок JSON) тарифы НЕ трогает — Cost обновится при
+    # следующем рендере (это осознанно, см. _cost_cell_html).
+    model_usage.ensure_tariffs_loaded()
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
@@ -671,7 +734,7 @@ def _render_status_page(
 </form>
 <h3 style="margin-top:24px">Models in use</h3>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Endpoints</th><th>Действия</th></tr>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Действия</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
@@ -947,9 +1010,12 @@ __all__ = [
     "_models_html",
     "_api_html",
     "_endpoints_cell_html",
+    "_cost_cell_html",
     "_usage_rows_html",
     "_actions_cell_html",
     "_fmt_tokens",
+    "_compact_number",
+    "_fmt_cost",
     "_render_status_page",
     "StatusEndpoint",
     "RefreshStateEndpoint",

@@ -60,6 +60,9 @@ def fresh_env(monkeypatch):
         # Persistence of the used-models table: sane default for tests (probe
         # of the interval value happens on config import).
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
+        # Tariffs file for the Cost column: empty by default (no tariffs — the
+        # Cost column renders "—"); tariff tests point it at a tmp file.
+        "ADAPTER_MODELS_TARIFFS": "",
         "ADAPTER_DEBUG_TAGS_OUT": "0",
         "ADAPTER_DEBUG_TAGS_FULL": "",
         "ADAPTER_WEBUI_ENABLE": "0",
@@ -112,6 +115,7 @@ def _default_config():
         # Used-models table: endpoint probes off by default (see fresh_env).
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
+        "ADAPTER_MODELS_TARIFFS": "",
         "ADAPTER_DEBUG_TAGS_OUT": "0",
         "ADAPTER_DEBUG_TAGS_FULL": "",
         "ADAPTER_WEBUI_ENABLE": "0",
@@ -189,6 +193,10 @@ def isolate_logs(fresh_env):
 
     model_usage.reset_model_usage()
     model_usage.set_persist_path("")
+    # Reset tariff cache (module global) so tests don't leak tariffs across
+    # each other (the cache repopulates on first use).
+    with model_usage._TARIFF_LOCK:
+        model_usage._TARIFFS.clear()
 
     yield
 

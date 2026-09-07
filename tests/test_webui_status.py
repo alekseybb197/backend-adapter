@@ -536,8 +536,8 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 7 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|Endpoints|Действия).
+        # Заголовок секции + 8 колонок (Модель|Бэкенд|Вызовов|Input|
+        # Output|Cost|Endpoints|Действия).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Models in use</h3>" in body
@@ -547,6 +547,7 @@ class TestUsageSection:
         assert "<th>Вызовов</th>" in body
         assert "<th>Input</th>" in body
         assert "<th>Output</th>" in body
+        assert "<th>Cost</th>" in body
         assert "<th>Endpoints</th>" in body
         assert "<th>completions</th>" not in body
         assert "<th>messages</th>" not in body
@@ -577,8 +578,10 @@ class TestUsageSection:
         assert "m-ok" in body and "m-none" in body
         # доступные эндпоинты — зелёным именем (одно на обе строки)
         assert body.count('style="color:#1a7f37">completions</span>') == 1
-        # серых «—» (пустая ячейка Endpoints) — ровно одна, у m-none
-        assert body.count('style="color:#aaa">—</span>') == 1
+        # серых «—» ровно три: Cost у m-ok (токены 0), Cost у m-none (токены 0)
+        # и Endpoints у m-none (доступных нет) — колонка Cost не добавляет
+        # четвёртую: у m-ok она «—» по нулевым токенам, а не по Endpoints.
+        assert body.count('style="color:#aaa">—</span>') == 3
         # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
         assert 'data-calls="1">1</td>' in body  # calls строки m-none
@@ -639,16 +642,17 @@ class TestUsageSection:
         })) == '<span style="color:#aaa">—</span>'
 
     def test_usage_rows_unit_empty_and_nonempty(self):
-        # _usage_rows_html: одна ячейка Endpoints на строку + плейсхолдер пустого.
+        # _usage_rows_html: одна ячейка Cost/Endpoints на строку + плейсхолдер
+        # пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"7\"" in html
+        assert "пока нет данных" in html and "<td colspan=\"8\"" in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+Endpoints+Действия = 7 ячеек
-        assert html.count("<td") == 7
+        # модель+бэкенд+вызовов+input+output+Cost+Endpoints+Действия = 8 ячеек
+        assert html.count("<td") == 8
         assert 'id="usage-row-0"' in html
         assert 'data-calls="1"' in html
         assert "completions" in html  # доступный эндпоинт — в ячейке Endpoints
@@ -709,7 +713,7 @@ class TestUsageSection:
         assert "color:#c0392b" in body  # красная ссылка-кнопка сброса
         # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
-        assert row_html.count("<td") == 7  # в т.ч. ячейка действий — одна
+        assert row_html.count("<td") == 8  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
         # Имя модели со спецсимволами в обеих формах: quote(safe="") +
@@ -746,12 +750,12 @@ class TestUsageSection:
         assert html.index("m-a") < html.index("проверяется…")
 
     def test_empty_table_no_reset_forms(self):
-        # У пустой таблицы (заглушка colspan=7) форм сброса/перепроверки нет.
+        # У пустой таблицы (заглушка colspan=8) форм сброса/перепроверки нет.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[])
         assert 'form method="post" action="/api/model-usage/reset' not in body
         assert 'form method="post" action="/api/model-usage/reprobe' not in body
-        assert "colspan=\"7\"" in body
+        assert "colspan=\"8\"" in body
 
     def test_page_header_is_backend_adapter(self):
         # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —
@@ -761,6 +765,137 @@ class TestUsageSection:
         assert "Backend-Adapter — статус" in body
         assert "[CC]-adapter" not in body
         assert "https://github.com/alekseybb197/backend-adapter" in body
+
+
+# ---------------------------------------------------------------------------
+# TestCostCell — колонка Cost строк Models in use (ADAPTER_MODELS_TARIFFS)
+# ---------------------------------------------------------------------------
+
+def _seed_tariffs(config, ws, path, entries):
+    """Записать файл тарифов, навести config.ADAPTER_MODELS_TARIFFS и
+    перечитать кэш (как это делает полноценный рендер страницы через
+    model_usage.ensure_tariffs_loaded). Вернуть (config, ws)."""
+    import yaml as _yaml
+    with open(path, "w", encoding="utf-8") as f:
+        _yaml.safe_dump({"tariffs": entries}, f)
+    config.ADAPTER_MODELS_TARIFFS = str(path)
+    from backend_adapter import model_usage
+    model_usage.ensure_tariffs_loaded()
+    return config, ws
+
+
+class TestCostCell:
+    """Ячейка Cost: считается на лету из токенов строки и тарифа на момент
+    отображения; «--» — нет тарифа / бесплатная модель / токенов ещё нет."""
+
+    def test_cost_cell_computed_from_tokens(self, tmp_path):
+        # input=1000×10/1M + output=2000×20/1M → 0.01+0.04 = 0,05 USD
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m-paid", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        row = ws._usage_rows_html([self._row(
+            "m-paid", input_tokens=1000, output_tokens=2000)])
+        assert "0,05 USD" in row
+        # ровно одна ячейка Cost (не задвоилась)
+        assert row.count("0,05 USD") == 1
+
+    def test_cost_cell_no_tariff_dash(self, tmp_path):
+        # Модель не в тарифах (файл пуст/не задан) → «--», не смотря на токены.
+        config, ws = _fresh_modules()
+        row = self._row("m-x", input_tokens=1000, output_tokens=2000)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+        # явный файл, но без записи про m-x — тоже «--»
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "other", "input_price": 1, "output_price": 1,
+             "currency": "USD"},
+        ])
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+
+    def test_cost_cell_zero_tokens_dash(self, tmp_path):
+        # Токенов ещё нет (после «Сбросить» / свежая строка) → «--», даже если
+        # тариф есть (0 × цена = 0 неотличимо от «нет данных» на странице).
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        row = self._row("m", input_tokens=0, output_tokens=0)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+
+    def test_cost_cell_zero_price_is_free_dash(self, tmp_path):
+        # Бесплатная модель (нулевые цены) — в тарифах, но Cost «--» (цена 0).
+        # Нулевая цена не роняет рендер (защита от деления на ноль в том
+        # числе: price_per по умолчанию 1).
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m-free", "input_price": 0, "output_price": 0,
+             "currency": "USD"},
+        ])
+        row = self._row("m-free", input_tokens=1000, output_tokens=2000)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+
+    def test_cost_cell_currency_and_backend_match(self, tmp_path):
+        # Тариф с backend матчится только для этого бэкенда; у другого — «--».
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m", "backend": "AAA", "input_price": 1, "output_price": 2,
+             "currency": "RUB", "price_per": 1},
+        ])
+        row_aaa = self._row("m", backend="AAA", input_tokens=100, output_tokens=50)
+        assert "200,00 RUB" in ws._cost_cell_html(row_aaa)  # 100×1+50×2 = 200
+        row_bbb = self._row("m", backend="BBB", input_tokens=100, output_tokens=50)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row_bbb)
+
+    def test_cost_cell_rounds_like_tokens(self, tmp_path):
+        # Сумма ≥ 10 000 — компактно как токены («12k3 USD»), меньше — точно
+        # с двумя знаками и запятой.
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m", "input_price": 1, "output_price": 1,
+             "currency": "USD", "price_per": 1},
+        ])
+        row = self._row("m", input_tokens=12345, output_tokens=0)
+        assert "12k3 USD" in ws._cost_cell_html(row)
+
+    def _row(self, model, backend="AAA", calls=1, endpoints=None,
+             input_tokens=0, output_tokens=0):
+        return {
+            "model": model,
+            "backend": backend,
+            "calls": calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "endpoints": endpoints or {},
+            "errors": {},
+            "first_seen": "10:00:00",
+            "probing": False,
+        }
+
+
+class TestFmtCost:
+    def _fmt(self, cost, currency="USD"):
+        config, ws = _fresh_modules()
+        return ws._fmt_cost(cost, currency)
+
+    def test_exact_two_decimals_comma(self):
+        # Запятая — десятичный разделитель, два знака до 10 000.
+        assert self._fmt(0.25, "USD") == "0,25 USD"
+        assert self._fmt(133.0, "RUB") == "133,00 RUB"
+        assert self._fmt(1234.56, "USD") == "1234,56 USD"
+        assert self._fmt(9999.99, "EUR") == "9999,99 EUR"
+
+    def test_compact_above_ten_thousand(self):
+        # ≥ 10 000 — компактно как токены (колонка узкая), с валютой.
+        assert self._fmt(12345.0, "USD") == "12k3 USD"
+        assert self._fmt(12345678.0, "RUB") == "12m3 RUB"
+
+    def test_zero_or_negative_dash(self):
+        # ≤ 0 (бесплатно/нет токенов) — «--»; пустая валюта — тоже «--».
+        assert self._fmt(0.0, "USD") == "—"
+        assert self._fmt(0.0, "") == "—"
+        assert self._fmt(-1.0, "USD") == "—"
 
 
 # ---------------------------------------------------------------------------

@@ -1099,3 +1099,178 @@ class TestReprobe:
                     while mu.reprobe_state()["running"] and time.time() < deadline:
                         time.sleep(0.02)
         assert mu.reprobe_state()["running"] is False
+
+
+# ---------------------------------------------------------------------------
+# Tariffs for the Cost column (ADAPTER_MODELS_TARIFFS, v0.8.6)
+# ---------------------------------------------------------------------------
+
+def _write_tariffs(path, entries):
+    """Записать YAML-файл тарифов {"tariffs": [entries]}."""
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump({"tariffs": entries}, f)
+
+
+class TestTariffs:
+    """Загрузка и lookup тарифов моделей (колонка Cost).
+
+    Источник — YAML по config.ADAPTER_MODELS_TARIFFS; формат с запятой как
+    десятичным разделителем ("0,02"); матчинг: точный (name+backend) →
+    wildcard (name без backend) → None. Читается с диска по событиям
+    «загрузка usage-файла» (_ensure_loaded_locked) и «новая модель»
+    (record_model_usage) — см. ensure_tariffs_loaded для рендера."""
+
+    def _point_tariffs(self, config, mu, tmp_path, entries):
+        """Записать файл тарифов и навести config.ADAPTER_MODELS_TARIFFS
+        на него. Возвращает путь файла."""
+        path = str(tmp_path / "tariffs.yaml")
+        _write_tariffs(path, entries)
+        config.ADAPTER_MODELS_TARIFFS = path
+        return path
+
+    def test_lookup_exact_match_and_wildcard(self, tmp_path):
+        config, mu = _fresh()
+        path = self._point_tariffs(config, mu, tmp_path, [
+            {"name": "paid", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+            {"name": "model-x", "backend": "AAA",
+             "input_price": 1, "output_price": 2, "currency": "RUB"},
+            {"name": "free", "input_price": 0, "output_price": 0,
+             "currency": "USD"},
+        ])
+        # точный (name+backend) бьёт wildcard по бэкенду
+        mu.ensure_tariffs_loaded()
+        t = mu.lookup_tariff("model-x", "AAA")
+        assert t is not None and t["currency"] == "RUB"
+        assert t["price_per"] == 1.0  # price_per отсутствовал → 1
+        # wildcard: paid задан без backend — матчит любой бэкенд
+        t = mu.lookup_tariff("paid", "BBB")
+        assert t is not None and t["currency"] == "USD"
+        assert t["input_price"] == 10.0
+        assert t["price_per"] == 1_000_000.0
+        # модели нет в тарифах / другой бэкенд у backend-тарифа
+        assert mu.lookup_tariff("nope", "AAA") is None
+        assert mu.lookup_tariff("model-x", "BBB") is None
+        # бесплатная модель — присутствует в тарифах (нулевые цены)
+        t = mu.lookup_tariff("free", "ZZZ")
+        assert t is not None and t["input_price"] == 0.0
+
+    def test_comma_decimal_separator(self, tmp_path):
+        """«0,02» (PyYAML читает как строку) нормализуется в 0.02."""
+        config, mu = _fresh()
+        path = self._point_tariffs(config, mu, tmp_path, [
+            {"name": "m", "input_price": "0,02", "output_price": "0,04",
+             "currency": "USD"},
+        ])
+        mu.ensure_tariffs_loaded()
+        t = mu.lookup_tariff("m", "AAA")
+        assert t["input_price"] == 0.02
+        assert t["output_price"] == 0.04
+
+    def test_broken_and_missing_files_empty(self, tmp_path):
+        """Пустой путь/битый файл/не-«tariffs»-структура → пусто, без
+        исключений (колонка Cost — «--»)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODELS_TARIFFS = str(tmp_path / "nope.yaml")
+        mu.ensure_tariffs_loaded()
+        assert mu.lookup_tariff("m", "AAA") is None
+        bad = tmp_path / "bad.yaml"
+        bad.write_text("not: [valid\n yaml: *anchor")
+        config.ADAPTER_MODELS_TARIFFS = str(bad)
+        mu.ensure_tariffs_loaded()
+        assert mu.lookup_tariff("m", "AAA") is None
+        # структурно неверный корень (не dict с tariffs-списком)
+        root = tmp_path / "root.yaml"
+        _write_tariffs(root, "not-a-list")
+        config.ADAPTER_MODELS_TARIFFS = str(root)
+        mu.ensure_tariffs_loaded()
+        assert mu.lookup_tariff("m", "AAA") is None
+
+    def test_junk_entries_skipped(self, tmp_path):
+        """Записи с мусором пропускаются, остальные грузятся."""
+        config, mu = _fresh()
+        path = self._point_tariffs(config, mu, tmp_path, [
+            {"name": "ok", "input_price": 1, "output_price": 2,
+             "currency": "USD"},
+            {"name": "no-currency", "input_price": 1, "output_price": 2},
+            {"backend": "AAA", "input_price": 1, "output_price": 2,
+             "currency": "USD"},  # нет name
+            {"name": "bad-price", "input_price": "abc", "output_price": 2,
+             "currency": "USD"},
+            {"name": "bad-per", "input_price": 1, "output_price": 2,
+             "currency": "USD", "price_per": 0},
+            {"name": "neg", "input_price": -5, "output_price": "x",
+             "currency": "USD"},
+        ])
+        mu.ensure_tariffs_loaded()
+        assert mu.lookup_tariff("ok", "A") is not None
+        assert mu.lookup_tariff("no-currency", "A") is None
+        assert mu.lookup_tariff("bad-price", "A") is None
+        # price_per 0 → 1 (защита деления на ноль), цены валидны
+        t = mu.lookup_tariff("bad-per", "A")
+        assert t is not None and t["price_per"] == 1.0
+        # отрицательная цена не проходит (входная не-число тоже)
+        assert mu.lookup_tariff("neg", "A") is None
+
+    def test_lookup_returns_copy(self, tmp_path):
+        """Результат lookup_tariff — копия: мутация не трогает кэш."""
+        config, mu = _fresh()
+        path = self._point_tariffs(config, mu, tmp_path, [
+            {"name": "m", "input_price": 1, "output_price": 2,
+             "currency": "USD"},
+        ])
+        mu.ensure_tariffs_loaded()
+        t1 = mu.lookup_tariff("m", "A")
+        t2 = mu.lookup_tariff("m", "A")
+        assert t1 == t2 and t1 is not t2
+        t1["currency"] = "EUR"
+        assert mu.lookup_tariff("m", "A")["currency"] == "USD"
+
+    def test_reload_on_usage_load_and_new_model(self, tmp_path):
+        """Тарифы перечитываются при (а) загрузке usage-файла и (б) создании
+        новой строки модели — изменение файла между вызовами видно lookup."""
+        config, mu = _fresh()
+        # (б) новая модель: _ensure_loaded_locked в record_model_usage
+        persist_file = _persist(tmp_path, config, mu)
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        # файла model-usage.yaml нет — первая модель триггерит загрузку
+        # пустого файла (точка а) и создание строки (точка б)
+        tariffs = str(tmp_path / "t.yaml")
+        _write_tariffs(tariffs, [
+            {"name": "m", "input_price": 1, "output_price": 2, "currency": "USD"},
+        ])
+        config.ADAPTER_MODELS_TARIFFS = tariffs
+        # строка m создаётся → тарифы загружены
+        mu.record_model_usage("m")
+        assert mu.lookup_tariff("m", "") is not None
+        # меняем файл тарифов, создаём НОВУЮ модель m2 — тарифы
+        # перечитываются с диска (старый тариф m перечитан заново)
+        _write_tariffs(tariffs, [
+            {"name": "m", "input_price": 99, "output_price": 99, "currency": "RUB"},
+            {"name": "m2", "input_price": 3, "output_price": 4, "currency": "USD"},
+        ])
+        mu.record_model_usage("m2")
+        t = mu.lookup_tariff("m", "")
+        assert t["currency"] == "RUB" and t["input_price"] == 99.0
+        assert mu.lookup_tariff("m2", "") is not None
+
+    def test_reload_on_persist_load(self, tmp_path):
+        """Тарифы читаются при загрузке usage-файла с диска
+        (_ensure_loaded_locked: пустая память, файл model-usage.yaml есть)."""
+        config, mu = _fresh()
+        persist_file = _persist(tmp_path, config, mu)
+        # usage-файл на диске (как после рестарта) + файл тарифов
+        with open(persist_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump({"version": 2, "models": {
+                "m1": {"model": "m1", "calls": 5, "backend": "AAA",
+                       "input_tokens": 100, "output_tokens": 50}}}, f)
+        tariffs = str(tmp_path / "t.yaml")
+        _write_tariffs(tariffs, [
+            {"name": "m1", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        config.ADAPTER_MODELS_TARIFFS = tariffs
+        # первый usage_snapshot загружает usage-файл и триггерит тарифы
+        rows = mu.usage_snapshot()
+        assert len(rows) == 1
+        assert mu.lookup_tariff("m1", "AAA") is not None

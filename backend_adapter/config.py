@@ -356,6 +356,27 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
 # при штатном завершении таблица сохраняется всегда.
 ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
 
+# ADAPTER_MODELS_TARIFFS — путь к YAML-файлу с тарифами моделей (для колонки
+# Cost таблицы «Models in use» на статус-странице WEBUI). Формат (запятая —
+# десятичный разделитель цен):
+#   tariffs:
+#     - name: model-name        # имя клиентской модели (как в BODY запроса)
+#       backend: provider-name  # опционально; при задании тариф матчится
+#                               #   только для этого бэкенда, без поля — для
+#                               #   любого бэкенда (wildcard)
+#       input_price: 10         # цена за price_per входных токенов
+#       output_price: 20        # цена за price_per выходных токенов
+#       currency: RUB           # 3-буквенный код валюты (USD, RUB, …)
+#       price_per: 1000000      # база — на сколько токенов дана цена
+#                               #   (дефолт 1; 0/None трактуется как 1)
+# Пусто / не задано / файл не читается — колонка Cost показывает «--».
+# Нулевые цены — бесплатная модель (не ошибка; Cost тоже «--»: токены есть,
+# цена 0 → сумма 0). Список перечитывается с диска при загрузке накопленных
+# счётчиков из model-usage.yaml и при добавлении новой модели в таблицу
+# работающего адаптера (см. model_usage._load_tariffs_locked) — стоимость
+# всегда считается по тарифу на момент отображения.
+ADAPTER_MODELS_TARIFFS = os.environ.get("ADAPTER_MODELS_TARIFFS", "")
+
 # Глобальные структуры конфигурации бэкендов (единственный режим — YAML).
 # _BACKENDS — список [{name, base, key}, …]
 # _BACKEND_BY_NAME — name → config
