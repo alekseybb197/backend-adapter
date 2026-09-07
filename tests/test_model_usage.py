@@ -266,6 +266,194 @@ class TestRecordProbeModel:
         assert rows[0]["model"] == "m"
         assert rows[0]["probing"] is False
 
+
+class TestEndpointSync:
+    """Синхронизация found-эндпоинтов в config._ENDPOINT_STATE (v0.8.5,
+    задача 2): найденные пробой модели эндпоинты переносятся в кэш бэкенда
+    (колонка «Доступные API» и экспортёр видят их), только found=True и
+    только для бэкендов из числа настроенных (config._BACKEND_BY_NAME)."""
+
+    def _config(self):
+        _reload_config()
+        from backend_adapter import config
+        return config
+
+    def _backend(self, name="AAA"):
+        return {"name": name, "base": f"http://{name.lower()}.local", "key": "k"}
+
+    def _probe_result(self):
+        """Результат _probe_model_endpoints: два found + один не-found."""
+        return {
+            "endpoints": {
+                "completions": {"status": 200, "found": True},
+                "responses": {"status": 200, "found": True},
+                "embeddings": {"status": 500, "found": False},
+            },
+            "errors": {"embeddings": "HTTP 500"},
+        }
+
+    def test_record_syncs_found_endpoints_to_backend_state(self):
+        """Первая проба модели: found-эндпоинты видны в _ENDPOINT_STATE
+        бэкенда; не-found — не переносятся (синхронизируются ТОЛЬКО
+        находки, found=True ⇔ HTTP 200)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        backend_cfg = self._backend()
+        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
+        config._BACKENDS = [backend_cfg]
+        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(mu, "_probe_model_endpoints",
+                                   return_value=self._probe_result()):
+                mu.record_model_usage("m")
+        entry = config._ENDPOINT_STATE.get("AAA")
+        assert entry is not None
+        found = {p: v["found"] for p, v in entry["endpoints"].items()}
+        assert found == {
+            "/v1/chat/completions": True,
+            "/v1/responses": True,
+        }
+        # embeddings (found=False) в кэш бэкенда не синхронизирован.
+        assert "/v1/embeddings" not in entry["endpoints"]
+        assert entry["at"] > 0
+
+    def test_record_orphaned_backend_not_synced(self):
+        """Бэкенд вне _BACKEND_BY_NAME (удалён из YAML — строка-история):
+        синхронизации в кэш НЕТ."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        backend_cfg = self._backend("GONE")
+        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
+        # В _BACKEND_BY_NAME бэкенда нет — как после удаления из YAML.
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(mu, "_probe_model_endpoints",
+                                   return_value=self._probe_result()):
+                mu.record_model_usage("m")
+        assert "GONE" not in config._ENDPOINT_STATE
+        # Строка usage-таблицы осталась как история.
+        rows = mu.usage_snapshot()
+        assert rows[0]["model"] == "m"
+        assert rows[0]["backend"] == "GONE"
+
+    def test_record_probe_returns_empty_no_sync(self):
+        """Проба без эндпоинтов (политика — ничего не перечислено) →
+        синхронизировать нечего, запись бэкенда не создаётся."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        backend_cfg = self._backend()
+        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
+        config._BACKENDS = [backend_cfg]
+        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
+            with mock.patch.object(mu, "_probe_model_endpoints",
+                                   return_value={"endpoints": {}, "errors": {}}):
+                mu.record_model_usage("m")
+        assert config._ENDPOINT_STATE == {}
+
+    def test_reprobe_syncs_found_endpoints(self):
+        """«Перепроверить» строки (reprobe_model): перепробованные found —
+        в кэш бэкенда."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        config._BACKENDS = [self._backend()]
+        config._BACKEND_BY_NAME = {"AAA": self._backend()}
+        mu.reset_model_usage()
+        mu._TABLE["m"] = {
+            "model": "m", "backend": "AAA", "calls": 5,
+            "input_tokens": 0, "output_tokens": 0,
+            "endpoints": {}, "errors": {},
+            "first_seen": "10:00:00", "probing": False,
+        }
+        with mock.patch.object(config, "_resolve_backend",
+                               return_value=({"name": "AAA"}, "m")):
+            with mock.patch.object(mu, "_backend_has_model", return_value=True):
+                with mock.patch.object(mu, "_probe_model_endpoints",
+                                       return_value=self._probe_result()):
+                    assert mu.reprobe_model("m") is True
+        entry = config._ENDPOINT_STATE.get("AAA")
+        assert entry is not None
+        assert entry["endpoints"]["/v1/chat/completions"] == {"status": 200, "found": True}
+        # Не-found эндпоинты (embeddings, status 500) в кэш не синхронизируются.
+        assert "/v1/embeddings" not in entry["endpoints"]
+
+    def test_load_syncs_found_endpoints_from_file(self, tmp_path):
+        """Загрузка model-usage.yaml: found-эндпоинты загруженных строк для
+        настроенных бэкендов переносятся в кэш; строки НЕ перепробуются."""
+        config, mu = _fresh()
+        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
+        mu.set_persist_path(persist_file)
+        backend_cfg = self._backend()
+        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
+        config._BACKENDS = [backend_cfg]
+        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
+        with open(persist_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump({
+                "version": 2,
+                "models": {
+                    "m": {
+                        "model": "m", "backend": "AAA", "calls": 3,
+                        "input_tokens": 0, "output_tokens": 0,
+                        "endpoints": {
+                            "completions": {"status": 200, "found": True},
+                            "embeddings": {"status": 500, "found": False},
+                        },
+                        "errors": {}, "first_seen": "10:00:00", "probing": False,
+                    }
+                },
+            }, f)
+        with mock.patch.object(mu, "_probe_model_endpoints") as m_probe:
+            rows = mu.usage_snapshot()  # лениво читает файл
+        assert len(rows) == 1
+        m_probe.assert_not_called()  # контракт: загруженные строки не перепробуются
+        entry = config._ENDPOINT_STATE.get("AAA")
+        assert entry is not None
+        assert entry["endpoints"]["/v1/chat/completions"] == {"status": 200, "found": True}
+
+    def test_load_orphaned_backend_not_synced(self, tmp_path):
+        """Загруженная строка бэкенда, которого нет в настройках, кэш НЕ
+        пополняет (строка остаётся историей в usage-таблице)."""
+        config, mu = _fresh()
+        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
+        mu.set_persist_path(persist_file)
+        with open(persist_file, "w", encoding="utf-8") as f:
+            yaml.safe_dump({
+                "version": 2,
+                "models": {
+                    "m": {
+                        "model": "m", "backend": "GONE", "calls": 1,
+                        "endpoints": {
+                            "completions": {"status": 200, "found": True},
+                        },
+                        "errors": {}, "first_seen": "10:00:00", "probing": False,
+                    }
+                },
+            }, f)
+        rows = mu.usage_snapshot()
+        assert rows[0]["backend"] == "GONE"
+        assert config._ENDPOINT_STATE == {}
+
+    def test_sync_helper_calls_upsert_for_found_only(self):
+        """_sync_found_endpoints: upsert зовётся только для found-эндпоинтов,
+        с (name, pname, status, True); осиротевший бэкенд — ни одного вызова."""
+        config, mu = _fresh()
+        backend_cfg = self._backend()
+        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
+        source = {
+            "endpoints": {
+                "completions": {"status": 200, "found": True},
+                "embeddings": {"status": 500, "found": False},
+            }
+        }
+        with mock.patch.object(config, "upsert_endpoint_state") as m_upsert:
+            mu._sync_found_endpoints("AAA", source)
+        assert m_upsert.call_args_list == [
+            mock.call("AAA", "completions", 200, True),
+        ]
+        m_upsert.reset_mock()
+        with mock.patch.object(config, "upsert_endpoint_state") as m_upsert2:
+            mu._sync_found_endpoints("GONE", source)
+        m_upsert2.assert_not_called()
+
     def test_probe_exception_swallowed(self):
         """probe raises → row kept, nothing escapes."""
         config, mu = _fresh()

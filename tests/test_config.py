@@ -896,6 +896,65 @@ class TestReloadBackendConfig:
         assert state["providers"] == 1
 
 
+class TestUpsertEndpointState:
+    """Tests for config.upsert_endpoint_state — sync of found endpoints from
+    model_usage into the backend probe cache (v0.8.5, задача 2).
+
+    Contract: an endpoint found by a MODEL's smoke probe (found=True ⇔ HTTP
+    200) is written into _ENDPOINT_STATE[backend]["endpoints"][path] under
+    the backend's entry (created if missing), keyed by full path (resolved
+    from the short pname via ENDPOINT_PROBES), refreshing ``at``. Unknown
+    pname → no-op. Idempotent: a repeat write overwrites and refreshes ``at``."""
+
+    def _config(self):
+        _reload_config()
+        from backend_adapter import config
+
+        config._ENDPOINT_STATE.clear()
+        return config
+
+    def test_writes_found_endpoint_by_path(self):
+        """pname → full path; entry created for a fresh backend."""
+        config = self._config()
+        config.upsert_endpoint_state("AAA", "completions", 200, True)
+        entry = config._ENDPOINT_STATE["AAA"]
+        assert entry["endpoints"] == {
+            "/v1/chat/completions": {"status": 200, "found": True}
+        }
+        assert entry["errors"] == {}
+        assert entry["at"] > 0
+
+    def test_merges_into_existing_entry(self):
+        """Second upsert merges into the backend's endpoints (others kept)."""
+        config = self._config()
+        config._ENDPOINT_STATE["AAA"] = {
+            "at": 1.0,
+            "endpoints": {"/v1/responses": {"status": 200, "found": True}},
+            "errors": {"embeddings": "boom"},
+        }
+        config.upsert_endpoint_state("AAA", "completions", 404, False)
+        entry = config._ENDPOINT_STATE["AAA"]
+        assert set(entry["endpoints"]) == {"/v1/responses", "/v1/chat/completions"}
+        assert entry["endpoints"]["/v1/chat/completions"] == {"status": 404, "found": False}
+        assert entry["endpoints"]["/v1/responses"]["found"] is True
+        assert entry["errors"] == {"embeddings": "boom"}  # не трогается
+        assert entry["at"] > 1.0  # свежесть обновлена
+
+    def test_unknown_pname_noop(self):
+        """Unknown short name (not in ENDPOINT_PROBES) → no-op, no entry."""
+        config = self._config()
+        config.upsert_endpoint_state("AAA", "strange-name", 200, True)
+        assert config._ENDPOINT_STATE == {}
+
+    def test_all_probe_pnames_resolve(self):
+        """Каждое короткое имя ENDPOINT_PROBES даёт запись по своему пути."""
+        config = self._config()
+        for pname, _path, _tpl in config.ENDPOINT_PROBES:
+            config.upsert_endpoint_state("AAA", pname, 200, True)
+        paths = set(config._ENDPOINT_STATE["AAA"]["endpoints"])
+        assert paths == {p for _p, p, _t in config.ENDPOINT_PROBES}
+
+
 class TestRuntimeConfig:
     """Tests for runtime config pool — get/set via /config endpoint."""
 

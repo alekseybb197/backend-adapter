@@ -847,6 +847,31 @@ def _log_probe(bname: str, base: str, endpoints: dict[str, dict], errors: dict[s
         print(f"[ENDPOINT_PROBE] backend '{bname}' ({base}): {' '.join(parts)}")
 
 
+def upsert_endpoint_state(backend_name: str, pname: str, status: int | None, found: bool) -> None:
+    """Записать результат пробы одного эндпоинта бэкенда в _ENDPOINT_STATE.
+
+    Синхронизация из model_usage (первое обращение к модели, «Перепроверить»
+    строки, загрузка model-usage.yaml): эндпоинт, найденный дымовой пробой
+    МОДЕЛИ (found=True ⇔ HTTP 200), должен быть виден колонке «Доступные API»
+    бэкенда и экспортёру, даже если фоновая проверка бэкенда его не пробовала.
+    Сети здесь нет — это перенос уже добытого результата (контракт
+    «загруженные строки не перепроверяются» не нарушается).
+
+    ``pname`` — короткое имя эндпоинта из ENDPOINT_PROBES (completions /
+    messages / responses / embeddings); неизвестное имя — no-op. Функция
+    идемпотентна: повторная запись того же эндпоинта перезаписывает
+    результат и освежает ``at`` (кэш TTL). Запись создаётся и для бэкенда,
+    отсутствующего в _BACKENDS (такое возможно лишь для осиротевших строк
+    usage-таблицы) — фильтр «только настроенные бэкенды» применяет вызывающий.
+    """
+    path = next((p for n, p, _t in ENDPOINT_PROBES if n == pname), None)
+    if path is None:
+        return
+    state = _ENDPOINT_STATE.setdefault(backend_name, {"at": 0.0, "endpoints": {}, "errors": {}})
+    state["endpoints"][path] = {"status": status, "found": found}
+    state["at"] = time.time()
+
+
 def _init_multi_backends(config_path: str) -> None:
     """Загрузить YAML-конфиг, пробовать модели, построить model → backend map.
 
