@@ -649,6 +649,7 @@ def _render_status_page(
 <html lang="ru">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>backend-adapter — статус</title>
 <style>
   body {{ font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 24px; color: #222; }}
