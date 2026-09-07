@@ -53,7 +53,7 @@ claude
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (23 модуля, включая __init__.py)
+├── backend_adapter/            # Доменный пакет (26 модулей, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend, YAML
 │   ├── server.py               # HTTP-сервер
 │   ├── convert.py              # Anthropic ↔ OpenAI конвертация
@@ -63,6 +63,11 @@ backend-adapter/
 │   ├── daemon.py               # Detach (double fork)
 │   ├── logger.py               # Debug-логирование
 │   ├── redact.py               # Маскирование секретов
+│   ├── webserver.py            # WEBUI-ядро (роутинг эндпойнтов, serve(), CLI)
+│   ├── webui_status.py         # WEBUI "/": статус-страница
+│   ├── webui_ops.py            # WEBUI health: /healthz /health /live /ready
+│   ├── webui_config_api.py     # WEBUI "/config": runtime-конфиг
+│   ├── prometheus_exporter.py  # Метрики /metrics (отдельный слушатель)
 │   └── __init__.py             # Module-level proxy
 ├── docs/                       # Документация
 ├── backend-adapter.service     # systemd unit (Linux)

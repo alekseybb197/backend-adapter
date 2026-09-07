@@ -89,7 +89,7 @@ pip install -r requirements.txt
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (23 модуля, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (26 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
@@ -101,6 +101,9 @@ backend-adapter/
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
 │   ├── webserver.py           # WEBUI-ядро: общий веб-сервер, роутинг эндпойнтов, CLI
 │   ├── webui_status.py        # WEBUI-эндпойнт "/": статус (версия, LLM, модели)
+│   ├── webui_ops.py           # WEBUI health-эндпоинты "/healthz" "/health" "/live" "/ready"
+│   ├── webui_config_api.py    # WEBUI-эндпойнт "/config": runtime-пул debug-переменных
+│   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
@@ -455,11 +458,18 @@ export ADAPTER_DEBUG_ENABLE=1
 # Включён ПО УМОЛЧАНИЮ (ADAPTER_WEBUI_ENABLE=1) на 127.0.0.1:8765 — статус-страница
 # доступна сразу; корень — ADAPTER_DEBUG_LOGPATH (если задан, там *.parts сессии),
 # иначе ./tmp/webui (вкладка /session пуста; там же живёт model-usage.yaml — таблица
-# использованных моделей). Отключить: ADAPTER_WEBUI_ENABLE=0. Руководство по
+# использованных моделей). Health-check для оркестрации: /healthz, /health, /live, /ready
+# (см. docs/webui.md). Отключить: ADAPTER_WEBUI_ENABLE=0. Руководство по
 # страницам и API — docs/webui.md.
 # export ADAPTER_WEBUI_PORT=8765
 # export ADAPTER_WEBUI_HOST="127.0.0.1"
 # Standalone-запуск вне процесса адаптера: python -m backend_adapter.webserver [ROOT] [--port] [--host]
+
+# Prometheus-экспортёр: ОТДЕЛЬНЫЙ слушатель метрик на ADAPTER_EXPORTER_PORT
+# (дефолт 9100) и ADAPTER_WEBUI_HOST. Включён ПО УМОЛЧАНИЮ вместе с WEBUI
+# (ADAPTER_EXPORTER_ENABLE=1); /metrics — текст text exposition 0.0.4 (stdlib-only,
+# без библиотек). Отключить: ADAPTER_EXPORTER_ENABLE=0.
+# export ADAPTER_EXPORTER_PORT=9100
 
 # Детальные логи результатов и ошибок инструментов (оба по умолчанию 0 — выкл,
 # zero-config не обрабатывает собранные логи; включите при отладке инструментов)
@@ -566,6 +576,7 @@ Streaming:  enabled (SSE passthrough)
 Backends:   1 configured:
   - home: http://127.0.0.1:8002
 [WEBUI] http://127.0.0.1:8765/ (root: ./tmp/webui)
+[EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================
 ```
 
@@ -624,6 +635,16 @@ ss -tlnp | grep 9999
 
 # В логах адаптера (если включён debug)
 # должны быть строки "[INIT] Loaded N models from backend:"
+
+# Health-check WEBUI (порт 8765): процесс жив
+curl -s http://127.0.0.1:8765/healthz
+# → 200 {"status": "ok", "version": "...", "uptime": ..., "pid": ...}
+
+# Readiness: 200 — бэкенды настроены и прогреты; 503 — ещё нет
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/ready
+
+# Prometheus-метрики (отдельный слушатель, порт 9100)
+curl -s http://127.0.0.1:9100/metrics | head
 
 # Попробовать запрос
 curl -X POST http://localhost:9999/v1/messages \
