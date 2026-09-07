@@ -5,7 +5,6 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
 Показывает на одной странице:
   - версию кода (из WebContext.version — в адаптере это __version__ из
     backend-adapter.py, единственный источник);
-  - режим работы (multi-backend / standalone);
   - каждый настроенный LLM-эндпойнт: доступность, список моделей и
     колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
     обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже);
@@ -219,33 +218,14 @@ def _models_html(models: list[str], status: str) -> str:
     остальные прячутся в <span class="models-extra" style="display:none">,
     а кнопка «Показать ещё (N)» разворачивает список (JS models_toggle,
     см. _render_status_page): при клике span получает display:block,
-    кнопка меняется на «Свернуть» и прячет его обратно.
-    Ссылка на краткое изображение выводится в начале и конце списка."""
+    кнопка меняется на «Свернуть» и прячет его обратно."""
     if not models:
         return f'<span style="color:#999">{status}</span>'
     line = '<div style="line-height:1.5">{}</div>'
-
-    # Ссылка на краткое изображение модели
-    def model_link(m):
-        q = quote(str(m), safe="")
-        return f'<a href="/session?model={q}" style="color:#0066cc;text-decoration:none" title="краткое изображение">📋</a>'
-
     if len(models) <= MODEL_LINES:
-        items = []
-        for m in models:
-            items.append(f"{line.format(html.escape(m))} {model_link(m)}")
-        return "".join(items)
-
-    shown_parts = []
-    for m in models[:MODEL_LINES]:
-        shown_parts.append(f"{line.format(html.escape(m))} {model_link(m)}")
-    shown = "".join(shown_parts)
-
-    extra_parts = []
-    for m in models[MODEL_LINES:]:
-        extra_parts.append(f"{line.format(html.escape(m))} {model_link(m)}")
-    extra = "".join(extra_parts)
-
+        return "".join(line.format(html.escape(m)) for m in models)
+    shown = "".join(line.format(html.escape(m)) for m in models[:MODEL_LINES])
+    extra = "".join(line.format(html.escape(m)) for m in models[MODEL_LINES:])
     n = len(models) - MODEL_LINES
     btn = (
         f'<button type="button" onclick="models_toggle(this)" '
@@ -254,7 +234,7 @@ def _models_html(models: list[str], status: str) -> str:
         f'font:inherit;cursor:pointer;text-decoration:underline">'
         f"Показать ещё ({n})</button>"
     )
-    return f'{shown}<span class="models-extra" style="display:none">{extra}</span><div style="line-height:1.5;margin-top:4px">{model_link(models[-1])}</div>{btn}'
+    return f'{shown}<span class="models-extra" style="display:none">{extra}</span>{btn}'
 
 
 def _api_html(api: dict | None) -> str:
@@ -676,7 +656,6 @@ def _render_status_page(
 <body>
 <h2>Backend-Adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
-   <b>Режим:</b> {html.escape(snapshot["mode"])} &nbsp;·&nbsp;
    <a href="/session">просмотр сессий →</a> &nbsp;·&nbsp;
    <a href="/config">runtime config →</a></p>
 {note_html}

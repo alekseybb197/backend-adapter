@@ -467,6 +467,12 @@ class TestModelsCell:
         # кнопка вызывает models_toggle и несёт общее число моделей
         assert 'onclick="models_toggle(this)"' in html
         assert 'data-models-count="7"' in html
+        # кнопка — ПРЯМОЙ сосед скрытого span (сразу после </span>): иначе
+        # models_toggle (btn.previousElementSibling) не найдёт span и кнопка
+        # «Показать ещё» не сработает
+        assert html.split("</span>", 1)[1].lstrip().startswith("<button")
+        assert "/session?model=" not in html  # иконок-ссылок нет
+        assert "📋" not in html
 
     def test_empty_shows_status_text(self):
         # Нет моделей — строка-заглушка со статусом (для колонки Models).
@@ -1053,7 +1059,10 @@ class TestStatusHTTP:
                 assert status == 200
                 assert "AAA" in body and "BBB" in body
                 assert "m-alpha" in body and "m-beta" in body
-                assert "multi-backend" in body
+                # Текста «Режим:» на странице больше нет (multi-backend —
+                # единственный режим, убран из шапки)
+                assert "Режим:" not in body
+                assert "multi-backend" not in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
