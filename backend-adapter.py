@@ -28,6 +28,8 @@ from backend_adapter.config import (
     ADAPTER_WEBUI_ENABLE,
     ADAPTER_WEBUI_HOST,
     ADAPTER_WEBUI_PORT,
+    ADAPTER_EXPORTER_ENABLE,
+    ADAPTER_EXPORTER_PORT,
     ADAPTER_STREAMING_ENABLE,
     ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_MODELS_MAPPING,
@@ -173,6 +175,21 @@ if __name__ == "__main__":
             from backend_adapter.webui_status import PROBE_TIMEOUT
 
             _cfg.start_refresh(timeout=PROBE_TIMEOUT)
+            # Prometheus-экспортёр — отдельный лёгкий слушатель на
+            # ADAPTER_EXPORTER_PORT (текст метрик /metrics, text exposition
+            # 0.0.4 без библиотек): настройки/статус приложения, таблица
+            # настроенных бэкендов, таблица использованных моделей со
+            # счётчиками (см. prometheus_exporter.py). Свой слушатель — не
+            # эндпоинт WEBUI: /metrics не должен висеть на порту статуса.
+            if ADAPTER_EXPORTER_ENABLE:
+                from backend_adapter.prometheus_exporter import serve_exporter
+
+                exporter = serve_exporter(
+                    __version__, ADAPTER_WEBUI_HOST, ADAPTER_EXPORTER_PORT, verbose=False
+                )
+                if exporter is not None:
+                    threading.Thread(target=exporter.serve_forever, daemon=True).start()
+                    print(f"[EXPORTER] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_EXPORTER_PORT}/metrics")
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
     with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
         try:

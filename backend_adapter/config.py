@@ -262,6 +262,17 @@ ADAPTER_WEBUI_PORT = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
 # локально). "0.0.0.0" — доступ из сети (внимание: содержимое сессий —
 # git log, файлы, reasoning — не должно случайно утечь).
 ADAPTER_WEBUI_HOST = os.environ.get("ADAPTER_WEBUI_HOST", "") or "127.0.0.1"
+# Prometheus-экспортёр — отдельный лёгкий слушатель метрик (см.
+# prometheus_exporter.py): включается вместе с WEBUI по умолчанию
+# (ADAPTER_EXPORTER_ENABLE=1), адрес — тот же ADAPTER_WEBUI_HOST, порт —
+# ADAPTER_EXPORTER_PORT. /metrics — text exposition 0.0.4 без библиотек.
+ADAPTER_EXPORTER_ENABLE = os.environ.get("ADAPTER_EXPORTER_ENABLE", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "",
+)
+ADAPTER_EXPORTER_PORT = int(os.environ.get("ADAPTER_EXPORTER_PORT", "9100"))
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
 # без вызова redact(), логируются полные токены, заголовки, ключи.
 # По умолчанию false — санитайзер активен, секреты маскируются.
