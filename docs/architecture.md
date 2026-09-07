@@ -826,5 +826,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.4** (WIP — группа v0.8.5 в разработке, see `backend-adapter.py`).
+Current: **v0.8.6** (WIP — ветка v0.8.6 в разработке, see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).
