@@ -941,6 +941,55 @@ class TestResetModel:
         with open(persist_file, encoding="utf-8") as f:
             assert "m1" in yaml.safe_load(f)["models"]
 
+    def test_flush_interrupted_by_keyboardinterrupt_swallowed(self, tmp_path):
+        """Повторный Ctrl-C во время файловой записи не должен ронять
+        завершение: KeyboardInterrupt из _save_table гасится, файл не
+        записан, _DIRTY остаётся True (следующее сохранение допишет)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        persist_file = _persist_setup(config, mu, tmp_path)
+        # Сеем строку напрямую (в обход record_model_usage: он сам сохраняет
+        # файл и снимает _DIRTY) — контролируем флаг вручную.
+        mu._TABLE["m1"] = {
+            "model": "m1", "backend": "AAA", "calls": 7,
+            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }
+        mu._DIRTY = True
+        with mock.patch.object(mu, "_save_table", side_effect=KeyboardInterrupt):
+            mu.flush_table()                 # не бросает наружу
+        assert mu._DIRTY is True             # хвост не потерян (флаг взведён)
+        # Без прерывания — flush дописывает файл (повторный Ctrl-C в новый
+        # flush после прерывания не должен мешать).
+        mu.flush_table()
+        with open(persist_file, encoding="utf-8") as f:
+            saved = yaml.safe_load(f)["models"]["m1"]
+        assert saved["calls"] == 7
+
+    def test_save_table_keeps_dirty_until_replace(self, tmp_path):
+        """_DIRTY снимается только после успешного os.replace: прерванная
+        запись (OSError до replace) оставляет флаг взведённым."""
+        config, mu = _fresh()
+        persist_file = _persist_setup(config, mu, tmp_path)
+        mu._TABLE["m1"] = {
+            "model": "m1", "backend": "AAA", "calls": 3,
+            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }
+        mu._DIRTY = True
+        # _atomic_write_yaml падает ДО os.replace — файл не обновлён,
+        # флаг остаётся → следующее сохранение допишет хвост.
+        with mock.patch.object(
+            mu, "_atomic_write_yaml", side_effect=OSError("disk full")
+        ):
+            mu._save_table(force=True)
+        assert mu._DIRTY is True
+        # Атомарная запись реально заменяет файл — флаг снимается.
+        mu._save_table(force=True)
+        assert mu._DIRTY is False
+        with open(persist_file, encoding="utf-8") as f:
+            assert yaml.safe_load(f)["models"]["m1"]["calls"] == 3
+
 
 class TestReprobe:
     """Фоновая перепроверка эндпоинтов строки (кнопка «Перепроверить»).

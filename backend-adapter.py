@@ -3,9 +3,11 @@
 — changelog: ../changelog.md"""
 
 __version__ = "0.8.6"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold + zero-config defaults: console-only logs (no disk dir), TOOLS_ERROR off, WEBUI status page on by default + distribution: standalone binaries (PyInstaller), build script, CI release workflow, one-line installer install.sh + runtime-config endpoint /config (live reads config.X) + incremental artifact-tree builds with checkpoints (.build_state.json) + pagination pages artefacts/pages/<N>/ + /session hash8 URL aliases + png/puml shortcuts + skill detection removed (skill.py, ADAPTER_SKILL_PATTERNS, skill_signal) + endpoint detection: smoke probe of backend API endpoints (ADAPTER_ENDPOINT_PROBE, YAML probe key) + background refresh of backend list (refresh by button, PRG redirect) + endpoint column HTTP-200-only + auto-start check on adapter start + used-models table on WEBUI status page (ADAPTER_MODEL_USAGE_ENABLE, per-model endpoint probe) + traffic counters (bytes sent/recv to backend)"
+__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold + zero-config defaults: console-only logs (no disk dir), TOOLS_ERROR off, WEBUI status page on by default + distribution: standalone binaries (PyInstaller), build script, CI release workflow, one-line installer install.sh + runtime-config endpoint /config (live reads config.X) + incremental artifact-tree builds with checkpoints (.build_state.json) + pagination pages artefacts/pages/<N>/ + /session hash8 URL aliases + png/puml shortcuts + skill detection removed (skill.py, ADAPTER_SKILL_PATTERNS, skill_signal) + endpoint detection: smoke probe of backend API endpoints (ADAPTER_ENDPOINT_PROBE, YAML probe key) + background refresh of backend list (refresh by button, PRG redirect) + endpoint column HTTP-200-only + auto-start check on adapter start + used-models table on WEBUI status page (ADAPTER_MODEL_USAGE_ENABLE, per-model endpoint probe) + traffic counters (bytes sent/recv to backend) + graceful shutdown on Ctrl-C/SIGTERM (signal handler, repeat-signal force exit, listener shutdown, interrupt-safe usage flush)"
 
+import contextlib
 import os
+import signal
 import sys
 import threading
 from collections import Counter
@@ -157,6 +159,7 @@ if __name__ == "__main__":
         ADAPTER_WEBUI_PORT,
         verbose=False,
     )
+    exporter = None  # поднимается ниже при ADAPTER_EXPORTER_ENABLE
     if webui:
         threading.Thread(target=webui.serve_forever, daemon=True).start()
         print(f"[WEBUI] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_WEBUI_PORT}/ (root: {webui_root})")
@@ -187,15 +190,73 @@ if __name__ == "__main__":
                 threading.Thread(target=exporter.serve_forever, daemon=True).start()
                 print(f"[EXPORTER] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_EXPORTER_PORT}/metrics")
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
+
+    # === Корректное завершение (Ctrl-C / SIGTERM) ===
+    # Дефолтный SIGINT кидает KeyboardInterrupt в главный поток — serve_forever
+    # выходит, finally выполняет вежливое завершение. Проблема была в том, что
+    # ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
+    # запись: Python кидает KI в главный поток, где бы тот ни был. Решение:
+    # как только начали завершение, переключаем SIGINT/SIGTERM на немедленный
+    # выход (os._exit) — повторный сигнал больше не может прервать flush_table,
+    # а просто тихо завершает процесс. SIGTERM (systemd/launchd/kill) по
+    # умолчанию убивает процесс МГНОВЕННО, без finally — перехватываем его
+    # как KeyboardInterrupt, чтобы штатное завершение сохраняло usage-хвост
+    # и останавливало слушатели.
+
+    def _force_exit(_signum, _frame):
+        # Сигнал во время завершения: выходим немедленно. os._exit минует
+        # обработчики/буферы Python — процесс умирает сразу, без дампа стека
+        # и без прерывания текущей записи (файл останется с .tmp-хвостом,
+        # следующий запуск перезапишет его — см. model_usage._atomic_write_yaml).
+        os._exit(130)
+
+    def _graceful_signal(_signum, _frame):
+        # SIGTERM → вежливое завершение, как Ctrl-C: KeyboardInterrupt
+        # пробрасывается в главный поток из serve_forever (PEP 475).
+        raise KeyboardInterrupt
+
+    if threading.current_thread() is threading.main_thread():
+        # SIGTERM → вежливое завершение, как Ctrl-C. Хэндлер ставится только
+        # в main-потоке: в других потоках signal.signal кидает ValueError.
+        with contextlib.suppress(ValueError):
+            signal.signal(signal.SIGTERM, _graceful_signal)
+
     with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
-            print("\n[EXIT] Bye")
+            pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
         finally:
+            # С этого момента повторный Ctrl-C/SIGTERM = немедленный выход:
+            # завершение (shutdown слушателей, flush таблицы) прервать нельзя.
+            if threading.current_thread() is threading.main_thread():
+                with contextlib.suppress(ValueError):
+                    signal.signal(signal.SIGINT, _force_exit)
+                    signal.signal(signal.SIGTERM, _force_exit)
+            try:
+                from backend_adapter import model_usage as _model_usage
+                from backend_adapter import config as _cfg
+
+                # Вежливая остановка фоновых слушателей: shutdown() ждёт
+                # завершения активных обработчиков (успевают дочитать ответ),
+                # новые запросы не принимаются; serve_forever в daemon-потоках
+                # выходит по shutdown-событию.
+                if webui is not None:
+                    webui.shutdown()
+                    webui.server_close()
+                if ADAPTER_EXPORTER_ENABLE and exporter is not None:
+                    exporter.shutdown()
+                    exporter.server_close()
+                # Фоновая проверка бэкендов: дождаться текущего цикла, чтобы
+                # снимок состояния и кэши моделей/эндпоинтов были
+                # консистентны на момент выхода (поток daemon — если не успел
+                # за таймаут, процесс завершится сам, воркер оборвётся).
+                _cfg.stop_refresh(timeout=2.0)
+            except BaseException:  # noqa: BLE001 — завершение не должно падать
+                pass
             # Финальный flush таблицы использованных моделей: штатное
             # завершение (в т.ч. Ctrl-C) всегда сохраняет «грязный» хвост
             # в model-usage.yaml (см. backend_adapter/model_usage.py).
-            from backend_adapter import model_usage as _model_usage
-
+            # Устойчив к прерыванию (см. flush_table).
             _model_usage.flush_table()
+            print("\n[EXIT] Bye")

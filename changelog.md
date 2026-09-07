@@ -1,6 +1,41 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
-## v0.8.6 (WIP — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, README)
+## v0.8.6 (WIP — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, корректное завершение по Ctrl-C/SIGTERM, README)
+
+### 2026-09-08 Корректное завершение по Ctrl-C/SIGTERM
+
+**Цель:** убрать падение процесса при повторном Ctrl-C во время завершения.
+Дефолтный SIGINT кидает KeyboardInterrupt в главный поток; первый Ctrl-C
+ловился в serve_forever, finally звал flush_table() (запись model-usage.yaml),
+а ПОВТОРНЫЙ Ctrl-C (пользователь жмёт сразу) прерывал YAML-запись посреди
+_atomic_write_yaml — «unhandled exception» с traceback-хвостом [PYI-...]
+(в бинаре PyInstaller — KeyboardInterrupt в <string>), оставался мусорный
+model-usage.yaml.tmp. SIGTERM (systemd/launchd/kill) по умолчанию убивал
+процесс МГНОВЕННО, без finally — usage-хвост терялся.
+
+**Решение:**
+- **переключение сигналов в finally** (backend-adapter.py): как только началось
+  вежливое завершение, SIGINT/SIGTERM переключаются на немедленный
+  os._exit(130) — повторный сигнал больше не может прервать flush_table(),
+  процесс тихо умирает без дампа стека;
+- **SIGTERM → вежливое завершение**: хэндлер _graceful_signal кидает
+  KeyboardInterrupt в главный поток (PEP 475), как Ctrl-C — штатное завершение
+  (shutdown слушателей, flush) работает и для systemctl stop / launchctl / kill;
+- **вежливая остановка фоновых слушателей** в finally: shutdown() +
+  server_close() WEBUI и Prometheus-экспортёра (активные обработчики успевают
+  дочитать ответ); config.stop_refresh(timeout=2) дожидается текущего цикла
+  фоновой проверки бэкендов (снимок состояния консистентен);
+- **flush_table() устойчив к прерыванию** (model_usage.py): глотает
+  KeyboardInterrupt из _save_table — завершение адаптера не падает;
+- **_save_table снимает _DIRTY только после успешного os.replace** — прерванная
+  запись оставляет флаг взведённым, следующее сохранение допишет хвост;
+  осиротевший model-usage.yaml.tmp затирается следующим атомарным сохранением.
+
+**Следствия:** Ctrl-C завершает адаптер вежливо и предсказуемо: первый —
+[EXIT] Bye после сохранения usage-хвоста; повторный во время завершения —
+немедленный выход с rc=130, без traceback и [PYI-...] unhandled exception.
+SIGTERM больше не «рубит» процесс, а проходит то же штатное завершение.
+Поведение проксирования не меняется. Ветка feature/v0.8.6 в WIP.
 
 ### 2026-09-08 Колонка Cost по тарифам ADAPTER_MODELS_TARIFFS + пересмотр флагов логирования/WEBUI
 

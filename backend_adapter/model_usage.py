@@ -164,11 +164,25 @@ def usage_persist_file() -> str | None:
 
 def flush_table() -> None:
     """Принудительно сохранить таблицу, если есть несохранённые мутации
-    (вызывается при завершении работы адаптера, в т.ч. Ctrl-C)."""
-    with _TABLE_LOCK:
-        dirty = _DIRTY
-    if dirty:
-        _save_table(force=True)
+    (вызывается при завершении работы адаптера, в т.ч. Ctrl-C).
+
+    Устойчив к повторному Ctrl-C: если запись YAML прервана сигналом
+    посреди _atomic_write_yaml, _save_table(force=True) завершается
+    исключением KeyboardInterrupt и _DIRTY остаётся True (см. _save_table) —
+    здесь мы гасим прерывание и даём таблице уйти в память (учёт не должен
+    ронять завершение адаптера; файл перепишется следующим сохранением).
+    """
+    try:
+        with _TABLE_LOCK:
+            dirty = _DIRTY
+        if dirty:
+            _save_table(force=True)
+    except KeyboardInterrupt:
+        # Повторный Ctrl-C пришёл в момент файловой записи: не даём ему
+        # уронить завершение процесса поверх (см. переключение SIGINT на
+        # os._exit в finally backend-adapter.py). Сохранение не удалось —
+        # файл останется прежним, таблица жива в памяти до выхода процесса.
+        pass
 
 
 def record_model_usage(client_model: str) -> None:
@@ -764,7 +778,11 @@ def _serialize_table() -> dict:
 def _atomic_write_yaml(path: str, payload: dict) -> None:
     """Атомарная запись YAML: временный файл в той же директории + os.replace.
     os.makedirs создаёт корень при необходимости. OSError НЕ ловится здесь —
-    его обрабатывает _save_table (учёт не должен ронять запрос)."""
+    его обрабатывает _save_table (учёт не должен ронять запрос).
+
+    Осиротевший временный файл прошлой прерванной записи (kill/Ctrl-C
+    посреди safe_dump) затирается: open(..., "w") обрезает его содержимое,
+    os.replace атомарно подменяет основной файл."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -781,7 +799,12 @@ def _atomic_write_yaml(path: str, payload: dict) -> None:
 def _save_table(force: bool) -> None:
     """Сохранить таблицу в YAML. force=True — независимо от периода; иначе —
     только если есть грязные мутации и прошёл период. Пишет полный снимок
-    атомарно (tmp + os.replace); OSError — лог, учёт не роняет."""
+    атомарно (tmp + os.replace); OSError — лог, учёт не роняет.
+
+    _DIRTY снимается ТОЛЬКО после успешного os.replace (самый конец
+    функции): прерванная запись (исключение/KeyboardInterrupt) оставляет
+    флаг взведённым, и следующее сохранение допишет хвост. OSError ловится,
+    KeyboardInterrupt — нет (его гасит flush_table/хэндлер завершения)."""
     if _PERSIST_PATH == "":
         return
     global _DIRTY, _LAST_SAVE

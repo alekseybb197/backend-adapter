@@ -1213,6 +1213,27 @@ def start_refresh(timeout: float | None = None, reload: bool = True) -> bool:
         return True
 
 
+def stop_refresh(timeout: float = 2.0) -> None:
+    """Дождаться завершения идущей фоновой проверки бэкендов (до timeout).
+
+    Вызывается при вежливом завершении адаптера (Ctrl-C/SIGTERM): если
+    refresh_worker в процессе сетевого опроса, ждём его завершения, чтобы
+    снимок состояния (refresh_state) и кэши моделей/эндпоинтов были
+    консистентны на момент выхода, а консоль не обрывалась посреди
+    [REFRESH]/[ENDPOINT_PROBE]-строк. Поток daemon: если не успел за
+    timeout, выходим без ожидания — процесс завершится сам, воркер оборвётся.
+    Никаких флагов остановки воркеру не передаётся (сеть ограничена
+    таймаутами запросов; дождаться текущей итерации — достаточная
+    вежливость)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _REFRESH_LOCK:
+            running = _REFRESH_JOB is not None and _REFRESH_JOB.get("running")
+        if not running:
+            return
+        time.sleep(0.05)
+
+
 def refresh_state() -> dict:
     """Снимок состояния проверки (копия — мутация результата безопасна).
 

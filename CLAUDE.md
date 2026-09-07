@@ -132,6 +132,35 @@ strict-ошибки в пакете починены и регрессий бы�
 запись журнала сопровождается блоком в changelog.md.
 
 
+### 2026-09-08 — Корректное завершение по Ctrl-C/SIGTERM (v0.8.6)
+
+**Контекст:** повторный Ctrl-C во время завершения ронял процесс: первый
+Ctrl-C ловился в serve_forever, finally звал flush_table() (запись
+model-usage.yaml), а второй Ctrl-C прерывал YAML-запись посреди
+_atomic_write_yaml — «unhandled exception» с traceback-хвостом [PYI-...]
+(в бинаре PyInstaller — KeyboardInterrupt в <string>), оставался мусорный
+model-usage.yaml.tmp. SIGTERM (systemd/launchd/kill) по умолчанию убивал
+процесс мгновенно, без finally — usage-хвост терялся.
+
+**Решение:**
+- **переключение сигналов в finally** (backend-adapter.py): начав вежливое
+  завершение, SIGINT/SIGTERM переключаем на немедленный os._exit(130) —
+  повторный сигнал не может прервать flush_table(), процесс тихо умирает
+  без дампа стека;
+- **SIGTERM → вежливое завершение**: хэндлер кидает KeyboardInterrupt в
+  главный поток (PEP 475), как Ctrl-C — штатное завершение работает и для
+  systemctl stop / launchctl / kill (раньше SIGTERM рубил процесс сразу);
+- **вежливая остановка фоновых слушателей** в finally: shutdown() +
+  server_close() WEBUI и экспортёра; config.stop_refresh(timeout=2) ждёт
+  текущего цикла фоновой проверки бэкендов;
+- **flush_table()** глотает KeyboardInterrupt из _save_table; _DIRTY снимается
+  только после успешного os.replace — прерванная запись не теряет хвост
+  (следующее сохранение допишет), осиротевший .tmp затирается.
+
+**Следствия:** первый Ctrl-C — [EXIT] Bye после сохранения usage-хвоста,
+повторный во время завершения — немедленный rc=130 без traceback; SIGTERM
+проходит то же штатное завершение, что и Ctrl-C. Поведение проксирования не меняется. Ветка feature/v0.8.6 в WIP; версия 0.8.6.
+
 ### 2026-09-08 — Колонка Cost по тарифам ADAPTER_MODELS_TARIFFS + пересмотр флагов логирования/WEBUI (v0.8.6)
 
 **Контекст:** (1) таблица «Models in use» показывала токены, но не стоимость
