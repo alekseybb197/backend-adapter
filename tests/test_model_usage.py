@@ -13,7 +13,7 @@ Tests cover:
     output_tokens), flag off / zero / missing row → no-op
   - snapshot is a copy in insertion order; reset clears
   - persistence (YAML in the WEBUI root, on tmp_path): disabled ("") does no
-    file I/O; auto path = LOGPATH or ./tmp/webui; record writes the file with
+    file I/O; auto path = ADAPTER_DEBUG_LOGPATH; record writes the file with
     {"version": 2, "models": ...} in insertion order; probing rows never hit
     disk; dirty file is normalized on load; v1 files (byte counters) migrate —
     calls/endpoints/errors/first_seen survive, tokens start at 0; unknown
@@ -633,11 +633,12 @@ class TestPersistPath:
         root = tmp_path / "webui"
         assert not (root / "model-usage.yaml").exists()
 
-    def test_auto_root_uses_logpath_or_default(self, tmp_path):
-        """No explicit path → ADAPTER_DEBUG_LOGPATH or ./tmp/webui."""
+    def test_auto_root_uses_logpath_default(self, tmp_path):
+        """No explicit path → ADAPTER_DEBUG_LOGPATH (v0.8.6: default ./tmp/logs,
+        no independent ./tmp/webui anymore)."""
         config, mu = _fresh()
         mu.set_persist_path(None)  # авто-режим (прод): _fresh оставил "" (тесты)
-        assert mu.usage_persist_file() == os.path.join("./tmp/webui", mu.MODEL_USAGE_FILE)
+        assert mu.usage_persist_file() == os.path.join("./tmp/logs", mu.MODEL_USAGE_FILE)
         config.ADAPTER_DEBUG_LOGPATH = str(tmp_path / "logs")
         assert mu.usage_persist_file() == str(tmp_path / "logs" / mu.MODEL_USAGE_FILE)
 

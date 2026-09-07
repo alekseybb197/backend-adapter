@@ -22,16 +22,18 @@ PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 # env-переменная в bind-кортеже socketserver означала бы INADDR_ANY (все
 # интерфейсы) — с `or` и незаданная, и пустая дают безопасный localhost.
 ADAPTER_ENDPOINT_HOST = os.environ.get("ADAPTER_ENDPOINT_HOST", "") or "127.0.0.1"
-ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
-# Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы).
-# ПУСТО / не задано → файловая запись ВЫКЛЮЧЕНА (zero-config: консольные
-# debug-блоки видны, ничего не пишется на диск и папка не создаётся).
-# Задано → директория логов: создаётся при необходимости на старте,
-# вся файловая запись (в т.ч. trace и *.parts дампы) подчинена
-# ADAPTER_DEBUG_ENABLE (мастер-выключатель: 0 → ничего не пишется).
-# Корень веб-интерфейса НЕ зависит от этой переменной (см. блок WEBUI).
-# Режим «один файл» удалён — путь всегда директория.
-ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "")
+# Мастер-выключатель ФАЙЛОВОЙ записи debug/trace-логов и *.parts дампов:
+#   ADAPTER_DEBUG_ENABLE=1 — файлы пишутся в ADAPTER_DEBUG_LOGPATH;
+#   0 (по умолчанию) — на диск ничего не пишется (консольные debug-блоки
+#   при этом БЕЗУСЛОВНЫ — печатаются всегда, независимо от этого флага).
+ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "0").lower() not in ("0", "false", "no", "")
+# Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы)
+# и корень веб-интерфейса (WEBUI, model-usage.yaml). ВСЕГДА непуст: пусто /
+# не задано → дефолт "./tmp/logs" (относительно папки запуска). Папка
+# создаётся на старте адаптера как корень WEBUI; лог-ФАЙЛЫ в неё пишутся
+# только при ADAPTER_DEBUG_ENABLE=1 (см. ADAPTER_DEBUG выше). Режим «один
+# файл» удалён — путь всегда директория.
+ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "") or "./tmp/logs"
 ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
 ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
@@ -117,7 +119,7 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
 # Подмножество переменных выше, которые можно менять НЕ ПЕРЕЗАПУСКАЯ адаптер —
 # через HTTP API /config (webui_config_api.py), эндпойнт общего WEBUI-сервера
-# (тот всегда поднят, если ADAPTER_WEBUI_ENABLE=1 — см. backend-adapter.py).
+# (WEBUI поднимается всегда — см. backend-adapter.py).
 # Идея: включать накопление логов/трейсов/*.parts-дампов на время диагностики
 # конкретной проблемы и выключать обратно, без остановки самого прокси.
 #
@@ -140,13 +142,12 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # хранит список тегов в _SET, но эта переменная — тоже НЕ список в пуле:
 # set_runtime_config() получает строку env-формата, а код читает _SET.)
 #
-# ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — включение
-# записи "с нуля" (когда путь изначально пуст) потребовало бы ещё и создать
-# директорию/пересоздать session_log._DEBUG_IS_DIR и т.п. на лету, это уже не
-# "переключатель объёма", а смена самой точки хранения — за рамками задачи.
-# Если ADAPTER_DEBUG_LOGPATH изначально не задан, ADAPTER_DEBUG_TAGS_OUT/
-# ADAPTER_DEBUG=1 через /config ничего на диск не запишут (некуда), только
-# в консоль — это ожидаемо, а не баг.
+# ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — это точка
+# хранения (корень WEBUI и лог-директория), а не «переключатель объёма»:
+# смена пути на лету потребовала бы пересоздания корня веб-сервера и
+# раскладки файлов посреди сессии — за рамками задачи. (Файловая запись
+# переключается пулом через ADAPTER_DEBUG: заданный LOGPATH всегда непуст,
+# поэтому 1 через /config сразу начнёт писать в него.)
 RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG",
     "ADAPTER_DEBUG_TAGS_OUT",
@@ -242,21 +243,14 @@ def set_runtime_config(**kwargs) -> dict:
 
 # ===================================================
 
-# Веб-интерфейс — общий статус адаптера + просмотр сессий:
-#   ADAPTER_WEBUI_ENABLE=1 (по умолчанию) — поднять локальный веб-сервер;
-#   статус-страница "/" (версия, режим, LLM-эндпоинты) работает всегда,
-#   "/session" (просмотр *.parts сессий) — только когда задан
-#   ADAPTER_DEBUG_LOGPATH (иначе вкладки сессий пусты, т.к. логи не пишутся).
-#   Корень — директория ADAPTER_DEBUG_LOGPATH, если задана; иначе —
-#   "./tmp/webui" (отдельная папка, НЕ зависит от лог-директории).
-#   Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST (пусто/не задано →
-#   дефолт 127.0.0.1, только локально).
-ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
+# Веб-интерфейс — общий статус адаптера + просмотр сессий. Поднимается
+# ВСЕГДА (флага отключения нет): статус-страница "/" (версия, режим,
+# LLM-эндпоинты, таблица «Models in use») + health-эндпоинты (/healthz,
+# /live, /ready) + /session (просмотр *.parts сессий; при ADAPTER_DEBUG_ENABLE=0
+# логов нет — вкладки сессий пусты) + /config (runtime-пул). Корень —
+# директория ADAPTER_DEBUG_LOGPATH (см. выше; дефолт ./tmp/logs) — там же
+# лежит model-usage.yaml. Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST
+# (пусто/не задано → дефолт 127.0.0.1, только локально).
 ADAPTER_WEBUI_PORT = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
 # Адрес, на котором слушает веб-интерфейс; дефолт 127.0.0.1 (только
 # локально). "0.0.0.0" — доступ из сети (внимание: содержимое сессий —
@@ -861,11 +855,9 @@ def _log_probe(bname: str, base: str, endpoints: dict[str, dict], errors: dict[s
     пробу бэкенда; формат един для лога и страницы (порядок — ENDPOINT_PROBES,
     по коротким именам, сырые HTTP-коды). Кэш-хиты не логируются (спам при
     частых проверках; страница показывает последний результат, лог даёт
-    историю фактических проб). Гейт — ADAPTER_DEBUG (живое чтение, как
-    _d() в logger.py; config.py не может импортировать logger — цикл).
-    Содержимое ответов не пишется: дымовые запросы, секретов нет."""
-    if not ADAPTER_DEBUG:
-        return
+    историю фактических проб). Печатается БЕЗУСЛОВНО (консольные debug-логи
+    не гейтятся; см. v0.8.6). Содержимое ответов не пишется: дымовые
+    запросы, секретов нет."""
     if errors:
         print(f"[ENDPOINT_PROBE] backend '{bname}' ({base}): failed: {errors}")
         return

@@ -103,7 +103,7 @@ class TestRenderConfigPage:
         for key in config.RUNTIME_CONFIG_POOL:
             assert key in html
 
-        # Check values (default: ADAPTER_DEBUG=True, others vary)
+        # Check values (v0.8.6: ADAPTER_DEBUG дефолт 0 — файловая запись; другие варьируются)
         assert "ADAPTER_DEBUG" in html
 
     def test_renders_with_applied_message(self):
@@ -260,12 +260,12 @@ class TestConfigHTTPPost:
         """/config POST ignores keys outside RUNTIME_CONFIG_POOL."""
         _reload_config()
         from backend_adapter import config
-        before_webui = config.ADAPTER_WEBUI_ENABLE
+        before_logpath = config.ADAPTER_DEBUG_LOGPATH
 
         httpd, port = _start_server(str(tmp_path))
         try:
             body = json.dumps({
-                "ADAPTER_WEBUI_ENABLE": False,  # outside pool
+                "ADAPTER_DEBUG_LOGPATH": "/tmp/other",  # outside pool
                 "ADAPTER_DEBUG": True,
             }).encode()
             status, response_body = _http_post(
@@ -273,8 +273,8 @@ class TestConfigHTTPPost:
             )
             assert status == 200
 
-            # WEBUI_ENABLE should NOT change
-            assert config.ADAPTER_WEBUI_ENABLE == before_webui
+            # LOGPATH (точка хранения) should NOT change
+            assert config.ADAPTER_DEBUG_LOGPATH == before_logpath
         finally:
             httpd.shutdown()
             httpd.server_close()

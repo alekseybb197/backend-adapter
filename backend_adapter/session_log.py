@@ -119,18 +119,17 @@ def _resolve_log_base():
     *.parts дампы и корень веб-интерфейса — всё в одной папке). Режим
     «один файл» удалён.
 
-    Zero-config: если env-переменная пуста / не задана — файловая запись
-    полностью ВЫКЛЮЧЕНА (все четыре значения falsy), дефолтного пути больше
-    нет, ничего на диск не пишется и папка не создаётся ни на импорте, ни
-    на старте. Консольные debug-блоки при этом видны (ADAPTER_DEBUG_ENABLE=1).
+    Путь ВСЕГДА непуст: пустая / не заданная env-переменная → дефолт
+    "./tmp/logs" (тот же, что config.ADAPTER_DEBUG_LOGPATH; папка создаётся
+    на старте адаптера как корень WEBUI). Файлы в неё пишутся ТОЛЬКО при
+    ADAPTER_DEBUG_ENABLE=1 — гейт на уровне вызывающих (logger/tracer/
+    write_debug_json), а не здесь.
 
-    ``is_dir``-флаги становятся True, когда env-путь задан, — независимо от
-    того, существует ли папка на диске: отсутствие лечится os.makedirs(
-    exist_ok=True) при записи (см. _open_session_file / _body_tags_parts_dir).
+    ``is_dir``-флаги True всегда — независимо от того, существует ли папка
+    на диске: отсутствие лечится os.makedirs(exist_ok=True) при записи
+    (см. _open_session_file / _body_tags_parts_dir).
     """
-    p = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip()
-    if not p:
-        return (False, "", False, "")
+    p = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip() or "./tmp/logs"
     return (True, p, True, p)
 
 
@@ -227,9 +226,9 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 
     Файл пишется только если включён мастер-выключатель
     ``config.ADAPTER_DEBUG`` (ADAPTER_DEBUG_ENABLE=1) и флаг
-    ``config.ADAPTER_DEBUG_TAGS_OUT``, и задан лог-путь (``_DEBUG_IS_DIR``
-    — т.е. ADAPTER_DEBUG_LOGPATH задаёт директорию логов сессий; папка
-    создаётся при необходимости). Для каждого тега пишутся парные файлы —
+    ``config.ADAPTER_DEBUG_TAGS_OUT`` (лог-путь задан всегда — директория
+    ADAPTER_DEBUG_LOGPATH с дефолтом ./tmp/logs; папка создаётся при
+    необходимости). Для каждого тега пишутся парные файлы —
     ``.json`` и ``.yaml``.
     """
     # Быстрая проверка — мастер-выключатель / флаг выключен или лог-путь

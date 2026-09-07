@@ -39,10 +39,12 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `docs/logging.md`, `docs/sanitizing.md`, `docs/architecture.md`,
   `docs/webui.md`.
 - Версия объявляется в `backend-adapter.py` (`__version__`), история — в `changelog.md`.
-- **WEBUI** (`ADAPTER_WEBUI_ENABLE=1`): общее ядро `webserver.py` (роутинг эндпойнтов,
-  `serve()`, CLI `python -m backend_adapter.webserver`) + эндпойнт-модули: `/` =
+- **WEBUI** (поднимается всегда — флага отключения нет, v0.8.6): общее ядро `webserver.py`
+  (роутинг эндпойнтов, `serve()`, CLI `python -m backend_adapter.webserver`) +
+  эндпойнт-модули: `/` =
   `webui_status.py` (версия, LLM-эндпойнты, модели; секция «Models in use» —
-  таблица `model_usage.py` персистентна: YAML `model-usage.yaml` в корне WEBUI,
+  таблица `model_usage.py` персистентна: YAML `model-usage.yaml` в корне WEBUI
+  (= `ADAPTER_DEBUG_LOGPATH`),
   обнуление счётчиков строки — кнопка/POST `/api/model-usage/reset` (строка
   не удаляется), перепроверка эндпоинтов строки — кнопка/POST
   `/api/model-usage/reprobe`; счётчики Вызовов/Input/Output
@@ -59,7 +61,7 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `/healthz` `/health` `/live` `/ready` = `webui_ops.py` (health-check на том же
   слушателе: JSON с версией/uptime/pid; `/ready` — 200 когда бэкенды настроены
   и кэш моделей непуст, иначе 503), `/session` = `session_viewer.py` (вкладки + раздача файлов + hash8-алиасы
-  `/session/<hash8>/...` и png/puml-шорткаты; корень — директория
+  `/session/<hash8>/...` и png/puml-шорткаты; корень — та же директория
   `ADAPTER_DEBUG_LOGPATH`, порт `ADAPTER_WEBUI_PORT`, адрес `ADAPTER_WEBUI_HOST`,
   daemon-поток в процессе адаптера), `/config` = `webui_config_api.py`
   (runtime-пул из 12 переменных — объём debug-записи, санитайзер, рубильники
@@ -79,8 +81,10 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `artefacts/pages/<N>/`.
   Новый эндпойнт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
   Per-session дампы частей протокола включаются флагом `ADAPTER_DEBUG_TAGS_OUT=1`
-  (парные `.json`+`.yaml`, фиксированный список тегов), требуют
-  `ADAPTER_DEBUG_ENABLE=1` и директорию `ADAPTER_DEBUG_LOGPATH`.
+  (парные `.json`+`.yaml`, фиксированный список тегов); файлы пишутся
+  только при `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH`.
+  Консольные debug-логи безусловны (печатаются всегда — v0.8.6);
+  `ADAPTER_DEBUG_ENABLE` гейтит только файловую запись, дефолт `0`.
 - Примеры конфигов — в `docs/samples/`: `sample.adapter.env` (env-файл
   адаптера), `sample.adapter.yaml` (конфиг бэкендов), шаблоны продакшена
   `backend-adapter.service` (systemd, запуск из исходников) и
@@ -126,6 +130,46 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+
+### 2026-09-08 — Колонка Cost по тарифам ADAPTER_MODELS_TARIFFS + пересмотр флагов логирования/WEBUI (v0.8.6)
+
+**Контекст:** (1) таблица «Models in use» показывала токены, но не стоимость
+расхода — считать её вручную по каждому провайдеру неудобно; (2) семантика
+флагов логирования устарела: консольные debug-логи — основной канал
+диагностики, но гейтились `ADAPTER_DEBUG_ENABLE`, а zero-config-дефолт
+создавал путаницу «где консоль, где диск»; корень WEBUI мог отличаться от
+лог-директории (`./tmp/webui`), а WEBUI имел флаг отключения.
+
+**Решение:**
+- **тарифы моделей** — новая env-переменная `ADAPTER_MODELS_TARIFFS` (путь к
+  YAML: `tariffs: [{name, backend?, input_price, output_price, currency,
+  price_per}]`; запятая — десятичный разделитель, нормализуется парсером).
+  Стоимость строки считается **на лету** из накопленных токенов при каждом
+  рендере (`cost = in×price_in/price_per + out×price_out/price_per`), колонка
+  **Cost** после Input/Output. Парсер/lookup — в `model_usage.py` (лист DAG),
+  форматирование — в `webui_status.py` (`_fmt_cost`: `N,NN CUR`, запятая-
+  разделитель, без locale; 0 токенов / модели нет в тарифах / нулевая цена —
+  серая «—»). Файл перечитывается при загрузке model-usage.yaml и при
+  добавлении новой модели в таблицу; в JS-поллинг Cost не входит (производная,
+  пересчитывается при полноценном рендере);
+- **консольные debug-логи безусловны** — `logger._d/_dr`, `[INIT]`,
+  `[MODEL_USAGE]`, `[ENDPOINT_PROBE]` печатаются всегда; `ADAPTER_DEBUG_ENABLE`
+  (дефолт `0`) гейтит ТОЛЬКО файловую запись (session-`*.log`/`*.jsonl`,
+  `*.parts`-дампы); RUNTIME_CONFIG_POOL-подпись ADAPTER_DEBUG — «файловая запись»;
+- **`ADAPTER_DEBUG_LOGPATH` — всегда непуст** (дефолт `./tmp/logs` при
+  пустой/незаданной env; обязателен как корень): лог-директория, корень WEBUI
+  и место `model-usage.yaml` — один путь. Независимый `./tmp/webui` и его
+  формула `LOGPATH or "./tmp/webui"` удалены; директория создаётся на старте
+  всегда (путь-файл → `[FATAL]` по-прежнему);
+- **`ADAPTER_WEBUI_ENABLE` удалён** — WEBUI (и Prometheus-экспортёр при
+  `ADAPTER_EXPORTER_ENABLE=1`) поднимается всегда.
+
+**Следствия:** на странице видна стоимость расхода по модели; старт и работа
+читаются в консоли независимо от настроек файловой записи; «включить
+логирование» = один флаг `ADAPTER_DEBUG_ENABLE` при неизменном пути; WEBUI и
+usage-файл всегда в известной директории. Breaking change: `ADAPTER_WEBUI_ENABLE`
+и формула `./tmp/webui` удалены. Ветка `feature/v0.8.6` в WIP; версия 0.8.6.
 
 ### 2026-09-07 — Перечитывание конфига по кнопке + политика probe «только явные» + синхронизация эндпоинтов + health-эндпоинты + Prometheus-экспортёр (v0.8.5)
 

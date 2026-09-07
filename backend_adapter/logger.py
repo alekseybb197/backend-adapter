@@ -11,12 +11,13 @@ from .redact import redact
 
 
 def _d(msg: str) -> None:
-    """Вывод лога: в консоль и/или в сессионный файл.
+    """Вывод лога: в консоль ВСЕГДА, в сессионный файл при файловой записи.
 
-    Консоль — всегда при ADAPTER_DEBUG_ENABLE=1. Файловая запись — только
-    если явно задан ADAPTER_DEBUG_LOGPATH (директория логов сессий; при
-    пустом env-пути _DEBUG_IS_DIR/_DEBUG_PATH falsy и файл не пишется);
-    файл session-<sessionID>.log (см. session_log).
+    Консоль — безусловна (печатается всегда, независимо от флагов).
+    Файловая запись — только при ADAPTER_DEBUG_ENABLE=1 (config.ADAPTER_DEBUG)
+    в директорию ADAPTER_DEBUG_LOGPATH (путь всегда непуст; сессия ещё не
+    установлена — sid "unknown" — файл не создаётся); файл
+    session-<sessionID>.log (см. session_log).
 
     При ADAPTER_SENSITIVE_LOGGING_ENABLE=1 санитайзер отключается —
     строка записывается в лог без вызова redact(), т.е. полные токены,
@@ -30,17 +31,16 @@ def _d(msg: str) -> None:
     webui_config_api.py) ничего бы не меняло здесь до перезапуска процесса."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     line = f"[{ts}] {msg}" if config.ADAPTER_SENSITIVE_LOGGING_ENABLE else f"[{ts}] {redact(msg)}"
-    if config.ADAPTER_DEBUG:
-        print(line)
-        # Писать в сессионный файл (только если задана директория логов)
-        if session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
-            sid = session_log._last_log_session_id or "unknown"
-            if sid == "unknown":
-                return  # сессия ещё не установлена — не создаём пустой файл
-            fd = session_log._open_session_file("debug", sid)
-            if fd:
-                fd.write((line + "\n").encode())
-                fd.flush()
+    print(line)
+    # Файловая запись — только при мастер-флаге файловой записи
+    if config.ADAPTER_DEBUG and session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
+        sid = session_log._last_log_session_id or "unknown"
+        if sid == "unknown":
+            return  # сессия ещё не установлена — не создаём пустой файл
+        fd = session_log._open_session_file("debug", sid)
+        if fd:
+            fd.write((line + "\n").encode())
+            fd.flush()
 
 
 def _dr(req_id: str, msg: str) -> None:

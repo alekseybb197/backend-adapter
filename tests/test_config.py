@@ -133,11 +133,12 @@ class TestHostVars:
 
 
 class TestZeroConfigDefaults:
-    """Default flags for the zero-config run (v0.7.2).
+    """Default flags for the zero-config run (v0.7.2 / v0.8.6).
 
     With env vars *absent* the adapter should: process no tool logs
-    (TOOLS_ERROR=0) and show status by default (WEBUI_ENABLE=1). Both parse
-    off-words incl. "" — so asserting the default requires delenv, NOT
+    (TOOLS_ERROR=0), NOT write log files (ADAPTER_DEBUG_ENABLE=0) and keep
+    the WEBUI always up (флага отключения больше нет — см. v0.8.6). Both
+    parse off-words incl. "" — so asserting the default requires delenv, NOT
     setenv("", ...) (an empty env value parses as False for both)."""
 
     def setup_method(self):
@@ -145,27 +146,12 @@ class TestZeroConfigDefaults:
         from backend_adapter import config
         self.config = config
 
-    def test_webui_enable_defaults_true(self, monkeypatch):
-        """WEBUI_ENABLE unset → enabled (status page up by default)."""
-        monkeypatch.delenv("ADAPTER_WEBUI_ENABLE", raising=False)
-        _reload_config()
-        from backend_adapter import config
-        assert config.ADAPTER_WEBUI_ENABLE is True
-        assert config.ADAPTER_WEBUI_PORT == 8765
-
     def test_tools_error_defaults_false(self, monkeypatch):
         """TOOLS_ERROR unset → disabled (no tool-error log processing)."""
         monkeypatch.delenv("ADAPTER_DEBUG_TOOLS_ERROR", raising=False)
         _reload_config()
         from backend_adapter import config
         assert config.ADAPTER_DEBUG_TOOLS_ERROR is False
-
-    def test_webui_explicit_off(self, monkeypatch):
-        """WEBUI_ENABLE=0 → disabled."""
-        monkeypatch.setenv("ADAPTER_WEBUI_ENABLE", "0")
-        _reload_config()
-        from backend_adapter import config
-        assert config.ADAPTER_WEBUI_ENABLE is False
 
 
 class TestParseBackendYaml:
@@ -1008,11 +994,12 @@ class TestRuntimeConfig:
     def test_key_outside_pool_ignored(self):
         """Key outside RUNTIME_CONFIG_POOL is silently ignored."""
         before = self.config.get_runtime_config()
-        webui_before = self.config.ADAPTER_WEBUI_ENABLE
-        result = self.config.set_runtime_config(ADAPTER_WEBUI_ENABLE=not webui_before)
+        # LOGPATH вне пула (неизменяемая на лету точка хранения) — игнорируется.
+        logpath_before = self.config.ADAPTER_DEBUG_LOGPATH
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_LOGPATH="/tmp/other")
         after = self.config.get_runtime_config()
         assert result == before == after
-        assert self.config.ADAPTER_WEBUI_ENABLE is webui_before  # не изменилось
+        assert self.config.ADAPTER_DEBUG_LOGPATH == logpath_before  # не изменилось
 
     def test_wrong_type_not_applied(self):
         """Wrong type for known key is not applied; other keys still apply."""
@@ -1483,7 +1470,7 @@ class TestEndpointProbe:
                                "responses": "m", "embeddings": "m"}},
             models=["m"],
         )
-        cfg.ADAPTER_DEBUG = True          # гейт лог-строки — как в проде
+        # консольная проба безусловна (v0.8.6) — флаг файловой записи не нужен
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
             cfg.probe_endpoints()
         out = capsys.readouterr().out
@@ -1496,7 +1483,7 @@ class TestEndpointProbe:
                      "probe": {"completions": "m"}},
             models=["m"],
         )
-        cfg.ADAPTER_DEBUG = True          # первый вызов обязан залогироваться
+        cfg.ADAPTER_DEBUG = True          # первый вызов обязан залогироваться (консоль безусловна)
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
             cfg.probe_endpoints()
             first_out = capsys.readouterr().out
@@ -1505,7 +1492,9 @@ class TestEndpointProbe:
         out = capsys.readouterr().out
         assert "[ENDPOINT_PROBE]" not in out
 
-    def test_no_log_line_when_debug_disabled(self, capsys):
+    def test_log_line_emitted_on_cache_hit_absent(self, capsys):
+        """[ENDPOINT_PROBE] печатается безусловно (v0.8.6: консоль не гейтится
+        ADAPTER_DEBUG) — на фактическую пробу строка есть даже при флаге 0."""
         cfg = self._setup(
             backend={"name": "AAA", "base": "http://aaa", "key": "k",
                      "probe": {"completions": "m"}},
@@ -1514,7 +1503,9 @@ class TestEndpointProbe:
         cfg.ADAPTER_DEBUG = False
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
             cfg.probe_endpoints()
-        assert "[ENDPOINT_PROBE]" not in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "[ENDPOINT_PROBE] backend 'AAA'" in out
+        assert "completions=200" in out
 
     # -- Интеграция с fake_backend (реальный HTTP) ----------------------------
 

@@ -25,7 +25,6 @@ from backend_adapter.config import (
     ADAPTER_TRACE_REASONING_MAX_CHARS,
     ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS,
     ADAPTER_STRICT_MODELS,
-    ADAPTER_WEBUI_ENABLE,
     ADAPTER_WEBUI_HOST,
     ADAPTER_WEBUI_PORT,
     ADAPTER_EXPORTER_ENABLE,
@@ -87,12 +86,10 @@ if __name__ == "__main__":
     print(f"\n{'=' * 70}")
     print(f"Backend-Adapter v{__version__}")
     print(f"Listening:  http://{ADAPTER_ENDPOINT_HOST}:{PROXY_PORT}")
-    if not ADAPTER_DEBUG:
-        log_status = "disabled (ADAPTER_DEBUG_ENABLE=0)"
-    elif ADAPTER_DEBUG_LOGPATH:
-        log_status = f"{ADAPTER_DEBUG_LOGPATH} (диск)"
+    if ADAPTER_DEBUG:
+        log_status = f"{ADAPTER_DEBUG_LOGPATH} (диск, ADAPTER_DEBUG_ENABLE=1)"
     else:
-        log_status = "console only (ADAPTER_DEBUG_ENABLE=1; диск: задайте ADAPTER_DEBUG_LOGPATH)"
+        log_status = "file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on"
     print(f"Logs:       {log_status}")
     print(f"Models:     {'strict' if ADAPTER_STRICT_MODELS else 'permissive'} validation")
     print(
@@ -121,21 +118,21 @@ if __name__ == "__main__":
     print(f"{'=' * 70}\n")
 
     # === Log directory (ADAPTER_DEBUG_LOGPATH) ===
-    # Файловая запись включается ТОЛЬКО явно заданным ADAPTER_DEBUG_LOGPATH
-    # (zero-config: путь пуст → ничего не пишется на диск и папка НЕ создаётся,
-    # консольные debug-блоки видны всегда при ADAPTER_DEBUG_ENABLE=1).
-    # Заданный путь всегда директория: проверяем, что это не файл, и создаём
-    # папку при необходимости.
-    if ADAPTER_DEBUG and ADAPTER_DEBUG_LOGPATH:
-        log_path = ADAPTER_DEBUG_LOGPATH
-        if os.path.isfile(log_path):
-            print(
-                f"[FATAL] ADAPTER_DEBUG_LOGPATH указывает на файл, а нужна директория: "
-                f"{log_path!r}. Логи сессий и трейсов, *.parts дампы и корень "
-                "веб-интерфейса живут в одной папке — задайте путь к директории."
-            )
-            sys.exit(1)
-        os.makedirs(log_path, exist_ok=True)
+    # Единая директория логов сессий (debug/trace/*.parts дампы) И корень
+    # веб-интерфейса (WEBUI + model-usage.yaml). LOGPATH всегда непуст
+    # (дефолт ./tmp/logs в config): папка создаётся как корень WEBUI всегда,
+    # лог-ФАЙЛЫ в неё пишутся только при ADAPTER_DEBUG_ENABLE=1 (см. config).
+    # Путь всегда директория: проверяем, что это не файл — путь-файл сломал
+    # бы корень WEBUI даже при выключенной файловой записи.
+    log_path = ADAPTER_DEBUG_LOGPATH
+    if os.path.isfile(log_path):
+        print(
+            f"[FATAL] ADAPTER_DEBUG_LOGPATH указывает на файл, а нужна директория: "
+            f"{log_path!r}. Логи сессий и трейсов, *.parts дампы и корень "
+            "веб-интерфейса живут в одной папке — задайте путь к директории."
+        )
+        sys.exit(1)
+    os.makedirs(log_path, exist_ok=True)
 
     # ThreadingHTTPServer вместо socketserver.TCPServer: [CC] может
     # открывать несколько параллельных запросов (конкурентные tool calls),
@@ -144,52 +141,51 @@ if __name__ == "__main__":
     # соединения простаивают в очереди accept() и клиент рвёт их по своему
     # таймауту. Это и есть основной источник BrokenPipeError в логе.
     # Веб-интерфейс WEBUI (webserver.py — общее ядро; эндпойнты:
-    # session_viewer.py "/session" + webui_status.py "/") — отдельный поток
-    # внутри процесса адаптера: daemon-поток, живёт вместе с адаптером.
-    # Корень НЕ обязан быть директорией логов: при заданном ADAPTER_DEBUG_LOGPATH
-    # — это она (там лежат *.parts папки сессий); при пустом — независимая
-    # папка ./tmp/webui (статус-страница работает всегда, /session пуст).
-    if ADAPTER_WEBUI_ENABLE:
-        webui_root = ADAPTER_DEBUG_LOGPATH or "./tmp/webui"
-        os.makedirs(webui_root, exist_ok=True)
-        from backend_adapter.webserver import serve as webui_serve
+    # session_viewer.py "/session" + webui_status.py "/" + webui_ops.py
+    # health-эндпоинты) поднимается ВСЕГДА — отдельный daemon-поток внутри
+    # процесса адаптера. Корень — директория ADAPTER_DEBUG_LOGPATH (всегда
+    # непуст, дефолт ./tmp/logs): там лежат *.parts папки сессий, корень
+    # WEBUI и model-usage.yaml.
+    webui_root = ADAPTER_DEBUG_LOGPATH
+    os.makedirs(webui_root, exist_ok=True)
+    from backend_adapter.webserver import serve as webui_serve
 
-        webui = webui_serve(
-            webui_root,
-            __version__,
-            ADAPTER_WEBUI_HOST,
-            ADAPTER_WEBUI_PORT,
-            verbose=False,
-        )
-        if webui:
-            threading.Thread(target=webui.serve_forever, daemon=True).start()
-            print(f"[WEBUI] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_WEBUI_PORT}/ (root: {webui_root})")
-            # Стартовая фоновая проверка бэкендов (модели + дымовая проба
-            # API-эндпойнтов): первый GET "/" сразу показывает свежие данные,
-            # а не пустую колонку Endpoints. Дублирует стартовый опрос
-            # _init_multi_backends — приемлемо: один раз, фоново, с таймаутом
-            # PROBE_TIMEOUT (10 с на эндпоинт), не ADAPTER_TIMEOUT (300 с).
-            # Локальные импорты: скрипт не импортирует webui_status; config
-            # связан только именами (не модулем).
-            from backend_adapter import config as _cfg
-            from backend_adapter.webui_status import PROBE_TIMEOUT
+    webui = webui_serve(
+        webui_root,
+        __version__,
+        ADAPTER_WEBUI_HOST,
+        ADAPTER_WEBUI_PORT,
+        verbose=False,
+    )
+    if webui:
+        threading.Thread(target=webui.serve_forever, daemon=True).start()
+        print(f"[WEBUI] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_WEBUI_PORT}/ (root: {webui_root})")
+        # Стартовая фоновая проверка бэкендов (модели + дымовая проба
+        # API-эндпойнтов): первый GET "/" сразу показывает свежие данные,
+        # а не пустую колонку Endpoints. Дублирует стартовый опрос
+        # _init_multi_backends — приемлемо: один раз, фоново, с таймаутом
+        # PROBE_TIMEOUT (10 с на эндпоинт), не ADAPTER_TIMEOUT (300 с).
+        # Локальные импорты: скрипт не импортирует webui_status; config
+        # связан только именами (не модулем).
+        from backend_adapter import config as _cfg
+        from backend_adapter.webui_status import PROBE_TIMEOUT
 
-            _cfg.start_refresh(timeout=PROBE_TIMEOUT)
-            # Prometheus-экспортёр — отдельный лёгкий слушатель на
-            # ADAPTER_EXPORTER_PORT (текст метрик /metrics, text exposition
-            # 0.0.4 без библиотек): настройки/статус приложения, таблица
-            # настроенных бэкендов, таблица использованных моделей со
-            # счётчиками (см. prometheus_exporter.py). Свой слушатель — не
-            # эндпоинт WEBUI: /metrics не должен висеть на порту статуса.
-            if ADAPTER_EXPORTER_ENABLE:
-                from backend_adapter.prometheus_exporter import serve_exporter
+        _cfg.start_refresh(timeout=PROBE_TIMEOUT)
+        # Prometheus-экспортёр — отдельный лёгкий слушатель на
+        # ADAPTER_EXPORTER_PORT (текст метрик /metrics, text exposition
+        # 0.0.4 без библиотек): настройки/статус приложения, таблица
+        # настроенных бэкендов, таблица использованных моделей со
+        # счётчиками (см. prometheus_exporter.py). Свой слушатель — не
+        # эндпоинт WEBUI: /metrics не должен висеть на порту статуса.
+        if ADAPTER_EXPORTER_ENABLE:
+            from backend_adapter.prometheus_exporter import serve_exporter
 
-                exporter = serve_exporter(
-                    __version__, ADAPTER_WEBUI_HOST, ADAPTER_EXPORTER_PORT, verbose=False
-                )
-                if exporter is not None:
-                    threading.Thread(target=exporter.serve_forever, daemon=True).start()
-                    print(f"[EXPORTER] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_EXPORTER_PORT}/metrics")
+            exporter = serve_exporter(
+                __version__, ADAPTER_WEBUI_HOST, ADAPTER_EXPORTER_PORT, verbose=False
+            )
+            if exporter is not None:
+                threading.Thread(target=exporter.serve_forever, daemon=True).start()
+                print(f"[EXPORTER] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_EXPORTER_PORT}/metrics")
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
     with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
         try:

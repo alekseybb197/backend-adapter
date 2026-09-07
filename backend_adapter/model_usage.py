@@ -16,8 +16,9 @@ input_tokens из usage.prompt_tokens, output_tokens из usage.completion_token
 статус-странице WEBUI "/" (см. webui_status._usage_rows_html).
 
 Персистентность: таблица сохраняется в YAML-файл `model-usage.yaml` в корне
-WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`, та же, что у корня
-веб-сервера) и при старте загружается из него, если файл есть — счётчики
+WEBUI (корень — директория `ADAPTER_DEBUG_LOGPATH`, дефолт ./tmp/logs;
+та же формула, что у корня веб-сервера) и при старте загружается из него,
+если файл есть — счётчики
 переживают перезапуски адаптера. Сохранение «грязной» таблицы — не чаще
 раза в config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL (сек); создание новой строки
 модели, обнуление счётчиков строки (reset_model, кнопка «Сбросить») и
@@ -115,7 +116,7 @@ _TARIFFS: dict[tuple[str, str], dict] = {}
 _TARIFF_LOCK = threading.Lock()
 
 # Персистентность (YAML-файл в корне WEBUI). _PERSIST_PATH:
-#   None (дефолт) → авто-формула (прод): config.ADAPTER_DEBUG_LOGPATH or "./tmp/webui"
+#   None (дефолт) → авто-формула (прод): config.ADAPTER_DEBUG_LOGPATH (всегда непуст)
 #   ""            → выключено (тесты, никакого файлового I/O)
 #   иначе         → явный путь к YAML-файлу (standalone webserver, тесты на tmp_path)
 # _PERSIST_LOCK сериализует запись файла; _TABLE_LOCK защищает таблицу.
@@ -583,9 +584,10 @@ def lookup_tariff(model: str, backend: str) -> dict | None:
 
 def _default_root() -> str:
     """Корень WEBUI — та же формула, что у webui_root в backend-adapter.py
-    (ADAPTER_DEBUG_LOGPATH or "./tmp/webui"). Читается лениво (живое чтение
-    config.ADAPTER_DEBUG_LOGPATH — его могут менять тесты между вызовами)."""
-    return config.ADAPTER_DEBUG_LOGPATH or "./tmp/webui"
+    (ADAPTER_DEBUG_LOGPATH, всегда непуст; дефолт ./tmp/logs). Читается
+    лениво (живое чтение config.ADAPTER_DEBUG_LOGPATH — его могут менять
+    тесты между вызовами)."""
+    return config.ADAPTER_DEBUG_LOGPATH
 
 
 def _default_root_file() -> str:
@@ -874,19 +876,16 @@ def _probe_model_endpoints(backend_cfg: dict, resolved: str) -> dict:
 
 
 def _log(client_model: str, msg: str) -> None:
-    """Консольный лог строки [MODEL_USAGE]; гейт — ADAPTER_DEBUG (живое
-    чтение, как _log_probe в config.py: config/model_usage не импортируют
-    logger — корень DAG)."""
-    if config.ADAPTER_DEBUG:
-        print(f"[MODEL_USAGE] model={client_model!r}: {msg}")
+    """Консольный лог строки [MODEL_USAGE]. Печатается БЕЗУСЛОВНО (консольные
+    debug-логи не гейтятся; см. v0.8.6). config/model_usage не импортируют
+    logger — корень DAG."""
+    print(f"[MODEL_USAGE] model={client_model!r}: {msg}")
 
 
 def _log_probe(client_model: str, backend_name: str, result: dict) -> None:
     """Лог-блок [MODEL_USAGE] первой пробы модели: сырые HTTP-коды по
     ENDPOINT_PROBES (единый формат с config._log_probe). Инкременты повторных
     обращений не логируются (спам при каждом запросе — как кэш-хиты пробы)."""
-    if not config.ADAPTER_DEBUG:
-        return
     errors = result["errors"]
     if errors:
         _log(client_model, f"backend '{backend_name}': failed: {errors}")

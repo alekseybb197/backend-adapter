@@ -286,7 +286,7 @@ class TestConfigSnapshot:
         snap = ws._config_snapshot()
         assert snap["mode"] == "standalone"
         assert snap["endpoints"] == []
-        assert snap["note"] and "ADAPTER_WEBUI_ENABLE" in snap["note"]
+        assert snap["note"] and "ADAPTER_BACKEND_CONFIG" in snap["note"]
 
     def test_multi_endpoints_carry_keys(self):
         # key нужен refresh-пробе; в HTML не выводится, но в данных должен быть.

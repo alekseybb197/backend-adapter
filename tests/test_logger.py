@@ -13,9 +13,10 @@ def _reload_all():
 class TestLog:
     """Tests for _d()."""
 
-    def test_debug_disabled_no_output(self, tmp_path):
-        """ADAPTER_DEBUG_ENABLE=0 (master switch): _d() writes nothing,
-        session file is not created."""
+    def test_debug_disabled_no_file_output(self, tmp_path, capsys):
+        """ADAPTER_DEBUG_ENABLE=0 (мастер-выключатель ФАЙЛОВОЙ записи): _d()
+        НЕ создаёт session-файл, но строка всё равно печатается в консоль
+        (консольные debug-логи безусловны — v0.8.6)."""
         _reload_all()
         from backend_adapter import session_log, config
         config.ADAPTER_DEBUG = False
@@ -25,6 +26,8 @@ class TestLog:
         from backend_adapter.logger import _d
         _d("test message")
         assert list(tmp_path.glob("session-*")) == []
+        out = capsys.readouterr().out
+        assert "test message" in out
 
     def test_debug_redacts_secrets(self, tmp_path):
         _reload_all()

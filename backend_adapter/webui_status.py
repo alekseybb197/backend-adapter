@@ -203,7 +203,7 @@ def _config_snapshot() -> dict:
         note = (
             "Данные адаптера недоступны — запущен standalone-режим (viewer вне процесса "
             "адаптера). Живые данные появятся после запуска внутри адаптера "
-            "(ADAPTER_WEBUI_ENABLE=1), либо задайте ADAPTER_BACKEND_CONFIG (путь к "
+            "(WEBUI поднимается всегда), либо задайте ADAPTER_BACKEND_CONFIG (путь к "
             "YAML-файлу конфигурации бэкенда) и перезапустите сервер."
         )
     return {"mode": mode, "endpoints": endpoints, "note": note}

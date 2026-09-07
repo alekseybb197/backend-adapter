@@ -135,17 +135,19 @@ Claude Code (Anthropic API client)
 4. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
    (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
    `0.0.0.0` — all interfaces)
-5. Log directory `ADAPTER_DEBUG_LOGPATH` (empty — **file logging off**: console
-   debug blocks still visible at `ADAPTER_DEBUG_ENABLE=1`, no directory is created):
-   when set, created when `ADAPTER_DEBUG_ENABLE=1` (master switch — at `0` nothing is
-   written and the folder is NOT created); points at an existing **file** →
+5. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
+   empty/unset — the path is always non-empty; v0.8.6): created unconditionally at
+   startup (it doubles as the WEBUI root); **file** logging of sessions/traces/dumps
+   only happens at `ADAPTER_DEBUG_ENABLE=1` (master switch of the *file* write —
+   console debug logs are unconditional); points at an existing **file** →
    `[FATAL]` + hint + `sys.exit(1)` (the path is always a directory).
-6. If `ADAPTER_WEBUI_ENABLE=1` (default): start the WEBUI in a daemon thread via
+6. Start the WEBUI in a daemon thread via
    `webserver.serve(root, __version__)` on `ADAPTER_WEBUI_HOST:<ADAPTER_WEBUI_PORT>`
    (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
-   careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` when set,
-   otherwise an independent `./tmp/webui` (created on demand — status page `/`
-   works out of the box; `/session` is empty until logs exist; endpoints: `/` —
+   careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` — the WEBUI
+   is always started, there is no disable flag (v0.8.6; `ADAPTER_WEBUI_ENABLE`
+   removed; `/session` is empty until file logging is enabled and logs exist;
+   endpoints: `/` —
    status, `/session` — session viewer, `/config` — runtime-config form,
    `/api/refresh-state` — JSON state of the background check, see §6.5,
    `/api/model-usage/reset` — zeroes a used-model row's counters (row is kept),
@@ -430,7 +432,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие strict-проверку
   (HTTP 400), и служебные дымовые пробы эндпоинтов токенов не дают.
 - **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
-  в корне WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`); файл
+  в корне WEBUI (= `ADAPTER_DEBUG_LOGPATH`, дефолт `./tmp/logs`); файл
   несёт версию формата (`version: 2`, строки — под ключом `models`). Точка
   синхронизации пути — `webserver.serve()` (`set_persist_path(root_dir)`;
   в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении

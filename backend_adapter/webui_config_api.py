@@ -59,7 +59,7 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 
     # Описания полей для подсказок
     field_descriptions = {
-        "ADAPTER_DEBUG": "Мастер-выключатель debug-логов (0/1)",
+        "ADAPTER_DEBUG": "Файловая запись логов (0/1); консоль — всегда",
         "ADAPTER_DEBUG_TAGS_OUT": "Per-session дампы протокола (.json+.yaml парой)",
         "ADAPTER_DEBUG_TOOLS": "Логировать все результаты инструментов ([TOOL_RESULT])",
         "ADAPTER_DEBUG_TOOLS_ERROR": "Логировать ошибки инструментов ([TOOL_RESULT_ERROR])",

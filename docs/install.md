@@ -442,14 +442,15 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 ### 5.7 Отладка и трассировка
 
 ```bash
-# Мастер-выключатель логирования: 1 — логи сессий/трейсы/дампы пишутся
-# (0/false/no — ничего не пишется, папка не создаётся)
-export ADAPTER_DEBUG_ENABLE=1
+# Мастер-выключатель ФАЙЛОВОЙ записи: 1 — логи сессий/трейсы/дампы пишутся
+# на диск (0/false/no — на диск ничего не пишется; консольные debug-логи
+# безусловны и от флага не зависят). Дефолт 0.
+export ADAPTER_DEBUG_ENABLE=0
 
-# Директория логов сессий: debug-логи (session-*.log), trace-логи (session-*.jsonl),
-# *.parts дампы. Пусто (дефолт) — файловая запись выключена: диск не используется,
-# папка не создаётся; консольные debug-блоки видны при ADAPTER_DEBUG_ENABLE=1.
-# Задана — папка создаётся при необходимости.
+# Директория логов сессий и корень WEBUI: debug-логи (session-*.log),
+# trace-логи (session-*.jsonl), *.parts дампы, model-usage.yaml. Путь всегда
+# непуст — при незаданной/пустой env дефолт ./tmp/logs (создаётся при старте);
+# файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1.
 # export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
 
 # Максимальная длина trim-блоков (символы)
@@ -466,12 +467,11 @@ export ADAPTER_DEBUG_ENABLE=1
 # export ADAPTER_DEBUG_TAGS_OUT=1
 
 # Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий.
-# Включён ПО УМОЛЧАНИЮ (ADAPTER_WEBUI_ENABLE=1) на 127.0.0.1:8765 — статус-страница
-# доступна сразу; корень — ADAPTER_DEBUG_LOGPATH (если задан, там *.parts сессии),
-# иначе ./tmp/webui (вкладка /session пуста; там же живёт model-usage.yaml — таблица
-# использованных моделей). Health-check для оркестрации: /healthz, /health, /live, /ready
-# (см. docs/webui.md). Отключить: ADAPTER_WEBUI_ENABLE=0. Руководство по
-# страницам и API — docs/webui.md.
+# Поднимается ВСЕГДА (v0.8.6; флага ADAPTER_WEBUI_ENABLE больше нет) на 127.0.0.1:8765 —
+# статус-страница доступна сразу; корень — ADAPTER_DEBUG_LOGPATH (дефолт ./tmp/logs,
+# там *.parts сессии и model-usage.yaml — таблица использованных моделей).
+# Health-check для оркестрации: /healthz, /health, /live, /ready
+# (см. docs/webui.md). Руководство по страницам и API — docs/webui.md.
 # export ADAPTER_WEBUI_PORT=8765
 # export ADAPTER_WEBUI_HOST="127.0.0.1"
 # Standalone-запуск вне процесса адаптера: python -m backend_adapter.webserver [ROOT] [--port] [--host]
@@ -492,8 +492,8 @@ export ADAPTER_DEBUG_ENABLE=1
 
 ```bash
 # Trace-логи (session-*.jsonl) пишутся в ту же директорию ADAPTER_DEBUG_LOGPATH,
-# что и debug-логи; включаются тем же мастер-выключателем ADAPTER_DEBUG_ENABLE=1.
-# Отдельной переменной пути нет.
+# что и debug-логи; включаются тем же мастер-выключателем файловой записи
+# ADAPTER_DEBUG_ENABLE=1. Отдельной переменной пути нет.
 
 # Обрезка полей (0 = без обрезки)
 # export ADAPTER_TRACE_REASONING_MAX_CHARS=0
@@ -538,16 +538,17 @@ export ADAPTER_STRICT_MODELS=1
 # export ADAPTER_MODELS_MAPPING=":k2-05"
 
 # --- Logging ---
-export ADAPTER_DEBUG_ENABLE=1
-# export ADAPTER_DEBUG_LOGPATH="./tmp/logs"   # директория логов сессий (пусто — файловая запись выключена)
+export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
+# export ADAPTER_DEBUG_LOGPATH="./tmp/logs"   # директория логов и корень WEBUI (дефолт ./tmp/logs)
 # export ADAPTER_DEBUG_TAGS_FULL="BODY,TOOL_RESULT"
 # export ADAPTER_DEBUG_TOOLS_ERROR=1
 
 # --- Sanitizer (secret masking in logs) ---
 export ADAPTER_SENSITIVE_LOGGING_ENABLE=0
 
-# --- WEBUI ---
-export ADAPTER_WEBUI_ENABLE=1
+# --- WEBUI (поднимается всегда; флага отключения нет) ---
+# export ADAPTER_WEBUI_PORT=8765
+# export ADAPTER_WEBUI_HOST="127.0.0.1"
 # export ADAPTER_EXPORTER_ENABLE=1          # Prometheus-экспортёр (отдельный слушатель)
 # export ADAPTER_EXPORTER_PORT=9100
 
@@ -580,13 +581,13 @@ python3 backend-adapter.py
 ======================================================================
 Claude Code Adapter v0.8.4 (...
 Listening:  http://127.0.0.1:9999
-Logs:       console only (ADAPTER_DEBUG_ENABLE=1; диск: задайте ADAPTER_DEBUG_LOGPATH)
+Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
 Streaming:  enabled (SSE passthrough)
 
 Backends:   1 configured:
   - home: http://127.0.0.1:8002
-[WEBUI] http://127.0.0.1:8765/ (root: ./tmp/webui)
+[WEBUI] http://127.0.0.1:8765/ (root: ./tmp/logs)
 [EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================
 ```
@@ -682,8 +683,8 @@ ADAPTER_PROXY_PORT=9998 python3 backend-adapter.py
 ### Нет ответа от бэкенда
 
 ```bash
-# Включить debug-логи (консольные блоки видны при дефолте ADAPTER_DEBUG_ENABLE=1)
-# или направить логи в директорию на диск:
+# Консольные debug-логи видны всегда; направить их копию в директорию на диск:
+# export ADAPTER_DEBUG_ENABLE=1
 # export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
 
 # Проверить соединение с бэкендом напрямую
@@ -732,7 +733,7 @@ Adapter cannot start. Exiting.
 | `ADAPTER_BACKEND_CONFIG` | путь к YAML | Подключение к бэкенду (пример — `docs/samples/sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` | Порт, на котором слушает адаптер |
 | `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` | Адрес, на котором слушает адаптер (только локально; `0.0.0.0` — все интерфейсы) |
-| `ADAPTER_DEBUG_ENABLE` | `1` | Включить логирование |
+| `ADAPTER_DEBUG_ENABLE` | `0` | Файловая запись логов (консоль — всегда; `1` — писать debug/trace на диск в `ADAPTER_DEBUG_LOGPATH`) |
 | `ADAPTER_DETACH_ENABLE` | `0` | **Важно:** не включаем detach при systemd |
 
 > **Важно:** `ADAPTER_DETACH_ENABLE=0` при работе через systemd — systemd сам следит за процессом.
@@ -750,7 +751,7 @@ cp docs/samples/backend-adapter.service ~/.config/systemd/user/backend-adapter.s
 # Примерный набор переменных (полный — в docs/samples/sample.adapter.env):
 # ADAPTER_BACKEND_CONFIG="/home/username/backend-adapter/adapter.yaml"
 # ADAPTER_PROXY_PORT=9999
-# ADAPTER_DEBUG_ENABLE=1
+# ADAPTER_DEBUG_ENABLE=0
 # ADAPTER_DETACH_ENABLE=0
 
 # 3. Загрузить изменения
@@ -812,7 +813,7 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 | `ADAPTER_BACKEND_CONFIG` | путь к YAML (пример — `docs/samples/sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` |
 | `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` |
-| `ADAPTER_DEBUG_ENABLE` | `1` |
+| `ADAPTER_DEBUG_ENABLE` | `0` |
 | `ADAPTER_DETACH_ENABLE` | `0` |
 
 **Установка:**

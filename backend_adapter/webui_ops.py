@@ -3,7 +3,7 @@
 webui_ops.py — операционные (health/liveness/readiness) эндпойнты WEBUI.
 
 Контракт — k8s-схема зондов на ОБЩЕМ слушателе WEBUI (тот же сервер, что
-отдаёт "/", "/session", "/config"; поднимается при ADAPTER_WEBUI_ENABLE=1):
+отдаёт "/", "/session", "/config"; WEBUI поднимается всегда):
 
   GET /healthz  — живость процесса и сервера (алиас — GET /health).
                  Всегда 200 application/json:

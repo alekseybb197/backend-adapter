@@ -450,9 +450,9 @@ class TestServe:
             httpd.server_close()
 
     def test_empty_root_serves_status_page(self, tmp_path):
-        """Zero-config WEBUI-корень (./tmp/webui при пустом ADAPTER_DEBUG_LOGPATH):
-        пустая, заранее созданная папка — валидный корень; статус-страница "/"
-        отвечает 200, /session — тоже 200 (пустая страница, .parts нет)."""
+        """WEBUI-корень: пустая, заранее созданная папка — валидный корень;
+        статус-страница "/" отвечает 200, /session — тоже 200 (пустая
+        страница, .parts нет)."""
         root = str(tmp_path / "webui")
         os.makedirs(root)
         httpd, port = _start_server(root)
