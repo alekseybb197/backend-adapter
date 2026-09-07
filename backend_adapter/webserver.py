@@ -248,7 +248,12 @@ def serve(
     # импортируют webserver (register/Endpoint), верхнеуровневый импорт
     # создал бы цикл.
     from . import model_usage as _model_usage
-    from . import session_viewer, webui_config_api, webui_status  # noqa: F401  (регистрируют себя)
+    from . import (  # noqa: F401  (регистрируют себя)
+        session_viewer,
+        webui_config_api,
+        webui_ops,
+        webui_status,
+    )
 
     # Персистентный YAML таблицы использованных моделей лежит в корне WEBUI
     # (тот же root_dir, что у *.parts сессий). Синхронизация здесь: корень
