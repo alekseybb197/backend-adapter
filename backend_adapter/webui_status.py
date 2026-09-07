@@ -219,14 +219,33 @@ def _models_html(models: list[str], status: str) -> str:
     остальные прячутся в <span class="models-extra" style="display:none">,
     а кнопка «Показать ещё (N)» разворачивает список (JS models_toggle,
     см. _render_status_page): при клике span получает display:block,
-    кнопка меняется на «Свернуть» и прячет его обратно."""
+    кнопка меняется на «Свернуть» и прячет его обратно.
+    Ссылка на краткое изображение выводится в начале и конце списка."""
     if not models:
         return f'<span style="color:#999">{status}</span>'
     line = '<div style="line-height:1.5">{}</div>'
+
+    # Ссылка на краткое изображение модели
+    def model_link(m):
+        q = quote(str(m), safe="")
+        return f'<a href="/session?model={q}" style="color:#0066cc;text-decoration:none" title="краткое изображение">📋</a>'
+
     if len(models) <= MODEL_LINES:
-        return "".join(line.format(html.escape(m)) for m in models)
-    shown = "".join(line.format(html.escape(m)) for m in models[:MODEL_LINES])
-    extra = "".join(line.format(html.escape(m)) for m in models[MODEL_LINES:])
+        items = []
+        for m in models:
+            items.append(f"{line.format(html.escape(m))} {model_link(m)}")
+        return "".join(items)
+
+    shown_parts = []
+    for m in models[:MODEL_LINES]:
+        shown_parts.append(f"{line.format(html.escape(m))} {model_link(m)}")
+    shown = "".join(shown_parts)
+
+    extra_parts = []
+    for m in models[MODEL_LINES:]:
+        extra_parts.append(f"{line.format(html.escape(m))} {model_link(m)}")
+    extra = "".join(extra_parts)
+
     n = len(models) - MODEL_LINES
     btn = (
         f'<button type="button" onclick="models_toggle(this)" '
@@ -235,7 +254,7 @@ def _models_html(models: list[str], status: str) -> str:
         f'font:inherit;cursor:pointer;text-decoration:underline">'
         f"Показать ещё ({n})</button>"
     )
-    return f'{shown}<span class="models-extra" style="display:none">{extra}</span>{btn}'
+    return f'{shown}<span class="models-extra" style="display:none">{extra}</span><div style="line-height:1.5;margin-top:4px">{model_link(models[-1])}</div>{btn}'
 
 
 def _api_html(api: dict | None) -> str:
@@ -293,6 +312,21 @@ def _fmt_tokens(n: int) -> str:
     Неразрывный узкий пробел (U+202F) между разрядами — читаемо и не
     переносится. Отрицательное значение — как 0 (не бывает)."""
     return f"{max(n, 0):,}".replace(",", " ")
+
+
+def _compact_number(n: int) -> str:
+    """Компактное представление числа: 12k3 для 12300, 34m9 для 34874321, 1b2 для 1200000000.
+
+    После символа только 1 цифра, остальное округляется вниз."""
+    n = max(n, 0)
+    if n >= 1_000_000_000:
+        return f"{n // 100_000_000 / 10:.0f}b{n // 100_000_000 % 10}"
+    elif n >= 1_000_000:
+        return f"{n // 100_000 / 10:.0f}m{n // 100_000 % 10}"
+    elif n >= 1000:
+        return f"{n // 100 / 10:.0f}k{n // 100 % 10}"
+    else:
+        return str(n)
 
 
 def _actions_cell_html(model: str, reprobing: bool = False) -> str:
@@ -355,8 +389,8 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
             f"<td>{html.escape(str(r['model']))}</td>"
             f"<td>{html.escape(str(r['backend']))}</td>"
             f'<td data-calls="{calls}">{calls}</td>'
-            f'<td data-input="{input_tokens}">{_fmt_tokens(input_tokens)}</td>'
-            f'<td data-output="{output_tokens}">{_fmt_tokens(output_tokens)}</td>'
+            f'<td data-input="{input_tokens}">{_compact_number(input_tokens)}</td>'
+            f'<td data-output="{output_tokens}">{_compact_number(output_tokens)}</td>'
             f"<td>{_endpoints_cell_html(r)}</td>"
             f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
@@ -571,8 +605,18 @@ def _render_status_page(
     # сам троттлит setTimeout (≥1/мин) — трафика нет.
     usage_poll_script = """
 <script>
-  function usage_fmt(n) {{
-    return String(n).replace(/\\B(?=(\\d{{3}})+(?!\\d))/g, "\\u202f");
+  function compact_fmt(n) {{
+    if (n >= 1000000000) {{
+      var b = Math.floor(n / 100000000);
+      return Math.floor(b / 10) + "b" + (b % 10);
+    }} else if (n >= 1000000) {{
+      var m = Math.floor(n / 100000);
+      return Math.floor(m / 10) + "m" + (m % 10);
+    }} else if (n >= 1000) {{
+      var k = Math.floor(n / 100);
+      return Math.floor(k / 10) + "k" + (k % 10);
+    }}
+    return String(n);
   }}
   function usage_poll() {{
     fetch("/api/model-usage/snapshot")
@@ -590,8 +634,8 @@ def _render_status_page(
             }}
           }};
           set(2, row["calls"]);
-          set(3, usage_fmt(row["input_tokens"]));
-          set(4, usage_fmt(row["output_tokens"]));
+          set(3, compact_fmt(row["input_tokens"]));
+          set(4, compact_fmt(row["output_tokens"]));
         }}
         setTimeout(usage_poll, 5000);
       }})

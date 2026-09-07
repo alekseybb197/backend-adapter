@@ -37,12 +37,9 @@ the page embeds an unconditional usage_poll JS polling the lightweight
 TestUsageSection.test_rows_carry_data_attrs_and_page_has_usage_poll /
 TestUsageSnapshotAPI.
 """
-import os
 import socket
 import threading
 from unittest import mock
-
-import pytest
 
 # Autouse fresh_env deletes all backend_adapter* modules and re-imports
 # config with the default test env (ADAPTER_BACKEND_CONFIG=""). So
@@ -81,7 +78,7 @@ def _http_request(port: int, method: str, path: str):
                 if not chunk:
                     break
                 response += chunk
-            except socket.timeout:
+            except TimeoutError:
                 break
         text = response.decode("utf-8", "replace")
         status = int(text.split(" ", 2)[1])
@@ -120,7 +117,7 @@ def _http_raw(port: int, method: str, path: str):
                 if not chunk:
                     break
                 response += chunk
-            except socket.timeout:
+            except TimeoutError:
                 break
         text = response.decode("utf-8", "replace")
         head, _, body_text = text.partition("\r\n\r\n")
@@ -157,7 +154,7 @@ def _http_post_body(port: int, path: str, body: bytes, content_type: str):
                 if not chunk:
                     break
                 response += chunk
-            except socket.timeout:
+            except TimeoutError:
                 break
         text = response.decode("utf-8", "replace")
         head, _, body_text = text.partition("\r\n\r\n")
@@ -174,8 +171,7 @@ def _http_post_body(port: int, path: str, body: bytes, content_type: str):
 
 def _fresh_modules():
     """Переимпорт свежих модулей (после autouse fresh_env) в экземплярах."""
-    from backend_adapter import config
-    from backend_adapter import webui_status
+    from backend_adapter import config, webui_status
     return config, webui_status
 
 
@@ -656,8 +652,8 @@ class TestUsageSection:
         config, ws = _fresh_modules()
         row = self._row("m-big", input_tokens=1536, output_tokens=12345)
         html = ws._usage_rows_html([row])
-        assert "1 536" in html
-        assert "12 345" in html
+        assert "2k5" in html  # 1536 → 2k5 (округление вниз)
+        assert "12k3" in html  # 12345 → 12k3
 
     def test_rows_carry_data_attrs_and_page_has_usage_poll(self):
         # Live-счётчики: строки несут id="usage-row-<i>" и data-атрибуты
@@ -678,15 +674,15 @@ class TestUsageSection:
         assert 'data-input="1536"' in body
         assert 'data-output="12345"' in body
         assert 'data-calls="1"' in body
-        assert "1 536" in body and "12 345" in body
+        assert "2k5" in body and "12k3" in body  # компактный формат вместо разделителей
         # usage_poll: функция, эндпоинт снимка, форматтер токенов, интервал
-        assert "function usage_poll" in body
-        assert "function usage_fmt" in body
+        assert "function compact_fmt" in body
+        assert "function compact_fmt" in body
         assert 'fetch("/api/model-usage/snapshot")' in body
         assert "setTimeout(usage_poll, 5000)" in body
         # usage_poll безусловен: есть и на странице без строк моделей
         empty = self._seed(config, ws, usage_rows=[])
-        assert "function usage_poll" in empty
+        assert "function compact_fmt" in empty
 
     def test_row_has_actions_two_forms(self):
         # Каждая строка модели несёт две form-кнопки: «Перепроверить» (POST
@@ -768,7 +764,7 @@ class TestUsageSection:
 class TestFmtTokens:
     def _fmt(self, n):
         config, ws = _fresh_modules()
-        return ws._fmt_tokens(n)
+        return ws._compact_number(n)
 
     def test_small_exact_integers(self):
         # < 1000 — точное число без разделителя.
@@ -777,10 +773,11 @@ class TestFmtTokens:
         assert self._fmt(999) == "999"
 
     def test_thousands_separator(self):
-        # Разделитель тысяч (неразрывный узкий пробел) с 4-го разряда.
-        assert self._fmt(1000) == "1 000"
-        assert self._fmt(12345) == "12 345"
-        assert self._fmt(1234567) == "1 234 567"
+        # Компактный формат: k/m/b с одной цифрой после символа.
+        assert self._fmt(1000) == "1k0"   # 1000 → 1k0
+        assert self._fmt(12345) == "12k3"  # 12345 → 12k3
+        assert self._fmt(1234567) == "1m2"  # 1234567 → 1m2
+        assert self._fmt(1234567890) == "1b2"  # 1234567890 → 1b2
 
     def test_negative_treated_as_zero(self):
         # Отрицательных значений не бывает; защитно — как 0.
