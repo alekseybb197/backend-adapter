@@ -37,7 +37,7 @@ echo "Packages OK."
 for cfg in adapter.env adapter.yaml; do
     if [[ ! -f "$cfg" ]]; then
         echo "[ERROR] $cfg not found in ${SCRIPT_DIR}" >&2
-        echo "Copy sample.adapter.env -> adapter.env and sample.adapter.yaml -> adapter.yaml" >&2
+        echo "Copy docs/samples/sample.adapter.env -> adapter.env and docs/samples/sample.adapter.yaml -> adapter.yaml" >&2
         exit 1
     fi
 done

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.8.4
+"""[CC] <-> [OI]-backend adapter v0.8.5
 — changelog: ../changelog.md"""
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 __comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT_ERROR log + tool_name in TOOL_RESULT (successful) + merged ADAPTER_DEBUG_TAGS_OUT flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold + zero-config defaults: console-only logs (no disk dir), TOOLS_ERROR off, WEBUI status page on by default + distribution: standalone binaries (PyInstaller), build script, CI release workflow, one-line installer install.sh + runtime-config endpoint /config (live reads config.X) + incremental artifact-tree builds with checkpoints (.build_state.json) + pagination pages artefacts/pages/<N>/ + /session hash8 URL aliases + png/puml shortcuts + skill detection removed (skill.py, ADAPTER_SKILL_PATTERNS, skill_signal) + endpoint detection: smoke probe of backend API endpoints (ADAPTER_ENDPOINT_PROBE, YAML probe key) + background refresh of backend list (refresh by button, PRG redirect) + endpoint column HTTP-200-only + auto-start check on adapter start + used-models table on WEBUI status page (ADAPTER_MODEL_USAGE_ENABLE, per-model endpoint probe) + traffic counters (bytes sent/recv to backend)"
 
 import os
@@ -28,6 +28,8 @@ from backend_adapter.config import (
     ADAPTER_WEBUI_ENABLE,
     ADAPTER_WEBUI_HOST,
     ADAPTER_WEBUI_PORT,
+    ADAPTER_EXPORTER_ENABLE,
+    ADAPTER_EXPORTER_PORT,
     ADAPTER_STREAMING_ENABLE,
     ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_MODELS_MAPPING,
@@ -100,7 +102,7 @@ if __name__ == "__main__":
     if not ADAPTER_BACKEND_CONFIG:
         print(
             "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу "
-            "конфигурации бэкенда (пример — sample.adapter.yaml в корне репозитория)."
+            "конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
         )
         sys.exit(1)
 
@@ -173,6 +175,21 @@ if __name__ == "__main__":
             from backend_adapter.webui_status import PROBE_TIMEOUT
 
             _cfg.start_refresh(timeout=PROBE_TIMEOUT)
+            # Prometheus-экспортёр — отдельный лёгкий слушатель на
+            # ADAPTER_EXPORTER_PORT (текст метрик /metrics, text exposition
+            # 0.0.4 без библиотек): настройки/статус приложения, таблица
+            # настроенных бэкендов, таблица использованных моделей со
+            # счётчиками (см. prometheus_exporter.py). Свой слушатель — не
+            # эндпоинт WEBUI: /metrics не должен висеть на порту статуса.
+            if ADAPTER_EXPORTER_ENABLE:
+                from backend_adapter.prometheus_exporter import serve_exporter
+
+                exporter = serve_exporter(
+                    __version__, ADAPTER_WEBUI_HOST, ADAPTER_EXPORTER_PORT, verbose=False
+                )
+                if exporter is not None:
+                    threading.Thread(target=exporter.serve_forever, daemon=True).start()
+                    print(f"[EXPORTER] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_EXPORTER_PORT}/metrics")
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
     with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
         try:

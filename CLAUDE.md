@@ -29,7 +29,7 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; доменный пакет `backend_adapter/`
-  (23 модуля, включая `__init__.py`; генератор дерева артефактов —
+  (26 модулей, включая `__init__.py`; генератор дерева артефактов —
   группа модулей `artifact_tree*.py` из 8 файлов, публичный API —
   `artifact_tree.generate()`; см. `docs/architecture.md`).
 - **Python 3.10+** (аннотации `X | Y`).
@@ -49,17 +49,27 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   на открытой странице обновляются сами — JS usage_poll ~5 с → GET
   `/api/model-usage/snapshot`, без сети к бэкендам; проверка бэкендов —
   фоновая: при старте адаптера, на первом GET `/` и по кнопке
-  «⟳ Проверить сейчас» (POST `/`) → `config.start_refresh()`; POST отвечает
+  «⟳ Перепроверить» (POST `/`) → `config.start_refresh()` (кнопка
+  перечитывает `ADAPTER_BACKEND_CONFIG` — бэкенды добавляются/удаляются
+  без рестарта; битый YAML — прежние остаются `[WARN]`); POST отвечает
   303 See Other на GET `/` (PRG — нет диалога «повторить действие»);
   пока проверка идёт, страница показывает баннер
   «Проверка выполняется…» и авто-обновляется по завершении через
-  `/api/refresh-state`), `/session` = `session_viewer.py` (вкладки + раздача файлов + hash8-алиасы
+  `/api/refresh-state`; футер — «Список провайдеров обновлён в … (N провайдеров, M моделей).»),
+  `/healthz` `/health` `/live` `/ready` = `webui_ops.py` (health-check на том же
+  слушателе: JSON с версией/uptime/pid; `/ready` — 200 когда бэкенды настроены
+  и кэш моделей непуст, иначе 503), `/session` = `session_viewer.py` (вкладки + раздача файлов + hash8-алиасы
   `/session/<hash8>/...` и png/puml-шорткаты; корень — директория
   `ADAPTER_DEBUG_LOGPATH`, порт `ADAPTER_WEBUI_PORT`, адрес `ADAPTER_WEBUI_HOST`,
   daemon-поток в процессе адаптера), `/config` = `webui_config_api.py`
   (runtime-пул из 12 переменных — объём debug-записи, санитайзер, рубильники
   стриминга/usage и строгой валидации моделей; см. `RUNTIME_CONFIG_POOL`
   в `config.py`; сеть/бэкенды/порты/`ADAPTER_DEBUG_LOGPATH` на лету не меняются).
+  Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) — ОТДЕЛЬНЫЙ лёгкий
+  слушатель на `ADAPTER_EXPORTER_PORT` (дефолт 9100) и адресе
+  `ADAPTER_WEBUI_HOST`, НЕ эндпоинт WEBUI (модуль `prometheus_exporter.py`,
+  stdlib-only, text exposition 0.0.4): настройки/статус приложения,
+  по бэкенду up/models/endpoint, по модели счётчики calls/input/output.
   Адрес прослушивания самого адаптера — `ADAPTER_ENDPOINT_HOST`
   (обе по умолчанию `127.0.0.1`);
   `artifact_tree.py` — генерация дерева артефактов (`artefacts/tree.html`)
@@ -71,8 +81,11 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   Per-session дампы частей протокола включаются флагом `ADAPTER_DEBUG_TAGS_OUT=1`
   (парные `.json`+`.yaml`, фиксированный список тегов), требуют
   `ADAPTER_DEBUG_ENABLE=1` и директорию `ADAPTER_DEBUG_LOGPATH`.
-- Служебные файлы продакшена: `backend-adapter.service` (systemd),
-  `com.user.backend-adapter.plist` (launchd).
+- Примеры конфигов — в `docs/samples/`: `sample.adapter.env` (env-файл
+  адаптера), `sample.adapter.yaml` (конфиг бэкендов), шаблоны продакшена
+  `backend-adapter.service` (systemd, запуск из исходников) и
+  `com.user.backend-adapter.plist` (launchd); рабочие копии кладутся в
+  корень репозитория как `adapter.env`/`adapter.yaml` (в `.gitignore`).
 
 ## Принципы
 
@@ -113,6 +126,58 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+### 2026-09-07 — Перечитывание конфига по кнопке + политика probe «только явные» + синхронизация эндпоинтов + health-эндпоинты + Prometheus-экспортёр (v0.8.5)
+
+**Контекст:** кнопка «Проверить сейчас» на статус-странице перепроверяла
+уже загруженные бэкенды, но изменения YAML-конфига (добавление/удаление
+бэкенда) требовали рестарта адаптера; эндпоинты бэкенда без ключа `probe`
+пробовались «моделью по умолчанию» — неявно и неожиданно; найденные
+дымовой пробой МОДЕЛИ эндпоинты не были видны в колонке «Доступные API»
+бэкенда; отсутствовали k8s-зонды живости/готовности и вынос метрик
+наружу для Prometheus.
+
+**Решение:**
+- **перечитывание конфига** — `config.reload_backend_config()`: подменяет
+  глобалы бэкендов (`_BACKENDS`/`_BACKEND_BY_NAME`/`_DEFAULT_BACKEND`
+  целиком — читаются как атрибуты модуля), stale-очищает `_ENDPOINT_STATE`
+  по удалённым бэкендам; модели/индексы НЕ трогает (их пересоберёт
+  `refresh_models`). Битый/недоступный файл → None: прежние бэкенды
+  остаются, `[WARN]`, проверка продолжается. Вызов — из `start_refresh
+  (reload=True)`: кнопка «⟳ Перепроверить» (переименована), первый GET `/`,
+  старт адаптера; внутри одной проверки файл читается один раз;
+- **политика «только явно указанные пробы»** — эндпоинт пробуется ТОЛЬКО
+  если перечислен в `probe` записи backend с НЕПУСТОЙ моделью (сверенной с
+  `/v1/models`). Неперечисленные/пустые/без ключа `probe` — молчаливый
+  пропуск (не ошибка; состояние бэкенда не создаётся). Единый
+  конфиг-источник и для фоновой проверки бэкендов, и для usage-проб модели;
+- **синхронизация эндпоинтов** — `config.upsert_endpoint_state()` +
+  `model_usage._sync_found_endpoints()`: found=True эндпоинты проб модели
+  (первое обращение, «Перепроверить» строки, загрузка model-usage.yaml)
+  переносятся в `config._ENDPOINT_STATE` бэкенда — общий источник колонки
+  «Доступные API» и экспортёра. Только для настроенных бэкендов: осиротевшие
+  usage-строки остаются историей;
+- **health-эндпоинты** — новый модуль `backend_adapter/webui_ops.py` на
+  общем WEBUI-слушателе: `/healthz` (+ алиас `/health`), `/live` — 200 JSON
+  (status/version/uptime/pid); `/ready` — 200, если `_BACKENDS` непуст И
+  `_AVAILABLE_MODELS` непуст («бэкенды настроены и прогреты»), иначе 503 с
+  JSON-телом и причиной. Имена `/healthz` + `/health` зафиксированы
+  пользователем; `/leave` не добавлялся;
+- **Prometheus-экспортёр** — новый модуль `backend_adapter/
+  prometheus_exporter.py`: ОТДЕЛЬНЫЙ слушатель на `ADAPTER_EXPORTER_PORT`
+  (дефолт 9100), адрес `ADAPTER_WEBUI_HOST`, флаг `ADAPTER_EXPORTER_ENABLE`
+  (дефолт `1`). НЕ эндпоинт общего `webserver` (повторный `serve()`
+  перезаписал бы `Handler.context/endpoints`). stdlib-only, text exposition
+  0.0.4, GET `/` и `/metrics`. Метрики — из живых конфиг-глобалов
+  (app/бэкенды/usage-таблица), label-значения экранируются. Bind-ошибка →
+  None, адаптер продолжает работать.
+
+**Следствия:** бэкенды добавляются/удаляются без рестарта; пробы
+предсказуемы (только явно перечисленное); находки моделей видны в общем
+кэше эндпоинтов; живость/готовность и метрики доступны наружу (k8s,
+Prometheus) без влияния на проксирование. Модуль экспортёра стоит в DAG
+после config/model_usage (импортирует только их и stdlib). Ветка
+`feature/v0.8.5` готова к PR после завершения группы коммитов.
 
 ### 2026-09-07 — Консоль: шапка + лог проверок; WEBUI: колонка Endpoints и live-счётчики (v0.8.4)
 
@@ -525,10 +590,10 @@ legacy-пара `ADAPTER_BACKEND_BASE` + `ADAPTER_BACKEND_KEY` и YAML чере�
 - удалены legacy-глобалы (`BACKEND_BASE`/`BACKEND_KEY`/`_BACKEND_LEGACY`),
   `_probe_models()` и все legacy-ветки;
 - пустой `ADAPTER_BACKEND_CONFIG` на старте → `[FATAL]` + подсказка
-  (пример — `sample.adapter.yaml` в корне) + `sys.exit(1)`;
+  (пример — `docs/samples/sample.adapter.yaml`) + `sys.exit(1)`;
 - финальный «недостижимый» return в `_resolve_backend` → `RuntimeError`;
-- в корень репозитория добавлен пример `sample.adapter.yaml`, на него
-  ссылаются env-файлы, plist и README.
+- в репозиторий добавлен пример `sample.adapter.yaml` (ныне — в
+  `docs/samples/`), на него ссылаются env-файлы, plist и README.
 
 **Следствия:** минимальный запуск — `ADAPTER_BACKEND_CONFIG` (путь к YAML)
 + env-переменная токена из поля `key`; «нулевая настройка» сохраняется:

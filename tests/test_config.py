@@ -728,6 +728,232 @@ class TestBackgroundRefresh:
         assert state["count"] == 1
         assert state["errors"] == {"AAA": "down"}
 
+    def test_start_refresh_reloads_config_by_default(self, tmp_path):
+        # start_refresh(reload=True — дефолт) перед проверкой перечитывает
+        # ADAPTER_BACKEND_CONFIG; reload_backend_config мокается — проверяем
+        # сам факт вызова и WARN при None (битый файл), когда проверка всё
+        # равно идёт по прежним бэкендам.
+        config = self._config()
+        config.ADAPTER_BACKEND_CONFIG = str(tmp_path / "adapter.yaml")
+        config._BACKENDS = [{"name": "AAA", "base": "http://aaa", "key": "k"}]
+        result = {"ok": True, "count": 1, "errors": {}, "probe": {}}
+        with mock.patch.object(config, "refresh_models", return_value=result):
+            with mock.patch.object(
+                config, "reload_backend_config", return_value=None
+            ) as m_reload:
+                assert config.start_refresh(timeout=5.0) is True
+                self._wait_for(lambda: not config.refresh_state()["running"])
+        m_reload.assert_called_once_with()
+        state = config.refresh_state()
+        assert state["ok"] is True
+        assert state["count"] == 1
+        # providers в финальном снимке — число бэкендов после перечитывания
+        assert state["providers"] == 1
+
+    def test_start_refresh_reload_false_skips_reload(self, tmp_path):
+        config = self._config()
+        config.ADAPTER_BACKEND_CONFIG = str(tmp_path / "adapter.yaml")
+        result = {"ok": False, "count": 0, "errors": {}, "probe": {}}
+        with mock.patch.object(config, "refresh_models", return_value=result):
+            with mock.patch.object(config, "reload_backend_config") as m_reload:
+                assert config.start_refresh(reload=False) is True
+                self._wait_for(lambda: not config.refresh_state()["running"])
+        m_reload.assert_not_called()
+
+
+class TestReloadBackendConfig:
+    """Tests for config.reload_backend_config — перечитывание конфига на лету.
+
+    Contract: reload parses ADAPTER_BACKEND_CONFIG and swaps the backend
+    globals (_BACKENDS/_BACKEND_BY_NAME/_DEFAULT_BACKEND), stale-cleans
+    _ENDPOINT_STATE entries of removed backends (in-place del), leaves
+    _AVAILABLE_MODELS/_MODEL_TO_BACKEND untouched (refresh_models rebuilds
+    them), returns the new blocks, or None on broken/unreadable/empty file
+    (backend globals untouched)."""
+
+    def _config(self):
+        _reload_config()
+        from backend_adapter import config
+
+        config._REFRESH_JOB = None
+        return config
+
+    @staticmethod
+    def _yaml(blocks: str) -> str:
+        return f"backend:\n{blocks}"
+
+    def test_reload_swaps_globals(self, tmp_path):
+        config = self._config()
+        cfg_file = tmp_path / "adapter.yaml"
+        cfg_file.write_text(self._yaml(
+            "  - name: AAA\n    base: http://aaa\n    key: K1\n"
+        ))
+        old = {"name": "OLD", "base": "http://old", "key": "K0"}
+        config._BACKENDS = [old]
+        config._BACKEND_BY_NAME = {"OLD": old}
+        config._DEFAULT_BACKEND = old
+        config.ADAPTER_BACKEND_CONFIG = str(cfg_file)
+
+        blocks = config.reload_backend_config()
+        assert blocks is not None
+        assert [b["name"] for b in blocks] == ["AAA"]
+        assert [b["name"] for b in config._BACKENDS] == ["AAA"]
+        assert set(config._BACKEND_BY_NAME) == {"AAA"}
+        assert config._DEFAULT_BACKEND["name"] == "AAA"
+
+    def test_reload_multiple_backends_sets_default_first(self, tmp_path):
+        config = self._config()
+        cfg_file = tmp_path / "adapter.yaml"
+        cfg_file.write_text(self._yaml(
+            "  - name: AAA\n    base: http://aaa\n    key: K1\n"
+            "  - name: BBB\n    base: http://bbb\n    key: K2\n"
+        ))
+        config.ADAPTER_BACKEND_CONFIG = str(cfg_file)
+        blocks = config.reload_backend_config()
+        assert [b["name"] for b in blocks] == ["AAA", "BBB"]
+        assert config._DEFAULT_BACKEND["name"] == "AAA"
+
+    def test_reload_stale_cleans_endpoint_state(self, tmp_path):
+        # Записи probe-кэша удалённых бэкендов вычищаются; свежие записи
+        # оставшихся сохраняются (кэш TTL не сбрасывается без нужды).
+        config = self._config()
+        cfg_file = tmp_path / "adapter.yaml"
+        cfg_file.write_text(self._yaml(
+            "  - name: AAA\n    base: http://aaa\n    key: K1\n"
+        ))
+        config.ADAPTER_BACKEND_CONFIG = str(cfg_file)
+        config._ENDPOINT_STATE["AAA"] = {"at": 1.0, "endpoints": {}, "errors": {}}
+        config._ENDPOINT_STATE["GONE"] = {"at": 1.0, "endpoints": {}, "errors": {}}
+        config._ENDPOINT_STATE["BBB"] = {"at": 1.0, "endpoints": {}, "errors": {}}
+
+        config.reload_backend_config()
+        assert set(config._ENDPOINT_STATE) == {"AAA"}  # GONE/BBB вычищены
+
+    def test_reload_keeps_models_index(self, tmp_path):
+        # reload НЕ трогает модели/индексы — их пересоберёт refresh_models.
+        config = self._config()
+        cfg_file = tmp_path / "adapter.yaml"
+        cfg_file.write_text(self._yaml(
+            "  - name: AAA\n    base: http://aaa\n    key: K1\n"
+        ))
+        config.ADAPTER_BACKEND_CONFIG = str(cfg_file)
+        config._AVAILABLE_MODELS["m1"] = {"id": "m1"}
+        config._MODEL_TO_BACKEND["m1"] = ("OLD", {"name": "OLD"})
+
+        config.reload_backend_config()
+        assert config._AVAILABLE_MODELS == {"m1": {"id": "m1"}}
+        assert config._MODEL_TO_BACKEND["m1"][0] == "OLD"
+
+    def test_reload_broken_file_returns_none_keeps_backends(self, tmp_path):
+        # Битый/недоступный YAML → None, прежние глобалы не тронуты.
+        config = self._config()
+        old = {"name": "AAA", "base": "http://aaa", "key": "k"}
+        config._BACKENDS = [old]
+        config._BACKEND_BY_NAME = {"AAA": old}
+        config._DEFAULT_BACKEND = old
+        config.ADAPTER_BACKEND_CONFIG = str(tmp_path / "missing.yaml")
+
+        assert config.reload_backend_config() is None
+        assert config._BACKENDS == [old]
+        assert config._BACKEND_BY_NAME == {"AAA": old}
+
+    def test_reload_empty_backend_key_returns_none(self, tmp_path):
+        # Файл есть, но ключа backend нет / блоков нет — None.
+        config = self._config()
+        cfg_file = tmp_path / "adapter.yaml"
+        cfg_file.write_text("other: 1\n")
+        config.ADAPTER_BACKEND_CONFIG = str(cfg_file)
+        assert config.reload_backend_config() is None
+
+    def test_start_refresh_reload_swaps_backends(self, tmp_path):
+        # Сквозной сценарий: start_refresh(reload=True) с реальным YAML —
+        # глобалы подменяются ДО фоновой проверки (refresh_models видит
+        # новые бэкенды).
+        config = self._config()
+        cfg_file = tmp_path / "adapter.yaml"
+        cfg_file.write_text(self._yaml(
+            "  - name: NEW\n    base: http://new\n    key: K1\n"
+        ))
+        config.ADAPTER_BACKEND_CONFIG = str(cfg_file)
+        config._BACKENDS = [{"name": "OLD", "base": "http://old", "key": "K0"}]
+        result = {"ok": True, "count": 1, "errors": {}, "probe": {}}
+
+        seen = {}
+
+        def recording_refresh(**kwargs):
+            seen["backends"] = [b["name"] for b in config._BACKENDS]
+            return result
+
+        with mock.patch.object(config, "refresh_models", side_effect=recording_refresh):
+            assert config.start_refresh(timeout=5.0) is True
+            deadline = time.monotonic() + 5.0
+            while not config.refresh_state().get("done_at"):
+                assert time.monotonic() < deadline, "таймаут воркера"
+                time.sleep(0.01)
+        assert seen["backends"] == ["NEW"]
+        state = config.refresh_state()
+        assert state["ok"] is True
+        assert state["providers"] == 1
+
+
+class TestUpsertEndpointState:
+    """Tests for config.upsert_endpoint_state — sync of found endpoints from
+    model_usage into the backend probe cache (v0.8.5, задача 2).
+
+    Contract: an endpoint found by a MODEL's smoke probe (found=True ⇔ HTTP
+    200) is written into _ENDPOINT_STATE[backend]["endpoints"][path] under
+    the backend's entry (created if missing), keyed by full path (resolved
+    from the short pname via ENDPOINT_PROBES), refreshing ``at``. Unknown
+    pname → no-op. Idempotent: a repeat write overwrites and refreshes ``at``."""
+
+    def _config(self):
+        _reload_config()
+        from backend_adapter import config
+
+        config._ENDPOINT_STATE.clear()
+        return config
+
+    def test_writes_found_endpoint_by_path(self):
+        """pname → full path; entry created for a fresh backend."""
+        config = self._config()
+        config.upsert_endpoint_state("AAA", "completions", 200, True)
+        entry = config._ENDPOINT_STATE["AAA"]
+        assert entry["endpoints"] == {
+            "/v1/chat/completions": {"status": 200, "found": True}
+        }
+        assert entry["errors"] == {}
+        assert entry["at"] > 0
+
+    def test_merges_into_existing_entry(self):
+        """Second upsert merges into the backend's endpoints (others kept)."""
+        config = self._config()
+        config._ENDPOINT_STATE["AAA"] = {
+            "at": 1.0,
+            "endpoints": {"/v1/responses": {"status": 200, "found": True}},
+            "errors": {"embeddings": "boom"},
+        }
+        config.upsert_endpoint_state("AAA", "completions", 404, False)
+        entry = config._ENDPOINT_STATE["AAA"]
+        assert set(entry["endpoints"]) == {"/v1/responses", "/v1/chat/completions"}
+        assert entry["endpoints"]["/v1/chat/completions"] == {"status": 404, "found": False}
+        assert entry["endpoints"]["/v1/responses"]["found"] is True
+        assert entry["errors"] == {"embeddings": "boom"}  # не трогается
+        assert entry["at"] > 1.0  # свежесть обновлена
+
+    def test_unknown_pname_noop(self):
+        """Unknown short name (not in ENDPOINT_PROBES) → no-op, no entry."""
+        config = self._config()
+        config.upsert_endpoint_state("AAA", "strange-name", 200, True)
+        assert config._ENDPOINT_STATE == {}
+
+    def test_all_probe_pnames_resolve(self):
+        """Каждое короткое имя ENDPOINT_PROBES даёт запись по своему пути."""
+        config = self._config()
+        for pname, _path, _tpl in config.ENDPOINT_PROBES:
+            config.upsert_endpoint_state("AAA", pname, 200, True)
+        paths = set(config._ENDPOINT_STATE["AAA"]["endpoints"])
+        assert paths == {p for _p, p, _t in config.ENDPOINT_PROBES}
+
 
 class TestRuntimeConfig:
     """Tests for runtime config pool — get/set via /config endpoint."""
@@ -847,15 +1073,17 @@ class TestRuntimeConfig:
 
 
 class TestEndpointProbe:
-    """Tests for the «smoke» API-endpoint probe (v0.8.2).
+    """Tests for the «smoke» API-endpoint probe (v0.8.2, policy v0.8.5).
 
-    probe_endpoints() must: use per-endpoint models from the YAML ``probe``
-    key (default model otherwise), skip ONLY endpoints whose probe-model is
-    absent from the backend /v1/models, classify responses by HTTP code
-    (found=True only for 200; any other code and 404 → not found; network →
-    backend error), cache results for ENDPOINT_PROBE_TTL (second call within
-    TTL → no network), log one [ENDPOINT_PROBE] line per real probe, and
-    honor ADAPTER_ENDPOINT_PROBE=0 (no network at all).
+    probe_endpoints() must: probe ONLY endpoints explicitly listed in the
+    YAML ``probe`` key with a non-empty model (others — not listed, empty
+    values, or a missing ``probe`` key entirely — are NOT probed), skip
+    endpoints whose probe-model is absent from the backend /v1/models
+    (single-endpoint skip with text in errors), classify responses by HTTP
+    code (found=True only for 200; any other code and 404 → not found;
+    network → backend error), cache results for ENDPOINT_PROBE_TTL (second
+    call within TTL → no network), log one [ENDPOINT_PROBE] line per real
+    probe, and honor ADAPTER_ENDPOINT_PROBE=0 (no network at all).
     """
 
     # -- Helpers -----------------------------------------------------------
@@ -865,7 +1093,8 @@ class TestEndpointProbe:
 
         Возвращает конфиг с записью бэкенда, которая уже «опрошена» на
         /v1/models: в _MODEL_TO_BACKEND лежат модели ``models`` (список id).
-        backend=None → запись без ключа probe; probe_enabled=False → флаг
+        backend=None → запись без ключа probe (по новой политике такой
+        бэкенд НЕ пробуется вовсе); probe_enabled=False → флаг
         ADAPTER_ENDPOINT_PROBE выключен (как при env-значении 0)."""
         _reload_config()
         from backend_adapter import config
@@ -951,18 +1180,20 @@ class TestEndpointProbe:
 
     # -- Выбор probe-модели -----------------------------------------------
 
-    def test_probe_model_explicit_and_default(self):
+    def test_probe_model_explicit_and_unlisted(self):
         cfg = self._setup(
             backend={"name": "AAA", "base": "http://aaa", "key": "k",
                      "probe": {"completions": "explicit", "messages": ""}},
             models=["def-model", "explicit"],
         )
-        # Перечислен с моделью (и модель есть в /v1/models) → эта модель.
+        # Перечислен с непустой моделью (и модель есть в /v1/models) → эта
+        # модель (политика «только явно указанные пробы»).
         assert cfg._probe_model(cfg._BACKENDS[0], "completions") == ("explicit", True)
-        # Пустое значение (messages:) и неперечисленные эндпойнты —
-        # моделью по умолчанию (первая из /v1/models этого бэкенда).
-        assert cfg._probe_model(cfg._BACKENDS[0], "messages") == ("def-model", None)
-        assert cfg._probe_model(cfg._BACKENDS[0], "responses") == ("def-model", None)
+        # Пустое значение (messages:) и неперечисленные эндпойнты НЕ
+        # пробуются: (None, None) — молчаливый штатный пропуск (никакого
+        # «модели по умолчанию» больше нет).
+        assert cfg._probe_model(cfg._BACKENDS[0], "messages") == (None, None)
+        assert cfg._probe_model(cfg._BACKENDS[0], "responses") == (None, None)
 
     def test_probe_model_specified_but_missing(self):
         # Модель задана в probe, но её НЕТ среди моделей бэкенда → (None,
@@ -973,13 +1204,15 @@ class TestEndpointProbe:
             models=["def-model"],
         )
         assert cfg._probe_model(cfg._BACKENDS[0], "completions") == (None, False)
-        # Не перечисленные эндпойнты — моделью по умолчанию (не задеты)
-        assert cfg._probe_model(cfg._BACKENDS[0], "messages") == ("def-model", None)
+        # Не перечисленные эндпойнты — штатный пропуск, не задеты
+        assert cfg._probe_model(cfg._BACKENDS[0], "messages") == (None, None)
 
-    def test_probe_model_no_probe_key_default(self):
+    def test_probe_model_no_probe_key_not_probed(self):
+        # Ключа probe нет вовсе — эндпойнты НЕ пробуются (по умолчанию
+        # политики; раньше здесь была «модель по умолчанию»).
         cfg = self._setup(models=["m1", "m2"])
-        assert cfg._probe_model(cfg._BACKENDS[0], "completions") == ("m1", None)
-        assert cfg._probe_model(cfg._BACKENDS[0], "embeddings") == ("m1", None)
+        assert cfg._probe_model(cfg._BACKENDS[0], "completions") == (None, None)
+        assert cfg._probe_model(cfg._BACKENDS[0], "embeddings") == (None, None)
 
     def test_probe_model_no_default_returns_none(self):
         cfg = self._setup()
@@ -1070,9 +1303,33 @@ class TestEndpointProbe:
 
     # -- probe_endpoints: интеграция ---------------------------------------
 
-    def test_probe_endpoints_all_probed_with_default_model(self):
+    def test_probe_endpoints_without_probe_key_not_probed(self):
+        # Бэкенд без ключа probe (или все значения пустые) по новой
+        # политике НЕ пробуется вовсе: сеть не ходила, состояние не
+        # создано, в errors бэкенд не значится — колонка «Доступные API»
+        # останется пустой. Это штатное состояние, а не ошибка.
         cfg = self._setup(models=["def-model"])
-        # Кэш пуст → реальная проба всеми 4 эндпойнтами моделью по умолчанию.
+        with mock.patch.object(cfg, "_http_json", return_value=(404, {}, None)) as m_http:
+            res = cfg.probe_endpoints(timeout=5.0)
+        assert res["ok"] is False           # ни одного пути не пробовано
+        assert res["endpoints"] == {}       # состояние не создано
+        assert res["errors"] == {}          # и ошибки нет
+        m_http.assert_not_called()
+
+    def test_probe_endpoints_all_probed_with_yaml_probe_models(self):
+        # Кэш пуст; бэкенд перечисляет все 4 эндпоинта → каждый пробуется
+        # СВОЕЙ моделью из probe-ключа.
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {
+                         "completions": "qwen3.6",
+                         "messages": "claude-m",
+                         "responses": "gpt-5-sol",
+                         "embeddings": "text-embedding-3-small",
+                     }},
+            models=["def-model", "qwen3.6", "claude-m", "gpt-5-sol",
+                    "text-embedding-3-small"],
+        )
         with mock.patch.object(cfg, "_http_json", return_value=(404, {}, None)) as m_http:
             res = cfg.probe_endpoints(timeout=5.0)
         assert res["ok"] is True
@@ -1081,12 +1338,16 @@ class TestEndpointProbe:
         assert all(v["found"] is False for v in state.values())
         self._assert_all_probed(m_http, ["/v1/chat/completions", "/v1/messages",
                                          "/v1/responses", "/v1/embeddings"])
-        # Модель по умолчанию ушла в каждый запрос
-        for c in m_http.call_args_list:
-            assert c.args[3]["model"] == "def-model"
+        # В каждый запрос ушла СВОЯ probe-модель (не «по умолчанию»)
+        bodies = {c.args[1]: c.args[3] for c in m_http.call_args_list}
+        assert bodies["http://aaa/v1/chat/completions"]["model"] == "qwen3.6"
+        assert bodies["http://aaa/v1/messages"]["model"] == "claude-m"
+        assert bodies["http://aaa/v1/responses"]["model"] == "gpt-5-sol"
+        assert bodies["http://aaa/v1/embeddings"]["model"] == "text-embedding-3-small"
 
     def test_probe_endpoints_uses_yaml_probe_models(self):
-        # Каждый эндпойнт пробуется СВОЕЙ моделью из probe-ключа.
+        # Частичный probe-перечень: перечисленные пробуются своими моделями,
+        # неперечисленные (messages) — НЕ пробуются вовсе.
         cfg = self._setup(
             backend={"name": "AAA", "base": "http://aaa", "key": "k",
                      "probe": {
@@ -1097,31 +1358,54 @@ class TestEndpointProbe:
             models=["def-model", "qwen3.6", "gpt-5-sol", "text-embedding-3-small"],
         )
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)) as m_http:
-            cfg.probe_endpoints()
+            res = cfg.probe_endpoints()
         bodies = {c.args[1]: c.args[3] for c in m_http.call_args_list}
         assert bodies["http://aaa/v1/chat/completions"]["model"] == "qwen3.6"
         assert bodies["http://aaa/v1/responses"]["model"] == "gpt-5-sol"
         assert bodies["http://aaa/v1/embeddings"]["model"] == "text-embedding-3-small"
-        # messages не перечислен (или пуст) → модель по умолчанию
-        assert bodies["http://aaa/v1/messages"]["model"] == "def-model"
+        # messages не перечислен → не пробуется (раньше — модель по умолчанию)
+        urls = [c.args[1] for c in m_http.call_args_list]
+        assert "/v1/messages" not in urls
+        state = res["endpoints"]["AAA"]["endpoints"]
+        assert "/v1/messages" not in state
+        assert res["errors"] == {}          # пропуск политикой — не ошибка
 
     def test_probe_skips_single_endpoint_with_missing_model(self):
         # Модель для messages задана в probe, но её НЕТ среди /v1/models
-        # бэкенда — пропускается ТОЛЬКО messages, остальные пробуются.
+        # бэкенда — messages пропускается точечно с текстом в errors.
+        # Другие эндпоинты не перечислены в probe → политикой не пробуются.
         cfg = self._setup(
             backend={"name": "AAA", "base": "http://aaa", "key": "k",
-                     "probe": {"messages": "ghost-model"}},
-            models=["def-model"],
+                     "probe": {"completions": "real-model",
+                               "messages": "ghost-model"}},
+            models=["real-model"],
         )
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)) as m_http:
             res = cfg.probe_endpoints()
         urls = [c.args[1] for c in m_http.call_args_list]
         assert "/v1/messages" not in urls            # этот эндпоинт не пробован
-        assert len(urls) == 3                        # остальные — да
+        assert urls == ["http://aaa/v1/chat/completions"]  # только перечисленный
         # Пропущенный эндпоинт НЕ в результатах, текст — в errors
         state = res["endpoints"]["AAA"]["endpoints"]
         assert "/v1/messages" not in state
         assert "messages" in res["errors"]["AAA"]
+        assert "ghost-model" in res["errors"]["AAA"]
+
+    def test_probe_all_listed_models_missing_backend_errors(self):
+        # Единственная заданная probe-модель не найдена → проб нет вовсе:
+        # состояние не создано, бэкенд в errors (ошибочный пропуск — в
+        # отличие от «не перечислил проб», где ошибки нет).
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"messages": "ghost-model"}},
+            models=["real-model"],
+        )
+        with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)) as m_http:
+            res = cfg.probe_endpoints()
+        m_http.assert_not_called()
+        assert res["ok"] is False
+        assert res["endpoints"] == {}
+        assert "AAA" in res["errors"]
         assert "ghost-model" in res["errors"]["AAA"]
 
     def test_probe_backend_without_models_skipped_entirely(self):
@@ -1138,7 +1422,12 @@ class TestEndpointProbe:
     # -- Кэш (TTL) ----------------------------------------------------------
 
     def test_cache_second_call_within_ttl_no_network(self):
-        cfg = self._setup(models=["m"])
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m", "messages": "m",
+                               "responses": "m", "embeddings": "m"}},
+            models=["m"],
+        )
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)) as m_http:
             first = cfg.probe_endpoints()
             second = cfg.probe_endpoints()
@@ -1149,7 +1438,12 @@ class TestEndpointProbe:
     # -- refresh_models: ключ "probe" и флаг ADAPTER_ENDPOINT_PROBE ----------
 
     def test_refresh_returns_probe_key(self):
-        cfg = self._setup(models=["m"])
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m", "messages": "m",
+                               "responses": "m", "embeddings": "m"}},
+            models=["m"],
+        )
         cfg.ADAPTER_ENDPOINT_PROBE = True
         with mock.patch.object(cfg, "_fetch_models", return_value=[{"id": "m"}]):
             with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
@@ -1169,7 +1463,11 @@ class TestEndpointProbe:
         m_http.assert_not_called()             # но проба эндпойнтов — нет
 
     def test_endpoint_probe_disabled_no_network(self):
-        cfg = self._setup(models=["m"], probe_enabled=False)
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m"}},
+            models=["m"], probe_enabled=False,
+        )
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)) as m_http:
             res = cfg.probe_endpoints()
         assert res["ok"] is False
@@ -1179,7 +1477,12 @@ class TestEndpointProbe:
     # -- Логирование [ENDPOINT_PROBE] ---------------------------------------
 
     def test_log_line_emitted_on_real_probe(self, capsys):
-        cfg = self._setup(models=["m"])
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m", "messages": "m",
+                               "responses": "m", "embeddings": "m"}},
+            models=["m"],
+        )
         cfg.ADAPTER_DEBUG = True          # гейт лог-строки — как в проде
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
             cfg.probe_endpoints()
@@ -1188,7 +1491,11 @@ class TestEndpointProbe:
         assert "completions=200" in out
 
     def test_no_log_line_on_cache_hit(self, capsys):
-        cfg = self._setup(models=["m"])
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m"}},
+            models=["m"],
+        )
         cfg.ADAPTER_DEBUG = True          # первый вызов обязан залогироваться
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
             cfg.probe_endpoints()
@@ -1199,7 +1506,11 @@ class TestEndpointProbe:
         assert "[ENDPOINT_PROBE]" not in out
 
     def test_no_log_line_when_debug_disabled(self, capsys):
-        cfg = self._setup(models=["m"])
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m"}},
+            models=["m"],
+        )
         cfg.ADAPTER_DEBUG = False
         with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
             cfg.probe_endpoints()
@@ -1219,7 +1530,9 @@ class TestEndpointProbe:
         fake_backend.models_response = {"object": "list", "data": [{"id": "m1"}]}
         fake_backend.completions_status = 200
         fake_backend.extra_post_paths = {}
-        backend = {"name": "AAA", "base": fake_backend.base_url, "key": "k"}
+        backend = {"name": "AAA", "base": fake_backend.base_url, "key": "k",
+                   "probe": {"completions": "m1", "messages": "m1",
+                             "responses": "m1", "embeddings": "m1"}}
         cfg._BACKENDS = [backend]
         cfg._BACKEND_BY_NAME = {"AAA": backend}
         cfg._DEFAULT_BACKEND = backend
@@ -1247,7 +1560,9 @@ class TestEndpointProbe:
             "/v1/responses": 200,
             "/v1/embeddings": 200,
         }
-        backend = {"name": "AAA", "base": fake_backend.base_url, "key": "k"}
+        backend = {"name": "AAA", "base": fake_backend.base_url, "key": "k",
+                   "probe": {"completions": "m1", "messages": "m1",
+                             "responses": "m1", "embeddings": "m1"}}
         cfg._BACKENDS = [backend]
         cfg._BACKEND_BY_NAME = {"AAA": backend}
         cfg._DEFAULT_BACKEND = backend

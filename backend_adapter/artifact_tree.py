@@ -368,7 +368,7 @@ def _generate_pages(
         index_rows.append((i, uname, len(p_turns)))
 
     index_html = (
-        "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
+        "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'><link rel='icon' type='image/svg+xml' href='/favicon.svg'>"
         "<title>Страницы сессии</title><style>"
         "body{font-family:-apple-system,Segoe UI,Arial,sans-serif;margin:24px}"
         "table{border-collapse:collapse}td{padding:6px 12px;border:1px solid #ddd}"

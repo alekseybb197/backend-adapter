@@ -53,6 +53,16 @@ flush_table в backend-adapter.py) сохраняют сразу. Строки, 
 ADAPTER_ENDPOINT_PROBE (тот управляет только фоновой пробой бэкендов в
 refresh_models). Персистентность (YAML-файл) работает независимо от
 мастер-флага. В RUNTIME_CONFIG_POOL таблица не входит.
+
+Синхронизация эндпоинтов: found-результаты проб МОДЕЛИ (при первом
+обращении, «Перепроверить» строки и загрузке model-usage.yaml) переносятся
+в config._ENDPOINT_STATE бэкенда (config.upsert_endpoint_state) — колонка
+«Доступные API» бэкенда на статус-странице и экспортёр видят эндпоинт,
+найденный моделью, даже если фоновая проверка бэкенда его не пробовала.
+Переносятся только found=True и только для бэкендов из числа настроенных
+(config._BACKEND_BY_NAME): эндпоинты осиротевших бэкендов (удалены из YAML)
+в кэш не добавляются. Сети при синхронизации нет — переносится уже добытый
+результат.
 """
 
 import os
@@ -193,6 +203,11 @@ def record_model_usage(client_model: str) -> None:
             if _backend_has_model(backend_cfg, resolved):
                 result = _probe_model_endpoints(backend_cfg, resolved)
                 _log_probe(client_model, backend_name, result)
+                if result is not None:
+                    # Синхронизация с фоновой проверкой бэкендов: найденные
+                    # пробой модели эндпоинты видны колонке «Доступные API»
+                    # бэкенда (см. _sync_found_endpoints).
+                    _sync_found_endpoints(backend_name, result)
             else:
                 # Модели нет среди моделей бэкенда в /v1/models — пробовать
                 # нечем (как с probe-моделью в config.probe_endpoints):
@@ -386,6 +401,8 @@ def reprobe_model(client_model: str) -> bool:
         if _backend_has_model(backend_cfg, resolved):
             result = _probe_model_endpoints(backend_cfg, resolved)
             _log_probe(client_model, backend_name, result)
+            if result is not None:
+                _sync_found_endpoints(backend_name, result)
         else:
             # Модели нет среди моделей бэкенда — пробовать нечем: колонки
             # эндпоинтов остаются «—».
@@ -445,6 +462,13 @@ def _ensure_loaded_locked() -> None:
             norm = _normalize_row(name, raw)
             if norm is not None:
                 _TABLE[norm["model"]] = norm
+        # Синхронизация с _ENDPOINT_STATE: found-эндпоинты загруженных строк
+        # (для бэкендов из числа настроенных) переносятся в кэш бэкендов —
+        # колонка «Доступные API» и экспортёр после рестарта сразу видят
+        # прошлые находки. Сети нет — перенос уже сохранённых результатов
+        # (см. _sync_found_endpoints; загруженные строки не перепроверяются).
+        for row in _TABLE.values():
+            _sync_found_endpoints(row["backend"], row)
     except Exception as e:  # noqa: BLE001 — загрузка не должна ронять учёт
         _log("persist", f"ignoring unreadable file: {e}")
     finally:
@@ -633,18 +657,57 @@ def _backend_has_model(backend_cfg: dict, resolved: str) -> bool:
     )
 
 
-def _probe_model_endpoints(backend_cfg: dict, resolved: str) -> dict:
-    """Синхронная проба 4 эндпоинтов модели у бэкенда (вызывается вне лока).
+def _sync_found_endpoints(backend_name: str, source: dict) -> None:
+    """Перенести found-эндпоинты источника в config._ENDPOINT_STATE бэкенда.
 
-    Собирает probes {путь: resolved} на все config.ENDPOINT_PROBES и зовёт
-    низкоуровневую config._probe_backend_endpoints (та же классификация:
-    found ⇔ HTTP 200, сеть/таймаут — found=False + текст в errors). Возвращает
-    нормализованный к схеме записи результат:
+    Синхронизация с фоновой проверкой бэкендов: эндпоинт, найденный дымовой
+    пробой МОДЕЛИ (found=True ⇔ HTTP 200), должен быть виден колонке
+    «Доступные API» бэкенда на статус-странице и экспортёру, даже если
+    фоновая проверка бэкенда его не пробовала. Сети здесь нет — перенос уже
+    добытого результата (контракт «загруженные строки не перепроверяются»
+    не нарушается).
+
+    ``source`` — строка таблицы или результат _probe_model_endpoints с ключом
+    ``endpoints``: {pname: {"status": int|None, "found": bool}} — по коротким
+    именам ENDPOINT_PROBES (config.upsert_endpoint_state переводит их в пути).
+
+    Переносятся ТОЛЬКО found-эндпоинты и ТОЛЬКО для бэкендов, присутствующих
+    в config._BACKEND_BY_NAME: эндпоинты осиротевших бэкендов (удалены из
+    YAML — строки usage-таблицы остаются как история) в кэш не добавляются.
+    """
+    if backend_name not in config._BACKEND_BY_NAME:
+        return
+    for pname, ep in source["endpoints"].items():
+        if ep.get("found"):
+            config.upsert_endpoint_state(backend_name, pname, ep.get("status"), True)
+
+
+def _probe_model_endpoints(backend_cfg: dict, resolved: str) -> dict:
+    """Синхронная проба эндпоинтов модели у бэкенда (вызывается вне лока).
+
+    Политика пробы — «только явно указанные» (единая с фоновой проверкой
+    config.probe_endpoints): эндпоинт пробуется ТОЛЬКО если он перечислен в
+    ключе probe YAML-записи бэкенда с НЕПУСТОЙ моделью. Неперечисленные,
+    пустые значения и отсутствие ключа probe вовсе — не пробуются. Пробуем
+    resolved (моделью ЗАПРОСА), но только для эндпоинтов из probe-перечня
+    бэкенда (политика «какие эндпоинты пробовать» едина с фоновой проверкой;
+    «кем» в usage-строке — фактическая модель запроса). Если проба не задана
+    ни для одного эндпоинта — возвращается пустой результат (модель учтена,
+    проб нет; колонки эндпоинтов «—»).
+
+    Зовёт низкоуровневую config._probe_backend_endpoints (та же
+    классификация: found ⇔ HTTP 200, сеть/таймаут — found=False + текст в
+    errors). Возвращает нормализованный к схеме записи результат:
       {"endpoints": {pname: {"status": int|None, "found": bool}}, "errors": {...}}
     — ключи по коротким именам ENDPOINT_PROBES (не пути), чтобы webui рендерил
     колонки без нормализации. Отдельная функция: её мокают тесты (в т.ч.
     _setup_adapter в test_server), не трогая config."""
-    probes = {path: resolved for _pname, path, _tpl in config.ENDPOINT_PROBES}
+    probe_cfg = backend_cfg.get("probe") or {}
+    probes = {
+        path: resolved for pname, path, _tpl in config.ENDPOINT_PROBES if probe_cfg.get(pname)
+    }
+    if not probes:
+        return {"endpoints": {}, "errors": {}}
     result = config._probe_backend_endpoints(backend_cfg, probes, timeout=MODEL_USAGE_PROBE_TIMEOUT)
     endpoints = {}
     for pname, path, _tpl in config.ENDPOINT_PROBES:

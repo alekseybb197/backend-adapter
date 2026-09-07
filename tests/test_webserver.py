@@ -12,6 +12,7 @@ import re
 import sys
 import threading
 import time
+from unittest import mock
 
 import pytest
 
@@ -40,7 +41,10 @@ def _start_server(root_dir: str, version: str = "0.0.0-test", port: int = 0):
 
 
 def _http_get(port: int, path: str):
-    """Raw GET через сокет (HTTP/1.0) — конвенция тестов test_server.py."""
+    """Raw GET через сокет (HTTP/1.0) — конвенция тестов test_server.py.
+
+    Возвращает {"status", "headers", "body"}: headers — dict в нижнем
+    регистре имён (нужен тестам favicon для проверки Content-Type)."""
     import socket
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     try:
@@ -57,9 +61,12 @@ def _http_get(port: int, path: str):
                 break
         text = response.decode("utf-8", "replace")
         status = int(text.split(" ", 2)[1])
-        parts = text.split("\r\n\r\n", 1)
-        body = parts[1] if len(parts) > 1 else ""
-        return {"status": status, "body": body}
+        head, _, body = text.partition("\r\n\r\n")
+        headers = {}
+        for line in head.split("\r\n")[1:]:
+            name, _, value = line.partition(":")
+            headers[name.strip().lower()] = value.strip()
+        return {"status": status, "headers": headers, "body": body}
     finally:
         sock.close()
 
@@ -211,6 +218,89 @@ class TestHandlerMatch:
     def test_unknown_path_404(self):
         ep, _ = self._match("/nonexistent")
         assert ep is None
+
+
+# ---------------------------------------------------------------------------
+# TestFaviconEndpoint
+# ---------------------------------------------------------------------------
+
+class TestFaviconEndpoint:
+    """Эндпоинт "/favicon.svg" из ядра (общий ресурс всех страниц WEBUI):
+    200 image/svg+xml с телом FAVICON_SVG; вложенный путь → 404; POST → 405."""
+
+    def test_unit_serves_svg(self):
+        # Прямая проверка обработчика: без remainder — 200 + image/svg+xml
+        # с байтами FAVICON_SVG; с remainder — 404.
+        from backend_adapter import webserver
+
+        calls = {}
+
+        class FakeHandler:
+            def send_error(self, code, msg):
+                calls["error"] = code
+
+            def _write(self, status, content_type, body):
+                calls.update(status=status, content_type=content_type, body=body)
+
+        ep = webserver.FaviconEndpoint(mock.Mock())
+        ep.GET(FakeHandler(), "")
+        assert calls["status"] == 200
+        assert calls["content_type"] == "image/svg+xml"
+        assert calls["body"] == webserver.FAVICON_SVG
+
+        calls.clear()
+        ep.GET(FakeHandler(), "x")
+        assert calls.get("error") == 404
+
+    def test_serve_integration_favicon_200(self, tmp_path):
+        # Реальный сервер: GET /favicon.svg → 200, image/svg+xml, тело —
+        # валидный SVG (содержит <svg); заголовок Content-Type корректен.
+        root = str(tmp_path / "logs")
+        os.makedirs(root)
+        httpd, port = _start_server(root)
+        try:
+            r = _http_get(port, "/favicon.svg")
+            assert r["status"] == 200
+            assert r["headers"].get("content-type") == "image/svg+xml"
+            assert "<svg" in r["body"]
+            assert len(r["body"].encode("utf-8")) > 0
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_serve_integration_favicon_404_nested(self, tmp_path):
+        root = str(tmp_path / "logs")
+        os.makedirs(root)
+        httpd, port = _start_server(root)
+        try:
+            r = _http_get(port, "/favicon.svg/extra")
+            assert r["status"] == 404
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_serve_integration_favicon_405_post(self, tmp_path):
+        root = str(tmp_path / "logs")
+        os.makedirs(root)
+        httpd, port = _start_server(root)
+        try:
+            r = _http_post(port, "/favicon.svg")
+            assert r["status"] == 405
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_serve_registers_favicon(self, tmp_path):
+        # serve() инстанцирует FaviconEndpoint — prefix есть в реестре.
+        root = str(tmp_path / "logs")
+        os.makedirs(root)
+        from backend_adapter import webserver
+        httpd = webserver.serve(root, "0.0.0-test", port=0)
+        assert httpd is not None
+        try:
+            assert any(ep.prefix == "/favicon.svg" for ep in webserver.Handler.endpoints)
+        finally:
+            httpd.server_close()
 
 
 # ---------------------------------------------------------------------------

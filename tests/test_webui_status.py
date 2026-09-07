@@ -37,12 +37,9 @@ the page embeds an unconditional usage_poll JS polling the lightweight
 TestUsageSection.test_rows_carry_data_attrs_and_page_has_usage_poll /
 TestUsageSnapshotAPI.
 """
-import os
 import socket
 import threading
 from unittest import mock
-
-import pytest
 
 # Autouse fresh_env deletes all backend_adapter* modules and re-imports
 # config with the default test env (ADAPTER_BACKEND_CONFIG=""). So
@@ -81,7 +78,7 @@ def _http_request(port: int, method: str, path: str):
                 if not chunk:
                     break
                 response += chunk
-            except socket.timeout:
+            except TimeoutError:
                 break
         text = response.decode("utf-8", "replace")
         status = int(text.split(" ", 2)[1])
@@ -120,7 +117,7 @@ def _http_raw(port: int, method: str, path: str):
                 if not chunk:
                     break
                 response += chunk
-            except socket.timeout:
+            except TimeoutError:
                 break
         text = response.decode("utf-8", "replace")
         head, _, body_text = text.partition("\r\n\r\n")
@@ -157,7 +154,7 @@ def _http_post_body(port: int, path: str, body: bytes, content_type: str):
                 if not chunk:
                     break
                 response += chunk
-            except socket.timeout:
+            except TimeoutError:
                 break
         text = response.decode("utf-8", "replace")
         head, _, body_text = text.partition("\r\n\r\n")
@@ -174,8 +171,7 @@ def _http_post_body(port: int, path: str, body: bytes, content_type: str):
 
 def _fresh_modules():
     """Переимпорт свежих модулей (после autouse fresh_env) в экземплярах."""
-    from backend_adapter import config
-    from backend_adapter import webui_status
+    from backend_adapter import config, webui_status
     return config, webui_status
 
 
@@ -471,6 +467,12 @@ class TestModelsCell:
         # кнопка вызывает models_toggle и несёт общее число моделей
         assert 'onclick="models_toggle(this)"' in html
         assert 'data-models-count="7"' in html
+        # кнопка — ПРЯМОЙ сосед скрытого span (сразу после </span>): иначе
+        # models_toggle (btn.previousElementSibling) не найдёт span и кнопка
+        # «Показать ещё» не сработает
+        assert html.split("</span>", 1)[1].lstrip().startswith("<button")
+        assert "/session?model=" not in html  # иконок-ссылок нет
+        assert "📋" not in html
 
     def test_empty_shows_status_text(self):
         # Нет моделей — строка-заглушка со статусом (для колонки Models).
@@ -601,14 +603,14 @@ class TestUsageSection:
         assert body.index(">m0</td>") < body.index(">m1</td>") < body.index(">m2</td>")
 
     def test_section_after_backends_table(self):
-        # Порядок блоков: таблица бэкендов → футер «Список моделей обновлён»
-        # + кнопка «⟳ Проверить сейчас» → заголовок «Models in use» →
+        # Порядок блоков: таблица бэкендов → футер «Список провайдеров
+        # обновлён» + кнопка «⟳ Перепроверить» → заголовок «Models in use» →
         # usage-таблица (строки моделей).
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-a")])
-        assert body.index("</table>") < body.index("Список моделей обновлён")
-        assert body.index("Список моделей обновлён") < body.index("⟳ Проверить сейчас")
-        assert body.index("⟳ Проверить сейчас") < body.index("Models in use")
+        assert body.index("</table>") < body.index("Список провайдеров обновлён")
+        assert body.index("Список провайдеров обновлён") < body.index("⟳ Перепроверить")
+        assert body.index("⟳ Перепроверить") < body.index("Models in use")
         assert body.index("Models in use") < body.index(">m-a</td>")
 
     def test_endpoints_cell_lists_only_found(self):
@@ -656,8 +658,8 @@ class TestUsageSection:
         config, ws = _fresh_modules()
         row = self._row("m-big", input_tokens=1536, output_tokens=12345)
         html = ws._usage_rows_html([row])
-        assert "1 536" in html
-        assert "12 345" in html
+        assert "2k5" in html  # 1536 → 2k5 (округление вниз)
+        assert "12k3" in html  # 12345 → 12k3
 
     def test_rows_carry_data_attrs_and_page_has_usage_poll(self):
         # Live-счётчики: строки несут id="usage-row-<i>" и data-атрибуты
@@ -678,15 +680,15 @@ class TestUsageSection:
         assert 'data-input="1536"' in body
         assert 'data-output="12345"' in body
         assert 'data-calls="1"' in body
-        assert "1 536" in body and "12 345" in body
+        assert "2k5" in body and "12k3" in body  # компактный формат вместо разделителей
         # usage_poll: функция, эндпоинт снимка, форматтер токенов, интервал
-        assert "function usage_poll" in body
-        assert "function usage_fmt" in body
+        assert "function compact_fmt" in body
+        assert "function compact_fmt" in body
         assert 'fetch("/api/model-usage/snapshot")' in body
         assert "setTimeout(usage_poll, 5000)" in body
         # usage_poll безусловен: есть и на странице без строк моделей
         empty = self._seed(config, ws, usage_rows=[])
-        assert "function usage_poll" in empty
+        assert "function compact_fmt" in empty
 
     def test_row_has_actions_two_forms(self):
         # Каждая строка модели несёт две form-кнопки: «Перепроверить» (POST
@@ -768,7 +770,7 @@ class TestUsageSection:
 class TestFmtTokens:
     def _fmt(self, n):
         config, ws = _fresh_modules()
-        return ws._fmt_tokens(n)
+        return ws._compact_number(n)
 
     def test_small_exact_integers(self):
         # < 1000 — точное число без разделителя.
@@ -777,10 +779,11 @@ class TestFmtTokens:
         assert self._fmt(999) == "999"
 
     def test_thousands_separator(self):
-        # Разделитель тысяч (неразрывный узкий пробел) с 4-го разряда.
-        assert self._fmt(1000) == "1 000"
-        assert self._fmt(12345) == "12 345"
-        assert self._fmt(1234567) == "1 234 567"
+        # Компактный формат: k/m/b с одной цифрой после символа.
+        assert self._fmt(1000) == "1k0"   # 1000 → 1k0
+        assert self._fmt(12345) == "12k3"  # 12345 → 12k3
+        assert self._fmt(1234567) == "1m2"  # 1234567 → 1m2
+        assert self._fmt(1234567890) == "1b2"  # 1234567890 → 1b2
 
     def test_negative_treated_as_zero(self):
         # Отрицательных значений не бывает; защитно — как 0.
@@ -873,7 +876,7 @@ class TestRenderAfterRefresh:
         body = ws._render_status_page(self._ctx(), refresh=_done_job(True, 1)).decode()
         assert "new-m1" in body
         assert "недоступен" not in body
-        assert "Список моделей обновлён" in body
+        assert "Список провайдеров обновлён" in body
 
     def test_partial_failure_shows_error_and_ok_row(self):
         # Частичный успех: упавший бэкенд — «недоступен (текст)», живые —
@@ -892,7 +895,7 @@ class TestRenderAfterRefresh:
         assert "недоступен" in body
         assert "Connection refused by test" in body
         assert "m-a" in body
-        assert "Список моделей обновлён" in body
+        assert "Список провайдеров обновлён" in body
 
     def test_full_failure_keeps_old_cache_shown(self):
         # ok=False: refresh кэш не тронул — страница показывает прежний
@@ -905,13 +908,13 @@ class TestRenderAfterRefresh:
         refresh = _done_job(False, 1, errors={"AAA": "Connection refused by test"})
         body = ws._render_status_page(self._ctx(), refresh=refresh).decode()
         assert "old-m" in body            # старый кэш не стёрт
-        assert "Не удалось обновить" in body
+        assert "Не удалось обновить список провайдеров" in body
         assert "Connection refused by test" in body
 
     def test_refresh_none_footer_mentions_button(self):
         config, ws = _fresh_modules()
         body = ws._render_status_page(self._ctx()).decode()
-        assert "по кнопке" in body and "Проверить сейчас" in body
+        assert "по кнопке" in body and "Перепроверить" in body
 
     def test_endpoint_absent_from_errors_after_partial_is_ok(self):
         # Бэкенд без ошибки в refresh — статус из snapshot («ok»), даже если
@@ -957,7 +960,7 @@ class TestStatusHTTP:
                     assert "0.0.0-test" in body       # версия из контекста сервера
                     assert "AAA" in body
                     assert "http://aaa.local" in body
-                    assert "Список моделей обновлён" in body
+                    assert "Список провайдеров обновлён" in body
                     assert "12:34:56" in body
                 finally:
                     httpd.shutdown()
@@ -986,7 +989,7 @@ class TestStatusHTTP:
                 status, body = _http_get(port, "/")
                 assert status == 200
                 assert "Проверка выполняется" in body
-                assert "Проверить сейчас" in body
+                assert "Перепроверить" in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -1056,7 +1059,10 @@ class TestStatusHTTP:
                 assert status == 200
                 assert "AAA" in body and "BBB" in body
                 assert "m-alpha" in body and "m-beta" in body
-                assert "multi-backend" in body
+                # Текста «Режим:» на странице больше нет (multi-backend —
+                # единственный режим, убран из шапки)
+                assert "Режим:" not in body
+                assert "multi-backend" not in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -1075,7 +1081,7 @@ class TestStatusHTTP:
                 status, body = _http_get(port, "/")
                 assert status == 200
                 assert "old-m" in body
-                assert "Не удалось обновить" in body
+                assert "Не удалось обновить список провайдеров" in body
             finally:
                 httpd.shutdown()
                 httpd.server_close()
@@ -1524,8 +1530,8 @@ class TestModelUsageReprobeAPI:
             assert "Перепроверка модели" in body
             assert "выполняется" in body
             assert "проверяется…" in body
-            assert "Перепроверить</button>" not in body
-            assert "Сбросить</button>" not in body
+            assert ">Перепроверить</button>" not in body   # кнопки строки нет
+            assert ">Сбросить</button>" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" in body
         finally:
             httpd.shutdown()
@@ -1548,8 +1554,8 @@ class TestModelUsageReprobeAPI:
             assert status == 200
             assert "Перепроверка модели" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
-            assert "Перепроверить</button>" in body
-            assert "Сбросить</button>" in body
+            assert ">Перепроверить</button>" in body      # кнопка строки на месте
+            assert ">Сбросить</button>" in body
         finally:
             httpd.shutdown()
             httpd.server_close()

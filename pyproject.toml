@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backend-adapter"
-version = "0.8.4"
+version = "0.8.5"
 description = "Claude Code ↔ OpenAI Backend Proxy Adapter"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -48,13 +48,9 @@ packages = ["backend_adapter"]
 include = [
     "backend_adapter/",
     "backend-adapter.py",
-    "backend-adapter.service",
-    "com.user.backend-adapter.plist",
-    "backend-adapter.env",
-    "sample.adapter.env",
-    "adapter.yaml",
     "requirements.txt",
     "docs/",
+    "install.sh",
 ]
 
 # ── Ruff configuration ──
@@ -86,6 +82,7 @@ ignore = [
 "backend_adapter/webui_status.py" = ["N802"]
 "backend_adapter/session_viewer.py" = ["N802"]
 "backend_adapter/webui_config_api.py" = ["N802"]
+"backend_adapter/webui_ops.py" = ["N802"]
 "backend-adapter.py" = ["F401", "I001"]
 
 [tool.ruff.lint.pydocstyle]

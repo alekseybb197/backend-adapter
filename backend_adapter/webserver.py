@@ -90,7 +90,47 @@ CONTENT_TYPES = {
     ".png": "image/png",
     ".puml": "text/plain; charset=utf-8",
     ".dot": "text/plain; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
+
+# Иконка вкладки браузера — два узла с двусторонней стрелкой между ними
+# (relay/routing «туда и обратно»), отражает суть адаптера: проксирование
+# запросов между клиентом и бэкендами в обе стороны. Встроена как строка, а
+# не файл на диске — та же причина, что у HTML-шаблонов остальных
+# эндпойнтов: standalone-бинарники (PyInstaller, см. changelog) не требуют
+# отдельной упаковки статики, раз она уже часть кода. Живёт в ЯДРЕ (не в
+# session_viewer/webui_status), потому что нужна ВСЕМ страницам сразу, а не
+# одной конкретной фиче.
+FAVICON_SVG = b"""<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="#111827"/>
+  <circle cx="9" cy="11" r="6" fill="#a3e635"/>
+  <circle cx="23" cy="21" r="6" fill="#e11d48"/>
+  <path d="M 11 16 L 21 16" stroke="#f3f4f6" stroke-width="1.8" stroke-linecap="round"/>
+  <path d="M 13 14 L 11 16 L 13 18" fill="none" stroke="#f3f4f6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M 19 14 L 21 16 L 19 18" fill="none" stroke="#f3f4f6" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+"""
+
+
+@register
+class FaviconEndpoint(Endpoint):
+    """Эндпоинт "/favicon.svg": статичная иконка, общая для всех страниц WEBUI.
+
+    Регистрируется здесь же, в ядре, а не через отдельный модуль-эндпойнт
+    (как /session, /config) — это не самостоятельная фича, а разделяемый
+    ресурс уровня всего сервера, и заводить под него отдельный файл ради
+    одного класса было бы избыточно."""
+
+    prefix = "/favicon.svg"
+
+    def __init__(self, context):
+        self.context = context  # не используется, но конструктор всех Endpoint обязан его принимать
+
+    def GET(self, handler, remainder: str):
+        if remainder:
+            handler.send_error(404, "Not found")
+            return
+        handler._write(200, CONTENT_TYPES[".svg"], FAVICON_SVG)
 
 
 class WebContext:
@@ -248,7 +288,12 @@ def serve(
     # импортируют webserver (register/Endpoint), верхнеуровневый импорт
     # создал бы цикл.
     from . import model_usage as _model_usage
-    from . import session_viewer, webui_config_api, webui_status  # noqa: F401  (регистрируют себя)
+    from . import (  # noqa: F401  (регистрируют себя)
+        session_viewer,
+        webui_config_api,
+        webui_ops,
+        webui_status,
+    )
 
     # Персистентный YAML таблицы использованных моделей лежит в корне WEBUI
     # (тот же root_dir, что у *.parts сессий). Синхронизация здесь: корень
@@ -348,6 +393,8 @@ __all__ = [
     "register",
     "ENDPOINTS",
     "CONTENT_TYPES",
+    "FAVICON_SVG",
+    "FaviconEndpoint",
     "WebContext",
     "Handler",
     "QuietWebServer",
