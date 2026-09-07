@@ -90,7 +90,45 @@ CONTENT_TYPES = {
     ".png": "image/png",
     ".puml": "text/plain; charset=utf-8",
     ".dot": "text/plain; charset=utf-8",
+    ".svg": "image/svg+xml",
 }
+
+# Иконка вкладки браузера — два узла со стрелкой между ними (relay/routing),
+# отражает суть адаптера: проксирование запросов между клиентом и
+# бэкендами. Встроена как строка, а не файл на диске — та же причина, что
+# у HTML-шаблонов остальных эндпойнтов: standalone-бинарники (PyInstaller,
+# см. changelog) не требуют отдельной упаковки статики, раз она уже часть
+# кода. Живёт в ЯДРЕ (не в session_viewer/webui_status), потому что нужна
+# ВСЕМ страницам сразу, а не одной конкретной фиче.
+FAVICON_SVG = b"""<svg viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+  <rect x="1" y="1" width="30" height="30" rx="7" fill="#1e2a3a"/>
+  <circle cx="9" cy="16" r="4.5" fill="#8ab4f8"/>
+  <circle cx="23" cy="16" r="4.5" fill="#ffb74d"/>
+  <path d="M 13.5 16 L 18.5 16" stroke="#e8eef7" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M 16.5 13.5 L 19.2 16 L 16.5 18.5" fill="none" stroke="#e8eef7" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+"""
+
+
+@register
+class FaviconEndpoint(Endpoint):
+    """Эндпоинт "/favicon.svg": статичная иконка, общая для всех страниц WEBUI.
+
+    Регистрируется здесь же, в ядре, а не через отдельный модуль-эндпойнт
+    (как /session, /config) — это не самостоятельная фича, а разделяемый
+    ресурс уровня всего сервера, и заводить под него отдельный файл ради
+    одного класса было бы избыточно."""
+
+    prefix = "/favicon.svg"
+
+    def __init__(self, context):
+        self.context = context  # не используется, но конструктор всех Endpoint обязан его принимать
+
+    def GET(self, handler, remainder: str):
+        if remainder:
+            handler.send_error(404, "Not found")
+            return
+        handler._write(200, CONTENT_TYPES[".svg"], FAVICON_SVG)
 
 
 class WebContext:
@@ -353,6 +391,8 @@ __all__ = [
     "register",
     "ENDPOINTS",
     "CONTENT_TYPES",
+    "FAVICON_SVG",
+    "FaviconEndpoint",
     "WebContext",
     "Handler",
     "QuietWebServer",
