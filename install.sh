@@ -62,8 +62,8 @@ Environment:
 
 The binary needs the same config as the sources: a YAML file passed via
 ADAPTER_BACKEND_CONFIG plus the token env var named in its `key` field
-(see sample.adapter.yaml). Legacy ADAPTER_BACKEND_BASE/ADAPTER_BACKEND_KEY
-were removed in v0.7.2.
+(see docs/samples/sample.adapter.yaml in the repo). Legacy
+ADAPTER_BACKEND_BASE/ADAPTER_BACKEND_KEY were removed in v0.7.2.
 EOF
       exit 0
       ;;
@@ -151,7 +151,8 @@ install_pip() {
 
   ok "Sources installed into ${src_dir}/venv"
   info "Run: ${src_dir}/venv/bin/backend-adapter (add it to your PATH)"
-  info "Config: cp ${src_dir}/sample.adapter.yaml -> adapter.yaml, then:"
+  info "Config examples: ${src_dir}/docs/samples/{sample.adapter.yaml,sample.adapter.env}"
+  info "  cp ${src_dir}/docs/samples/sample.adapter.yaml adapter.yaml, then:"
   info "  export ADAPTER_BACKEND_CONFIG=${src_dir}/adapter.yaml"
 }
 
@@ -217,11 +218,11 @@ verify() {
 }
 
 # ── Install systemd service (Linux, user-level) ────────────────────────
-# The repo's backend-adapter.service is a python-source template
-# (/usr/bin/python3 %h/backend-adapter/backend-adapter.py, User=username);
-# it does not fit a binary install. For the binary we generate a
-# user-level unit (systemctl --user) pointing at the installed binary and
-# an env file created next to it.
+# The repo's docs/samples/backend-adapter.service is a python-source
+# template (/usr/bin/python3 %h/backend-adapter/backend-adapter.py,
+# User=username); it does not fit a binary install. For the binary we
+# generate a user-level unit (systemctl --user) pointing at the installed
+# binary and an env file created next to it.
 install_systemd() {
   if [[ "$(uname -s)" != "Linux" ]]; then
     return
@@ -280,12 +281,12 @@ EOF
 }
 
 # ── Install launchd service (macOS, current user) ──────────────────────
-# Same rationale as systemd: the repo plist targets the python-source
-# layout (~/backend-adapter/backend-adapter.py). We generate a plist that
-# runs the installed binary. launchd does not read EnvironmentFile, so the
-# env vars are inlined in the plist; the env file written next to it is a
-# copy-paste reference for editing the plist (single source of truth for
-# the documented defaults).
+# Same rationale as systemd: the repo plist (docs/samples/) targets the
+# python-source layout (~/backend-adapter/backend-adapter.py). We generate
+# a plist that runs the installed binary. launchd does not read
+# EnvironmentFile, so the env vars are inlined in the plist; the env file
+# written next to it is a copy-paste reference for editing the plist
+# (single source of truth for the documented defaults).
 install_launchd() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     return
@@ -400,7 +401,8 @@ echo ""
 echo "Next steps:"
 echo "  1. Create the backend config (YAML) and point to it:"
 echo "     export ADAPTER_BACKEND_CONFIG=/path/to/adapter.yaml"
-echo "     # example: sample.adapter.yaml in the repo (structure backend: name/base/key)"
+echo "     # example: docs/samples/sample.adapter.yaml in the repo"
+echo "     # (structure backend: name/base/key; key names the token env var)"
 echo ""
 echo "  2. Run the adapter:"
 echo "     backend-adapter"

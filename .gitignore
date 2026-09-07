@@ -2,6 +2,9 @@
 .claude/
 local-adapter.env
 local-adapter.yaml
+# Рабочие копии конфигов (копируются из docs/samples/, содержат токены)
+adapter.env
+adapter.yaml
 tmp/
 settings.json
 

@@ -82,6 +82,10 @@ cd backend-adapter
 # При необходимости используйте виртуальное окружение:
 #   python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
+
+# Подготовить конфиги из примеров (docs/samples/) и заполнить их
+cp docs/samples/sample.adapter.env  adapter.env
+cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 
 Структура проекта:
@@ -114,20 +118,24 @@ backend-adapter/
 │   ├── artifact_tree_graphviz.py  # PNG через plantuml/graphviz-fallback
 │   ├── artifact_tree_html.py      # интерактивный tree.html
 │   └── __init__.py            # Module-level proxy
-│   ├── architecture.md        # Архитектура
-│   ├── environment.md         # Полный список env-переменных
-│   ├── logging.md             # Конфигурация логирования
-│   └── sanitizing.md          # Sanitization секретов
 ├── install.sh                   # Однострочный установщик (curl | bash)
-├── backend-adapter.service      # systemd unit (Linux, продакшен)
-├── com.user.backend-adapter.plist  # launchd (macOS, продакшен)
-├── backend-adapter.env          # Пример env для сервиса
-├── sample.adapter.env           # Полный пример env (сервис + клиент)
-├── sample.adapter.yaml          # Пример YAML-конфига бэкендов
 ├── requirements.txt             # Зависимости (единственная — PyYAML)
 ├── scripts/
 │   ├── build-binaries.sh        # Сборка standalone-бинарников (PyInstaller)
 │   └── dev-run.sh               # Запуск из исходников (venv + конфиг)
+├── docs/
+│   ├── install.md               # Установка (этот файл)
+│   ├── environment.md           # Полный список env-переменных
+│   ├── logging.md               # Конфигурация логирования
+│   ├── sanitizing.md            # Sanitization секретов
+│   ├── webui.md                 # Руководство по WEBUI и API
+│   ├── architecture.md          # Архитектура
+│   ├── samples/                 # Примеры конфигов (см. раздел 3):
+│   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
+│   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
+│   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
+│   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
+│   └── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
 └── changelog.md                 # История версий
 ```
 
@@ -188,8 +196,9 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 установки заполните `ADAPTER_BACKEND_CONFIG` (в env-файле на Linux / в
 `EnvironmentVariables` plist на macOS — launchd не читает env-файлы) и
 запустите сервис вручную. Системные шаблоны репозитория
-(`backend-adapter.service`, `com.user.backend-adapter.plist`) рассчитаны на
-запуск из исходников; для бинарника юнит генерируется установщиком.
+(`docs/samples/backend-adapter.service`,
+`docs/samples/com.user.backend-adapter.plist`) рассчитаны на запуск из
+исходников; для бинарника юнит генерируется установщиком.
 
 Опции:
 
@@ -218,15 +227,16 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 
 Установленному бинарнику нужен тот же конфиг, что и исходникам (см. ниже,
 раздел [4.3](#43-запуск)): YAML-файл бэкендов через `ADAPTER_BACKEND_CONFIG`
-плюс env-переменная токена из поля `key`. Скачайте `sample.adapter.yaml`
-из репозитория и заполните его.
+плюс env-переменная токена из поля `key`. Примеры конфигов — в
+`docs/samples/` репозитория (`sample.adapter.yaml`, `sample.adapter.env`);
+скачайте и заполните их.
 
 ### 4.3 Запуск
 
 Бинарнику нужен тот же конфиг, что и исходникам: YAML-файл бэкендов через
 `ADAPTER_BACKEND_CONFIG` (см. [5.1](#51-конфигурация-бэкенда-yaml-файл-через-adapter_backend_config))
-плюс env-переменная токена из поля `key`. Скачайте `sample.adapter.yaml`
-из репозитория, заполните и укажите на него:
+плюс env-переменная токена из поля `key`. Возьмите пример
+`docs/samples/sample.adapter.yaml`, заполните и укажите на него:
 
 ```yaml
 # adapter.yaml — один бэкенд; другие добавляются записями в тот же список
@@ -320,11 +330,12 @@ pyinstaller --onefile \
 
 Единственный способ указать подключение к бэкенду — переменная окружения
 `ADAPTER_BACKEND_CONFIG`, ссылающаяся на YAML-файл со структурой `backend:`
-(пример — `sample.adapter.yaml` в корне репозитория). Один или несколько бэкендов
+(пример — `docs/samples/sample.adapter.yaml`). Один или несколько бэкендов
 задаются записями в одном списке:
 
 ```yaml
 # sample.adapter.yaml — один бэкенд; другие добавляются записями в тот же список
+# (полный пример — docs/samples/sample.adapter.yaml)
 backend:
   - name: home
     base: "http://127.0.0.1:8002"
@@ -337,7 +348,7 @@ backend:
 Укажите путь к файлу в окружении:
 
 ```bash
-export ADAPTER_BACKEND_CONFIG="./sample.adapter.yaml"
+export ADAPTER_BACKEND_CONFIG="./adapter.yaml"
 ```
 
 Каждый бэкенд имеет три поля:
@@ -500,18 +511,15 @@ export ADAPTER_DEBUG_ENABLE=1
 
 ### 5.8 Полный пример env-файла
 
-```bash
-# sample.adapter.env — полный пример
-# ============================================================
-# Adapter configuration (backend-adapter.py)
-# ============================================================
+Полный рабочий env-файл с комментариями всех переменных — в
+`docs/samples/sample.adapter.env` (скопируйте в `adapter.env` и заполните:
+путь к YAML в `ADAPTER_BACKEND_CONFIG` и токен бэкенда). Ниже — та же
+структура кратко, с пояснениями по блокам:
 
+```bash
 # --- Backend connection ---
-# Путь к YAML-файлу конфигурации бэкендов — единственный способ
-# указать подключение. Пример файла — sample.adapter.yaml в корне
-# репозитория (структура backend: - name/base/key; key — имя
-# переменной окружения, в которой лежит токен).
-export ADAPTER_BACKEND_CONFIG="<путь>/sample.adapter.yaml"
+export ADAPTER_BACKEND_CONFIG="<путь>/adapter.yaml"
+export ADAPTER_BACKEND_KEY_LLM_SERVICE="*****"   # имя из поля key YAML-конфига
 
 # --- Server settings ---
 export ADAPTER_PROXY_PORT=9999
@@ -527,26 +535,28 @@ export ADAPTER_STREAM_INCLUDE_USAGE=1
 
 # --- Models ---
 export ADAPTER_STRICT_MODELS=1
-# export ADAPTER_MODELS_MAPPING="claude-sonnet:k2-05"
+# export ADAPTER_MODELS_MAPPING=":k2-05"
 
-# --- Debugging ---
+# --- Logging ---
 export ADAPTER_DEBUG_ENABLE=1
-# export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"   # директория логов сессий (пусто — файловая запись выключена)
+# export ADAPTER_DEBUG_LOGPATH="./tmp/logs"   # директория логов сессий (пусто — файловая запись выключена)
 # export ADAPTER_DEBUG_TAGS_FULL="BODY,TOOL_RESULT"
 # export ADAPTER_DEBUG_TOOLS_ERROR=1
 
 # --- Sanitizer (secret masking in logs) ---
 export ADAPTER_SENSITIVE_LOGGING_ENABLE=0
 
-# --- Claude Code client ---
-export ANTHROPIC_BASE_URL="http://localhost:9999"
-export ANTHROPIC_API_KEY=""
-export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1"
-export CLAUDE_CODE_ATTRIBUTION_HEADER="0"
-export ANTHROPIC_MODEL="qwen3.6-35b-a3b"
-export ANTHROPIC_DEFAULT_MODEL="qwen3.6-35b-a3b"
-export CLAUDE_CODE_DISABLE_THINKING="1"
+# --- WEBUI ---
+export ADAPTER_WEBUI_ENABLE=1
+# export ADAPTER_EXPORTER_ENABLE=1          # Prometheus-экспортёр (отдельный слушатель)
+# export ADAPTER_EXPORTER_PORT=9100
+
+# --- Mode ---
+export ADAPTER_DETACH_ENABLE=0
 ```
+
+Переменные `ANTHROPIC_*`/`CLAUDE_CODE_*` — настройки клиента [CC]
+(раздел [5.2](#52-настройка-клиента-cc)), в env-файл адаптера они не входят.
 
 ---
 
@@ -555,9 +565,10 @@ export CLAUDE_CODE_DISABLE_THINKING="1"
 ### 6.1 В foreground (разработка)
 
 ```bash
-# Загрузить переменные
-source sample.adapter.env
-# или: source backend-adapter.env
+# Подготовить конфиги (один раз) и загрузить переменные
+# cp docs/samples/sample.adapter.env  adapter.env
+# cp docs/samples/sample.adapter.yaml adapter.yaml
+source adapter.env
 
 # Запустить
 python3 backend-adapter.py
@@ -588,7 +599,7 @@ Backends:   1 configured:
 
 ```bash
 # Загрузить env
-source sample.adapter.env
+source adapter.env
 
 # Запустить в фоне
 ADAPTER_DETACH_ENABLE=1 python3 backend-adapter.py
@@ -689,7 +700,7 @@ Adapter cannot start. Exiting.
 Проверьте:
 
 - Путь в `ADAPTER_BACKEND_CONFIG` корректен и YAML-файл существует
-- Структура YAML — `backend:` со списком записей (пример — `sample.adapter.yaml`)
+- Структура YAML — `backend:` со списком записей (пример — `docs/samples/sample.adapter.yaml`)
 - Поле `key` каждой записи указывает на существующую переменную окружения, в которой лежит токен
 - Бэкенд доступен и отдаёт `GET /v1/models`
 - `ADAPTER_STRICT_MODELS=0` — переключить в разрешающий режим
@@ -710,13 +721,15 @@ Adapter cannot start. Exiting.
 
 ### 9.1 Linux — systemd
 
-Системные файлы: `backend-adapter.service` и `backend-adapter.env`.
+Юнит `backend-adapter.service` (шаблон для запуска из исходников — в
+`docs/samples/`) рассчитан на установку исходников в `~/backend-adapter`
+и подхватывает переменные из env-файла (`EnvironmentFile`).
 
 **Минимальный набор env-переменных** для systemd-юнита:
 
 | Переменная | Значение | Зачем |
 |---|---|---|
-| `ADAPTER_BACKEND_CONFIG` | путь к YAML | Подключение к бэкенду (пример — `sample.adapter.yaml`) |
+| `ADAPTER_BACKEND_CONFIG` | путь к YAML | Подключение к бэкенду (пример — `docs/samples/sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` | Порт, на котором слушает адаптер |
 | `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` | Адрес, на котором слушает адаптер (только локально; `0.0.0.0` — все интерфейсы) |
 | `ADAPTER_DEBUG_ENABLE` | `1` | Включить логирование |
@@ -730,10 +743,12 @@ Adapter cannot start. Exiting.
 
 ```bash
 # 1. Скопировать юнит в директорию user-юнитов
-cp backend-adapter.service ~/.config/systemd/user/backend-adapter.service
+cp docs/samples/backend-adapter.service ~/.config/systemd/user/backend-adapter.service
 
-# 2. Заполнить .env (или создать новый файл для сервиса)
-# ADAPTER_BACKEND_CONFIG="/home/username/backend-adapter/sample.adapter.yaml"
+# 2. Создать env-файл сервиса (путь из EnvironmentFile юнита — см. шаблон:
+#    ~/backend-adapter/backend-adapter.env) и заполнить его
+# Примерный набор переменных (полный — в docs/samples/sample.adapter.env):
+# ADAPTER_BACKEND_CONFIG="/home/username/backend-adapter/adapter.yaml"
 # ADAPTER_PROXY_PORT=9999
 # ADAPTER_DEBUG_ENABLE=1
 # ADAPTER_DETACH_ENABLE=0
@@ -786,14 +801,15 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 
 ### 9.2 macOS — launchd
 
-На macOS вместо systemd используется **launchd**. Системный файл:
-`com.user.backend-adapter.plist`.
+На macOS вместо systemd используется **launchd**. Системный файл —
+`com.user.backend-adapter.plist` (шаблон для запуска из исходников — в
+`docs/samples/`).
 
 **Минимальный набор env-переменных** в `<key>EnvironmentVariables</key>`:
 
 | Переменная | Значение |
 |---|---|
-| `ADAPTER_BACKEND_CONFIG` | путь к YAML (пример — `sample.adapter.yaml`) |
+| `ADAPTER_BACKEND_CONFIG` | путь к YAML (пример — `docs/samples/sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` |
 | `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` |
 | `ADAPTER_DEBUG_ENABLE` | `1` |
@@ -803,7 +819,7 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 
 ```bash
 # 1. Скопировать plist в директорию user-задач
-cp com.user.backend-adapter.plist \
+cp docs/samples/com.user.backend-adapter.plist \
    ~/Library/LaunchAgents/com.user.backend-adapter.plist
 
 # 2. Загрузить задачу

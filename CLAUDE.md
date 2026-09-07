@@ -81,8 +81,11 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   Per-session дампы частей протокола включаются флагом `ADAPTER_DEBUG_TAGS_OUT=1`
   (парные `.json`+`.yaml`, фиксированный список тегов), требуют
   `ADAPTER_DEBUG_ENABLE=1` и директорию `ADAPTER_DEBUG_LOGPATH`.
-- Служебные файлы продакшена: `backend-adapter.service` (systemd),
-  `com.user.backend-adapter.plist` (launchd).
+- Примеры конфигов — в `docs/samples/`: `sample.adapter.env` (env-файл
+  адаптера), `sample.adapter.yaml` (конфиг бэкендов), шаблоны продакшена
+  `backend-adapter.service` (systemd, запуск из исходников) и
+  `com.user.backend-adapter.plist` (launchd); рабочие копии кладутся в
+  корень репозитория как `adapter.env`/`adapter.yaml` (в `.gitignore`).
 
 ## Принципы
 
@@ -587,10 +590,10 @@ legacy-пара `ADAPTER_BACKEND_BASE` + `ADAPTER_BACKEND_KEY` и YAML чере�
 - удалены legacy-глобалы (`BACKEND_BASE`/`BACKEND_KEY`/`_BACKEND_LEGACY`),
   `_probe_models()` и все legacy-ветки;
 - пустой `ADAPTER_BACKEND_CONFIG` на старте → `[FATAL]` + подсказка
-  (пример — `sample.adapter.yaml` в корне) + `sys.exit(1)`;
+  (пример — `docs/samples/sample.adapter.yaml`) + `sys.exit(1)`;
 - финальный «недостижимый» return в `_resolve_backend` → `RuntimeError`;
-- в корень репозитория добавлен пример `sample.adapter.yaml`, на него
-  ссылаются env-файлы, plist и README.
+- в репозиторий добавлен пример `sample.adapter.yaml` (ныне — в
+  `docs/samples/`), на него ссылаются env-файлы, plist и README.
 
 **Следствия:** минимальный запуск — `ADAPTER_BACKEND_CONFIG` (путь к YAML)
 + env-переменная токена из поля `key`; «нулевая настройка» сохраняется:

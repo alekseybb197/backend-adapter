@@ -6,6 +6,45 @@
 бампается до выхода из WIP; отправка в удалённый репозиторий — после
 проверки. WIP-шапка v0.8.4 выше не удаляется. -->
 
+### 2026-09-07 Конфиги-примеры перенесены в docs/samples/, backend-adapter.env удалён
+
+**Контекст:** корневые `sample.adapter.env`, `sample.adapter.yaml`,
+`backend-adapter.env`, `backend-adapter.service`,
+`com.user.backend-adapter.plist` (примеры конфигов + шаблоны systemd/launchd
+для запуска из исходников) засоряли корень; `backend-adapter.env` дублировал
+`sample.adapter.env` (минимальный env для сервиса) и путал, какой файл
+использовать.
+
+**Решение:**
+- примеры перенесены в **`docs/samples/`** (`sample.adapter.env`,
+  `sample.adapter.yaml`, `backend-adapter.service`,
+  `com.user.backend-adapter.plist`) — рядом с остальной документацией;
+- **`backend-adapter.env` удалён**: вместо него используется
+  `docs/samples/sample.adapter.env` — единый полный пример с комментариями
+  каждой переменной (в т.ч. токен `ADAPTER_BACKEND_KEY_*` из поля `key`,
+  WEBUI/экспортёр, PID-файл); для systemd/launchd из него берётся нужный
+  набор переменных;
+- рабочие копии кладутся в корень репозитория как `adapter.env`/
+  `adapter.yaml` — README/install.md/dev-run.sh переведены на этот путь;
+  оба имени добавлены в `.gitignore` (ранее покрывались только
+  исторические `local-adapter.env`/`local-adapter.yaml`);
+- `pyproject.toml` (sdist include): перечисленные корневые
+  `backend-adapter.service`, `com.user.backend-adapter.plist`,
+  `backend-adapter.env`, `sample.adapter.env`, `adapter.yaml` заменены на
+  `docs/` + `install.sh` (примеры входят в состав `docs/`);
+- новые локальные файлы пользователя — `docs/claude_code/` (настройки
+  клиента [CC]: settings/statusline) — в установку не входят;
+- ссылки на прежние пути в корне обновлены в коде (`backend-adapter.py`
+  FATAL-подсказка), `scripts/dev-run.sh`, README, docs/install.md,
+  docs/environment.md, docs/sanitizing.md, CLAUDE.md, changelog.md.
+
+**Следствия:** один источник примеров конфигов — `docs/samples/`; корень
+чист; установка из исходников начинается с
+`cp docs/samples/sample.adapter.{env,yaml} {adapter.env,adapter.yaml}`.
+Поведение проксирования не меняется; `install.sh` правила установки не
+трогал — обновлены только ссылки на примеры в подсказках (установщик
+по-прежнему не читает файлы-примеры репозитория).
+
 ### 2026-09-07 Prometheus-экспортёр: отдельный слушатель на ADAPTER_EXPORTER_PORT
 
 **Цель:** выносить метрики адаптера наружу для Prometheus (скрейп по
@@ -120,9 +159,9 @@ JSON-контракту; зонды не ходят в сеть и не трог
 - **футер** — «Список провайдеров обновлён в HH:MM:SS (N провайдеров,
   M моделей).»: N из нового поля `providers` снимка
   (`len(_BACKENDS)` на момент публикации), M = count моделей;
-- **`sample.adapter.yaml`** обновлён под политику (пустая `messages:` убрана,
-  комментарий — «перечисленные пробуются указанной моделью; неперечисленные
-  не пробуются»).
+- **`sample.adapter.yaml`** (в `docs/samples/`) обновлён под политику (пустая
+  `messages:` убрана, комментарий — «перечисленные пробуются указанной
+  моделью; неперечисленные не пробуются»).
 
 **Следствия:** бэкенды добавляются/удаляются без рестарта (кнопка +
 перечитывание); пробы предсказуемы — только то, что явно перечислено;
@@ -966,7 +1005,8 @@ Releases (`releases/latest/download`) в `/usr/local/bin` (fallback —
 `INSTALL_DIR`/`SERVICE_INSTALL`/`USE_PIP`.
 
 **`--service` генерирует юниты сам** (user-level, без root): системные
-шаблоны репозитория (`backend-adapter.service`, `com.user.backend-adapter.plist`)
+шаблоны репозитория (`docs/samples/backend-adapter.service`,
+`docs/samples/com.user.backend-adapter.plist`)
 рассчитаны на python-source раскладку (`/usr/bin/python3 %h/backend-adapter/
 backend-adapter.py`) и бинарнику не подходят. Для бинарника `install.sh`
 пишет свежий юнит heredoc'ом, указывающий на установленный бинарник:
@@ -1049,6 +1089,7 @@ standalone-бинарники). Запуск — `./scripts/dev-run.sh` из к�
 **Проверочная сборка** (macOS arm64, PyInstaller 6.22.2): бинарник
 `dist/binaries/macos-arm64/backend-adapter` (~8.7 МБ) — без конфига даёт
 `[FATAL] ADAPTER_BACKEND_CONFIG is not set` и exit 1; со `sample.adapter.yaml`
+из `docs/samples/`
 доходит до сетевого probing бэкенда (весь пакет внутри бинарника работает);
 WEBUI поднимается (`HTTP 200` на `127.0.0.1:8765`). В ходе сборки найден и
 исправлен дефект: исходный self-check скрипта звал `--help` (адаптер его не

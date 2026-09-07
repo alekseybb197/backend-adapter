@@ -102,7 +102,7 @@ if __name__ == "__main__":
     if not ADAPTER_BACKEND_CONFIG:
         print(
             "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу "
-            "конфигурации бэкенда (пример — sample.adapter.yaml в корне репозитория)."
+            "конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
         )
         sys.exit(1)
 

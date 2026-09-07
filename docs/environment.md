@@ -26,7 +26,8 @@
 Минимальный запуск:
 
 ```bash
-export ADAPTER_BACKEND_CONFIG="./sample.adapter.yaml"   # внешний LLM-бэкенд
+# Примеры — docs/samples/sample.adapter.yaml и sample.adapter.env
+export ADAPTER_BACKEND_CONFIG="./adapter.yaml"           # внешний LLM-бэкенд
 # ... + переменная токена, на которую ссылается поле key в YAML
 python3 backend-adapter.py
 ```
@@ -37,7 +38,7 @@ python3 backend-adapter.py
 
 | Переменная | Default | Описание |
 |---|---|---|
-| `ADAPTER_BACKEND_CONFIG` | *(пусто)* | **Обязательна при старте. Единственный способ конфигурации бэкенда.** Путь к YAML-файлу со структурой `backend:` (список записей `name`/`base`/`key`). Пример — `sample.adapter.yaml` в корне репозитория. Не задан — старт невозможен: адаптер завершается с `[FATAL]` и подсказкой. |
+| `ADAPTER_BACKEND_CONFIG` | *(пусто)* | **Обязательна при старте. Единственный способ конфигурации бэкенда.** Путь к YAML-файлу со структурой `backend:` (список записей `name`/`base`/`key`). Пример — `docs/samples/sample.adapter.yaml`. Не задан — старт невозможен: адаптер завершается с `[FATAL]` и подсказкой. |
 
 > **Стартовый probe не настраивается:** при `ADAPTER_STRICT_MODELS=1` (дефолт)
 > адаптер при старте опрашивает каждый бэкенд (`GET /v1/models`) — это не
@@ -45,7 +46,7 @@ python3 backend-adapter.py
 > валидации. Если бэкенд недоступен, адаптер продолжает старт
 > (с предупреждением в консоль) — на проксирование это не влияет.
 
-### Пример YAML-конфига бэкендов (`ADAPTER_BACKEND_CONFIG=./sample.adapter.yaml`)
+### Пример YAML-конфига бэкендов (пример файла — `docs/samples/sample.adapter.yaml`)
 
 ```yaml
 backend:
@@ -239,8 +240,8 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 
 | Цель | Переменная | Значение |
 |---|---|---|
-| Один бэкенд | `ADAPTER_BACKEND_CONFIG` | `"./sample.adapter.yaml"` — YAML с одним элементом `backend:` |
-| Несколько бэкендов | `ADAPTER_BACKEND_CONFIG` | `"./sample.adapter.yaml"` — YAML с несколькими элементами `backend:` |
+| Один бэкенд | `ADAPTER_BACKEND_CONFIG` | YAML с одним элементом `backend:` (пример — `docs/samples/sample.adapter.yaml`) |
+| Несколько бэкендов | `ADAPTER_BACKEND_CONFIG` | YAML с несколькими элементами `backend:` |
 | Включить стриминг | `ADAPTER_STREAMING_ENABLE` | `1` |
 | Отключить стриминг (аварийный) | `ADAPTER_STREAMING_ENABLE` | `0` |
 | Токены usage в стриме | `ADAPTER_STREAM_INCLUDE_USAGE` | `1` |

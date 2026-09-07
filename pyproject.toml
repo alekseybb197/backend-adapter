@@ -48,13 +48,9 @@ packages = ["backend_adapter"]
 include = [
     "backend_adapter/",
     "backend-adapter.py",
-    "backend-adapter.service",
-    "com.user.backend-adapter.plist",
-    "backend-adapter.env",
-    "sample.adapter.env",
-    "adapter.yaml",
     "requirements.txt",
     "docs/",
+    "install.sh",
 ]
 
 # ── Ruff configuration ──

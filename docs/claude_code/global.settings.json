@@ -1,0 +1,54 @@
+{
+    "plansDirectory": "./tmp/plans",
+    "enableAllProjectMcpServers": true,
+    "language": "russian",
+    "autoUpdatesChannel": "stable",
+    "cleanupPeriodDays": 7,
+    "attribution": {
+        "commit": "",
+        "pr": ""
+    },
+    "spinnerTipsEnabled": false,
+    "respectGitignore": false,
+    "alwaysThinkingEnabled": false,
+    "env": {
+        "ANTHROPIC_BASE_URL": "http://localhost:9999",
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_AUTH_TOKEN": "dummy",
+
+        "ANTHROPIC_MODEL": "qwen36",
+        "ANTHROPIC_DEFAULT_MODEL": "qwen36",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "262144",
+
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen36",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen36",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen36",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "sonnet",
+
+        "CLAUDE_CODE_HIDE_ACCOUNT_INFO": "1",
+
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+
+        "DISABLE_TELEMETRY": "1",
+        "DISABLE_ERROR_REPORTING": "1",
+        "DISABLE_AUTOUPDATER": "1",
+        "DISABLE_COST_WARNINGS": "1",
+
+        "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
+        "ENABLE_TOOL_SEARCH": "auto:5",
+        "MAX_THINKING_TOKENS": "50000",
+        "MAX_MCP_OUTPUT_TOKENS": "50000",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000",
+        "BASH_DEFAULT_TIMEOUT_MS": "300000",
+        "BASH_MAX_TIMEOUT_MS": "600000",
+        "MCP_TIMEOUT": "60000",
+        "MCP_TOOL_TIMEOUT": "120000",
+        "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1"
+    },
+    "statusLine": {
+        "type": "command",
+        "command": "~/.claude/statusline.sh",
+        "padding": 0
+    }
+}

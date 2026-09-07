@@ -25,13 +25,18 @@ cd backend-adapter
 # 2. Установить зависимости (единственная внешняя — PyYAML)
 pip install -r requirements.txt
 
-# 3. Загрузить env-переменные
-source sample.adapter.env
+# 3. Скопировать и заполнить env-файл и YAML-конфиг бэкенда
+cp docs/samples/sample.adapter.env  adapter.env
+cp docs/samples/sample.adapter.yaml adapter.yaml
+#    (в adapter.env: токен ADAPTER_BACKEND_KEY_LLM_SERVICE и пути)
 
-# 4. Запустить адаптер
+# 4. Загрузить env-переменные
+source adapter.env
+
+# 5. Запустить адаптер
 python3 backend-adapter.py
 
-# 5. В другом терминале запустить Claude Code
+# 6. В другом терминале запустить Claude Code
 claude
 ```
 
@@ -68,13 +73,15 @@ backend-adapter/
 │   ├── webui_ops.py            # WEBUI health: /healthz /health /live /ready
 │   ├── webui_config_api.py     # WEBUI "/config": runtime-конфиг
 │   ├── prometheus_exporter.py  # Метрики /metrics (отдельный слушатель)
+│   ├── session_viewer.py       # WEBUI "/session": просмотр *.parts сессий
+│   ├── artifact_tree*.py       # Генерация дерева артефактов (8 модулей)
 │   └── __init__.py             # Module-level proxy
 ├── docs/                       # Документация
-├── backend-adapter.service     # systemd unit (Linux)
-├── com.user.backend-adapter.plist  # launchd (macOS)
-├── backend-adapter.env         # Пример env для сервиса
-├── sample.adapter.env          # Полный пример env
-├── sample.adapter.yaml         # Пример YAML-конфига бэкендов
+│   ├── samples/                # Примеры конфигов: sample.adapter.env (env-файл),
+│   │                           #   sample.adapter.yaml (YAML бэкендов),
+│   │                           #   backend-adapter.service + com.user.backend-adapter.plist
+│   │                           #   (шаблоны systemd/launchd для запуска из исходников)
+│   └── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
 └── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 
