@@ -1,6 +1,50 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
-## v0.8.6 (WIP — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, корректное завершение по Ctrl-C/SIGTERM, Cost в live-поллинге, верхняя «Свернуть», тесты graceful shutdown и интеграционного прогона, favicon на производных страницах, удаление tmp/check_v086.py, колонка Actions с иконками-действиями строки и удаление модели, реформа логирования — консоль с TRIM / файл полный, удалены TAGS_FULL·TOOLS·TOOLS_ERROR, TAGS_OUT → ADAPTER_DEBUG_PARTS, иконки строк 🔄/⏪/🗑, README)
+## v0.8.6 — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, корректное завершение по Ctrl-C/SIGTERM, Cost в live-поллинге, верхняя «Свернуть», тесты graceful shutdown и интеграционного прогона, favicon на производных страницах, удаление tmp/check_v086.py, колонка Actions с иконками-действиями строки и удаление модели, реформа логирования — консоль с TRIM / файл полный, удалены TAGS_FULL·TOOLS·TOOLS_ERROR, TAGS_OUT → ADAPTER_DEBUG_PARTS, иконки строк 🔄/⏪/🗑
+
+### 2026-09-08 Саммари ветки v0.8.6 (11 коммитов между merge PR #11 (v0.8.5) и снятием WIP)
+
+**Цель:** финальная публикация всей группы работ v0.8.6 — единая запись о
+том, что вошло в ветку между v0.8.5 и снятием WIP (детали каждой работы — в
+подзаписях ниже).
+
+**Решение:**
+- **колонка Cost по тарифам** — новая env-переменная `ADAPTER_MODELS_TARIFFS`
+  (YAML: `tariffs: [{name, backend?, input_price, output_price, currency,
+  price_per}]`); стоимость строки таблицы «Models in use» считается на лету
+  из накопленных токенов при каждом рендере (колонка Cost после
+  Input/Output, формат `N,NN CUR`);
+- **пересмотр флагов логирования/WEBUI** — консольные debug-логи стали
+  безусловными; `ADAPTER_DEBUG_ENABLE` (дефолт `0`) гейтит только файловую
+  запись; `ADAPTER_DEBUG_LOGPATH` — единый корень логов/WEBUI/
+  `model-usage.yaml` (всегда непуст, дефолт `./tmp/logs`);
+  `ADAPTER_WEBUI_ENABLE` удалён — WEBUI поднимается всегда;
+- **корректное завершение по Ctrl-C/SIGTERM** — модуль `shutdown.py`:
+  переключение сигналов в finally (повторный сигнал → os._exit(130) без
+  traceback), SIGTERM → вежливое завершение, остановка WEBUI/экспортёра,
+  flush usage-хвоста;
+- **замечания после graceful shutdown** — тесты завершения
+  (test_shutdown.py), интеграционный прогон реального процесса в пуле
+  тестов (test_manual_check.py, маркер `manual`), Cost в live-поллинге
+  (snapshot + `cost_html`), верхняя «Свернуть» у колонки моделей;
+- **favicon на всех HTML-страницах WEBUI** + удалён временный
+  `tmp/check_v086.py`;
+- **колонка Actions и удаление модели** — POST
+  `/api/model-usage/delete?model=…` + кнопка-иконка (строка уходит из
+  таблицы и YAML-файла); колонка «Действия» → «Actions»;
+- **реформа логирования** — консоль всегда с обрезкой `ADAPTER_DEBUG_TRIM`,
+  файл `session-*.log` при `ADAPTER_DEBUG_ENABLE=1` полный без обрезки;
+  удалены `ADAPTER_DEBUG_TAGS_FULL`/`ADAPTER_DEBUG_TOOLS`/
+  `ADAPTER_DEBUG_TOOLS_ERROR`; `ADAPTER_DEBUG_TAGS_OUT` →
+  `ADAPTER_DEBUG_PARTS` (дампы всех логгируемых частей); `[TOOL_RESULT]`
+  content-блок безусловен, `[TOOL_RESULT_ERROR]` удалён;
+- **иконки строк** таблицы «Models in use»: ⟳/↺/✕ → 🔄/⏪/🗑 (кнопка
+  «⟳ Перепроверить» не менялась).
+
+**Следствия:** версия v0.8.6 публикуется (снятие WIP) — поведение
+проксирования в ветке не менялось; breaking changes: удалены
+`ADAPTER_WEBUI_ENABLE`, `ADAPTER_DEBUG_TAGS_FULL`, `ADAPTER_DEBUG_TOOLS`,
+`ADAPTER_DEBUG_TOOLS_ERROR`; `ADAPTER_DEBUG_TAGS_OUT` → `ADAPTER_DEBUG_PARTS`.
 
 ### 2026-09-08 Реформа логирования: консоль с TRIM / файл полный; удалены TAGS_FULL·TOOLS·TOOLS_ERROR; TAGS_OUT → ADAPTER_DEBUG_PARTS; иконки строк 🔄/⏪/🗑
 
@@ -50,7 +94,6 @@ runtime-live), test_server.py (content-блок безусловен), test_conf
 test_webui_config_api.py, test_session_log.py, test_webui_status.py (новые
 глифы 🔄/⏪/🗑); интеграция — test_manual_check.py (реальный процесс:
 консоль обрезана при малом TRIM, `session-*.log` несёт полную строку).
-Ветка feature/v0.8.6 в WIP.
 
 ### 2026-09-08 Колонка Actions, иконки-действия строки, удаление модели из таблицы и файла
 
@@ -88,7 +131,7 @@ tooltip); контракты reset/reprobe и поведение проксир�
 Покрыто: unit — TestDeleteModel (test_model_usage.py), TestModelUsageDeleteAPI
 (test_webui_status.py); интеграция — test_manual_check.py (delete через
 HTTP, usage-строка исчезает со страницы, имя модели остаётся в таблице
-бэкендов). Ветка feature/v0.8.6 в WIP.
+бэкендов).
 
 ### 2026-09-08 Замечания после graceful shutdown: тест завершения, интеграционный прогон в пуле тестов, Cost в live-поллинге, верхняя «Свернуть»
 
@@ -133,7 +176,7 @@ HTTP, usage-строка исчезает со страницы, имя моде
 Cost на открытой
 странице обновляется вместе со счётчиками (без перезагрузки и без сети к
 бэкендам); развёрнутая колонка моделей сворачивается и сверху, и снизу.
-Поведение проксирования не меняется. Ветка feature/v0.8.6 в WIP.
+Поведение проксирования не меняется.
 
 ### 2026-09-08 Favicon на всех HTML-страницах WEBUI
 
@@ -151,7 +194,6 @@ tree.html дерева артефактов (artifact_tree_html.py — ренд�
 **Следствия:** favicon виден на всех страницах WEBUI (в т.ч. внутри iframe
 tree.html), файл раздаётся одним эндпоинтом. Покрыто тестами: /config
 (unit + HTTP), /session, tree.html. Поведение проксирования не меняется.
-Ветка feature/v0.8.6 в WIP.
 
 ### 2026-09-08 Удалён временный скрипт tmp/check_v086.py (интеграционный прогон — только в пуле тестов)
 
@@ -168,7 +210,7 @@ test_shutdown.py удалён пустой skip-класс TestManualIntegration
 
 **Следствия:** в разработке участвует только код из git; интеграционный
 контроль реального процесса — постоянный тест test_manual_check.py.
-Поведение адаптера не меняется. Ветка feature/v0.8.6 в WIP.
+Поведение адаптера не меняется.
 
 ### 2026-09-08 Корректное завершение по Ctrl-C/SIGTERM
 
@@ -203,7 +245,7 @@ model-usage.yaml.tmp. SIGTERM (systemd/launchd/kill) по умолчанию у�
 [EXIT] Bye после сохранения usage-хвоста; повторный во время завершения —
 немедленный выход с rc=130, без traceback и [PYI-...] unhandled exception.
 SIGTERM больше не «рубит» процесс, а проходит то же штатное завершение.
-Поведение проксирования не меняется. Ветка feature/v0.8.6 в WIP.
+Поведение проксирования не меняется.
 
 ### 2026-09-08 Колонка Cost по тарифам ADAPTER_MODELS_TARIFFS + пересмотр флагов логирования/WEBUI
 
