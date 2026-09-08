@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import probe_json  # JSON-дампы результатов проверок в LOGPATH (лист DAG)
+
 # ==================== НАСТРОЙКИ ====================
 PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 # Адрес (host), на котором слушает HTTP-эндпоинт адаптера. Пусто / не задано —
@@ -486,6 +488,36 @@ def _fetch_models(base: str, key: str, timeout: float | None = None) -> list[dic
     return data.get("data", [])
 
 
+def _write_models_snapshot(
+    bname: str,
+    bmodels: list[dict] | None,
+    error: str | None = None,
+) -> None:
+    """JSON-дамп результата проверки бэкенда на доступные модели.
+
+    Безусловный наблюдательный канал (v0.9.0): файл
+    ``<имя_бэкенда>.models.json`` пишется в ADAPTER_DEBUG_LOGPATH при каждой
+    проверке — стартовой (_init_multi_backends) и фоновой (refresh_models /
+    reload-перечитывания) — каждый раз перезаписываясь целиком. Вне
+    ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_PARTS / TRIM (гейт — только наличие
+    LOGPATH); снимок содержит ПОЛНЫЕ записи моделей из ответа /v1/models
+    (redact-маскирование секретов — внутри probe_json). Провал записи молча
+    глотается модулем probe_json — проверку не роняет."""
+    payload = {
+        "backend": bname,
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ok": error is None and bmodels is not None,
+    }
+    if error is not None:
+        payload["error"] = error
+    if bmodels is not None:
+        payload["count"] = len(bmodels)
+        # Копии записей ответа — в файл уходит снимок на момент проверки
+        # (бэкенд мог поменять список моделей к следующему чтению).
+        payload["models"] = [dict(m) for m in bmodels]
+    probe_json.write_models_json(bname, payload)
+
+
 # ==================== MULTI-BACKEND: ENDPOINT PROBE ====================
 # «Дымовая» проба API-эндпойнтов бэкенда: короткий POST (max_tokens:1) на
 # каждый известный путь — определить, какие эндпойнты бэкенд реально
@@ -603,6 +635,46 @@ def _probe_model(backend: dict, name: str) -> tuple[str | None, bool | None]:
             return specified, True
         return None, False
     return None, None
+
+
+def _pname_for_path(path: str) -> str | None:
+    """Короткое имя эндпоинта ENDPOINT_PROBES по полному пути (или None)."""
+    for pname, ep_path, _tpl in ENDPOINT_PROBES:
+        if ep_path == path:
+            return pname
+    return None
+
+
+def _write_endpoint_snapshot(
+    bname: str,
+    model: str,
+    pname: str,
+    path: str,
+    status: int | None,
+    found: bool,
+    *,
+    error: str | None = None,
+) -> None:
+    """JSON-дамп результата пробы эндпоинта модели (v0.9.0).
+
+    Файл ``<бэкенд>.<конверт.модель>.<pname>.json`` в ADAPTER_DEBUG_LOGPATH
+    (конвертация модели — probe_json._convert_name). Безусловный
+    наблюдательный канал: пишется при каждой фактической пробе (фоновая
+    проверка бэкендов и пер-модельные пробы usage-таблицы), перезаписывая
+    файл целиком. ``status=None`` — сетевая ошибка/таймаут (found=False,
+    текст — в ``error``). Провал записи молча глотается в probe_json."""
+    payload = {
+        "backend": bname,
+        "model": model,
+        "endpoint": pname,
+        "path": path,
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "status": status,
+        "found": found,
+    }
+    if error is not None:
+        payload["error"] = error
+    probe_json.write_endpoint_json(bname, model, pname, payload)
 
 
 def probe_endpoints(timeout: float | None = None) -> dict:
@@ -727,6 +799,25 @@ def probe_endpoints(timeout: float | None = None) -> dict:
             "errors": result["errors"],
         }
         _log_probe(bname, b["base"], result["endpoints"], result["errors"])
+        # JSON-дампы результатов пробы эндпоинтов (v0.9.0): файл на каждый
+        # реально пробованный путь — <бэкенд>.<модель>.<pname>.json, где
+        # модель — та, которой эндпоинт пробовался (probes[path]). Пишутся
+        # при каждом фактическом прогоне (не из кэша), перезаписываясь
+        # целиком. (ep_name, а не pname: внешний pname-цикл выше имеет тип
+        # str, тут — str | None после _pname_for_path.)
+        for path, ep in result["endpoints"].items():
+            ep_name = _pname_for_path(path)
+            if ep_name is None:
+                continue  # путь вне ENDPOINT_PROBES — не наш (страховка)
+            _write_endpoint_snapshot(
+                bname,
+                probes[path],
+                ep_name,
+                path,
+                ep.get("status"),
+                bool(ep.get("found")),
+                error=result["errors"].get(ep_name),
+            )
 
     return {
         "ok": ok_any,
@@ -870,8 +961,12 @@ def _init_multi_backends(config_path: str) -> None:
             bmodels = _fetch_models(base, b["key"])
         except Exception as e:
             print(f"[WARN] Failed to probe backend '{name}' at {base}: {e}")
+            _write_models_snapshot(name, None, error=str(e))
             continue
         print(f"[INIT] Backend '{name}' at {base}: ok ({len(bmodels)} models)")
+        # JSON-дамп результата стартовой проверки (v0.9.0) — пишется при
+        # каждом init, перезаписывая файл целиком.
+        _write_models_snapshot(name, bmodels)
         for m in bmodels:
             # Делаем копию, чтобы не мутировать оригинальный ответ бэкенда
             all_models.append((dict(m), b))
@@ -1016,11 +1111,17 @@ def refresh_models(timeout: float | None = None) -> dict:
     all_models: list[tuple[dict, dict]] = []
     errors: dict[str, str] = {}
     for b in backends:
+        bname = b["name"]
         try:
             bmodels = _fetch_models(b["base"], b["key"], timeout=timeout)
         except Exception as e:
-            errors[b["name"]] = str(e)
+            errors[bname] = str(e)
+            # JSON-дамп результата проверки упавшего бэкенда (v0.9.0).
+            _write_models_snapshot(bname, None, error=str(e))
             continue
+        # JSON-дамп результата фоновой проверки бэкенда (v0.9.0) — пишется
+        # при каждом refresh, перезаписывая файл целиком.
+        _write_models_snapshot(bname, bmodels)
         for m in bmodels:
             all_models.append((dict(m), b))
 

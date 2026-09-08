@@ -51,6 +51,9 @@ backend_adapter/
 ├── prometheus_exporter.py  ← отдельный слушатель метрик /metrics (text exposition
 │                             0.0.4, stdlib-only) — см. §6.8
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
+├── probe_json.py           ← JSON-результаты проверок бэкендов в LOGPATH
+│                             (<бэкенд>.models.json и <бэкенд>.<модель>.<pname>.json,
+│                             безусловный канал, redact) — см. §6.9
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
     artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
     artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
@@ -587,6 +590,32 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   страницы; экспортёр не должен ронять адаптер: OSError на bind → `None`
   + строка `[EXPORTER] Failed to bind ...`, остальное работает.
 
+### 6.9 JSON-результаты проверок в LOGPATH (`probe_json.py`, v0.9.0)
+
+Безусловный наблюдательный канал (как .err-файлы, см. §8): результаты
+проверок бэкендов пишутся плоскими JSON-файлами в корень
+`ADAPTER_DEBUG_LOGPATH`, рядом с `model-usage.yaml` и корнем WEBUI:
+
+- `<имя_бэкенда>.models.json` — проверка бэкенда на доступные модели
+  (`.models.json`): стартовый `_init_multi_backends` (config.py), фоновая
+  `refresh_models` (кнопка «⟳ Перепроверить»), reload-перечитывания;
+- `<имя_бэкенда>.<конверт.модель>.<pname>.json` — проверка эндпоинта модели
+  (config.py `probe_endpoints` — фоновая проба бэкенда; model_usage.py
+  `_probe_model_endpoints` — пер-модельные пробы usage-таблицы: первое
+  обращение модели и reprobe строки). `pname` — из `ENDPOINT_PROBES`:
+  `completions | messages | responses | embeddings`.
+
+Конвертация имени модели для файла: все `/` и `:` → `_`
+(`org/model:v1` → `org_model_v1`); остальные символы не трогаются.
+Каждый файл при каждой новой проверке ПЕРЕЗАПИСЫВАЕТСЯ целиком (атомарно:
+tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не гейтится
+`ADAPTER_DEBUG_ENABLE` / `ADAPTER_DEBUG_PARTS` / `ADAPTER_DEBUG_TRIM`;
+директория создаётся при записи. Секреты маскируются `redact()` по
+умолчанию (полные данные — при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`,
+живое чтение config); любая ошибка записи молча глотается — проверку не
+роняет. Модуль — лист DAG: импортируется config.py и model_usage.py
+(оба корня DAG), сам на верхнем уровне — stdlib only.
+
 ### 6.2 Разрешение коллизий имён моделей
 
 Когда одна и та же модель встречается на нескольких бэкендах, генерируется префиксный ID:
@@ -800,10 +829,14 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 
 ```
 backend-adapter.py
-  ├── config.py          (no internal deps — stdlib only + os.environ;
+  ├── config.py          (no internal deps on the top level — stdlib only;
+  │                       writes probe JSON via probe_json — безусловный канал;
   │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming, model_usage
-  ├── model_usage.py     → config, yaml (used-models table, см. §6.6)
+  ├── model_usage.py     → config, yaml, probe_json (used-models table, см. §6.6;
+  │                       пер-модельные пробы эндпоинтов пишут JSON-дампы в LOGPATH)
+  ├── probe_json.py      (no internal deps on the top level — stdlib only;
+  │                       config/redact читаются локально внутри записи)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact

@@ -29,7 +29,8 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; доменный пакет `backend_adapter/`
-  (26 модулей, включая `__init__.py`; генератор дерева артефактов —
+  (26 модулей → 27 с probe_json.py, включая `__init__.py`; генератор дерева
+  артефактов —
   группа модулей `artifact_tree*.py` из 8 файлов, публичный API —
   `artifact_tree.generate()`; см. `docs/architecture.md`).
 - **Python 3.10+** (аннотации `X | Y`).
@@ -97,7 +98,12 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   (парные `.json`+`.yaml`, ВСЕ логгируемые части — фиксированного списка
   тегов больше нет) включаются флагом `ADAPTER_DEBUG_PARTS=1`;
   файлы пишутся только при `ADAPTER_DEBUG_ENABLE=1` в директорию
-  `ADAPTER_DEBUG_LOGPATH`.
+  `ADAPTER_DEBUG_LOGPATH`. Помимо гейтнутых каналов в той же директории
+  живут БЕЗУСЛОВНЫЕ артефакты (вне ENABLE/PARTS/TRIM; см. `probe_json.py`,
+  `session_log.write_error_file`): JSON-результаты проверок
+  `<имя_бэкенда>.models.json` и `<имя_бэкенда>.<модель>.<pname>.json`
+  (перезапись каждый раз, секреты маскируются; v0.9.0), файлы `.err`
+  инцидентов и PID-файл `adapter.pid` при запуске в фоне (`daemon.py`).
 - Примеры конфигов — в `docs/samples/`: `sample.adapter.env` (env-файл
   адаптера), `sample.adapter.yaml` (конфиг бэкендов), шаблоны продакшена
   `backend-adapter.service` (systemd, запуск из исходников) и
@@ -143,6 +149,80 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+### 2026-09-08 — CI к набору проверок проекта, JSON-файлы результатов проверок в LOGPATH, [EXIT] Bye, PID-файл в LOGPATH (v0.9.0)
+
+**Контекст:** пользователь дал группу из 4 задач: (1) CI должен отвечать
+набору проверок проекта; (2) результаты проверок бэкендов на доступные
+модели и эндпоинты — в LOGPATH как плоские JSON-файлы (безусловный канал
+вне ENABLE/PARTS/TRIM, гейт — наличие лог-директории); (3) вернуть
+«[EXIT] Bye» как консольное сообщение завершения; (4) PID-файл —
+в LOGPATH.
+
+**Решение:**
+- **CI (`ci.yml`) к проекту** — mypy в lint-and-typecheck с флагом
+  `--strict --ignore-missing-imports` (как локальная проверка CLAUDE.md;
+  не-strict конфиг pyproject.toml остаётся — disable_error_code действует);
+  оба job'а ставят `requirements-dev.txt` (pytest, pytest-cov, mypy, ruff)
+  вместо инлайн-списка пакетов; `pyproject.toml` version синхронизирован
+  с `__version__`;
+- **JSON-файлы результатов проверок** — новый модуль
+  `backend_adapter/probe_json.py` (лист DAG: импортируется config.py и
+  model_usage.py, сам на верхнем уровне — только stdlib; config/redact —
+  локально внутри записи). Два вида файлов в корне `ADAPTER_DEBUG_LOGPATH`
+  (рядом с model-usage.yaml и .err), каждый раз перезаписываются целиком
+  (tmp + os.replace): `<имя_бэкенда>.models.json` — результат проверки
+  бэкенда на доступные модели (`{"backend", "checked_at", "ok", "count",
+  "models"|"error"}`; полные записи из /v1/models); `<имя_бэкенда>.
+  <конвертированное_имя_модели>.<имя_эндпоинта>.json` — результат пробы
+  эндпоинта модели (`{"backend", "model", "endpoint", "path", "checked_at",
+  "status", "found", "error"}`); конвертация имени модели — только `/` и
+  `:` → `_` (точки/тире не трогаются — коллизий нет); имя эндпоинта —
+  короткое из `ENDPOINT_PROBES` (completions/messages/responses/embeddings).
+  Канал записи БЕЗУСЛОВНЫЙ, как .err: вне `ADAPTER_DEBUG_ENABLE`/PARTS/TRIM;
+  провал записи молча глотается (наблюдательный канал). Охват — все
+  события: `.models.json` — стартовый `_init_multi_backends`, фоновый
+  `refresh_models` (успех и ошибка каждого бэкенда — свой файл),
+  reload-перечитывания; эндпоинт-файлы — фоновая `probe_endpoints` (только
+  фактически пробованные пути, не из кэша) и пер-модельные пробы
+  usage-таблицы (единая точка `_probe_model_endpoints` — record/reprobe).
+  **Санитайзер**: значения секретных ключей (case-insensitive:
+  `*_KEY/*_TOKEN/*_SECRET/*_PAT/API_KEY` и `key/token/secret/password/
+  authorization` — рекурсивно по структуре payload) маскируются до
+  сериализации маской в стиле `redact._mask`, поверх — текстовый `redact()`
+  (Bearer-фрагменты, KEY=-обвязки в error-строках); при
+  `ADAPTER_SENSITIVE_LOGGING_ENABLE=1` — полные данные (живое чтение config,
+  как `session_log.write_error_file`). Отдельный модуль (а не хелпер внутри
+  config): config и model_usage оба его импортируют, циклов импорта нет;
+- **`[EXIT] Bye`** — печать перенесена из finally `backend-adapter.py`
+  ВНУТРЬ `shutdown.graceful_shutdown` (после успешного завершения процедуры,
+  в т.ч. когда слушателей не было): контракт модуля («печатается
+  „[EXIT] Bye“, код возврата 0») становится самодостаточным и покрывается
+  unit-тестами, а не только интеграционным прогоном. Повторный сигнал
+  (os._exit(130)) «Bye» не печатает;
+- **PID-файл в LOGPATH** — `daemon._write_pidfile()`: env
+  `ADAPTER_PIDFILE` задаёт ИМЯ файла (basename; абсолютный путь вне LOGPATH
+  игнорируется), файл кладётся ВСЕГДА в `ADAPTER_DEBUG_LOGPATH` (дефолт
+  `adapter.pid`), директория создаётся при записи (detach-вызов идёт до
+  стартового os.makedirs). daemon.py остаётся stdlib-only — LOGPATH читается
+  из os.environ той же формулой (`os.environ.get("ADAPTER_DEBUG_LOGPATH",
+  "").strip() or "./tmp/logs"`), что у config и probe_json. Пишется при
+  запуске в фоне (`ADAPTER_DETACH_ENABLE=1`).
+
+**Следствия:** CI повторяет локальную проверку (strict-регрессии ловятся в
+PR); результаты проверок бэкендов и их эндпоинтов читаются из LOGPATH как
+плоские JSON-файлы фиксированных имён — без включения файловой записи
+(модели — даже при `ADAPTER_DEBUG_ENABLE=0`, как .err); конец работы
+адаптера маркируется «[EXIT] Bye» из модуля завершения; PID-файл лежит в
+единой директории артефактов (рядом с session-*.log, model-usage.yaml,
+JSON-результатами). Поведение проксирования не меняется. Breaking change:
+`ADAPTER_PIDFILE` интерпретируется как имя (в LOGPATH), а не путь.
+Покрыто unit-тестами (test_probe_json — конвертация/запись/перезапись/
+атомарность/безусловность/санитайзер/тихий провал; test_config —
+.models.json и эндпоинт-файлы после init/refresh/probe; test_model_usage —
+пер-модельные дампы record/reprobe; test_shutdown — «Bye»; test_daemon —
+PID в LOGPATH) и интеграционным прогоном (test_manual_check: JSON-файлы в
+logs_dir процесса при ENABLE=0). Версия 0.9.0.
 
 ### 2026-09-08 — Протокол .err-инцидентов, фикс Cost-ячейки live-поллинга, шапка статус-страницы с иконками 🔃/📋/🔧/📊 (v0.9.0)
 

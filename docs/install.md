@@ -93,7 +93,7 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (26 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (27 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
@@ -109,6 +109,7 @@ backend-adapter/
 │   ├── webui_config_api.py    # WEBUI-эндпойнт "/config": runtime-пул debug-переменных
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
+│   ├── probe_json.py          # JSON-результаты проверок бэкендов в LOGPATH
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
