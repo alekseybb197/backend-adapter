@@ -462,8 +462,9 @@ export ADAPTER_DEBUG_ENABLE=0
 # пишет полные строки (v0.8.6-реформа)
 # export ADAPTER_DEBUG_TRIM=3000
 
-# Переопределить PID-файл в detach-режиме
-# export ADAPTER_PIDFILE="/tmp/adapter.pid"
+# Имя PID-файла в detach-режиме (v0.9.0): файл кладётся в
+# ADAPTER_DEBUG_LOGPATH (basename значения; дефолт — adapter.pid).
+# export ADAPTER_PIDFILE="adapter.pid"
 
 # JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
 # TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE — .json и .yaml парой;
@@ -614,15 +615,16 @@ Detach-режим (double fork UNIX-daemon pattern):
 
 - Родительский процесс завершается немедленно
 - stdio/stderr перенаправлены в `/dev/null`
-- PID-файл пишется в `/tmp/adapter.pid` (по умолчанию)
+- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH` (v0.9.0): имя — `adapter.pid`
+  или `basename(ADAPTER_PIDFILE)`)
 - Логи идут в директорию `ADAPTER_DEBUG_LOGPATH`, если задана
   (пусто — файловая запись выключена, только консоль)
 
 Управление:
 
 ```bash
-cat /tmp/adapter.pid     # прочитать PID
-kill $(cat /tmp/adapter.pid)   # остановить
+cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid"   # прочитать PID
+kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить
 ```
 
 > **Важно:** detach-режим не предназначен для продакшен-использования.

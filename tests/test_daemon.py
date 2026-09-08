@@ -12,30 +12,55 @@ def _reload_all():
 
 
 class TestWritePidFile:
-    """Tests for _write_pidfile()."""
+    """Tests for _write_pidfile().
 
-    def test_writes_current_pid(self, tmp_path):
+    PID-файл пишется в ADAPTER_DEBUG_LOGPATH (v0.9.0): ADAPTER_PIDFILE
+    задаёт имя файла (basename — абсолютный путь вне LOGPATH
+    игнорируется); не задано — ``adapter.pid``. Директория создаётся при
+    необходимости. Во всех тестах LOGPATH указывает на tmp_path — иначе
+    запись ушла бы в ./tmp/logs (дефолт env) внутри репозитория.
+    """
+
+    def test_writes_current_pid_into_logpath(self, tmp_path):
         _reload_all()
         from backend_adapter.daemon import _write_pidfile
-        pidfile = str(tmp_path / "test.pid")
-        os.environ["ADAPTER_PIDFILE"] = pidfile
+        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(tmp_path)
+        os.environ["ADAPTER_PIDFILE"] = "test.pid"
         _write_pidfile()
-        written = int(open(pidfile).read())
+        written = int(open(tmp_path / "test.pid").read())
         assert written == os.getpid()
 
-    def test_default_pidfile(self):
-        """Default PIDFILE path should be /tmp/adapter.pid."""
+    def test_default_pidfile(self, tmp_path):
+        """ADAPTER_PIDFILE не задан → ADAPTER_DEBUG_LOGPATH/adapter.pid."""
+        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(tmp_path)
+        os.environ.pop("ADAPTER_PIDFILE", None)
         _reload_all()
         from backend_adapter.daemon import _write_pidfile
-        if "ADAPTER_PIDFILE" in os.environ:
-            del os.environ["ADAPTER_PIDFILE"]
-        # Can't easily test default path — it writes to /tmp/
-        # Instead test custom path
-        tmp_path = __import__("pathlib").Path("/tmp/test_adapter_pidfile_$$")
-        os.environ["ADAPTER_PIDFILE"] = str(tmp_path)
         _write_pidfile()
-        assert tmp_path.exists()
-        tmp_path.unlink(missing_ok=True)
+        written = int(open(tmp_path / "adapter.pid").read())
+        assert written == os.getpid()
+
+    def test_absolute_pidfile_uses_basename_in_logpath(self, tmp_path):
+        """Абсолютный путь в ADAPTER_PIDFILE вне LOGPATH игнорируется:
+        файл кладётся в LOGPATH под своим basename."""
+        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(tmp_path)
+        os.environ["ADAPTER_PIDFILE"] = "/abs/other/test.pid"
+        _reload_all()
+        from backend_adapter.daemon import _write_pidfile
+        _write_pidfile()
+        assert (tmp_path / "test.pid").exists()
+        assert not os.path.exists("/abs/other/test.pid")
+
+    def test_logpath_created_if_missing(self, tmp_path):
+        """Директория LOGPATH создаётся (вызов может произойти до стартового
+        os.makedirs корня WEBUI в backend-adapter.py)."""
+        target = tmp_path / "nested" / "logs"
+        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(target)
+        os.environ["ADAPTER_PIDFILE"] = "adapter.pid"
+        _reload_all()
+        from backend_adapter.daemon import _write_pidfile
+        _write_pidfile()
+        assert int((target / "adapter.pid").read_text()) == os.getpid()
 
 
 class TestDetach:
