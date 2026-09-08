@@ -450,7 +450,11 @@ export ADAPTER_DEBUG_ENABLE=0
 # Директория логов сессий и корень WEBUI: debug-логи (session-*.log),
 # trace-логи (session-*.jsonl), *.parts дампы, model-usage.yaml. Путь всегда
 # непуст — при незаданной/пустой env дефолт ./tmp/logs (создаётся при старте);
-# файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1.
+# файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1. Исключение — файлы
+# инцидентов session-*.err (v0.9.0): пишутся в ту же директорию БЕЗУСЛОВНО при
+# финальном ответе клиенту 4xx/5xx реального прокси-запроса (полные запрос и
+# ошибка, без обрезки по TRIM; redact по умолчанию, полные данные при
+# ADAPTER_SENSITIVE_LOGGING_ENABLE=1).
 # export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
 
 # Максимальная длина КОНСОЛЬНЫХ debug-строк (символы; 0 — без обрезки).

@@ -47,10 +47,15 @@ def _send_http(host, port, method, path, body=None, headers=None, timeout=3):
         sock.close()
 
 
-class TestServer:
-    """Integration tests for the HTTP server."""
+class ServerSetupMixin:
+    """Настройка адаптера поверх fake-бэкенда.
 
-    def _setup_adapter(self, fake_backend, mock_logger=True):
+    Общий для TestServer и TestErrFileProtocol. Отдельный класс (не
+    TestServer-наследование), чтобы тесты TestErrFileProtocol не тянули
+    унаследованные тесты родителя.
+    """
+
+    def _setup_adapter(self, fake_backend, mock_logger=True, mock_err=True):
         """Set up adapter pointing at fake backend (single-backend YAML config).
 
         Uses direct attribute patching on already-loaded modules to avoid
@@ -62,6 +67,7 @@ class TestServer:
         консольного вывода — они проверяют печать через capsys).
         """
         from backend_adapter import config, server as server_mod
+        from backend_adapter import session_log as session_log_mod
 
         cfg = {"name": "test", "base": fake_backend.base_url, "key": "test-key"}
         config._BACKENDS = [cfg]
@@ -76,6 +82,12 @@ class TestServer:
             server_mod._dr = lambda *a, **kw: None
         server_mod._trace = lambda *a, **kw: None
         server_mod.write_debug_json = lambda *a, **kw: None
+        # .err-канал (v0.9.0) безусловен (не зависит от ADAPTER_DEBUG_ENABLE) —
+        # в unit-контексте без LOGPATH его надо мокать, иначе ошибки пишутся
+        # в дефолтный ./tmp/logs. Тесты самого .err ставят LOGPATH на tmp_path
+        # и вызывают _setup_adapter(mock_err=False), чтобы канал был живым.
+        if mock_err:
+            server_mod.write_error_file = lambda *a, **kw: None
 
         # Used-models table: reset + mock the per-model endpoint probe so the
         # server hook never fires real network requests; tests override the
@@ -112,6 +124,10 @@ class TestServer:
         # Wait for server to actually accept connections
         time.sleep(0.3)
         return server
+
+
+class TestServer(ServerSetupMixin):
+    """Integration tests for the HTTP server."""
 
     def test_full_message_flow(self, fake_backend):
         """Full POST /v1/messages cycle: convert + response."""
@@ -486,3 +502,185 @@ class TestServer:
                 assert "The temperature is 21 C." in out
             finally:
                 server.shutdown()
+
+
+class TestErrFileProtocol(ServerSetupMixin):
+    """Протокол .err-инцидентов (v0.9.0): финальный 4xx/5xx реального
+    прокси-запроса пишет session-<ts>-<safe8>.err в LOGPATH (безусловный
+    канал — вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). Тесты ставят LOGPATH на
+    tmp_path и НЕ мокают write_error_file (mock_err=False)."""
+
+    def _setup(self, fake_backend, tmp_path, mock_logger=True):
+        """Настроить сессионные пути на tmp_path и адаптер с живым .err-каналом."""
+        from backend_adapter import session_log as session_log_mod
+        session_log_mod._DEBUG_IS_DIR = True
+        session_log_mod._TRACE_IS_DIR = True
+        session_log_mod._DEBUG_PATH = str(tmp_path)
+        session_log_mod._TRACE_PATH = str(tmp_path)
+        session_log_mod._session_logs.clear()
+        session_log_mod._session_file_ts.clear()
+        return self._setup_adapter(fake_backend, mock_logger=mock_logger, mock_err=False)
+
+    def _err_files(self, tmp_path):
+        return sorted(tmp_path.glob("session-*.err"))
+
+    # -- 400 от бэкенда (не-retry) ---------------------------------------
+
+    def test_backend_400_writes_err_file(self, fake_backend, tmp_path):
+        """400-ответ бэкенда → .err создан; не-стрим ветка; тело и запрос полные."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_DEBUG = False  # файловая запись debug выключена — .err всё равно пишется
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"message": "bad request from backend"}}
+        fake_backend.completions_status = 400
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 400
+            finally:
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        assert "final_status=400" in content
+        assert 'model=test-model' in content
+        assert "/v1/chat/completions" in content
+        # Полный запрос [OI] (out_body) и полная ошибка бэкенда
+        assert '"max_tokens": 100' in content
+        assert "bad request from backend" in content
+        assert "==================== ERROR ====================" in content
+
+    def test_backend_400_stream_writes_err_file(self, fake_backend, tmp_path):
+        """400 в стрим-ветке (stream=true, ошибка до начала потока) → .err."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"message": "stream denied"}}
+        fake_backend.completions_status = 400
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100,
+                                        "stream": True})
+                assert resp["status"] == 400
+            finally:
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        assert "final_status=400" in content
+        assert "stream denied" in content
+
+    # -- 502 после ретраев -------------------------------------------------
+
+    def test_backend_502_retries_writes_err_file(self, fake_backend, tmp_path):
+        """502 (3 попытки с backoff) → .err один (финальный инцидент)."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"message": "upstream boom"}}
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100},
+                                  timeout=15)
+                assert resp["status"] == 502
+                assert len(fake_backend.requests) == 3
+            finally:
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1  # один .err на запрос, не на попытку
+        assert "final_status=502" in errs[0].read_text(encoding="utf-8")
+
+    # -- успех / локальные 400 адаптера — .err НЕ пишется ------------------
+
+    def test_success_no_err_file(self, fake_backend, tmp_path):
+        """200-успех → .err не создан."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 200
+            finally:
+                server.shutdown()
+        assert self._err_files(tmp_path) == []
+
+    def test_local_400_no_backend_no_err_file(self, fake_backend, tmp_path):
+        """400 ДО бэкенда (нет /v1/messages, strict-модель) → .err не создан:
+        бэкенд не участвовал, инцидента взаимодействия нет."""
+        fake_backend.models_response = {"data": [{"id": "known-model"}]}
+        fake_backend.completions_response = {}
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "GET", "/unknown")
+                assert resp["status"] == 404
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "unknown-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 400
+            finally:
+                server.shutdown()
+        assert self._err_files(tmp_path) == []
+
+    def test_err_file_redacts_by_default(self, fake_backend, tmp_path):
+        """Санитайзер .err по умолчанию (SENSITIVE=0): секреты маскируются."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_SENSITIVE_LOGGING_ENABLE = False
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "error": {"message": "invalid Authorization: Bearer sk-live-abcdef123456"}
+        }
+        fake_backend.completions_status = 401
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 401
+            finally:
+                server.shutdown()
+        content = self._err_files(tmp_path)[0].read_text(encoding="utf-8")
+        assert "sk-live-abcdef123456" not in content
+        assert "REDACTED" in content
+
+    def test_err_file_full_at_sensitive_one(self, fake_backend, tmp_path):
+        """При SENSITIVE=1 .err несёт полные данные (без redact)."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_SENSITIVE_LOGGING_ENABLE = True
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "error": {"message": "invalid Authorization: Bearer sk-live-abcdef123456"}
+        }
+        fake_backend.completions_status = 401
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 401
+            finally:
+                server.shutdown()
+        content = self._err_files(tmp_path)[0].read_text(encoding="utf-8")
+        assert "sk-live-abcdef123456" in content
+        assert "REDACTED" not in content

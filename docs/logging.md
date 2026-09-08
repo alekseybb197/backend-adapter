@@ -8,7 +8,8 @@
 | **Console-only blocks** | Stdout/stderr | `_d("[NAME] ...")` |
 | **Structured traces** | `<LOGPATH>/session-<ts>-<sid>.jsonl` | `_trace(...)` |
 
-Также дополнительные механизмы: **JSON/YAML дампы** per-session через `ADAPTER_DEBUG_PARTS`.
+Также дополнительные механизмы: **JSON/YAML дампы** per-session через `ADAPTER_DEBUG_PARTS`
+и **.err-файлы инцидентов** (безусловный канал, v0.9.0 — см. ниже).
 
 ---
 
@@ -114,6 +115,39 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **одн
 | 28 | `[FAIL]` | INTERNAL | всегда | Финальная ошибка: 504/502/error code |
 | 29 | `[STREAM_WARN]` | INTERNAL | `stream=True` | SSE chunk parse failure |
 | 30 | `[USAGE_WARN]` | INTERNAL | `stream=True` | Бэкенд не вернул usage (input_tokens estimated) |
+
+---
+
+## .err-файлы инцидентов взаимодействия с бэкендом (v0.9.0)
+
+**Безусловный наблюдательный канал** — файл ошибок пишется при финальном
+ответе клиенту **4xx/5xx** (после ретраев/таймаутов) реального прокси-запроса
+агента (`POST /v1/messages` → `server.do_POST`), независимо от `ADAPTER_DEBUG_ENABLE`,
+`ADAPTER_DEBUG_PARTS` и `ADAPTER_DEBUG_TRIM`.
+
+| Свойство | Значение |
+|---|---|
+| Функция | `write_error_file(session_id, req_id, *, final_status, backend_url, model, out_body, err_body)` в `session_log.py` |
+| Имя файла | `session-<YYYYMMDD-HHMMSS>-<session_id[:8]>.err` — **общий** `_session_file_ts` сессии (тот же ts, что у `session-*.log`/`.jsonl`), та же директория `ADAPTER_DEBUG_LOGPATH` |
+| Когда пишется | Финальный статус клиенту 4xx/5xx: код HTTPError последней попытки (не-retry 4xx, исчерпанные 429/502/503/504), `504` после таймаутов, `502` после прочих ошибок. Один `.err` на запрос (не на попытку) |
+| Когда НЕ пишется | 200-успех; ошибки **ДО** бэкенда (нет `/v1/messages`, Invalid JSON, нет `model`, strict-400) — бэкенд не участвовал, инцидента взаимодействия нет |
+| Содержимое | Шапка-метаданные (`session_id`, `final_status`, `model`, `backend_url`), **ПОЛНОЕ** тело запроса к бэкенду (`out_body`), **ПОЛНОЕ** сообщение об ошибке последней попытки (`err_body`). Без обрезки по `ADAPTER_DEBUG_TRIM` |
+| Санитайзер | Секреты маскируются `redact()` по умолчанию; при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1` — полные данные |
+| Гейт записи | Только наличие лог-директории `ADAPTER_DEBUG_LOGPATH` (всегда непуста, дефолт `./tmp/logs`) |
+
+Формат записи (в духе session-лога, timestamp-строки с префиксом `[req_id]`):
+
+```
+==================== ERROR ====================
+[2026-09-08T12:00:00] [req_id] session_id=... final_status=400 model=... backend_url=...
+[2026-09-08T12:00:00] [req_id] [REQUEST] <полное out_body>
+[2026-09-08T12:00:00] [req_id] [BACKEND_ERROR] <полное err_body>
+==================== END ERROR ====================
+```
+
+Дымовые пробы (config/webui_status) в `.err` НЕ пишутся — у них свои
+консольные логи. Файл ошибок — наблюдательный канал: провал записи никогда
+не роняет обработку запроса.
 
 ---
 

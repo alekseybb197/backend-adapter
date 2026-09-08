@@ -33,7 +33,7 @@ from .convert import (
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
-from .session_log import write_debug_json
+from .session_log import write_debug_json, write_error_file
 from .streaming import _sse_write, stream_openai_to_anthropic
 from .tracer import _lookup_tool_use_name, _lookup_tool_use_producer, _trace
 
@@ -682,6 +682,19 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         failed=True,
                         streamed=True,
                     )
+                    # Протокол .err-инцидентов (v0.9.0): финальный ответ —
+                    # ошибка 4xx/5xx, запрос дошёл до бэкенда (out_body
+                    # сформирован). Пишем файл инцидента БЕЗУСЛОВНО (не
+                    # зависит от ADAPTER_DEBUG_ENABLE/PARTS/TRIM).
+                    write_error_file(
+                        session_id,
+                        req_id,
+                        final_status=final_status,
+                        backend_url=backend_url,
+                        model=model,
+                        out_body=out_body,
+                        err_body=msg,
+                    )
                 return
 
             # === Нестриминговая ветка (клиент явно не просил stream) ===
@@ -853,6 +866,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     )
                     final_status = 502
             else:
+                # last_error пуст (недостижимый fallback после исчерпания
+                # цикла без исключения) — msg для .err-файла задаём тем же
+                # текстом, что уходит клиенту.
+                msg = f"Backend unavailable after {ADAPTER_RETRY} attempts"
                 _dr(req_id, f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
                 self._send_json(
                     502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"}
@@ -866,6 +883,19 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 retries_used=ADAPTER_RETRY,
                 total_elapsed_ms=int((time.time() - req_t0) * 1000),
                 failed=True,
+            )
+            # Протокол .err-инцидентов (v0.9.0): финальный ответ — ошибка
+            # 4xx/5xx, запрос дошёл до бэкенда. Файл инцидента пишется
+            # БЕЗУСЛОВНО (вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). msg — полное
+            # тело последней попытки (HTTPError) или текст исключения.
+            write_error_file(
+                session_id,
+                req_id,
+                final_status=final_status,
+                backend_url=backend_url,
+                model=model,
+                out_body=out_body,
+                err_body=msg,
             )
         finally:
             # Фиксация учёта usage (таблица WEBUI «Использованные модели»):

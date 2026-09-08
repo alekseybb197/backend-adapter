@@ -242,6 +242,10 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
             self.end_headers()
             if FakeBackendHandler.completions_status == 200 and FakeBackendHandler.completions_response:
                 self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
+            elif FakeBackendHandler.completions_response:
+                # Любой не-200 статус с настроенным телом — пишем его как тело
+                # ошибки (v0.9.0: .err-тесты проверяют ПОЛНОЕ сообщение бэкенда).
+                self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
             elif FakeBackendHandler.completions_status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path in FakeBackendHandler.extra_post_paths:
