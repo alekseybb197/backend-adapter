@@ -279,6 +279,61 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
     "yes",
 )
 
+# ==================== РОУТИНГ ВХОДНЫХ ЭНДПОИНТОВ (TARGET) ====================
+# Три env-переменные — по одной на каждый входной POST-эндпоинт адаптера
+# (префикс имени переменной = входной эндпоинт): ADAPTER_MESSAGES_TARGET
+# управляет приёмом на /v1/messages, ADAPTER_COMPLETIONS_TARGET — на
+# /v1/chat/completions, ADAPTER_RESPONSES_TARGET — на /v1/responses.
+# Значение задаёт, ЧТО делать с запросом на этом входе:
+#   messages|completions|responses — целевой формат (куда конвертировать/
+#       передавать); разрешена только реализованная пара (реестр
+#       routing.IMPLEMENTED_CONVERSIONS) или passthrough (цель = сам вход,
+#       бэкенд поддерживает формат);
+#   auto — автовыбор: passthrough E→E, если бэкенд/модель поддерживает
+#       входной формат (по кэшу проб), иначе реализованная конверсия,
+#       иначе ошибка агенту. Сети во время запроса НЕТ — только кэш
+#       _ENDPOINT_STATE (endpoint_support ниже);
+#   none — входной эндпоинт выключен (404) — безопасный дефолт.
+# Zero-config дефолты описывают текущие возможности конвертера:
+# MESSAGES=completions (принимается только /v1/messages, конвертация в chat
+# completions), COMPLETIONS=none, RESPONSES=none.
+# В RUNTIME_CONFIG_POOL сознательно НЕ входят: значения строковые (пул —
+# только bool/int) и меняют, какие входные пути «живы» (топология
+# восприятия эндпоинтов агентом) — читаются на импорте, как и остальная
+# конфигурация сети/бэкендов. Невалидное/пустое значение НЕ роняет старт:
+# консольный [WARN] + трактовка как 'none' (безопасное выключение входа).
+
+_TARGET_FORMATS = ("messages", "completions", "responses")
+
+
+def _parse_target(value: str, var_name: str) -> str:
+    """Нормализация значения TARGET-переменной (нижний регистр, strip).
+
+    Невалидное/пустое значение не роняет старт (это рубильник поведения,
+    а не жёсткое требование как ADAPTER_BACKEND_CONFIG): печатается
+    консольный [WARN], значение трактуется как 'none' — вход выключен
+    (безопасный дефолт)."""
+    raw = (value or "").strip().lower()
+    if raw in _TARGET_FORMATS or raw in ("auto", "none"):
+        return raw
+    if value and value.strip():
+        print(
+            f"[WARN] {var_name}: invalid value {value!r} (expected "
+            f"messages|completions|responses|auto|none) — treating as 'none'"
+        )
+    return "none"
+
+
+ADAPTER_MESSAGES_TARGET = _parse_target(
+    os.environ.get("ADAPTER_MESSAGES_TARGET", "completions"), "ADAPTER_MESSAGES_TARGET"
+)
+ADAPTER_COMPLETIONS_TARGET = _parse_target(
+    os.environ.get("ADAPTER_COMPLETIONS_TARGET", "none"), "ADAPTER_COMPLETIONS_TARGET"
+)
+ADAPTER_RESPONSES_TARGET = _parse_target(
+    os.environ.get("ADAPTER_RESPONSES_TARGET", "none"), "ADAPTER_RESPONSES_TARGET"
+)
+
 # Период персистентного сохранения таблицы использованных моделей в YAML
 # (сек). «Грязная» таблица сохраняется не чаще раза в
 # ADAPTER_MODEL_USAGE_SAVE_INTERVAL; создание новой строки модели, сброс
@@ -920,6 +975,31 @@ def upsert_endpoint_state(backend_name: str, pname: str, status: int | None, fou
     state = _ENDPOINT_STATE.setdefault(backend_name, {"at": 0.0, "endpoints": {}, "errors": {}})
     state["endpoints"][path] = {"status": status, "found": found}
     state["at"] = time.time()
+
+
+def endpoint_support(backend_name: str, pname: str) -> bool | None:
+    """Поддерживает ли бэкенд формат ``pname`` — ОТВЕТ ТОЛЬКО ПО КЭШУ ПРОБ.
+
+    Источник — _ENDPOINT_STATE (фоновая probe_endpoints + пер-модельные пробы
+    usage-таблицы через upsert_endpoint_state): ``found=True`` (HTTP 200) ⇔
+    поддержка. Сети здесь НЕТ — это чистый геттер кэша для роутинга
+    (routing.decide), который в режиме ``auto`` не может делать синхронных
+    проб во время запроса (решение пользователя).
+
+    Возвращает:
+    - True — бэкенд подтверждённо поддерживает формат (found=True);
+    - False — пробовался, но не поддерживает (не-200);
+    - None — неизвестно: не пробовался / пробы выключены (ADAPTER_ENDPOINT_
+      PROBE=0 и пер-модельные пробы не наполняли кэш) / ``pname`` вне
+      ENDPOINT_PROBES. Зовущий (routing.decide) трактует None как False —
+      «нет подтверждения поддержки → passthrough не выбирается»."""
+    path = next((p for n, p, _t in ENDPOINT_PROBES if n == pname), None)
+    if path is None:
+        return None
+    ep = _ENDPOINT_STATE.get(backend_name, {}).get("endpoints", {}).get(path)
+    if ep is None:
+        return None
+    return bool(ep.get("found"))
 
 
 def _init_multi_backends(config_path: str) -> None:

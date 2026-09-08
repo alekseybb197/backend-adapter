@@ -70,6 +70,12 @@ def fresh_env(monkeypatch):
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
         "ADAPTER_PIDFILE": "",
+        # Input-endpoint routing (v0.9.0): zero-config defaults — only
+        # /v1/messages accepted, converted to chat completions; the other two
+        # inputs are disabled (404).
+        "ADAPTER_MESSAGES_TARGET": "completions",
+        "ADAPTER_COMPLETIONS_TARGET": "none",
+        "ADAPTER_RESPONSES_TARGET": "none",
     }
 
     for k, v in defaults.items():
@@ -119,6 +125,10 @@ def _default_config():
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
         "ADAPTER_PIDFILE": "",
+        # Input-endpoint routing (v0.9.0): zero-config defaults (see fresh_env).
+        "ADAPTER_MESSAGES_TARGET": "completions",
+        "ADAPTER_COMPLETIONS_TARGET": "none",
+        "ADAPTER_RESPONSES_TARGET": "none",
     }
     for k, v in defaults.items():
         os.environ[k] = v
