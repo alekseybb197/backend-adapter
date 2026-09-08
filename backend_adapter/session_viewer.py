@@ -47,7 +47,7 @@ subprocess. Логгер "artifact_tree" наследует формат лог�
 транслитерация имени сессии): клик по вкладке пишет hash, при загрузке/
 обновлении страницы скрипт открывает вкладку из hash (если она ещё
 существует), а не первую попавшуюся. В левом краю панели вкладок —
-ссылка «← статус» на корень сервера (статус-страницу WEBUI, эндпойнт
+ссылка «Статус 📊» на корень сервера (статус-страницу WEBUI, эндпойнт
 "/"), чтобы после просмотра сессий возвращаться к списку бэкендов и
 моделей одним кликом.
 
@@ -257,17 +257,15 @@ def render_shell(sessions, root_dir):
             f"<code>{TREE_RELATIVE_PATH.replace(os.sep, '/')}</code>, он будет сгенерирован автоматически. "
             f"Перезапускать сервер не нужно.</div>"
         )
-        tabs = (
-            '<a id="status-link" href="/">← статус</a><a id="config-link" href="/config">config</a>'
-        )
+        tabs = '<a id="status-link" href="/">Статус 📊</a><a id="config-link" href="/config">Runtime config 🔧</a>'
         body = f'<div id="tabs">{tabs}</div>' + body
         return SHELL_TEMPLATE.format(body=body)
 
     # Ссылка на статус-страницу "/" — первой в панели (как и на пустой
     # странице), затем вкладки сессий, справа (margin-left:auto) — reload.
     tabs_html = [
-        '<a id="status-link" href="/">← статус</a>',
-        '<a id="config-link" href="/config">config</a>',
+        '<a id="status-link" href="/">Статус 📊</a>',
+        '<a id="config-link" href="/config">Runtime config 🔧</a>',
     ]
     frames_html = []
     for i, (name, _) in enumerate(sessions):

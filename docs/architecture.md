@@ -163,7 +163,7 @@ Claude Code (Anthropic API client)
    **first** check automatically (`webui_status._autostart_first_check`).
    Checks are background (`config.start_refresh` runs `config.refresh_models`,
    5 s timeout per endpoint, in a daemon thread): started at adapter startup,
-   on the first GET `/`, and by the «⟳ Перепроверить» button (POST `/`),
+   on the first GET `/`, and by the 🔃 button «Перепроверить бэкенды» (POST `/`),
    which answers **303 See Other** → GET `/` (PRG pattern — page reloads
    never repeat the POST, no «resubmit» dialog). While a check runs, the page
    shows a «Проверка выполняется…» banner and polls `/api/refresh-state`;
@@ -304,7 +304,7 @@ POST-запросами с `max_tokens:1` по фиксированному сп
 
 Проба встроена в `config.refresh_models` (конец функции, после обновления кэша
 моделей): вызывается при каждой фоновой проверке бэкендов — при старте
-адаптера, на первом GET `/` и по кнопке «⟳ Перепроверить» (POST `/` →
+адаптера, на первом GET `/` и по кнопке-иконке 🔃 «Перепроверить бэкенды» (POST `/` →
 `config.start_refresh` → фоновый воркер, см. §6.5). Результат добавляется в
 возвращаемый dict ключом `"probe"` (старые читатели `ok/count/errors` не
 ломаются) и кэшируется в `_ENDPOINT_STATE` (~60 с, `ENDPOINT_PROBE_TTL`);
@@ -337,7 +337,7 @@ GET `/` и по кнопке:
 - **Запуск** — `start_refresh(timeout, reload=True)`: при старте адаптера
   (`backend-adapter.py` после поднятия WEBUI), на первом GET `/`
   (автостарт, `webui_status._autostart_first_check`) и по кнопке
-  «⟳ Перепроверить» (POST `/`). При `reload=True` (по умолчанию) перед
+  🔃 «Перепроверить бэкенды» (POST `/`). При `reload=True` (по умолчанию) перед
   запуском воркера вызывается `config.reload_backend_config()` — кнопка
   **перечитывает** `ADAPTER_BACKEND_CONFIG` на лету: `_BACKENDS`/
   `_BACKEND_BY_NAME`/`_DEFAULT_BACKEND` подменяются новым списком, из
@@ -356,7 +356,7 @@ GET `/` и по кнопке:
   рендерит последний результат; если проверок ещё не было (done_at пуст) и
   есть что проверять — первый заход сам запускает ПЕРВУЮ проверку
   (`_autostart_first_check`), повторные — только по кнопке. POST `/`
-  (кнопка «⟳ Перепроверить») вызывает `start_refresh(timeout=
+  (кнопка 🔃 «Перепроверить бэкенды») вызывает `start_refresh(timeout=
   PROBE_TIMEOUT)` и отвечает **303 See Other** на GET `/` (PRG: браузер
   переходит на страницу GET-навигацией, авто-релоад не повторяет POST).
   Футер проверки — «Список провайдеров обновлён в HH:MM:SS (N провайдеров,
@@ -471,7 +471,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не входит;
   персистентность работает независимо от мастер-флага.
 - **Вывод** — секция «Models in use» на статус-странице `/` сразу под
-  кнопкой «⟳ Перепроверить» (подписи-абзаца перед ней нет; футер о
+  кнопкой проверки бэкендов 🔃 (подписи-абзаца перед ней нет; футер о
   проверке и кнопка — под таблицей бэкендов), рендер —
   `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
   строк в порядке первого обращения; первый вызов после старта загружает
@@ -761,7 +761,8 @@ and strict-models switches), flip-able without restarting the adapter:
   pool values; POST —
   `application/x-www-form-urlencoded` or JSON body → `set_runtime_config()`,
   response re-renders with a flash «Применено»/«Игнорировано» split. Links to
-  the form: session tabs panel («config») and the status page `/` («runtime config →»).
+  the form: session tabs panel («Runtime config 🔧») and the status page `/`
+  (header icons 📋 → `/session`, 🔧 → `/config`; back links «Статус 📊»).
 - The pool keys double as **env vars at startup** — the same names still read from
   the environment by `config.py`; `/config` only overrides the process state.
 

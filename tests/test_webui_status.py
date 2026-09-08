@@ -10,7 +10,8 @@ renders the current state from config.refresh_state() (seeded as
 _REFRESH_JOB here); the first GET — if no check has ever completed and
 there is something to probe — auto-starts the FIRST check
 (_autostart_first_check: adapter start / first GET / button); POST "/"
-(the «⟳ Проверить сейчас» button) launches
+(the 🔃 «Перепроверить бэкенды» button (ex-«⟳ Проверить сейчас»)
+launches
 config.start_refresh(timeout=PROBE_TIMEOUT) and answers 303 See Other →
 GET "/" (PRG pattern: the page is shown via a plain GET, so reloads never
 repeat the POST and no «resubmit» dialog appears); while a check is running
@@ -21,8 +22,10 @@ model list, failure keeps the old cache and shows the error text, standalone
 cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
 button (JS models_toggle on the page) — see TestModelsCell. The Models in use
 table (single Endpoints column — available endpoints only, comma-separated;
-footer and the «⟳ Проверить сейчас» button sit right under the backends
-table, before the section) — see TestUsageSection. Its Actions cell holds
+footer sits right under the backends table, before the section; the 🔃
+refresh button lives in the page header — v0.9.0 (no standalone button
+under the table); the header shows "Backend-Adapter Version <ver>" with
+🔃/📋/🔧 icons) — see TestUsageSection. Its Actions cell holds
 three PRG forms with symbol-icon buttons (🔄 «Перепроверить» POST
 /api/model-usage/reprobe, ⏪ «Сбросить» POST /api/model-usage/reset, 🗑
 «Удалить» POST /api/model-usage/delete) and renders «проверяется…» (no
@@ -35,7 +38,9 @@ TestModelUsageDeleteAPI / TestReprobeStateAPI. Live counters (Вызовов/Inp
 id="usage-row-<i>" and data-calls/data-input/data-output (exact values), and
 the page embeds an unconditional usage_poll JS polling the lightweight
 /api/model-usage/snapshot every 5 s and updating only the counter cells
-(no location.reload, no network to backends, no start_refresh) — see
+(no location.reload, no network to backends, no start_refresh); the Cost
+cell is set via innerHTML (setHtml — cost_html arrives as ready-made HTML
+from the server), counters via textContent — see
 TestUsageSection.test_rows_carry_data_attrs_and_page_has_usage_poll /
 TestUsageSnapshotAPI.
 """
@@ -484,7 +489,7 @@ class TestModelsCell:
         # нижняя кнопка — сразу после </span> скрытого блока (под списком)
         assert html.split("</span>", 1)[1].lstrip().startswith("<button")
         assert "/session?model=" not in html  # иконок-ссылок нет
-        assert "📋" not in html
+        assert "📋" not in html  # в ячейке модели нет иконок-ссылок (шапка отдельно)
 
     def test_collapse_top_hidden_in_collapsed_and_toggled_by_js(self):
         # Полная страница: верхняя «Свернуть» есть в разметке (скрыта) и JS
@@ -654,15 +659,19 @@ class TestUsageSection:
         assert body.index(">m0</td>") < body.index(">m1</td>") < body.index(">m2</td>")
 
     def test_section_after_backends_table(self):
-        # Порядок блоков: таблица бэкендов → футер «Список провайдеров
-        # обновлён» + кнопка «⟳ Перепроверить» → заголовок «Models in use» →
-        # usage-таблица (строки моделей).
+        # Порядок блоков: шапка (Version + иконки 🔃/📋/🔧) → таблица
+        # бэкендов → футер «Список провайдеров обновлён» → заголовок
+        # «Models in use» → usage-таблица (строки моделей).
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-a")])
+        assert body.index("Backend-Adapter Version") < body.index("🔃")
         assert body.index("</table>") < body.index("Список провайдеров обновлён")
-        assert body.index("Список провайдеров обновлён") < body.index("⟳ Перепроверить")
-        assert body.index("⟳ Перепроверить") < body.index("Models in use")
+        assert body.index("Список провайдеров обновлён") < body.index("Models in use")
         assert body.index("Models in use") < body.index(">m-a</td>")
+        # Кнопка 🔃 (проверка бэкендов, прежняя «⟳ Перепроверить») — в шапке,
+        # ДО таблиц; подпись «Перепроверить бэкенды» — в title/aria-label.
+        assert 'title="Перепроверить бэкенды"' in body
+        assert 'action="/"' in body
 
     def test_endpoints_cell_lists_only_found(self):
         # _endpoints_cell_html: доступные (found=True) — имена через запятую
@@ -828,7 +837,8 @@ class TestUsageSection:
         # ссылка на GitHub-репозиторий проекта.
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
-        assert "Backend-Adapter — статус" in body
+        assert "Backend-Adapter Version 0.0.0-test" in body
+        assert "Backend-Adapter — статус" not in body
         assert "[CC]-adapter" not in body
         assert "https://github.com/alekseybb197/backend-adapter" in body
 
@@ -1031,7 +1041,7 @@ class TestAutoStartFirstCheck:
 
     def test_done_does_not_start_again(self):
         # Проверка уже завершалась (done_at есть): повторно не гоним —
-        # дальше только по кнопке «⟳ Проверить сейчас».
+        # дальше только по кнопке 🔃 (иконка «Перепроверить бэкенды»).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1190,7 +1200,7 @@ class TestStatusHTTP:
                 status, body = _http_get(port, "/")
                 assert status == 200
                 assert "Проверка выполняется" in body
-                assert "Перепроверить" in body
+                assert "Перепроверить бэкенды" in body  # title/aria-label кнопки 🔃
             finally:
                 httpd.shutdown()
                 httpd.server_close()

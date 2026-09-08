@@ -40,7 +40,7 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
   - Проверка бэкендов запускается:
       * при старте адаптера (backend-adapter.py запускает config.
         start_refresh(timeout=PROBE_TIMEOUT) после поднятия WEBUI) и
-      * по кнопке «⟳ Перепроверить» (POST "/") — работает по
+      * по кнопке 🔃 (POST "/", прежняя «⟳ Перепроверить») — работает по
         PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(
         timeout=PROBE_TIMEOUT) (см. config._refresh_worker) и отвечает
         303 See Other на GET "/" — браузер переходит на страницу
@@ -132,7 +132,7 @@ def _collect_endpoints() -> list[dict]:
       - multi-backend в процессе адаптера (_BACKENDS заполнен при старте);
       - standalone (viewer вне адаптера): эндпойнты не опрошены, но если
         окружение задаёт ADAPTER_BACKEND_CONFIG с YAML-файлом — они
-        показываются пустыми, чтобы кнопка «⟳ Перепроверить» могла
+        показываются пустыми, чтобы кнопка 🔃 (проверка бэкендов) могла
         выполнить живую пробу."""
     endpoints = []
 
@@ -492,11 +492,14 @@ def _render_status_page(
     бэкенд честно без моделей. Колонка «Доступные API» рендерится из
     config._ENDPOINT_STATE через _collect_endpoints (сама проба выполняется
     внутри refresh_models; refresh["probe"] отдельно не рендерится).
+    Шапка страницы — «Backend-Adapter Version <x.x.x>» ({context.version});
+    второй строкой — иконки-навигация: 🔃 (кнопка POST "/" — проверка
+    бэкендов с перечитыванием конфига, прежняя «⟳ Перепроверить», PRG/303),
+    📋 → /session (Обзор сессий), 🔧 → /config (Runtime config).
     Сразу под таблицей бэкендов — футер о последней проверке ({footer},
     «Список провайдеров обновлён в HH:MM:SS (N провайдеров, M моделей)»,
     где N = refresh["providers"] — число настроенных бэкендов после
-    перечитывания конфига, M = count моделей) и кнопка «⟳ Перепроверить»
-    (POST "/").
+    перечитывания конфига, M = count моделей).
     Секция «Models in use» рендерится из model_usage.usage_snapshot() (см.
     _usage_rows_html) — таблица заполняется запросами агента в этом процессе
     независимо от проверок бэкендов; колонка Endpoints перечисляет только
@@ -508,12 +511,14 @@ def _render_status_page(
     Счётчики строк секции «Models in use» обновляются без перезагрузки:
     безусловный JS usage_poll (usage_poll_script в <head>) каждые 5 с
     опрашивает /api/model-usage/snapshot (см. UsageSnapshotEndpoint) и
-    правит textContent ячеек Вызовов/Input/Output по data-атрибутам строк
-    (рендер — см. _usage_rows_html). Строки сопоставляются позиционно:
-    снимок идёт в порядке первого обращения, как и рендер. Число строк
-    изменилось (сброс/новая модель) — location.reload() перерисует
-    таблицу; эндпоинты строк в этом поллинге не трогаются (их меняет
-    только reprobe, у которого свой авто-релоад)."""
+    правит ячейки по data-атрибутам строк: Вызовы/Input/Output — textContent
+    (set), Cost — innerHTML (setHtml: cost_html приходит с сервера ГОТОВЫМ
+    HTML — см. _cost_cell_html; рендер и поллинг используют один
+    форматтер). Строки сопоставляются позиционно: снимок идёт в порядке
+    первого обращения, как и рендер. Число строк изменилось (сброс/новая
+    модель) — location.reload() перерисует таблицу; эндпоинты строк в этом
+    поллинге не трогаются (их меняет только reprobe, у которого свой
+    авто-релоад)."""
     # Колонка Cost строк Models in use считается по тарифу на момент
     # отображения: каждый полноценный рендер страницы (GET "/", перезагрузка)
     # перечитывает маленький файл тарифов с диска (model_usage.
@@ -560,7 +565,7 @@ def _render_status_page(
     if refresh is None:
         footer = (
             '<p style="color:#888">Список провайдеров и API-эндпойнты бэкендов '
-            "проверяются по кнопке «⟳ Перепроверить» (перечитывание "
+            "проверяются по кнопке 🔃 (прежняя «⟳ Перепроверить»; перечитывание "
             "ADAPTER_BACKEND_CONFIG + GET /v1/models + дымовые POST "
             "max_tokens:1, таймаут 10 с на эндпойнт; проба кэшируется 60 с, "
             "ADAPTER_ENDPOINT_PROBE=0 — отключить). Первый заход на страницу "
@@ -770,10 +775,15 @@ def _render_status_page(
 {usage_poll_script}
 </head>
 <body>
-<h2>Backend-Adapter — статус</h2>
-<p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
-   <a href="/session">просмотр сессий →</a> &nbsp;·&nbsp;
-   <a href="/config">runtime config →</a></p>
+<h2>Backend-Adapter Version {html.escape(context.version)}</h2>
+<p style="font-size:18px;line-height:1">
+  <form method="POST" action="/" style="display:inline;padding:0">
+    <button type="submit" aria-label="Перепроверить бэкенды" title="Перепроверить бэкенды"
+            style="background:none;border:none;padding:0;font-size:inherit;line-height:inherit;cursor:pointer">🔃</button>
+  </form>
+  &nbsp;<a href="/session" title="Обзор сессий" style="text-decoration:none">📋</a>
+  &nbsp;<a href="/config" title="Runtime config" style="text-decoration:none">🔧</a>
+</p>
 {note_html}
 {banner_html}
 {reprobe_banner_html}
@@ -782,9 +792,6 @@ def _render_status_page(
   {"".join(rows)}
 </table>
 {footer}
-<form method="POST" action="/" style="margin-top:12px">
-  <button type="submit">⟳ Перепроверить</button>
-</form>
 <h3 style="margin-top:24px">Models in use</h3>
 <table>
   <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Actions</th></tr>
@@ -806,8 +813,11 @@ def _render_status_page(
 class StatusEndpoint(webserver.Endpoint):
     """Эндпойнт "/": статус-страница (версия, эндпойнты LLM, API, модели).
 
-    Проверка бэкендов — по кнопке «⟳ Перепроверить» (POST "/") и при
-    автостарте (первый GET, см. _autostart_first_check). POST работает по
+    Шапка — «Backend-Adapter Version <x.x.x>»; навигация-иконки второй
+    строкой: 🔃 (кнопка POST "/" — проверка бэкендов, подпись
+    «Перепроверить бэкенды» в title/aria-label), 📋 → /session, 🔧 → /config.
+    Проверка бэкендов — по кнопке 🔃 (POST "/") и при автостарте (первый
+    GET, см. _autostart_first_check). POST работает по
     PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(timeout=
     PROBE_TIMEOUT) и отвечает 303 See Other на GET "/" (HTTP не ждёт её
     завершения; браузер переходит на страницу GET-навигацией, поэтому
@@ -850,7 +860,7 @@ class StatusEndpoint(webserver.Endpoint):
         handler._write(200, "text/html; charset=utf-8", self._render_from_state())
 
     def POST(self, handler, remainder: str):
-        # Кнопка «⟳ Перепроверить»: PRG-паттерн — запускаем фоновую
+        # Кнопка 🔃 (прежняя «⟳ Перепроверить»): PRG-паттерн — запускаем фоновую
         # проверку (с перечитыванием ADAPTER_BACKEND_CONFIG) и отвечаем
         # 303 See Other на GET "/", чтобы браузер перешёл на неё
         # GET-навигацией. Иначе авто-обновление страницы
@@ -890,7 +900,7 @@ class ModelUsageResetEndpoint(webserver.Endpoint):
     Кнопка «Сбросить» в таблице использованных моделей (form method=post)
     работает по PRG-паттерну: обнуление + 303 See Other на GET "/" — страница
     показывается GET-навигацией, обновление не повторяет POST (как у
-    кнопки «⟳ Перепроверить»). JSON-клиент (Content-Type:
+    кнопки 🔃). JSON-клиент (Content-Type:
     application/json) получает 200 {"ok": true, "model": ...} при успехе,
     404 {"error": ...} — строки нет, 400 {"error": ...} — нет query-
     параметра model (единый формат ошибки, как в server.py). GET на
@@ -1096,7 +1106,7 @@ def _autostart_first_check() -> bool:
       - в процессе адаптера стартовую проверку уже запустил
         backend-adapter.py (running=True) — повторно не гоним;
       - проверка уже завершалась (done_at есть) — не гоним повторно:
-        повторные проверки — только по кнопке «⟳ Перепроверить»."""
+        повторные проверки — только по кнопке 🔃."""
     if not _collect_endpoints():  # standalone без конфига — нечего проверять
         return False
     state = config.refresh_state()
