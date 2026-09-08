@@ -273,6 +273,18 @@ class TestManualAdapterProcess:
                 time.sleep(1)
                 _, page = _http_get(f"http://127.0.0.1:{web_port}/")
                 assert _usage_cost_cell(page) == "—", _usage_cost_cell(page)
+
+                # удаление строки → usage-строка исчезает со страницы (сам
+                # бэкенд и его модели в таблице бэкендов остаются — qwen-test
+                # там по-прежнему виден как модель бэкенда)
+                st, _ = _http_post(
+                    f"http://127.0.0.1:{web_port}/api/model-usage/delete"
+                    f"?model=qwen-test")
+                assert st in (200, 303), st
+                time.sleep(1)
+                _, page = _http_get(f"http://127.0.0.1:{web_port}/")
+                assert 'id="usage-row-' not in page, "usage-строка не удалена"
+                assert _usage_cost_cell(page) is None, _usage_cost_cell(page)
             finally:
                 # вежливая остановка процесса перед рестартом при ENABLE=1
                 ap.proc.terminate()

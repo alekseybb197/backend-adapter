@@ -385,17 +385,27 @@ def _fmt_cost(cost: float, currency: str) -> str:
     return _compact_number(int(cost)) + " " + currency
 
 
-def _actions_cell_html(model: str, reprobing: bool = False) -> str:
-    """HTML ячейки действий строки таблицы использованных моделей.
+_ACTIONS = (
+    ("reprobe", "⟳", "Перепроверить эндпоинты модели", "#555"),
+    ("reset", "↺", "Сбросить счётчики модели", "#555"),
+    ("delete", "✕", "Удалить строку модели", "#c0392b"),
+)
 
-    Две form-кнопки целиком внутри своего <td> (валидный HTML — без
-    вложенных форм и JS): «Перепроверить» (POST /api/model-usage/reprobe?model=…)
-    запускает фоновую перепробу эндпоинтов строки, «Сбросить» (POST
-    /api/model-usage/reset?model=…) обнуляет счётчики строки (оба эндпоинта
-    по PRG отвечают 303 на GET "/"). При reprobing=True (перепроверка этой модели
-    уже идёт) вместо кнопок — серый текст «проверяется…»: повторный запуск
-    невозможен, страница авто-обновится по завершении. Имя модели кодируется
-    quote(safe="") для query-параметра и html.escape — для атрибута action."""
+
+def _actions_cell_html(model: str, reprobing: bool = False) -> str:
+    """HTML ячейки действий (колонка Actions) строки таблицы использованных моделей.
+
+    Три form-кнопки целиком внутри своего <td> (валидный HTML — без
+    вложенных форм и JS), тексты-фразы заменены символьными иконками с
+    title/aria-label-подписями: ⟳ (reprobe — фоновая перепроба эндпоинтов
+    строки, POST /api/model-usage/reprobe?model=…), ↺ (reset — обнуление
+    счётчиков строки, POST /api/model-usage/reset?model=…), ✕ (delete —
+    удаление строки модели из таблицы и YAML-файла, POST
+    /api/model-usage/delete?model=…). Все три эндпоинта по PRG отвечают 303
+    на GET "/". При reprobing=True (перепроверка этой модели уже идёт) вместо
+    кнопок — серый текст «проверяется…»: повторный запуск невозможен,
+    страница авто-обновится по завершении. Имя модели кодируется quote(safe="")
+    для query-параметра и html.escape — для атрибута action."""
     q = quote(str(model), safe="")
     if reprobing:
         return (
@@ -403,18 +413,18 @@ def _actions_cell_html(model: str, reprobing: bool = False) -> str:
             '<span title="перепроверка эндпоинтов модели выполняется">'
             "проверяется…</span></td>"
         )
-    return (
-        "<td>"
-        f'<form method="post" action="/api/model-usage/reprobe?model={html.escape(q)}">'
-        '<button type="submit" style="color:#555;background:none;border:none;'
-        'padding:0 6px 0 0;font:inherit;cursor:pointer;text-decoration:underline">'
-        "Перепроверить</button>"
-        "</form>"
-        f'<form method="post" action="/api/model-usage/reset?model={html.escape(q)}">'
-        '<button type="submit" style="color:#c0392b;background:none;border:none;'
-        'padding:0;font:inherit;cursor:pointer;text-decoration:underline">Сбросить</button>'
-        "</form></td>"
-    )
+    forms = []
+    for i, (name, glyph, label, color) in enumerate(_ACTIONS):
+        pad = "padding:0 6px 0 0;" if i < len(_ACTIONS) - 1 else "padding:0;"
+        forms.append(
+            f'<form method="post" action="/api/model-usage/{name}?model={html.escape(q)}">'
+            f'<button type="submit" aria-label="{label}" title="{label}" '
+            f'style="color:{color};background:none;border:none;{pad}'
+            'font:inherit;cursor:pointer"'
+            f">{glyph}</button>"
+            "</form>"
+        )
+    return "<td>" + "".join(forms) + "</td>"
 
 
 def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
@@ -422,7 +432,7 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
     Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Endpoints |
-    Действия. Колонка Endpoints перечисляет только доступные эндпоинты
+    Actions. Колонка Endpoints перечисляет только доступные эндпоинты
     (found=True) короткими именами через запятую (см. _endpoints_cell_html).
     input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
     _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
@@ -433,9 +443,9 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     JS usage_poll обновляет их textContent по /api/model-usage/snapshot без
     перезагрузки страницы (см. usage_poll в _render_status_page). ``reprobing``
     — карта client_model → True: у строки идёт фоновая перепроверка (баннер +
-    авто-релоад); в ячейке действий вместо кнопок — «проверяется…».
-    Модель/бэкенд — html.escape; «Перепроверить»/«Сбросить» — отдельные
-    формы в последнем <td> (см. _actions_cell_html)."""
+    авто-релоад); в ячейке Actions вместо кнопок — «проверяется…».
+    Модель/бэкенд — html.escape; иконки-действия (⟳/↺/✕) — отдельные формы
+    в последнем <td> (см. _actions_cell_html)."""
     body = []
     for i, r in enumerate(rows):
         reprobing_row = bool(reprobing and reprobing.get(r["model"]))
@@ -766,7 +776,7 @@ def _render_status_page(
 </form>
 <h3 style="margin-top:24px">Models in use</h3>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Действия</th></tr>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Actions</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
@@ -897,6 +907,51 @@ class ModelUsageResetEndpoint(webserver.Endpoint):
             handler._write(400, "application/json; charset=utf-8", body)
             return
         if not model_usage.reset_model(model):
+            body = json.dumps({"error": f"model '{model}' not in usage table"}).encode()
+            handler._write(404, "application/json; charset=utf-8", body)
+            return
+        body = json.dumps({"ok": True, "model": model}).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
+@webserver.register
+class ModelUsageDeleteEndpoint(webserver.Endpoint):
+    """POST /api/model-usage/delete?model=<имя> — удаление строки модели.
+
+    Удаляет модель из рабочей таблицы использованных моделей и из YAML-файла
+    (запись обновлённой таблицы без строки; см. model_usage.delete_model).
+    Кнопка «✕» в колонке Actions таблицы (form method=post) работает по
+    PRG-паттерну: удаление + 303 See Other на GET "/" — страница
+    показывается GET-навигацией, обновление не повторяет POST (как у кнопок
+    «Сбросить»/«Перепроверить»). JSON-клиент (Content-Type:
+    application/json) получает 200 {"ok": true, "model": ...} при успехе,
+    404 {"error": ...} — строки нет (повторное удаление/неизвестная модель;
+    в отличие от reset, delete не идемпотентен — строка после успеха
+    исчезает), 400 {"error": ...} — нет query-параметра model (единый формат
+    ошибки, как в server.py). GET на префикс — 404 дефолтом Endpoint."""
+
+    prefix = "/api/model-usage/delete"
+
+    def __init__(self, context):
+        self.context = context
+
+    def POST(self, handler, remainder: str):
+        parsed = urlparse(handler.path)
+        model = parse_qs(parsed.query).get("model", [""])[0].strip()
+        ct = handler.headers.get("Content-Type", "")
+        if "application/json" not in ct:
+            # HTML-форма кнопки (application/x-www-form-urlencoded): PRG.
+            if not model:
+                handler._redirect("/")  # кнопка без model невозможна в норме
+                return
+            model_usage.delete_model(model)  # строка есть на живой странице
+            handler._redirect("/")  # 303 → GET "/" (PRG)
+            return
+        if not model:
+            body = b'{"error": "missing \'model\' query parameter"}'
+            handler._write(400, "application/json; charset=utf-8", body)
+            return
+        if not model_usage.delete_model(model):
             body = json.dumps({"error": f"model '{model}' not in usage table"}).encode()
             handler._write(404, "application/json; charset=utf-8", body)
             return
@@ -1059,6 +1114,7 @@ __all__ = [
     "StatusEndpoint",
     "RefreshStateEndpoint",
     "ModelUsageResetEndpoint",
+    "ModelUsageDeleteEndpoint",
     "ModelUsageReprobeEndpoint",
     "ReprobeStateEndpoint",
     "UsageSnapshotEndpoint",

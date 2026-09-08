@@ -39,11 +39,11 @@ backend_adapter/
 │                             (reprobe); персистентный YAML (version: 2, миграция v1)
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
 │                             "/api/model-usage/reset", "/api/model-usage/reprobe",
-│                             "/api/model-usage/reprobe-state",
+│                             "/api/model-usage/delete", "/api/model-usage/reprobe-state",
 │                             "/api/model-usage/snapshot": status page (version,
 │                             LLM endpoints, models) + background-check state +
 │                             секция «Models in use» (live-счётчики, сброс
-│                             счётчиков/перепроверка)
+│                             счётчиков/перепроверка/удаление строки)
 ├── webui_ops.py            ← WEBUI health endpoints "/healthz", "/health", "/live",
 │                             "/ready" (200/503 JSON; readiness по _BACKENDS/
 │                             _AVAILABLE_MODELS) — см. §6.7
@@ -152,6 +152,8 @@ Claude Code (Anthropic API client)
    `/api/refresh-state` — JSON state of the background check, see §6.5,
    `/api/model-usage/reset` — zeroes a used-model row's counters (row is kept),
    `/api/model-usage/reprobe` — background row re-probe,
+   `/api/model-usage/delete` — removes a used-model row from the table and
+   the YAML file (not kept),
    `/api/model-usage/reprobe-state` — its JSON state, see §6.6).
    The used-models table persists to `model-usage.yaml` (version: 2, v1 migrated)
    in `root`.
@@ -447,7 +449,10 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   Сохранение «грязной» таблицы — не чаще раза в
   `config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL` (сек, дефолт 300); создание
   строки, обнуление счётчиков строки (`reset_model`: calls/input_tokens/
-  output_tokens → 0, строка НЕ удаляется), завершение перепроверки
+  output_tokens → 0, строка НЕ удаляется), удаление строки (`delete_model`:
+  `del _TABLE[model]` под `_TABLE_LOCK` + `_DIRTY=True`, файл
+  перезаписывается без строки — в отличие от reset, строка уходит и из
+  памяти, и из YAML), завершение перепроверки
   (`_save_table(force=True)`) и завершение работы (`flush_table`, в т.ч.
   Ctrl-C) сохраняют сразу. Строки с `probing: True` на диск не попадают;
   запись атомарная (tmp + `os.replace`). Загруженные строки не
@@ -471,7 +476,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
   строк в порядке первого обращения; первый вызов после старта загружает
   таблицу из YAML. Колонки: Модель | Бэкенд | Вызовов | Input | Output |
-  **Endpoints** | Действия (7). Endpoints — одна колонка: только доступные
+  Cost | **Endpoints** | Actions (8). Endpoints — одна колонка: только доступные
   эндпоинты строки короткими именами через запятую (зелёным, порядок
   `config.ENDPOINT_PROBES`; ничего доступного — серая «—»). Токеновые
   колонки рендерятся форматтером `_fmt_tokens` (точное число с неразрывным
@@ -498,8 +503,10 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   `errors`, `_DIRTY = True` + `_save_table(force=True)`; **calls и токены не
   трогает** — проба служебная, не обращение агента; найденные эндпоинты
   синхронизируются в `config._ENDPOINT_STATE` (§6.4); исключения ловятся).
-  Не-JSON (кнопка «Перепроверить» в колонке «Действия» рядом со «Сбросить»,
-  две формы в одной ячейке) — 303 See Other на GET `/` (PRG); JSON — 202
+  Не-JSON (кнопки-иконки в колонке Actions: ⟳ «Перепроверить» / ↺
+  «Сбросить» / ✕ «Удалить» — три отдельные формы в одной ячейке,
+  `_actions_cell_html` по `_ACTIONS`; тексты-фразы в `title`/`aria-label`)
+  — 303 See Other на GET `/` (PRG); JSON — 202
   «запущено», 404 «нет строки / уже идёт / первая проба ещё выполняется»,
   400 «нет model». Пока перепроверка идёт: баннер «Перепроверка модели X…»,
   в строке — серый «проверяется…» вместо кнопок; JS `reprobe_poll`
@@ -507,6 +514,19 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   JSON из `model_usage.reprobe_state()`: running/model/started_at) каждые
   ~2 с и делает `location.reload()` по завершении — состояние живёт в
   `model_usage`, не в `config.refresh_state()`.
+- **Удаление строки (delete)** — `POST /api/model-usage/delete?model=<имя>`
+  (`ModelUsageDeleteEndpoint`, по образцу reset): `model_usage.delete_model`
+  — под `_TABLE_LOCK`: `_ensure_loaded_locked()` + `del _TABLE[model]` +
+  `_DIRTY=True`; вне лока `_save_table(force=True)` (файл сразу без строки).
+  Чистка `config._ENDPOINT_STATE` НЕ требуется: кэш доступности эндпоинтов —
+  общий на бэкенд, не по моделям (стирание было бы гонкой с фоновой пробой).
+  Безопасен при идущей перепроверке строки (`reprobe_model` в finally
+  увидит `row is None` и не мутирует). Не-JSON (кнопка ✕) — 303 на GET `/`
+  (PRG); JSON — 200 `{"ok": true, "model": ...}` при удалении, 404 «строки
+  нет» (повторное удаление — строка уже ушла; delete НЕ идемпотентен, в
+  отличие от reset), 400 «нет model». GET на префикс — 404. Сброс/удаление
+  не совмещены: reset обнуляет счётчики и сохраняет строку, delete убирает
+  строку целиком.
 
 ### 6.7 Health-эндпоинты (`webui_ops.py`, `/healthz` `/health` `/live` `/ready`)
 
@@ -792,7 +812,8 @@ backend-adapter.py
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
   ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state",
   │                       "/api/model-usage/snapshot", "/api/model-usage/reset",
-  │                       "/api/model-usage/reprobe", "/api/model-usage/reprobe-state"),
+  │                       "/api/model-usage/delete", "/api/model-usage/reprobe",
+  │                       "/api/model-usage/reprobe-state"),
   │                       config, model_usage
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   ├── webui_ops.py       → webserver (эндпоинты "/healthz" "/health" "/live" "/ready"),

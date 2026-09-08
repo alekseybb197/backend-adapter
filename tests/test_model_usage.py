@@ -991,6 +991,41 @@ class TestResetModel:
             assert yaml.safe_load(f)["models"]["m1"]["calls"] == 3
 
 
+class TestDeleteModel:
+    def test_delete_removes_row_memory_and_file(self, tmp_path):
+        """delete_model → row gone from table and file (saved without it)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        persist_file = _persist_setup(config, mu, tmp_path)
+        mu.record_model_usage("m")          # строка создана (calls=1)
+        mu._TABLE["m"]["calls"] = 7         # сид счётчиков напрямую
+        mu._TABLE["m"]["input_tokens"] = 300
+        mu._TABLE["m"]["output_tokens"] = 500
+        assert mu.delete_model("m") is True
+        assert mu.usage_snapshot() == []    # строки в памяти больше нет
+        with open(persist_file, encoding="utf-8") as f:
+            saved = yaml.safe_load(f)
+        assert "m" not in saved["models"]  # файл перезаписан без строки
+        # повторное удаление уже удалённой строки — False
+        assert mu.delete_model("m") is False
+
+    def test_delete_missing_row_returns_false(self, tmp_path):
+        """delete_model for a row that is not in the table → False."""
+        config, mu = _fresh()
+        persist_file = _persist_setup(config, mu, tmp_path)
+        assert mu.delete_model("nope") is False
+
+    def test_delete_no_persist_removes_memory_only(self):
+        """Без персистентности (путь "") delete_model убирает строку из памяти,
+        не бросая исключений (нет файла для перезаписи)."""
+        config, mu = _fresh()
+        config.ADAPTER_MODEL_USAGE_ENABLE = False
+        mu.record_model_usage("m")
+        assert mu.delete_model("m") is True
+        assert mu.usage_snapshot() == []
+        assert mu.delete_model("m") is False
+
+
 class TestReprobe:
     """Фоновая перепроверка эндпоинтов строки (кнопка «Перепроверить»).
 

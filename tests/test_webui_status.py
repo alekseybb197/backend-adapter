@@ -22,14 +22,16 @@ cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
 button (JS models_toggle on the page) — see TestModelsCell. The Models in use
 table (single Endpoints column — available endpoints only, comma-separated;
 footer and the «⟳ Проверить сейчас» button sit right under the backends
-table, before the section) — see TestUsageSection. Its actions cell holds
-two PRG forms — «Перепроверить» (POST /api/model-usage/reprobe) and
-«Сбросить» (POST /api/model-usage/reset) — and renders «проверяется…» (no
+table, before the section) — see TestUsageSection. Its Actions cell holds
+three PRG forms with symbol-icon buttons (⟳ «Перепроверить» POST
+/api/model-usage/reprobe, ↺ «Сбросить» POST /api/model-usage/reset, ✕
+«Удалить» POST /api/model-usage/delete) and renders «проверяется…» (no
 forms) while that row is being re-probed; /reprobe answers 202 on launch /
+404 / 400 for JSON clients and 303 for the HTML form; /delete answers 200 /
 404 / 400 for JSON clients and 303 for the HTML form; /api/model-usage/
 reprobe-state serves the reprobe snapshot for the page's reprobe_poll JS
 (banner + auto-reload while running) — see TestModelUsageReprobeAPI /
-TestReprobeStateAPI. Live counters (Вызовов/Input/Output): usage rows carry
+TestModelUsageDeleteAPI / TestReprobeStateAPI. Live counters (Вызовов/Input/Output): usage rows carry
 id="usage-row-<i>" and data-calls/data-input/data-output (exact values), and
 the page embeds an unconditional usage_poll JS polling the lightweight
 /api/model-usage/snapshot every 5 s and updating only the counter cells
@@ -583,7 +585,7 @@ class TestUsageSection:
 
     def test_section_present_with_headers(self):
         # Заголовок секции + 8 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|Cost|Endpoints|Действия).
+        # Output|Cost|Endpoints|Actions).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Models in use</h3>" in body
@@ -599,7 +601,7 @@ class TestUsageSection:
         assert "<th>messages</th>" not in body
         assert "<th>responses</th>" not in body
         assert "<th>embeddings</th>" not in body
-        assert "<th>Действия</th>" in body
+        assert "<th>Actions</th>" in body
 
     def test_empty_table_shows_placeholder(self):
         # Пустая таблица → строка «пока нет данных», никаких строк моделей.
@@ -740,14 +742,19 @@ class TestUsageSection:
         empty = self._seed(config, ws, usage_rows=[])
         assert "function compact_fmt" in empty
 
-    def test_row_has_actions_two_forms(self):
-        # Каждая строка модели несёт две form-кнопки: «Перепроверить» (POST
-        # на /api/model-usage/reprobe?model=<имя>) и «Сбросить» (POST на
-        # /api/model-usage/reset?model=<имя>) — без JS, PRG через 303.
+    def test_row_has_actions_three_forms(self):
+        # Каждая строка модели несёт три form-кнопки-иконки: ⟳ «Перепроверить»
+        # (POST /api/model-usage/reprobe?model=<имя>), ↺ «Сбросить» (POST
+        # /api/model-usage/reset?model=<имя>), ✕ «Удалить» (POST
+        # /api/model-usage/delete?model=<имя>) — без JS, PRG через 303.
+        # Тексты-фразы — в title/aria-label кнопок, глифы в body.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-reset")])
-        assert "Перепроверить" in body
-        assert "Сбросить" in body
+        assert "Перепроверить" in body  # title/aria-label иконки ⟳
+        assert "Сбросить" in body  # title/aria-label иконки ↺
+        assert "Удалить" in body  # title/aria-label иконки ✕
+        for glyph in ("⟳", "↺", "✕"):
+            assert glyph in body
         assert (
             '<form method="post" action="/api/model-usage/reset?model=m-reset">'
             in body
@@ -756,13 +763,18 @@ class TestUsageSection:
             '<form method="post" action="/api/model-usage/reprobe?model=m-reset">'
             in body
         )
-        assert "color:#c0392b" in body  # красная ссылка-кнопка сброса
-        # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
+        assert (
+            '<form method="post" action="/api/model-usage/delete?model=m-reset">'
+            in body
+        )
+        assert "color:#c0392b" in body  # красная иконка ✕ (деструктивное действие)
+        assert 'title="Удалить строку модели"' in body
+        # все три формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
         assert row_html.count("<td") == 8  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
-        # Имя модели со спецсимволами в обеих формах: quote(safe="") +
+        # Имя модели со спецсимволами во всех трёх формах: quote(safe="") +
         # html.escape, спецсимволы не ломают query/атрибут.
         config, ws = _fresh_modules()
         row = self._row('m & "x"/у=1')
@@ -771,6 +783,7 @@ class TestUsageSection:
         q = _quote('m & "x"/у=1', safe="")
         assert f'action="/api/model-usage/reset?model={q}"' in html
         assert f'action="/api/model-usage/reprobe?model={q}"' in html
+        assert f'action="/api/model-usage/delete?model={q}"' in html
         assert 'model=m & "' not in html  # сырые спецсимволы в action не выходят
 
     def test_row_actions_hidden_while_reprobing(self):
@@ -781,10 +794,11 @@ class TestUsageSection:
         assert "проверяется…" in html
         assert "Перепроверить" not in html
         assert "Сбросить" not in html
+        assert "Удалить" not in html
         assert "form method=\"post\"" not in html
 
     def test_row_actions_normal_when_other_reprobing(self):
-        # Перепроверяется ДРУГАЯ модель — у строки обычные кнопки.
+        # Перепроверяется ДРУГАЯ модель — у строки обычные кнопки-иконки.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html(
             [self._row("m-a"), self._row("m-b")],
@@ -795,12 +809,13 @@ class TestUsageSection:
         assert "проверяется…" in html
         assert html.index("m-a") < html.index("проверяется…")
 
-    def test_empty_table_no_reset_forms(self):
-        # У пустой таблицы (заглушка colspan=8) форм сброса/перепроверки нет.
+    def test_empty_table_no_action_forms(self):
+        # У пустой таблицы (заглушка colspan=8) форм действий нет.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[])
         assert 'form method="post" action="/api/model-usage/reset' not in body
         assert 'form method="post" action="/api/model-usage/reprobe' not in body
+        assert 'form method="post" action="/api/model-usage/delete' not in body
         assert "colspan=\"8\"" in body
 
     def test_page_header_is_backend_adapter(self):
@@ -1573,6 +1588,161 @@ class TestModelUsageResetAPI:
 
 
 # ---------------------------------------------------------------------------
+# /api/model-usage/delete: POST — удаление строки модели из таблицы и файла
+# ---------------------------------------------------------------------------
+
+class TestModelUsageDeleteAPI:
+    def _seed_row(self, model="m-del", calls=5, input_tokens=0,
+                  output_tokens=0):
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": model, "backend": "AAA", "calls": calls,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "endpoints": {}, "errors": {}, "first_seen": "10:00:00",
+            "probing": False,
+        }])
+
+    def test_post_form_deletes_and_redirects(self, tmp_path):
+        # HTML-кнопка (без JSON Content-Type): POST ?model=m → 303 See Other
+        # с Location "/" (PRG); строка удалена из таблицы (страницы).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-del": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        self._seed_row()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+            from backend_adapter import model_usage
+            assert model_usage.usage_snapshot() == []  # строка удалена из памяти
+            status2, body2 = _http_get(port, "/")
+            assert status2 == 200
+            assert ">m-del</td>" not in body2  # строки на странице нет
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_delete_removes_from_file(self, tmp_path):
+        # Удаление формы перезаписывает YAML-файл без строки (serve включил
+        # persist на root_dir=tmp_path).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-del": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": "m-del", "backend": "AAA", "calls": 5,
+            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }])
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # принудительно сохранить (flush), чтобы строка была в файле
+            model_usage._DIRTY = True  # сид пишет _TABLE напрямую, без флага
+            model_usage.flush_table()
+            _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/x-www-form-urlencoded",
+            )
+            import yaml
+            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            assert "m-del" not in (data or {}).get("models", {})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_ok_then_404(self, tmp_path):
+        # JSON-клиент: 200 {"ok": true, ...}; повторное удаление той же модели
+        # — 404 (строки уже нет; delete НЕ идемпотентен, в отличие от reset);
+        # удаление неизвестной модели — 404 {"error": ...}.
+        config, ws = _fresh_modules()
+        self._seed_row()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/json",
+            )
+            assert status == 200
+            import json
+            assert json.loads(body) == {"ok": True, "model": "m-del"}
+            from backend_adapter import model_usage
+            assert model_usage.usage_snapshot() == []
+            # Повторное удаление уже удалённой строки — 404
+            status2, _, body2 = _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/json",
+            )
+            assert status2 == 404
+            assert "error" in json.loads(body2)
+            # Удаление модели, которой нет — 404
+            status3, _, body3 = _http_post_body(
+                port, "/api/model-usage/delete?model=ghost", b"",
+                "application/json",
+            )
+            assert status3 == 404
+            assert "error" in json.loads(body3)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_missing_model_400(self, tmp_path):
+        # Без query-параметра model — 400 {"error": ...} (JSON-клиент).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _, body = _http_post_body(
+                port, "/api/model-usage/delete", b"",
+                "application/json",
+            )
+            assert status == 400
+            import json
+            assert "error" in json.loads(body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_without_model_redirects(self, tmp_path):
+        # HTML-форма без model — 303 на "/" (в норме невозможно: кнопка
+        # всегда несёт model).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/delete", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_get_returns_404(self, tmp_path):
+        # GET на префикс удаления — 404 (дефолт Endpoint; удаление только POST).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _ = _http_get(port, "/api/model-usage/delete?model=m")
+            assert status == 404
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
 # /api/model-usage/reprobe: POST — фоновая перепроверка эндпоинтов строки
 # ---------------------------------------------------------------------------
 
@@ -1711,8 +1881,8 @@ class TestModelUsageReprobeAPI:
             assert "Перепроверка модели" in body
             assert "выполняется" in body
             assert "проверяется…" in body
-            assert ">Перепроверить</button>" not in body   # кнопки строки нет
-            assert ">Сбросить</button>" not in body
+            assert "form method=\"post\"" not in body  # кнопок строки нет
+            assert 'title="Перепроверить эндпоинты модели"' not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" in body
         finally:
             httpd.shutdown()
@@ -1735,8 +1905,8 @@ class TestModelUsageReprobeAPI:
             assert status == 200
             assert "Перепроверка модели" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
-            assert ">Перепроверить</button>" in body      # кнопка строки на месте
-            assert ">Сбросить</button>" in body
+            assert 'title="Перепроверить эндпоинты модели"' in body  # ⟳ на месте
+            assert 'title="Удалить строку модели"' in body
         finally:
             httpd.shutdown()
             httpd.server_close()

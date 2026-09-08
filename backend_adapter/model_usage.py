@@ -377,6 +377,29 @@ def reset_model(model: str) -> bool:
     return existed
 
 
+def delete_model(model: str) -> bool:
+    """Удалить строку модели из рабочей таблицы и из YAML-файла.
+
+    Файл перезаписывается сразу (force-save) обновлённой таблицей без
+    указанной строки. Возвращает True, если строка существовала (в памяти
+    или в файле) и удалена; False — строки нет (второй клик по кнопке,
+    неизвестная модель). Чистка config._ENDPOINT_STATE не требуется: кэш
+    доступности эндпоинтов — общий на бэкенд, не по моделям. Безопасен при
+    идущей перепроверке строки (воркер в finally увидит row is None и не
+    мутирует). Точка вызова — ModelUsageDeleteEndpoint (POST
+    /api/model-usage/delete)."""
+    global _DIRTY
+    with _TABLE_LOCK:
+        _ensure_loaded_locked()
+        existed = model in _TABLE
+        if existed:
+            del _TABLE[model]
+            _DIRTY = True
+    if existed:
+        _save_table(force=True)
+    return existed
+
+
 def start_reprobe(client_model: str) -> bool:
     """Запустить фоновую перепроверку эндпоинтов строки модели.
 
@@ -935,6 +958,7 @@ __all__ = [
     "usage_snapshot",
     "reset_model_usage",
     "reset_model",
+    "delete_model",
     "start_reprobe",
     "reprobe_state",
     "reprobe_model",
