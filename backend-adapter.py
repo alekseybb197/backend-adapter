@@ -228,9 +228,11 @@ if __name__ == "__main__":
             pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
         finally:
             # Переключение сигналов + остановка слушателей + фоновой проверки
-            # + финальный flush usage-таблицы (см. shutdown.graceful_shutdown:
-            # остановки по отдельности глотают ошибки, процедуру прервать
-            # нельзя — повторный сигнал уже = немедленный os._exit(130)).
+            # + финальный flush usage-таблицы + печать «[EXIT] Bye»
+            # (см. shutdown.graceful_shutdown: остановки по отдельности глотают
+            # ошибки, процедуру прервать нельзя — повторный сигнал уже =
+            # немедленный os._exit(130); маркер «[EXIT] Bye» печатает сам
+            # graceful_shutdown — контракт завершения живёт в shutdown.py).
             graceful_shutdown(
                 httpd,
                 webui,
@@ -238,4 +240,3 @@ if __name__ == "__main__":
                 ADAPTER_EXPORTER_ENABLE,
                 _finish,
             )
-            print("\n[EXIT] Bye")

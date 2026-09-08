@@ -21,9 +21,8 @@
   код возврата — 0 (SIGINT обработан), а не 130/1;
 - одиночный SIGTERM без SIGINT — тоже вежливое завершение с кодом 0.
 
-См. также _handle_signal/_exit_code в daemon.py (PID-файл) — общее у
-модулей только имя; shutdown.py стоит в DAG после config/model_usage
-(импортирует их локально в _graceful_finish).
+shutdown.py стоит в DAG после config/model_usage (импортирует их локально
+в _graceful_finish).
 """
 
 from __future__ import annotations
@@ -109,7 +108,8 @@ def graceful_finish(webui, exporter, exporter_enabled: bool, finish: Callable[[]
         with contextlib.suppress(BaseException):
             exporter.shutdown()
             exporter.server_close()
-    finish()
+    with contextlib.suppress(BaseException):
+        finish()
 
 
 def handle_main_loop_exception(exc: BaseException) -> int:
@@ -134,7 +134,10 @@ def graceful_shutdown(
     Порядок: (1) сигналы переключаются на немедленный выход (повторный
     Ctrl-C/SIGTERM во время процедуры = os._exit(130)); (2) вежливая
     остановка слушателей/воркера и финальный flush usage-таблицы
-    (graceful_finish, ошибки не пробрасываются); (3) возврат кода — 0.
+    (graceful_finish, ошибки не пробрасываются); (3) консольный маркер
+    «[EXIT] Bye» (печатается всегда по завершении процедуры — в т.ч. когда
+    слушателей не было вовсе; контракт v0.8.6, см. docstring модуля);
+    (4) возврат кода — 0.
 
     Вызывается из finally-блока main после обработки KeyboardInterrupt
     (код возврата из except-ветки берёт exit_code)."""
@@ -145,6 +148,7 @@ def graceful_shutdown(
 
         with contextlib.suppress(BaseException):
             httpd.server_close()
+    print("\n[EXIT] Bye")
     return 0
 
 
