@@ -746,7 +746,8 @@ def _render_status_page(
 </script>
 {poll_script}
 {reprobe_poll_script}
-{usage_poll_script}</head>
+{usage_poll_script}
+</head>
 <body>
 <h2>Backend-Adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;

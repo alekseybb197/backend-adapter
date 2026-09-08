@@ -330,6 +330,29 @@ class TestSessionHTTP:
             httpd.shutdown()
             httpd.server_close()
 
+    def test_get_session_tabs_head_has_favicon(self, tmp_path):
+        """Favicon — общий ресурс всех страниц WEBUI: /session (страница
+        вкладок, порождается от статус-страницы) несёт тот же link-тег."""
+        _make_parts_dir(tmp_path, "session-A.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/session")
+            assert status == 200
+            assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in body
+            # и сам файл отдаётся (эндпоинт ядра)
+            import urllib.request
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/favicon.svg", timeout=5
+            ) as r:
+                assert r.status == 200
+                assert r.headers.get_content_type() == "image/svg+xml"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_session_page_links_to_status_root(self, tmp_path):
         """Ссылка «← статус» ведёт на корень сервера — статус-страницу "/",
         которая в этом же процессе отвечает 200 (эндпойнт зарегистрирован)."""
@@ -370,6 +393,24 @@ class TestSessionHTTP:
             status, body = _http_get(port, "/session/session-B.parts/artefacts/tree.html")
             assert status == 200
             assert "<!DOCTYPE" in body or "html" in body.lower()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_tree_html_carries_favicon_link(self, tmp_path):
+        """Сгенерированное tree.html (открывается в iframe вкладки /session)
+        несёт favicon-link — при показе в браузере иконка вкладки общая со
+        статус-страницей (раздача /favicon.svg — эндпоинт ядра, доступен на
+        любом пути)."""
+        _make_parts_dir(tmp_path, "session-B.parts", {
+            "a-1-openai_body.json": _simple_ob(1),
+            "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
+        })
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, body = _http_get(port, "/session/session-B.parts/artefacts/tree.html")
+            assert status == 200
+            assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in body
         finally:
             httpd.shutdown()
             httpd.server_close()

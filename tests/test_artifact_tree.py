@@ -984,6 +984,9 @@ class TestRenders:
         content = open(out_path).read()
         assert "DOCTYPE html" in content
         assert "DATA" in content
+        # Favicon — общий ресурс всех страниц WEBUI: даже открытый напрямую
+        # с диска tree.html просит /favicon.svg у сервера (см. /session)
+        assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in content
 
     def test_render_html_with_layout(self, tmp_path):
         model = {

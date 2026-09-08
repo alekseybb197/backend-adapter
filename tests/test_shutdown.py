@@ -234,9 +234,3 @@ class TestGracefulShutdown:
             )
         assert code == 0
         assert calls == ["finish"]
-
-
-@pytest.mark.skip(reason="документация контракта; ручная проверка — §3.9 плана")
-class TestManualIntegration:
-    """Ручной прогон завершения реального процесса адаптера (fake-бэкенд,
-    SIGINT×2 / SIGTERM → rc 0/130/0 без traceback) — см. tmp/check_v086.py."""

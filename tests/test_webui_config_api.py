@@ -119,6 +119,16 @@ class TestRenderConfigPage:
         assert "Игнорировано" in html
         assert "UNKNOWN_KEY" in html
 
+    def test_head_has_favicon_link(self):
+        """В <head> страницы /config есть <link rel="icon" ...> — иконка
+        вкладки общая для всех страниц WEBUI (эндпоинт /favicon.svg в ядре)."""
+        from backend_adapter import config
+        current = config.get_runtime_config()
+        html = self.render(current).decode("utf-8")
+        assert (
+            '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in html
+        ), "нет favicon-link в <head> страницы /config"
+
 
 # ---------------------------------------------------------------------------
 # HTTP tests: GET /config
@@ -147,6 +157,8 @@ class TestConfigHTTPGet:
             # Строковое поле списка тегов — как text input со значением env-формата
             assert "ADAPTER_DEBUG_TAGS_FULL" in body
             assert 'type="text"' in body
+            # Favicon — общий ресурс всех страниц WEBUI (см. /favicon.svg)
+            assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in body
         finally:
             httpd.shutdown()
             httpd.server_close()
