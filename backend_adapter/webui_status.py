@@ -221,8 +221,13 @@ def _models_html(models: list[str], status: str) -> str:
     Если моделей больше MODEL_LINES — первые MODEL_LINES показываются,
     остальные прячутся в <span class="models-extra" style="display:none">,
     а кнопка «Показать ещё (N)» разворачивает список (JS models_toggle,
-    см. _render_status_page): при клике span получает display:block,
-    кнопка меняется на «Свернуть» и прячет его обратно."""
+    см. _render_status_page): при клике span получает display:block, кнопка
+    внизу меняется на «Свернуть», а ВВЕРХУ списка появляется вторая ссылка
+    «Свернуть» (свёрнута вместе со span — class="models-collapse-top") —
+    у развёрнутой колонки есть и верхний, и нижний край сворачивания.
+    Обе кнопки несут data-models-count (общее число моделей); колонка
+    оборачивается в <span class="models-cell"> — JS ищет кнопки по этому
+    классу (см. models_toggle)."""
     if not models:
         return f'<span style="color:#999">{status}</span>'
     line = '<div style="line-height:1.5">{}</div>'
@@ -231,14 +236,31 @@ def _models_html(models: list[str], status: str) -> str:
     shown = "".join(line.format(html.escape(m)) for m in models[:MODEL_LINES])
     extra = "".join(line.format(html.escape(m)) for m in models[MODEL_LINES:])
     n = len(models) - MODEL_LINES
-    btn = (
-        f'<button type="button" onclick="models_toggle(this)" '
-        f'data-models-count="{len(models)}" '
-        f'style="color:#1a7f37;background:none;border:none;padding:0;'
-        f'font:inherit;cursor:pointer;text-decoration:underline">'
+    btn_style = (
+        "color:#1a7f37;background:none;border:none;padding:0;font:inherit;"
+        "cursor:pointer;text-decoration:underline"
+    )
+    # Нижняя кнопка «Показать ещё (N)» — ПРЯМОЙ сосед скрытого span? НЕТ:
+    # ячейка обёрнута в .models-cell, а скрытый span ищется по классу
+    # (querySelector), поэтому кнопки могут стоять в любом месте ячейки.
+    # Нижняя кнопка — сразу после span (дочерний порядок: shown/скрытый
+    # span/нижняя кнопка) — визуально под списком; верхняя «Свернуть»
+    # (btn_top) стоит сразу после видимых строк (до span) и скрыта, пока
+    # список свёрнут (display:none — показывается при развороте, см. JS).
+    btn_bottom = (
+        f'<button type="button" class="models-toggle" onclick="models_toggle(this)" '
+        f'data-models-count="{len(models)}" style="{btn_style}">'
         f"Показать ещё ({n})</button>"
     )
-    return f'{shown}<span class="models-extra" style="display:none">{extra}</span>{btn}'
+    btn_top = (
+        f'<button type="button" class="models-collapse-top" style="display:none" '
+        f'onclick="models_toggle(this)" data-models-count="{len(models)}" '
+        f'style="{btn_style}">Свернуть</button>'
+    )
+    return (
+        f'<span class="models-cell">{shown}{btn_top}'
+        f'<span class="models-extra" style="display:none">{extra}</span>{btn_bottom}</span>'
+    )
 
 
 def _api_html(api: dict | None) -> str:
@@ -281,9 +303,10 @@ def _cost_cell_html(row: dict) -> str:
     (бесплатная модель) / токены ещё не накоплены (0/0 — после «Сбросить»)
     → серая «—»: рендер различать эти случаи не обязан, главное — нулевая
     цена не роняет рендер. Серая «—» выводится и при нечитаемом/пустом
-    файле тарифов. Ячейка НЕ несёт data-атрибута и не обновляется JS
-    usage_poll (счётчики обновляются; Cost — производная, пересчитается
-    при следующем полноценном рендере страницы)."""
+    файле тарифов. Тот же HTML используется и для live-обновления: каждый
+    снимок /api/model-usage/snapshot несёт cost_html = _cost_cell_html(строка)
+    на текущий момент, JS usage_poll подставляет его в ячейку Cost — значение
+    меняется синхронно с ростом токенов (см. UsageSnapshotEndpoint)."""
     tokens_in = max(int(row.get("input_tokens", 0) or 0), 0)
     tokens_out = max(int(row.get("output_tokens", 0) or 0), 0)
     if tokens_in <= 0 and tokens_out <= 0:
@@ -635,8 +658,10 @@ def _render_status_page(
 
     # Live-счётчики секции Models in use: JS usage_poll каждые 5 с опрашивает
     # лёгкий /api/model-usage/snapshot (model_usage.usage_snapshot() — копии
-    # строк из памяти, сети к бэкендам нет) и обновляет ТОЛЬКО ячейки
-    # счётчиков (Вызовов/Input/Output) — без перезагрузки страницы. Строки
+    # строк из памяти, сети к бэкендам нет) и обновляет ячейки счётчиков
+    # (Вызовов/Input/Output) и Cost — без перезагрузки страницы. Cost в
+    # снимке — готовый HTML (_cost_cell_html на токены снимка): серверный
+    # рендер и поллинг используют ОДИН форматтер, расхождений нет. Строки
     # сопоставляются ПОЗИЦИОННО: и рендер, и снимок идут в порядке первого
     # обращения (usage_snapshot), поэтому экранирование имён не мешает.
     # Число строк изменилось (строка сброшена/добавлена) либо в таблице
@@ -670,7 +695,9 @@ def _render_status_page(
         for (var i = 0; i < trs.length; i++) {{
           var row = rows[i];
           var cells = trs[i].getElementsByTagName("td");
-          // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output
+          // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output,
+          // 5 Cost (cost_html — готовый HTML с сервера: токены × тариф
+          // на текущий момент; пересчитывается в каждом снимке)
           var set = function (idx, val) {{
             if (cells[idx] && String(cells[idx].textContent) !== String(val)) {{
               cells[idx].textContent = val;
@@ -679,6 +706,7 @@ def _render_status_page(
           set(2, row["calls"]);
           set(3, compact_fmt(row["input_tokens"]));
           set(4, compact_fmt(row["output_tokens"]));
+          set(5, row["cost_html"]);
         }}
         setTimeout(usage_poll, 5000);
       }})
@@ -703,14 +731,17 @@ def _render_status_page(
 </style>
 <script>
   function models_toggle(btn) {{
-    var span = btn.previousElementSibling;
-    if (span && span.classList.contains("models-extra")) {{
-      var expanded = span.style.display !== "none";
-      span.style.display = expanded ? "none" : "block";
-      btn.textContent = expanded
-        ? "Показать ещё (" + (btn.dataset.modelsCount - {MODEL_LINES}) + ")"
-        : "Свернуть";
+    var cell = btn.closest(".models-cell");
+    var span = cell.querySelector(".models-extra");
+    var tops = cell.querySelectorAll(".models-collapse-top");
+    var expanded = span.style.display !== "none";
+    span.style.display = expanded ? "none" : "block";
+    for (var j = 0; j < tops.length; j++) {{
+      tops[j].style.display = expanded ? "none" : "block";
     }}
+    btn.textContent = expanded
+      ? "Показать ещё (" + (btn.dataset.modelsCount - {MODEL_LINES}) + ")"
+      : "Свернуть";
   }}
 </script>
 {poll_script}
@@ -947,9 +978,13 @@ class UsageSnapshotEndpoint(webserver.Endpoint):
 
     Лёгкий ответ для JS usage_poll на статус-странице:
     model_usage.usage_snapshot() — список строк таблицы (calls/input_tokens/
-    output_tokens/endpoints/…) в порядке первого обращения. GET ничего не
-    мутирует (кроме ленивой загрузки таблицы при первом обращении) и не
-    ходит в сеть к бэкендам — безопасно опрашивать каждые 5 с."""
+    output_tokens/endpoints/…) в порядке первого обращения, каждая строка
+    дополнена полем cost_html — готовым HTML ячейки Cost на ТЕКУЩИЙ момент
+    (см. _cost_cell_html: токены строки × тариф на лету): поллинг обновляет
+    и ячейку Cost, а не только счётчики — значение меняется синхронно с
+    ростом токенов. GET ничего не мутирует (кроме ленивой загрузки таблицы
+    при первом обращении) и не ходит в сеть к бэкендам — безопасно
+    опрашивать каждые 5 с."""
 
     prefix = "/api/model-usage/snapshot"
 
@@ -957,7 +992,10 @@ class UsageSnapshotEndpoint(webserver.Endpoint):
         self.context = context
 
     def GET(self, handler, remainder: str):
-        body = json.dumps(model_usage.usage_snapshot()).encode("utf-8")
+        rows = model_usage.usage_snapshot()
+        for r in rows:
+            r["cost_html"] = _cost_cell_html(r)
+        body = json.dumps(rows).encode("utf-8")
         handler._write(200, "application/json; charset=utf-8", body)
 
 

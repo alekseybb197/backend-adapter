@@ -455,9 +455,10 @@ class TestModelsCell:
         config, ws = _fresh_modules()
         models = [f"m{i}" for i in range(7)]
         html = ws._models_html(models, "ok")
-        # первые MODEL_LINES строк — видимые div'ы (вне скрытого span)
-        visible = html.split('<span class="models-extra"')[0]
-        assert visible.count('<div style="line-height:1.5">') == ws.MODEL_LINES
+        # видимые строки (до скрытого span и верхней кнопки) — первые
+        # MODEL_LINES div'ов
+        head = html.split('<button type="button" class="models-collapse-top"')[0]
+        assert head.count('<div style="line-height:1.5">') == ws.MODEL_LINES
         assert '<span class="models-extra" style="display:none">' in html
         # в скрытом span — остальные (7 - MODEL_LINES) строк
         extra = html.split('<span class="models-extra" style="display:none">')[1]
@@ -467,12 +468,52 @@ class TestModelsCell:
         # кнопка вызывает models_toggle и несёт общее число моделей
         assert 'onclick="models_toggle(this)"' in html
         assert 'data-models-count="7"' in html
-        # кнопка — ПРЯМОЙ сосед скрытого span (сразу после </span>): иначе
-        # models_toggle (btn.previousElementSibling) не найдёт span и кнопка
-        # «Показать ещё» не сработает
+        # в развёрнутом виде колонка получает и ВЕРХНЮЮ «Свернуть»: кнопка
+        # сразу после видимых строк (до скрытого span), display:none, пока
+        # список свёрнут; класс — models-collapse-top (для JS models_toggle).
+        # Верхняя и нижняя кнопки несут data-models-count (общее число моделей).
+        visible, rest = html.split('<button type="button" class="models-collapse-top"', 1)
+        # видимая часть до верхней кнопки — первые MODEL_LINES строк
+        assert visible.count('<div style="line-height:1.5">') == ws.MODEL_LINES
+        assert 'style="display:none"' in rest.split(">", 1)[0]
+        assert 'data-models-count="7"' in rest.split(">", 1)[0]
+        assert html.count('onclick="models_toggle(this)"') == 2
+        assert html.count("Свернуть") == 1  # только текст верхней кнопки
+        # нижняя кнопка — сразу после </span> скрытого блока (под списком)
         assert html.split("</span>", 1)[1].lstrip().startswith("<button")
         assert "/session?model=" not in html  # иконок-ссылок нет
         assert "📋" not in html
+
+    def test_collapse_top_hidden_in_collapsed_and_toggled_by_js(self):
+        # Полная страница: верхняя «Свернуть» есть в разметке (скрыта) и JS
+        # models_toggle переключает её видимость вместе со скрытым span —
+        # класс .models-collapse-top ищется внутри .models-cell, кнопки внизу
+        # достаточно для сворачивания (работают обе).
+        config, ws = _fresh_modules()
+        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {f"m{i}": ("AAA", backend) for i in range(8)}
+        ctx = mock.Mock(version="0.0.0-test")
+        body = ws._render_status_page(ctx, refresh=_done_job(True, 8)).decode()
+        # models-cell оборачивает колонку; JS ищет span и верхнюю кнопку по
+        # классам внутри ячейки (btn.closest(".models-cell") + querySelector)
+        assert '<span class="models-cell">' in body
+        assert '<span class="models-extra" style="display:none">' in body
+        assert 'class="models-collapse-top"' in body
+        assert 'btn.closest(".models-cell")' in body
+        assert 'cell.querySelector(".models-extra")' in body
+        assert 'cell.querySelectorAll(".models-collapse-top")' in body
+        # верхняя кнопка идёт ДО скрытого span (над списком), нижняя — после
+        # (ищем в РАЗМЕТКЕ — от первого .models-cell; «models-extra» в
+        # docstring _models_html идёт раньше и в счёт не входит)
+        cell_markup = body[body.index('<span class="models-cell">'):]
+        top_pos = cell_markup.index('class="models-collapse-top"')
+        extra_pos = cell_markup.index('class="models-extra"')
+        bottom_pos = cell_markup.index("Показать ещё")
+        assert top_pos < extra_pos < bottom_pos
+        # у развёрнутой колонки — «Свернуть» и сверху, и снизу (нижняя кнопка
+        # меняет текст на «Свернуть» в JS, верхняя имеет текст сразу)
+        assert "Свернуть" in body
 
     def test_empty_shows_status_text(self):
         # Нет моделей — строка-заглушка со статусом (для колонки Models).
@@ -491,9 +532,14 @@ class TestModelsCell:
         ctx = mock.Mock(version="0.0.0-test")
         body = ws._render_status_page(ctx, refresh=_done_job(True, 6)).decode()
         assert "function models_toggle(btn)" in body
-        assert "Свернуть" in body  # JS меняет текст кнопки на «Свернуть»
+        assert "Свернуть" in body  # и в JS, и в разметке верхней кнопки
         # первая модель видна строкой, а её хвост свёрнут в models-extra
         assert "m0" in body and '<span class="models-extra" style="display:none">' in body
+        # скрытая верхняя «Свернуть» есть у свёрнутой колонки (развернёт JS)
+        assert 'class="models-collapse-top"' in body
+        assert body.index('class="models-collapse-top"') < body.index(
+            'class="models-extra"'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1918,3 +1964,54 @@ class TestUsageSnapshotAPI:
                     httpd.server_close()
         assert m_start.call_count == 0
         assert m_refresh.call_count == 0
+
+    def test_snapshot_row_carries_cost_html(self, tmp_path):
+        # Снимок дополняет каждую строку полем cost_html — HTML ячейки Cost
+        # на ТЕКУЩИЙ момент (токены строки × тариф): JS usage_poll ставит его
+        # в ячейку Cost (индекс 5) — значение меняется синхронно со счётчиками.
+        config, ws = _fresh_modules()
+        # строка без тарифа → cost_html — серая «—» (как у _cost_cell_html)
+        self._seed_row("m-dash", calls=1, input_tokens=1000, output_tokens=500)
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            import json
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            rows = json.loads(body)
+            assert rows[0]["cost_html"] == '<span style="color:#aaa">—</span>'
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_snapshot_cost_html_tracks_updated_tokens(self, tmp_path):
+        # cost_html пересчитывается на каждом запросе снимка из ТЕКУЩИХ токенов
+        # строки: тариф задан, токены выросли → следующее обращение к
+        # эндпоинту возвращает новую стоимость (сервер не кэширует старое).
+        config, ws = _fresh_modules()
+        from backend_adapter import model_usage
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m-snap", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        self._seed_row("m-snap", calls=1, input_tokens=1000, output_tokens=2000)
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            import json
+            # 0,25·? — нет: 10·1000/1e6 + 20·2000/1e6 = 0,01 + 0,04 = «0,05 USD»
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            row = json.loads(body)[0]
+            assert row["cost_html"] == "0,05 USD"
+            # токены выросли (живая строка в памяти — как после реальных
+            # запросов) → следующий снимок даёт актуальную стоимость
+            with model_usage._TABLE_LOCK:
+                model_usage._TABLE["m-snap"]["input_tokens"] = 1_000_000
+                model_usage._TABLE["m-snap"]["output_tokens"] = 2_000_000
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            row = json.loads(body)[0]
+            # 10·1e6/1e6 + 20·2e6/1e6 = 10 + 40 = «50,00 USD»
+            assert row["cost_html"] == "50,00 USD"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

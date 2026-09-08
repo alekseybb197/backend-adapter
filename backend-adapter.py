@@ -195,31 +195,33 @@ if __name__ == "__main__":
     # Дефолтный SIGINT кидает KeyboardInterrupt в главный поток — serve_forever
     # выходит, finally выполняет вежливое завершение. Проблема была в том, что
     # ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
-    # запись: Python кидает KI в главный поток, где бы тот ни был. Решение:
-    # как только начали завершение, переключаем SIGINT/SIGTERM на немедленный
-    # выход (os._exit) — повторный сигнал больше не может прервать flush_table,
-    # а просто тихо завершает процесс. SIGTERM (systemd/launchd/kill) по
-    # умолчанию убивает процесс МГНОВЕННО, без finally — перехватываем его
-    # как KeyboardInterrupt, чтобы штатное завершение сохраняло usage-хвост
-    # и останавливало слушатели.
+    # запись: Python кидает KI в главный поток, где бы тот ни был. Решение
+    # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см. ADR):
+    # (1) SIGTERM перехватывается на KeyboardInterrupt (как Ctrl-C) — иначе
+    # systemd/launchd/kill убивают процесс мгновенно, без finally, и
+    # usage-хвост теряется; (2) как только начали завершение, SIGINT/SIGTERM
+    # переключаются на немедленный os._exit(130) — повторный сигнал не может
+    # прервать flush_table, а просто тихо завершает процесс.
+    from backend_adapter.shutdown import graceful_shutdown, install_signal_handlers
 
-    def _force_exit(_signum, _frame):
-        # Сигнал во время завершения: выходим немедленно. os._exit минует
-        # обработчики/буферы Python — процесс умирает сразу, без дампа стека
-        # и без прерывания текущей записи (файл останется с .tmp-хвостом,
-        # следующий запуск перезапишет его — см. model_usage._atomic_write_yaml).
-        os._exit(130)
+    install_signal_handlers(graceful=True)
 
-    def _graceful_signal(_signum, _frame):
-        # SIGTERM → вежливое завершение, как Ctrl-C: KeyboardInterrupt
-        # пробрасывается в главный поток из serve_forever (PEP 475).
-        raise KeyboardInterrupt
+    def _finish():
+        # Финальный этап вежливого завершения: остановить фоновую проверку
+        # бэкендов (дождаться текущего цикла, чтобы снимок состояния и кэши
+        # моделей/эндпоинтов были консистентны на момент выхода; поток daemon
+        # — если не успел за таймаут, процесс завершится сам, воркер
+        # оборвётся) и сохранить «грязный» хвост таблицы использованных
+        # моделей в model-usage.yaml. Устойчив к прерыванию (см. flush_table).
+        # Ошибки не пробрасываются: завершение не должно падать.
+        try:
+            from backend_adapter import model_usage as _model_usage
+            from backend_adapter import config as _cfg
 
-    if threading.current_thread() is threading.main_thread():
-        # SIGTERM → вежливое завершение, как Ctrl-C. Хэндлер ставится только
-        # в main-потоке: в других потоках signal.signal кидает ValueError.
-        with contextlib.suppress(ValueError):
-            signal.signal(signal.SIGTERM, _graceful_signal)
+            _cfg.stop_refresh(timeout=2.0)
+            _model_usage.flush_table()
+        except BaseException:  # noqa: BLE001 — завершение не должно падать
+            pass
 
     with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
         try:
@@ -227,36 +229,15 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
         finally:
-            # С этого момента повторный Ctrl-C/SIGTERM = немедленный выход:
-            # завершение (shutdown слушателей, flush таблицы) прервать нельзя.
-            if threading.current_thread() is threading.main_thread():
-                with contextlib.suppress(ValueError):
-                    signal.signal(signal.SIGINT, _force_exit)
-                    signal.signal(signal.SIGTERM, _force_exit)
-            try:
-                from backend_adapter import model_usage as _model_usage
-                from backend_adapter import config as _cfg
-
-                # Вежливая остановка фоновых слушателей: shutdown() ждёт
-                # завершения активных обработчиков (успевают дочитать ответ),
-                # новые запросы не принимаются; serve_forever в daemon-потоках
-                # выходит по shutdown-событию.
-                if webui is not None:
-                    webui.shutdown()
-                    webui.server_close()
-                if ADAPTER_EXPORTER_ENABLE and exporter is not None:
-                    exporter.shutdown()
-                    exporter.server_close()
-                # Фоновая проверка бэкендов: дождаться текущего цикла, чтобы
-                # снимок состояния и кэши моделей/эндпоинтов были
-                # консистентны на момент выхода (поток daemon — если не успел
-                # за таймаут, процесс завершится сам, воркер оборвётся).
-                _cfg.stop_refresh(timeout=2.0)
-            except BaseException:  # noqa: BLE001 — завершение не должно падать
-                pass
-            # Финальный flush таблицы использованных моделей: штатное
-            # завершение (в т.ч. Ctrl-C) всегда сохраняет «грязный» хвост
-            # в model-usage.yaml (см. backend_adapter/model_usage.py).
-            # Устойчив к прерыванию (см. flush_table).
-            _model_usage.flush_table()
+            # Переключение сигналов + остановка слушателей + фоновой проверки
+            # + финальный flush usage-таблицы (см. shutdown.graceful_shutdown:
+            # остановки по отдельности глотают ошибки, процедуру прервать
+            # нельзя — повторный сигнал уже = немедленный os._exit(130)).
+            graceful_shutdown(
+                httpd,
+                webui,
+                exporter,
+                ADAPTER_EXPORTER_ENABLE,
+                _finish,
+            )
             print("\n[EXIT] Bye")
