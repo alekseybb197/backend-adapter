@@ -39,11 +39,11 @@ backend_adapter/
 │                             (reprobe); персистентный YAML (version: 2, миграция v1)
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
 │                             "/api/model-usage/reset", "/api/model-usage/reprobe",
-│                             "/api/model-usage/reprobe-state",
+│                             "/api/model-usage/delete", "/api/model-usage/reprobe-state",
 │                             "/api/model-usage/snapshot": status page (version,
 │                             LLM endpoints, models) + background-check state +
 │                             секция «Models in use» (live-счётчики, сброс
-│                             счётчиков/перепроверка)
+│                             счётчиков/перепроверка/удаление строки)
 ├── webui_ops.py            ← WEBUI health endpoints "/healthz", "/health", "/live",
 │                             "/ready" (200/503 JSON; readiness по _BACKENDS/
 │                             _AVAILABLE_MODELS) — см. §6.7
@@ -135,21 +135,25 @@ Claude Code (Anthropic API client)
 4. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
    (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
    `0.0.0.0` — all interfaces)
-5. Log directory `ADAPTER_DEBUG_LOGPATH` (empty — **file logging off**: console
-   debug blocks still visible at `ADAPTER_DEBUG_ENABLE=1`, no directory is created):
-   when set, created when `ADAPTER_DEBUG_ENABLE=1` (master switch — at `0` nothing is
-   written and the folder is NOT created); points at an existing **file** →
+5. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
+   empty/unset — the path is always non-empty; v0.8.6): created unconditionally at
+   startup (it doubles as the WEBUI root); **file** logging of sessions/traces/dumps
+   only happens at `ADAPTER_DEBUG_ENABLE=1` (master switch of the *file* write —
+   console debug logs are unconditional); points at an existing **file** →
    `[FATAL]` + hint + `sys.exit(1)` (the path is always a directory).
-6. If `ADAPTER_WEBUI_ENABLE=1` (default): start the WEBUI in a daemon thread via
+6. Start the WEBUI in a daemon thread via
    `webserver.serve(root, __version__)` on `ADAPTER_WEBUI_HOST:<ADAPTER_WEBUI_PORT>`
    (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
-   careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` when set,
-   otherwise an independent `./tmp/webui` (created on demand — status page `/`
-   works out of the box; `/session` is empty until logs exist; endpoints: `/` —
+   careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` — the WEBUI
+   is always started, there is no disable flag (v0.8.6; `ADAPTER_WEBUI_ENABLE`
+   removed; `/session` is empty until file logging is enabled and logs exist;
+   endpoints: `/` —
    status, `/session` — session viewer, `/config` — runtime-config form,
    `/api/refresh-state` — JSON state of the background check, see §6.5,
    `/api/model-usage/reset` — zeroes a used-model row's counters (row is kept),
    `/api/model-usage/reprobe` — background row re-probe,
+   `/api/model-usage/delete` — removes a used-model row from the table and
+   the YAML file (not kept),
    `/api/model-usage/reprobe-state` — its JSON state, see §6.6).
    The used-models table persists to `model-usage.yaml` (version: 2, v1 migrated)
    in `root`.
@@ -430,7 +434,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие strict-проверку
   (HTTP 400), и служебные дымовые пробы эндпоинтов токенов не дают.
 - **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
-  в корне WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`); файл
+  в корне WEBUI (= `ADAPTER_DEBUG_LOGPATH`, дефолт `./tmp/logs`); файл
   несёт версию формата (`version: 2`, строки — под ключом `models`). Точка
   синхронизации пути — `webserver.serve()` (`set_persist_path(root_dir)`;
   в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении
@@ -445,7 +449,10 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   Сохранение «грязной» таблицы — не чаще раза в
   `config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL` (сек, дефолт 300); создание
   строки, обнуление счётчиков строки (`reset_model`: calls/input_tokens/
-  output_tokens → 0, строка НЕ удаляется), завершение перепроверки
+  output_tokens → 0, строка НЕ удаляется), удаление строки (`delete_model`:
+  `del _TABLE[model]` под `_TABLE_LOCK` + `_DIRTY=True`, файл
+  перезаписывается без строки — в отличие от reset, строка уходит и из
+  памяти, и из YAML), завершение перепроверки
   (`_save_table(force=True)`) и завершение работы (`flush_table`, в т.ч.
   Ctrl-C) сохраняют сразу. Строки с `probing: True` на диск не попадают;
   запись атомарная (tmp + `os.replace`). Загруженные строки не
@@ -469,7 +476,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
   строк в порядке первого обращения; первый вызов после старта загружает
   таблицу из YAML. Колонки: Модель | Бэкенд | Вызовов | Input | Output |
-  **Endpoints** | Действия (7). Endpoints — одна колонка: только доступные
+  Cost | **Endpoints** | Actions (8). Endpoints — одна колонка: только доступные
   эндпоинты строки короткими именами через запятую (зелёным, порядок
   `config.ENDPOINT_PROBES`; ничего доступного — серая «—»). Токеновые
   колонки рендерятся форматтером `_fmt_tokens` (точное число с неразрывным
@@ -496,8 +503,10 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   `errors`, `_DIRTY = True` + `_save_table(force=True)`; **calls и токены не
   трогает** — проба служебная, не обращение агента; найденные эндпоинты
   синхронизируются в `config._ENDPOINT_STATE` (§6.4); исключения ловятся).
-  Не-JSON (кнопка «Перепроверить» в колонке «Действия» рядом со «Сбросить»,
-  две формы в одной ячейке) — 303 See Other на GET `/` (PRG); JSON — 202
+  Не-JSON (кнопки-иконки в колонке Actions: ⟳ «Перепроверить» / ↺
+  «Сбросить» / ✕ «Удалить» — три отдельные формы в одной ячейке,
+  `_actions_cell_html` по `_ACTIONS`; тексты-фразы в `title`/`aria-label`)
+  — 303 See Other на GET `/` (PRG); JSON — 202
   «запущено», 404 «нет строки / уже идёт / первая проба ещё выполняется»,
   400 «нет model». Пока перепроверка идёт: баннер «Перепроверка модели X…»,
   в строке — серый «проверяется…» вместо кнопок; JS `reprobe_poll`
@@ -505,6 +514,19 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   JSON из `model_usage.reprobe_state()`: running/model/started_at) каждые
   ~2 с и делает `location.reload()` по завершении — состояние живёт в
   `model_usage`, не в `config.refresh_state()`.
+- **Удаление строки (delete)** — `POST /api/model-usage/delete?model=<имя>`
+  (`ModelUsageDeleteEndpoint`, по образцу reset): `model_usage.delete_model`
+  — под `_TABLE_LOCK`: `_ensure_loaded_locked()` + `del _TABLE[model]` +
+  `_DIRTY=True`; вне лока `_save_table(force=True)` (файл сразу без строки).
+  Чистка `config._ENDPOINT_STATE` НЕ требуется: кэш доступности эндпоинтов —
+  общий на бэкенд, не по моделям (стирание было бы гонкой с фоновой пробой).
+  Безопасен при идущей перепроверке строки (`reprobe_model` в finally
+  увидит `row is None` и не мутирует). Не-JSON (кнопка ✕) — 303 на GET `/`
+  (PRG); JSON — 200 `{"ok": true, "model": ...}` при удалении, 404 «строки
+  нет» (повторное удаление — строка уже ушла; delete НЕ идемпотентен, в
+  отличие от reset), 400 «нет model». GET на префикс — 404. Сброс/удаление
+  не совмещены: reset обнуляет счётчики и сохраняет строку, delete убирает
+  строку целиком.
 
 ### 6.7 Health-эндпоинты (`webui_ops.py`, `/healthz` `/health` `/live` `/ready`)
 
@@ -601,29 +623,26 @@ Trace event `tool_result` includes `parent_req_id` — `null` if the producer wa
 
 ### 8.1 Debug logging (`logger.py`)
 
-`_d(msg)` — timestamped message, optionally prefixed with `[req_id]` (`_dr`)
+`_d(msg)` / `_dr(req_id, msg)` — timestamped console+file debug log (`_write`)
 
-- Goes to stdout if `ADAPTER_DEBUG_ENABLE=1` (master switch — console blocks are
-  independent of disk logging)
-- Written to per-session `session-<ts>-<sid>.log` files in the `ADAPTER_DEBUG_LOGPATH`
-  directory (only when set — empty means file logging is off, no directory is
-  created) when `ADAPTER_DEBUG_ENABLE=1`
+- **Console: unconditional** (always printed — v0.8.6), **trimmed** to
+  `ADAPTER_DEBUG_TRIM` chars (`0` = no trim)
+- **File**: per-session `session-<ts>-<sid>.log` in `ADAPTER_DEBUG_LOGPATH`,
+  written **only** when `ADAPTER_DEBUG_ENABLE=1` — and carrying the **FULL
+  line, untrimmed**: the file channel is inherently full-part (v0.8.6 reform)
 - All messages pass through `redact()` to mask secrets (unless `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`)
 
-The write-volume flags below are **runtime-switchable**: the WEBUI endpoint
+The runtime flags below are **runtime-switchable**: the WEBUI endpoint
 `/config` re-reads them live (see §8.6) instead of restarting the adapter.
 
-Debug flags:
+Debug flags (runtime pool):
 
 | Flag | Purpose |
 |---|---|
-| `ADAPTER_DEBUG_BODY_FULL` | Full Anthropic request body (no trim) |
-| `ADAPTER_DEBUG_OPENAI_BODY_FULL` | Full OpenAI request body |
-| `ADAPTER_DEBUG_RESPONSE_FULL` | Full responses (both stream and non-stream) |
-| `ADAPTER_DEBUG_TOOLS` | Full tool result content for all results |
-| `ADAPTER_DEBUG_TOOLS_ERROR` | Full tool error details (default: off — zero-config does not process collected logs) |
-| `ADAPTER_DEBUG_TOOLS_RESPONSE_FULL` | No trim on tool result content |
-| `ADAPTER_DEBUG_TRIM` | Max chars for trimmed logs (default: 3000) |
+| `ADAPTER_DEBUG` | File logging master switch (full parts, no trim) |
+| `ADAPTER_DEBUG_PARTS` | Per-session `.json`+`.yaml` dumps of all logged protocol parts |
+| `ADAPTER_DEBUG_TRIM` | Console trim limit in chars (0 = no trim; default 3000) |
+| `ADAPTER_SENSITIVE_LOGGING_ENABLE` | Disables the redaction sanitizer (1 = raw secrets) |
 
 ### 8.2 Structured trace (`tracer.py`)
 
@@ -691,16 +710,25 @@ Long base64/hex strings may also be matched.
   (adapter startup when `ADAPTER_DEBUG_ENABLE=1`, and/or at first write);
   empty (default) — no directory, no disk writes
 
-### 8.5 Per-request OpenAI body JSON dump (`ADAPTER_DEBUG_OPENAI_BODY_JSON`)
+### 8.5 Per-session protocol dumps — `ADAPTER_DEBUG_PARTS` (`.json` + `.yaml` pairs)
 
-When enabled, writes complete OpenAI-format request bodies as numbered JSON files alongside the session log files.
+`ADAPTER_DEBUG_PARTS=1` (plus the master switch `ADAPTER_DEBUG_ENABLE=1`) enables
+per-session dumps of **all** logged protocol parts — there is no fixed tag list
+anymore (the old `ADAPTER_DEBUG_TAGS_FULL` / `ADAPTER_DEBUG_TAGS_OUT_ALL`
+selectors were removed in the v0.8.6 logging reform).
 
-- Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch) and the log directory
-  `ADAPTER_DEBUG_LOGPATH` is set (created on demand)
+- Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch for file writes) and
+  the log directory `ADAPTER_DEBUG_LOGPATH` is set (created on demand)
 - Creates `session-<datetime>-<sessid8>.parts/` directory next to the session log files
-- Writes `openai-NNNN.json` for each POST `/v1/messages` request with full body
+- Writes a **pair** of files per logged part — `.json` (machine-readable,
+  `json.dumps(indent=2)`) and `.yaml` (human-readable) — via
+  `session_log.write_debug_json(session_id, tag, data)`; tags: `BODY`,
+  `TOOL_RESULT` (one full dict per result, including errors — the separate
+  `TOOL_RESULT_ERROR` tag is gone), `OPENAI_BODY`, `FETCH_RAW`, `RESPONSE`
+  (stream: aggregated snapshot). Dumps carry full data, no trimming
 - Thread-safe: uses `threading.Lock` on the per-session counter
-- Uses `json.dump(indent=2)` for readable formatting
+- Full lines also land in `session-*.log` (`.parts` dumps are the machine-readable
+  twin of the debug blocks)
 
 ### 8.6 Runtime config pool + WEBUI endpoint `/config` (`webui_config_api.py`)
 
@@ -710,10 +738,10 @@ and strict-models switches), flip-able without restarting the adapter:
 
 | Type | Variables |
 |---|---|
-| bool | `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`, `ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR` |
+| bool | `ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS` |
 | bool | `ADAPTER_SENSITIVE_LOGGING_ENABLE`, `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS` |
 | int | `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS` |
-| str | `ADAPTER_DEBUG_TAGS_FULL` (env-format `"TAG1,TAG2"`; empty = reset) |
+| *(none)* | no string members — the old detail selectors were removed (v0.8.6) |
 
 - `get_runtime_config()` — snapshot dict `{name: value}`; `set_runtime_config(**kw)`
   type-validates against `_RUNTIME_CONFIG_TYPES` and silently ignores out-of-pool
@@ -721,18 +749,16 @@ and strict-models switches), flip-able without restarting the adapter:
   re-assigns `config` module globals. Returns the post-state dict.
 - **Readers must read live** — `config.ADAPTER_X` module attribute at call time,
   not `from .config import X` import-time snapshots. All pool consumers were
-  refactored to live reads: `logger.py` (`_d` gating), `server.py`,
-  `convert.py`, `streaming.py`, `tracer.py`. The single non-scalar pool member,
-  `ADAPTER_DEBUG_TAGS_FULL`, is stored as the env-format string (the pool's
-  public value) plus a live `frozenset` `_ADAPTER_DEBUG_TAGS_FULL_SET` that
-  `_trim_limit()` consults — `set_runtime_config()` recomputes it in place.
+  refactored to live reads: `logger.py` (`_write`/`trim_limit`), `server.py`,
+  `convert.py`, `streaming.py`, `tracer.py`.
 - Deliberately **excluded** from the pool: network, backend config/mapping,
   listen addresses/ports (`ADAPTER_PROXY_PORT`, `ADAPTER_ENDPOINT_HOST`,
   `ADAPTER_WEBUI_*`), timeouts/retries, detach/pidfile, `ADAPTER_DEBUG_LOGPATH`
   (directory identity must not change mid-flight — the session logger would
   write to a moving target).
 - Endpoint `webui_config_api.py` (`@webserver.register`, prefix `/config`): GET —
-  HTML form (4 bool checkboxes + 3 int inputs) with current pool values; POST —
+  HTML form (6 bool checkboxes + 3 int inputs, no string fields) with current
+  pool values; POST —
   `application/x-www-form-urlencoded` or JSON body → `set_runtime_config()`,
   response re-renders with a flash «Применено»/«Игнорировано» split. Links to
   the form: session tabs panel («config») and the status page `/` («runtime config →»).
@@ -790,7 +816,8 @@ backend-adapter.py
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
   ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state",
   │                       "/api/model-usage/snapshot", "/api/model-usage/reset",
-  │                       "/api/model-usage/reprobe", "/api/model-usage/reprobe-state"),
+  │                       "/api/model-usage/delete", "/api/model-usage/reprobe",
+  │                       "/api/model-usage/reprobe-state"),
   │                       config, model_usage
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   ├── webui_ops.py       → webserver (эндпоинты "/healthz" "/health" "/live" "/ready"),
@@ -824,5 +851,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.4** (WIP — группа v0.8.5 в разработке, see `backend-adapter.py`).
+Current: **v0.8.6** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

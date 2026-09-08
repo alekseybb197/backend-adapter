@@ -22,7 +22,7 @@
         <key>ADAPTER_PROXY_PORT</key>
         <string>9999</string>
         <key>ADAPTER_DEBUG_ENABLE</key>
-        <string>1</string>
+        <string>0</string>
         <key>ADAPTER_DETACH_ENABLE</key>
         <string>0</string>
         <key>ADAPTER_STREAMING_ENABLE</key>

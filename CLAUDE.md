@@ -39,13 +39,19 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `docs/logging.md`, `docs/sanitizing.md`, `docs/architecture.md`,
   `docs/webui.md`.
 - Версия объявляется в `backend-adapter.py` (`__version__`), история — в `changelog.md`.
-- **WEBUI** (`ADAPTER_WEBUI_ENABLE=1`): общее ядро `webserver.py` (роутинг эндпойнтов,
-  `serve()`, CLI `python -m backend_adapter.webserver`) + эндпойнт-модули: `/` =
+- **WEBUI** (поднимается всегда — флага отключения нет, v0.8.6): общее ядро `webserver.py`
+  (роутинг эндпойнтов, `serve()`, CLI `python -m backend_adapter.webserver`) +
+  эндпойнт-модули: `/` =
   `webui_status.py` (версия, LLM-эндпойнты, модели; секция «Models in use» —
-  таблица `model_usage.py` персистентна: YAML `model-usage.yaml` в корне WEBUI,
-  обнуление счётчиков строки — кнопка/POST `/api/model-usage/reset` (строка
-  не удаляется), перепроверка эндпоинтов строки — кнопка/POST
-  `/api/model-usage/reprobe`; счётчики Вызовов/Input/Output
+  таблица `model_usage.py` персистентна: YAML `model-usage.yaml` в корне WEBUI
+  (= `ADAPTER_DEBUG_LOGPATH`),
+  обнуление счётчиков строки — кнопка ⏪/POST `/api/model-usage/reset` (строка
+  не удаляется), удаление строки из таблицы и файла — кнопка 🗑/POST
+  `/api/model-usage/delete` (в отличие от reset строка уходит и из памяти,
+  и из YAML — файл перезаписывается сразу без неё), перепроверка
+  эндпоинтов строки — кнопка 🔄/POST `/api/model-usage/reprobe`; действия
+  строки — иконки-кнопки 🔄/⏪/🗑 в колонке Actions (фразы-подписи в
+  title/aria-label); счётчики Вызовов/Input/Output
   на открытой странице обновляются сами — JS usage_poll ~5 с → GET
   `/api/model-usage/snapshot`, без сети к бэкендам; проверка бэкендов —
   фоновая: при старте адаптера, на первом GET `/` и по кнопке
@@ -59,7 +65,7 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `/healthz` `/health` `/live` `/ready` = `webui_ops.py` (health-check на том же
   слушателе: JSON с версией/uptime/pid; `/ready` — 200 когда бэкенды настроены
   и кэш моделей непуст, иначе 503), `/session` = `session_viewer.py` (вкладки + раздача файлов + hash8-алиасы
-  `/session/<hash8>/...` и png/puml-шорткаты; корень — директория
+  `/session/<hash8>/...` и png/puml-шорткаты; корень — та же директория
   `ADAPTER_DEBUG_LOGPATH`, порт `ADAPTER_WEBUI_PORT`, адрес `ADAPTER_WEBUI_HOST`,
   daemon-поток в процессе адаптера), `/config` = `webui_config_api.py`
   (runtime-пул из 12 переменных — объём debug-записи, санитайзер, рубильники
@@ -78,9 +84,14 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   файлами сессии; большие сессии разбиваются на страницы пагинации
   `artefacts/pages/<N>/`.
   Новый эндпойнт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
-  Per-session дампы частей протокола включаются флагом `ADAPTER_DEBUG_TAGS_OUT=1`
-  (парные `.json`+`.yaml`, фиксированный список тегов), требуют
-  `ADAPTER_DEBUG_ENABLE=1` и директорию `ADAPTER_DEBUG_LOGPATH`.
+  Консольные debug-логи безусловны (печатаются всегда — v0.8.6) и обрезаются
+  до `ADAPTER_DEBUG_TRIM` (0 — без обрезки); `ADAPTER_DEBUG_ENABLE` гейтит
+  только файловую запись (дефолт `0`): `session-*.log` несёт ПОЛНЫЕ строки
+  без обрезки, `*.jsonl` — trace. Per-session дампы частей протокола
+  (парные `.json`+`.yaml`, ВСЕ логгируемые части — фиксированного списка
+  тегов больше нет) включаются флагом `ADAPTER_DEBUG_PARTS=1`;
+  файлы пишутся только при `ADAPTER_DEBUG_ENABLE=1` в директорию
+  `ADAPTER_DEBUG_LOGPATH`.
 - Примеры конфигов — в `docs/samples/`: `sample.adapter.env` (env-файл
   адаптера), `sample.adapter.yaml` (конфиг бэкендов), шаблоны продакшена
   `backend-adapter.service` (systemd, запуск из исходников) и
@@ -126,6 +137,238 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+### 2026-09-08 — Реформа логирования: консоль с TRIM / файл полный; удалены TAGS_FULL·TOOLS·TOOLS_ERROR; TAGS_OUT → ADAPTER_DEBUG_PARTS; иконки строк 🔄/⏪/🗑 (v0.8.6)
+
+**Контекст:** после того как консольные debug-логи стали безусловными (v0.8.6),
+устарели прежние «селекторы подробности»: в КОНСОЛЬ (всегда печатается)
+обрезка `ADAPTER_DEBUG_TRIM` гейтилась исключениями `ADAPTER_DEBUG_TAGS_FULL`
+(т.е. обрезка ограничивала единственный всегда-включённый канал); в ФАЙЛ
+(`ADAPTER_DEBUG_ENABLE=1`) попадали те же `_d`-строки — уже обрезанные,
+хотя файловый канал принципиально должен нести полные части;
+`ADAPTER_DEBUG_TOOLS`/`ADAPTER_DEBUG_TOOLS_ERROR` гейтили консольные
+content-блоки `[TOOL_RESULT]`/`[TOOL_RESULT_ERROR]`; `ADAPTER_DEBUG_TAGS_OUT`
+включал парные `.json+.yaml` дампы только для фиксированного списка тегов.
+Пользователь попросил упростить модель и сменить иконки действий строк.
+
+**Решение:**
+- **упрощённая модель логирования** — консоль: всегда, с обрезкой
+  `ADAPTER_DEBUG_TRIM` (`0` = выкл.); файл `session-*.log`: при
+  `ADAPTER_DEBUG_ENABLE=1`, ПОЛНЫЕ строки без обрезки (реформа затронула
+  `logger._d/_dr` → новый `_write(msg)`: в консоль — обрезанную копию с
+  redact, в файл — полную); `*.parts`-дампы `.json+.yaml`: при
+  `ADAPTER_DEBUG_ENABLE=1` + `ADAPTER_DEBUG_PARTS=1`, полные, для **всех**
+  логгируемых частей (BODY, TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE);
+- **удалены переменные и механизмы** — `ADAPTER_DEBUG_TAGS_FULL`
+  (+ `_parse_tags_full`/`_SET`/`_RAW`-представление), `ADAPTER_DEBUG_TOOLS`,
+  `ADAPTER_DEBUG_TOOLS_ERROR`, `ADAPTER_DEBUG_TAGS_OUT_ALL`, `_trim_limit(tag)`;
+  вместо тегового трима — `config.trim_limit()` (живое чтение
+  `ADAPTER_DEBUG_TRIM`, без тега); `ADAPTER_DEBUG_TAGS_OUT` переименован в
+  `ADAPTER_DEBUG_PARTS` (та же семантика: парные дампы, но для всех частей);
+- **`[TOOL_RESULT]` content-блок безусловен** — печатается для КАЖДОГО
+  результата единым блоком (summary остаётся); `[TOOL_RESULT_ERROR]` удалён
+  полностью (тег исчез из кода и *.parts-дампов); консольные служебные
+  print-блоки (`[INIT]`, `[REFRESH]`, `[ENDPOINT_PROBE]`) не тронуты;
+- **runtime-пул `/config`** — строковых полей больше нет: 6 bool
+  (`ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS`, `ADAPTER_SENSITIVE_LOGGING_ENABLE`,
+  `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`,
+  `ADAPTER_STRICT_MODELS`) + 3 int (`ADAPTER_DEBUG_TRIM`,
+  `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`);
+- **иконки действий строк таблицы «Models in use»** — в колонке Actions
+  глифы ⟳/↺/✕ заменены на 🔄 (U+1F504, reprobe), ⏪ (U+23EA, reset),
+  🗑 (U+1F5D1, delete, красный); текстовая кнопка «⟳ Перепроверить»
+  (POST `/`, проверка бэкендов) и глиф ⟳ в текстах/документации НЕ менялись.
+
+**Следствия:** канал «консоль» читается с обрезкой, канал «файл» несёт
+полные части — селекторы подробности больше не нужны; `.parts`-дампы по
+одному флагу покрывают все логгируемые части; одна строка лога на каждый
+tool result (ошибки и успехи единообразно). Поведение проксирования не
+меняется. Breaking change: удалены `ADAPTER_DEBUG_TAGS_FULL`,
+`ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR`; `ADAPTER_DEBUG_TAGS_OUT`
+→ `ADAPTER_DEBUG_PARTS`. Покрыто unit-тестами (logger: консоль с TRIM/файл
+полный; server: content-блок безусловен; config/webui: PARTS, удалённые
+имена; webui_status: новые глифы) и интеграционным прогоном
+(test_manual_check.py: консоль обрезана при малом TRIM, файл полный).
+Ветка feature/v0.8.6 готова к PR.
+
+### 2026-09-08 — Колонка Actions, иконки-действия строки, удаление модели из таблицы и файла (v0.8.6)
+
+**Контекст:** в таблице «Models in use» (WEBUI `/`) действия строки были
+текстовыми кнопками («Перепроверить», «Сбросить») в колонке «Действия»;
+сброс обнулял счётчики, но строку модели нельзя было убрать из таблицы и
+из персистентного YAML-файла. Пользователь попросил переименовать колонку
+в Actions, добавить удаление выбранной модели (рабочая таблица + файл на
+диске перезаписываются без строки) и заменить фразы кнопок символьными
+иконками.
+
+**Решение:**
+- **`model_usage.delete_model(model)`** — удаление строки по образцу
+  `reset_model`: под `_TABLE_LOCK` `_ensure_loaded_locked()` + `del
+  _TABLE[model]` + `_DIRTY = True`, вне лока `_save_table(force=True)` —
+  YAML-файл перезаписывается сразу без строки (в отличие от reset строка
+  уходит и из памяти, и с диска). Возвращает True, если строка
+  существовала. Безопасно при идущей reprobe (`reprobe_model` в finally
+  видит `row is None` и не мутирует). Чистка `config._ENDPOINT_STATE` не
+  нужна — кэш доступности эндпоинтов общий на бэкенд, не по моделям;
+- **колонка Actions + иконки-кнопки** — `<th>Действия</th>` →
+  `<th>Actions</th>` (8 колонок и позиции не меняются: Cost=5, Actions=7 —
+  usage_poll и позиционный парсинг интеграционного теста валидны);
+  `_actions_cell_html` собирает по `_ACTIONS` три POST-формы с
+  кнопками-иконками: ⟳ (U+27F3, reprobe), ↺ (U+21BA, reset), ✕ (U+2715,
+  delete — красный #c0392b); фразы-подписи ушли в `title`/`aria-label`.
+  Reprobing-ветка ячейки прежняя: серый «проверяется…», кнопок нет;
+- **`POST /api/model-usage/delete?model=<имя>`** — новый
+  `ModelUsageDeleteEndpoint` по образцу reset: JSON-клиент — 200
+  `{"ok": true, ...}` / 404 (строки нет — повторный delete не
+  идемпотентен, в отличие от reset) / 400 (нет model); кнопка ✕ (HTML-
+  форма) — 303 See Other на GET `/` (PRG); GET на префикс → 404;
+- переименование колонки не трогает текстовую кнопку «⟳ Перепроверить»
+  (POST `/`) — проверка бэкендов остаётся текстовой.
+
+**Следствия:** строку модели можно убрать из рабочей таблицы и из
+`model-usage.yaml` одной кнопкой/curl-ом; действия строки компактны и
+читаются по смыслу иконки (подпись — в tooltip); контракты reset/reprobe
+и поведение проксирования не меняются. Покрыто unit-тестами
+(TestDeleteModel, TestModelUsageDeleteAPI) и интеграционным прогоном
+(test_manual_check.py: delete через HTTP, строка исчезает со страницы).
+Ветка feature/v0.8.6 готова к PR.
+
+### 2026-09-08 — Замечания после graceful shutdown: тест завершения, интеграционный прогон в пуле тестов, Cost в live-поллинге, верхняя «Свернуть» (v0.8.6)
+
+**Контекст:** после фикса graceful shutdown (запись ниже) пользователь
+попросил: (1) контролировать завершение тестом; (2) объяснить смысл
+временного ручного скрипта проверки (tmp/) и — если он проверяет
+качество — добавить его в пул постоянных тестов; (3) колонка Cost на
+странице не считалась синхронно с обновлением счётчиков (висело «--»,
+пересчёт лишь при добавлении новой модели); (4) у развёрнутой колонки
+моделей ссылка «Свернуть» была только внизу.
+
+**Решение:**
+- **логика завершения вынесена в модуль `backend_adapter/shutdown.py`**
+  (хэндлеры/процедура были инлайном в backend-adapter.py, непокрываемым
+  тестами): `install_signal_handlers(graceful=True/False)`, `exit_code`,
+  `graceful_finish` (остановка слушателей + finish-коллбек, каждый шаг
+  глотает ошибки), `graceful_shutdown` (переключение сигналов + финиш +
+  закрытие httpd, код 0), `os_exit` (обёртка os._exit с NoReturn для
+  mypy-strict). backend-adapter.py вызывает модуль — контракт завершения
+  тот же. Тесты tests/test_shutdown.py: повторный сигнал → os._exit(130)
+  (в суба-процессе), KeyboardInterrupt → код 0 / прочее → 1, остановка
+  слушателей и finish, ошибка одного шага не блокирует остальные,
+  graceful_shutdown с моком установки сигналов;
+- **интеграционный прогон — постоянный тест `tests/test_manual_check.py`**
+  (маркер `manual`, зарегистрирован в pytest.ini): РЕАЛЬНЫЙ процесс
+  backend-adapter.py с fake-бэкендом — старт WEBUI/экспортёра без
+  ADAPTER_WEBUI_ENABLE, консоль при ENABLE=0, файловая запись при =1,
+  колонка Cost (значение из токенов × тарифов и после сброса — «--»),
+  сигнальное завершение (SIGINT/SIGTERM → rc=0 + «[EXIT] Bye» без
+  traceback, повторный SIGINT → rc=130). Выполняется и в общем прогоне
+  (~30 с) — сигнальный контракт реального процесса под постоянным
+  контролем;
+- **Cost обновляется синхронно со счётчиками**: `/api/model-usage/snapshot`
+  дополняет каждую строку полем `cost_html` = `_cost_cell_html(строка)` на
+  ТЕКУЩИЙ момент (серверный рендер и поллинг используют один форматтер —
+  расхождений нет), JS usage_poll ставит его в ячейку Cost (индекс 5)
+  вместо прежнего «только счётчики, Cost пересчитается при полном рендере»;
+- **верхняя «Свернуть»**: колонка моделей обёрнута в `<span class=
+  "models-cell">`; при развороте над списком появляется вторая ссылка
+  «Свернуть» (class `models-collapse-top`, скрыта, пока список свёрнут) —
+  JS models_toggle ищет span и верхнюю кнопку по классам внутри ячейки
+  (`btn.closest(".models-cell")` + `querySelector*`), а не по
+  `previousElementSibling` (прежний «кнопка — прямой сосед span»).
+
+**Следствия:** корректное завершение по сигналам покрыто unit- и
+интеграционными тестами (регрессия ловится в общем прогоне); Cost на
+открытой странице меняется вместе со счётчиками без перезагрузки;
+развёрнутую колонку моделей можно свернуть и сверху, и снизу. Поведение
+проксирования не меняется. Ветка feature/v0.8.6 готова к PR.
+
+### 2026-09-08 — Favicon на всех HTML-страницах WEBUI (v0.8.6)
+
+**Контекст:** favicon (общий эндпоинт `/favicon.svg` ядра webserver.py)
+подключался link-тегом только в `<head>` статус-страницы "/" — на
+страницах, порождённых от неё (вкладки `/session`, `/config`), иконки
+вкладки не было.
+
+**Решение:** `<head>` страницы `/config` (webui_config_api.py) и шаблона
+tree.html дерева артефактов (artifact_tree_html.py — он рендерится во
+вкладке `/session` и открывается из `artefacts/pages/index.html`) дополнены
+тем же `<link rel="icon" type="image/svg+xml" href="/favicon.svg">`;
+у статус-страницы закрывающий `</head>` перенесён на отдельную строку
+(JS-вставки не сливаются с ним). Сам favicon раздаётся одним эндпоинтом
+ядра на любом пути — отдельных копий файла нет.
+
+**Следствия:** favicon показывается на всех HTML-страницах WEBUI (в т.ч.
+внутри iframe tree.html); контракт раздачи не меняется. Покрыто тестами
+(/config — unit и HTTP, /session и tree.html — HTTP-проверки link-тега).
+Поведение проксирования не меняется. Ветка feature/v0.8.6 готова к PR.
+
+### 2026-09-08 — Корректное завершение по Ctrl-C/SIGTERM (v0.8.6)
+
+**Контекст:** повторный Ctrl-C во время завершения ронял процесс: первый
+Ctrl-C ловился в serve_forever, finally звал flush_table() (запись
+model-usage.yaml), а второй Ctrl-C прерывал YAML-запись посреди
+_atomic_write_yaml — «unhandled exception» с traceback-хвостом [PYI-...]
+(в бинаре PyInstaller — KeyboardInterrupt в <string>), оставался мусорный
+model-usage.yaml.tmp. SIGTERM (systemd/launchd/kill) по умолчанию убивал
+процесс мгновенно, без finally — usage-хвост терялся.
+
+**Решение:**
+- **переключение сигналов в finally** (backend-adapter.py): начав вежливое
+  завершение, SIGINT/SIGTERM переключаем на немедленный os._exit(130) —
+  повторный сигнал не может прервать flush_table(), процесс тихо умирает
+  без дампа стека;
+- **SIGTERM → вежливое завершение**: хэндлер кидает KeyboardInterrupt в
+  главный поток (PEP 475), как Ctrl-C — штатное завершение работает и для
+  systemctl stop / launchctl / kill (раньше SIGTERM рубил процесс сразу);
+- **вежливая остановка фоновых слушателей** в finally: shutdown() +
+  server_close() WEBUI и экспортёра; config.stop_refresh(timeout=2) ждёт
+  текущего цикла фоновой проверки бэкендов;
+- **flush_table()** глотает KeyboardInterrupt из _save_table; _DIRTY снимается
+  только после успешного os.replace — прерванная запись не теряет хвост
+  (следующее сохранение допишет), осиротевший .tmp затирается.
+
+**Следствия:** первый Ctrl-C — [EXIT] Bye после сохранения usage-хвоста,
+повторный во время завершения — немедленный rc=130 без traceback; SIGTERM
+проходит то же штатное завершение, что и Ctrl-C. Поведение проксирования не меняется. Ветка feature/v0.8.6 готова к PR; версия 0.8.6.
+
+### 2026-09-08 — Колонка Cost по тарифам ADAPTER_MODELS_TARIFFS + пересмотр флагов логирования/WEBUI (v0.8.6)
+
+**Контекст:** (1) таблица «Models in use» показывала токены, но не стоимость
+расхода — считать её вручную по каждому провайдеру неудобно; (2) семантика
+флагов логирования устарела: консольные debug-логи — основной канал
+диагностики, но гейтились `ADAPTER_DEBUG_ENABLE`, а zero-config-дефолт
+создавал путаницу «где консоль, где диск»; корень WEBUI мог отличаться от
+лог-директории (`./tmp/webui`), а WEBUI имел флаг отключения.
+
+**Решение:**
+- **тарифы моделей** — новая env-переменная `ADAPTER_MODELS_TARIFFS` (путь к
+  YAML: `tariffs: [{name, backend?, input_price, output_price, currency,
+  price_per}]`; запятая — десятичный разделитель, нормализуется парсером).
+  Стоимость строки считается **на лету** из накопленных токенов при каждом
+  рендере (`cost = in×price_in/price_per + out×price_out/price_per`), колонка
+  **Cost** после Input/Output. Парсер/lookup — в `model_usage.py` (лист DAG),
+  форматирование — в `webui_status.py` (`_fmt_cost`: `N,NN CUR`, запятая-
+  разделитель, без locale; 0 токенов / модели нет в тарифах / нулевая цена —
+  серая «—»). Файл перечитывается при загрузке model-usage.yaml и при
+  добавлении новой модели в таблицу; в JS-поллинг Cost не входит (производная,
+  пересчитывается при полноценном рендере);
+- **консольные debug-логи безусловны** — `logger._d/_dr`, `[INIT]`,
+  `[MODEL_USAGE]`, `[ENDPOINT_PROBE]` печатаются всегда; `ADAPTER_DEBUG_ENABLE`
+  (дефолт `0`) гейтит ТОЛЬКО файловую запись (session-`*.log`/`*.jsonl`,
+  `*.parts`-дампы); RUNTIME_CONFIG_POOL-подпись ADAPTER_DEBUG — «файловая запись»;
+- **`ADAPTER_DEBUG_LOGPATH` — всегда непуст** (дефолт `./tmp/logs` при
+  пустой/незаданной env; обязателен как корень): лог-директория, корень WEBUI
+  и место `model-usage.yaml` — один путь. Независимый `./tmp/webui` и его
+  формула `LOGPATH or "./tmp/webui"` удалены; директория создаётся на старте
+  всегда (путь-файл → `[FATAL]` по-прежнему);
+- **`ADAPTER_WEBUI_ENABLE` удалён** — WEBUI (и Prometheus-экспортёр при
+  `ADAPTER_EXPORTER_ENABLE=1`) поднимается всегда.
+
+**Следствия:** на странице видна стоимость расхода по модели; старт и работа
+читаются в консоли независимо от настроек файловой записи; «включить
+логирование» = один флаг `ADAPTER_DEBUG_ENABLE` при неизменном пути; WEBUI и
+usage-файл всегда в известной директории. Breaking change: `ADAPTER_WEBUI_ENABLE`
+и формула `./tmp/webui` удалены. Ветка `feature/v0.8.6` готова к PR; версия 0.8.6.
 
 ### 2026-09-07 — Перечитывание конфига по кнопке + политика probe «только явные» + синхронизация эндпоинтов + health-эндпоинты + Prometheus-экспортёр (v0.8.5)
 

@@ -24,7 +24,7 @@ webserver.py — общее ядро локального веб-сервера 
 
 CLI (ручной запуск вне адаптера):
     python3 -m backend_adapter.webserver [ROOT_DIR] [--port 8765] [--host 127.0.0.1]
-Встроенный запуск — из backend-adapter.py при ADAPTER_WEBUI_ENABLE=1
+Встроенный запуск — из backend-adapter.py: WEBUI поднимается ВСЕГДА
 (daemon-поток процесса адаптера), через serve().
 """
 
@@ -268,7 +268,7 @@ def serve(
     инстансы зарегистрированных классов с общим WebContext и возвращает
     инстанс ``QuietWebServer`` — вызывающий сам решает, когда звать
     ``serve_forever()`` (например, в daemon-потоке, как делает
-    backend-adapter.py при ADAPTER_WEBUI_ENABLE=1).
+    backend-adapter.py — WEBUI поднимается всегда).
 
     ``root_dir`` — папка, в которой лежат ``*.parts`` директории сессий
     (в адаптере это директория ADAPTER_DEBUG_LOGPATH). ``version`` — версия кода

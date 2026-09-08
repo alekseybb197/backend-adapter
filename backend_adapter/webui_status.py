@@ -31,6 +31,10 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     usage_snapshot(), снимок из памяти, сети к бэкендам нет) и обновляет
     только ячейки счётчиков. Оверхед — один маленький JSON-ответ раз в 5 с
     на открытую вкладку; при скрытой вкладке браузер сам троттлит таймеры.
+    Колонка Cost — стоимость накопленных токенов строки по тарифу модели
+    (ADAPTER_MODELS_TARIFFS, см. model_usage.lookup_tariff): считается на
+    лету из токенов и тарифа на момент отображения, поллингом НЕ
+    обновляется (производная — пересчитается при следующем рендере).
 
 Откуда данные:
   - Проверка бэкендов запускается:
@@ -199,7 +203,7 @@ def _config_snapshot() -> dict:
         note = (
             "Данные адаптера недоступны — запущен standalone-режим (viewer вне процесса "
             "адаптера). Живые данные появятся после запуска внутри адаптера "
-            "(ADAPTER_WEBUI_ENABLE=1), либо задайте ADAPTER_BACKEND_CONFIG (путь к "
+            "(WEBUI поднимается всегда), либо задайте ADAPTER_BACKEND_CONFIG (путь к "
             "YAML-файлу конфигурации бэкенда) и перезапустите сервер."
         )
     return {"mode": mode, "endpoints": endpoints, "note": note}
@@ -217,8 +221,13 @@ def _models_html(models: list[str], status: str) -> str:
     Если моделей больше MODEL_LINES — первые MODEL_LINES показываются,
     остальные прячутся в <span class="models-extra" style="display:none">,
     а кнопка «Показать ещё (N)» разворачивает список (JS models_toggle,
-    см. _render_status_page): при клике span получает display:block,
-    кнопка меняется на «Свернуть» и прячет его обратно."""
+    см. _render_status_page): при клике span получает display:block, кнопка
+    внизу меняется на «Свернуть», а ВВЕРХУ списка появляется вторая ссылка
+    «Свернуть» (свёрнута вместе со span — class="models-collapse-top") —
+    у развёрнутой колонки есть и верхний, и нижний край сворачивания.
+    Обе кнопки несут data-models-count (общее число моделей); колонка
+    оборачивается в <span class="models-cell"> — JS ищет кнопки по этому
+    классу (см. models_toggle)."""
     if not models:
         return f'<span style="color:#999">{status}</span>'
     line = '<div style="line-height:1.5">{}</div>'
@@ -227,14 +236,31 @@ def _models_html(models: list[str], status: str) -> str:
     shown = "".join(line.format(html.escape(m)) for m in models[:MODEL_LINES])
     extra = "".join(line.format(html.escape(m)) for m in models[MODEL_LINES:])
     n = len(models) - MODEL_LINES
-    btn = (
-        f'<button type="button" onclick="models_toggle(this)" '
-        f'data-models-count="{len(models)}" '
-        f'style="color:#1a7f37;background:none;border:none;padding:0;'
-        f'font:inherit;cursor:pointer;text-decoration:underline">'
+    btn_style = (
+        "color:#1a7f37;background:none;border:none;padding:0;font:inherit;"
+        "cursor:pointer;text-decoration:underline"
+    )
+    # Нижняя кнопка «Показать ещё (N)» — ПРЯМОЙ сосед скрытого span? НЕТ:
+    # ячейка обёрнута в .models-cell, а скрытый span ищется по классу
+    # (querySelector), поэтому кнопки могут стоять в любом месте ячейки.
+    # Нижняя кнопка — сразу после span (дочерний порядок: shown/скрытый
+    # span/нижняя кнопка) — визуально под списком; верхняя «Свернуть»
+    # (btn_top) стоит сразу после видимых строк (до span) и скрыта, пока
+    # список свёрнут (display:none — показывается при развороте, см. JS).
+    btn_bottom = (
+        f'<button type="button" class="models-toggle" onclick="models_toggle(this)" '
+        f'data-models-count="{len(models)}" style="{btn_style}">'
         f"Показать ещё ({n})</button>"
     )
-    return f'{shown}<span class="models-extra" style="display:none">{extra}</span>{btn}'
+    btn_top = (
+        f'<button type="button" class="models-collapse-top" style="display:none" '
+        f'onclick="models_toggle(this)" data-models-count="{len(models)}" '
+        f'style="{btn_style}">Свернуть</button>'
+    )
+    return (
+        f'<span class="models-cell">{shown}{btn_top}'
+        f'<span class="models-extra" style="display:none">{extra}</span>{btn_bottom}</span>'
+    )
 
 
 def _api_html(api: dict | None) -> str:
@@ -264,6 +290,38 @@ def _api_html(api: dict | None) -> str:
             '<span style="color:#aaa" title="ни один эндпоинт не ответил HTTP 200">—</span>'
         )
     return "<br>".join(parts)
+
+
+def _cost_cell_html(row: dict) -> str:
+    """HTML ячейки «Cost» строки таблицы Models in use.
+
+    Стоимость считается НА ЛЕТУ из токенов строки и тарифа на момент
+    отображения: cost = input_tokens×input_price/price_per +
+    output_tokens×output_price/price_per (model_usage.lookup_tariff —
+    кэш, без сети и диска; см. формат тарифов в config.
+    ADAPTER_MODELS_TARIFFS). Модели нет в тарифах / нулевая цена
+    (бесплатная модель) / токены ещё не накоплены (0/0 — после «Сбросить»)
+    → серая «—»: рендер различать эти случаи не обязан, главное — нулевая
+    цена не роняет рендер. Серая «—» выводится и при нечитаемом/пустом
+    файле тарифов. Тот же HTML используется и для live-обновления: каждый
+    снимок /api/model-usage/snapshot несёт cost_html = _cost_cell_html(строка)
+    на текущий момент, JS usage_poll подставляет его в ячейку Cost — значение
+    меняется синхронно с ростом токенов (см. UsageSnapshotEndpoint)."""
+    tokens_in = max(int(row.get("input_tokens", 0) or 0), 0)
+    tokens_out = max(int(row.get("output_tokens", 0) or 0), 0)
+    if tokens_in <= 0 and tokens_out <= 0:
+        return '<span style="color:#aaa">—</span>'
+    tariff = model_usage.lookup_tariff(str(row.get("model", "")), str(row.get("backend", "")))
+    if tariff is None:
+        return '<span style="color:#aaa">—</span>'
+    cost = (
+        tokens_in * tariff["input_price"] / tariff["price_per"]
+        + tokens_out * tariff["output_price"] / tariff["price_per"]
+    )
+    if cost <= 0:
+        # Нулевая цена (бесплатная модель) — «—», как «нет тарифа/токенов».
+        return '<span style="color:#aaa">—</span>'
+    return _fmt_cost(cost, tariff["currency"])
 
 
 def _endpoints_cell_html(row: dict) -> str:
@@ -309,17 +367,45 @@ def _compact_number(n: int) -> str:
         return str(n)
 
 
-def _actions_cell_html(model: str, reprobing: bool = False) -> str:
-    """HTML ячейки действий строки таблицы использованных моделей.
+def _fmt_cost(cost: float, currency: str) -> str:
+    """Формат стоимости для колонки Cost: «0,25 USD», «133 RUB».
 
-    Две form-кнопки целиком внутри своего <td> (валидный HTML — без
-    вложенных форм и JS): «Перепроверить» (POST /api/model-usage/reprobe?model=…)
-    запускает фоновую перепробу эндпоинтов строки, «Сбросить» (POST
-    /api/model-usage/reset?model=…) обнуляет счётчики строки (оба эндпоинта
-    по PRG отвечают 303 на GET "/"). При reprobing=True (перепроверка этой модели
-    уже идёт) вместо кнопок — серый текст «проверяется…»: повторный запуск
-    невозможен, страница авто-обновится по завершении. Имя модели кодируется
-    quote(safe="") для query-параметра и html.escape — для атрибута action."""
+    Стоимость ≤ 0 (нет токенов / бесплатная модель — нулевая цена) → «--»:
+    рендер различает «нет данных» и «бесплатно» не обязан (см.
+    _usage_rows_html — нулевая цена не роняет рендер). До 10 000 — точное
+    число с запятой-разделителем и ДВУМЯ знаками («1234,56 USD»): деньги
+    принято писать точно. ≥ 10 000 — компактно как токены (_compact_number
+    на округлённом целом): колонка остаётся узкой на больших суммах
+    («12k3 USD»). locale НЕ используется — формат свой (запятая — десятичный
+    разделитель, как в тарифах YAML-файла)."""
+    if cost <= 0 or not currency:
+        return "—"
+    if cost < 10_000:
+        return f"{cost:.2f}".replace(".", ",") + " " + currency
+    return _compact_number(int(cost)) + " " + currency
+
+
+_ACTIONS = (
+    ("reprobe", "🔄", "Перепроверить эндпоинты модели", "#555"),
+    ("reset", "⏪", "Сбросить счётчики модели", "#555"),
+    ("delete", "🗑", "Удалить строку модели", "#c0392b"),
+)
+
+
+def _actions_cell_html(model: str, reprobing: bool = False) -> str:
+    """HTML ячейки действий (колонка Actions) строки таблицы использованных моделей.
+
+    Три form-кнопки целиком внутри своего <td> (валидный HTML — без
+    вложенных форм и JS), тексты-фразы заменены символьными иконками с
+    title/aria-label-подписями: 🔄 (reprobe — фоновая перепроба эндпоинтов
+    строки, POST /api/model-usage/reprobe?model=…), ⏪ (reset — обнуление
+    счётчиков строки, POST /api/model-usage/reset?model=…), 🗑 (delete —
+    удаление строки модели из таблицы и YAML-файла, POST
+    /api/model-usage/delete?model=…). Все три эндпоинта по PRG отвечают 303
+    на GET "/". При reprobing=True (перепроверка этой модели уже идёт) вместо
+    кнопок — серый текст «проверяется…»: повторный запуск невозможен,
+    страница авто-обновится по завершении. Имя модели кодируется quote(safe="")
+    для query-параметра и html.escape — для атрибута action."""
     q = quote(str(model), safe="")
     if reprobing:
         return (
@@ -327,37 +413,39 @@ def _actions_cell_html(model: str, reprobing: bool = False) -> str:
             '<span title="перепроверка эндпоинтов модели выполняется">'
             "проверяется…</span></td>"
         )
-    return (
-        "<td>"
-        f'<form method="post" action="/api/model-usage/reprobe?model={html.escape(q)}">'
-        '<button type="submit" style="color:#555;background:none;border:none;'
-        'padding:0 6px 0 0;font:inherit;cursor:pointer;text-decoration:underline">'
-        "Перепроверить</button>"
-        "</form>"
-        f'<form method="post" action="/api/model-usage/reset?model={html.escape(q)}">'
-        '<button type="submit" style="color:#c0392b;background:none;border:none;'
-        'padding:0;font:inherit;cursor:pointer;text-decoration:underline">Сбросить</button>'
-        "</form></td>"
-    )
+    forms = []
+    for i, (name, glyph, label, color) in enumerate(_ACTIONS):
+        pad = "padding:0 6px 0 0;" if i < len(_ACTIONS) - 1 else "padding:0;"
+        forms.append(
+            f'<form method="post" action="/api/model-usage/{name}?model={html.escape(q)}">'
+            f'<button type="submit" aria-label="{label}" title="{label}" '
+            f'style="color:{color};background:none;border:none;{pad}'
+            'font:inherit;cursor:pointer"'
+            f">{glyph}</button>"
+            "</form>"
+        )
+    return "<td>" + "".join(forms) + "</td>"
 
 
 def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     """HTML строк таблицы Models in use (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
-    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Endpoints |
-    Действия. Колонка Endpoints перечисляет только доступные эндпоинты
+    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Endpoints |
+    Actions. Колонка Endpoints перечисляет только доступные эндпоинты
     (found=True) короткими именами через запятую (см. _endpoints_cell_html).
     input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
     _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
-    Ячейки счётчиков несут data-атрибуты (data-calls/data-input/data-output)
-    с ТОЧНЫМИ значениями — JS usage_poll обновляет их textContent по
-    /api/model-usage/snapshot без перезагрузки страницы (см. usage_poll в
-    _render_status_page). ``reprobing`` — карта client_model → True: у строки
-    идёт фоновая перепроверка (баннер + авто-релоад); в ячейке действий
-    вместо кнопок — «проверяется…». Модель/бэкенд — html.escape;
-    «Перепроверить»/«Сбросить» — отдельные формы в последнем <td> (см.
-    _actions_cell_html)."""
+    Колонка Cost — стоимость накопленных токенов по тарифу модели на момент
+    отображения (см. _cost_cell_html / _fmt_cost; «--» — модели нет в
+    тарифах, бесплатная модель или токенов ещё нет). Ячейки счётчиков несут
+    data-атрибуты (data-calls/data-input/data-output) с ТОЧНЫМИ значениями —
+    JS usage_poll обновляет их textContent по /api/model-usage/snapshot без
+    перезагрузки страницы (см. usage_poll в _render_status_page). ``reprobing``
+    — карта client_model → True: у строки идёт фоновая перепроверка (баннер +
+    авто-релоад); в ячейке Actions вместо кнопок — «проверяется…».
+    Модель/бэкенд — html.escape; иконки-действия (🔄/⏪/🗑) — отдельные формы
+    в последнем <td> (см. _actions_cell_html)."""
     body = []
     for i, r in enumerate(rows):
         reprobing_row = bool(reprobing and reprobing.get(r["model"]))
@@ -371,13 +459,14 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
             f'<td data-calls="{calls}">{calls}</td>'
             f'<td data-input="{input_tokens}">{_compact_number(input_tokens)}</td>'
             f'<td data-output="{output_tokens}">{_compact_number(output_tokens)}</td>'
+            f"<td>{_cost_cell_html(r)}</td>"
             f"<td>{_endpoints_cell_html(r)}</td>"
             f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="7" style="color:#888">пока нет данных — '
+            '<tr><td colspan="8" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -425,6 +514,13 @@ def _render_status_page(
     изменилось (сброс/новая модель) — location.reload() перерисует
     таблицу; эндпоинты строк в этом поллинге не трогаются (их меняет
     только reprobe, у которого свой авто-релоад)."""
+    # Колонка Cost строк Models in use считается по тарифу на момент
+    # отображения: каждый полноценный рендер страницы (GET "/", перезагрузка)
+    # перечитывает маленький файл тарифов с диска (model_usage.
+    # ensure_tariffs_loaded — см. ADAPTER_MODELS_TARIFFS). Лёгкий поллинг
+    # usage_poll (снимок JSON) тарифы НЕ трогает — Cost обновится при
+    # следующем рендере (это осознанно, см. _cost_cell_html).
+    model_usage.ensure_tariffs_loaded()
     snapshot = _config_snapshot()
     endpoints = snapshot["endpoints"]
     errors = (refresh or {}).get("errors", {}) or {}
@@ -572,8 +668,10 @@ def _render_status_page(
 
     # Live-счётчики секции Models in use: JS usage_poll каждые 5 с опрашивает
     # лёгкий /api/model-usage/snapshot (model_usage.usage_snapshot() — копии
-    # строк из памяти, сети к бэкендам нет) и обновляет ТОЛЬКО ячейки
-    # счётчиков (Вызовов/Input/Output) — без перезагрузки страницы. Строки
+    # строк из памяти, сети к бэкендам нет) и обновляет ячейки счётчиков
+    # (Вызовов/Input/Output) и Cost — без перезагрузки страницы. Cost в
+    # снимке — готовый HTML (_cost_cell_html на токены снимка): серверный
+    # рендер и поллинг используют ОДИН форматтер, расхождений нет. Строки
     # сопоставляются ПОЗИЦИОННО: и рендер, и снимок идут в порядке первого
     # обращения (usage_snapshot), поэтому экранирование имён не мешает.
     # Число строк изменилось (строка сброшена/добавлена) либо в таблице
@@ -607,7 +705,9 @@ def _render_status_page(
         for (var i = 0; i < trs.length; i++) {{
           var row = rows[i];
           var cells = trs[i].getElementsByTagName("td");
-          // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output
+          // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output,
+          // 5 Cost (cost_html — готовый HTML с сервера: токены × тариф
+          // на текущий момент; пересчитывается в каждом снимке)
           var set = function (idx, val) {{
             if (cells[idx] && String(cells[idx].textContent) !== String(val)) {{
               cells[idx].textContent = val;
@@ -616,6 +716,7 @@ def _render_status_page(
           set(2, row["calls"]);
           set(3, compact_fmt(row["input_tokens"]));
           set(4, compact_fmt(row["output_tokens"]));
+          set(5, row["cost_html"]);
         }}
         setTimeout(usage_poll, 5000);
       }})
@@ -640,19 +741,23 @@ def _render_status_page(
 </style>
 <script>
   function models_toggle(btn) {{
-    var span = btn.previousElementSibling;
-    if (span && span.classList.contains("models-extra")) {{
-      var expanded = span.style.display !== "none";
-      span.style.display = expanded ? "none" : "block";
-      btn.textContent = expanded
-        ? "Показать ещё (" + (btn.dataset.modelsCount - {MODEL_LINES}) + ")"
-        : "Свернуть";
+    var cell = btn.closest(".models-cell");
+    var span = cell.querySelector(".models-extra");
+    var tops = cell.querySelectorAll(".models-collapse-top");
+    var expanded = span.style.display !== "none";
+    span.style.display = expanded ? "none" : "block";
+    for (var j = 0; j < tops.length; j++) {{
+      tops[j].style.display = expanded ? "none" : "block";
     }}
+    btn.textContent = expanded
+      ? "Показать ещё (" + (btn.dataset.modelsCount - {MODEL_LINES}) + ")"
+      : "Свернуть";
   }}
 </script>
 {poll_script}
 {reprobe_poll_script}
-{usage_poll_script}</head>
+{usage_poll_script}
+</head>
 <body>
 <h2>Backend-Adapter — статус</h2>
 <p><b>Версия кода:</b> {html.escape(context.version)} &nbsp;·&nbsp;
@@ -671,7 +776,7 @@ def _render_status_page(
 </form>
 <h3 style="margin-top:24px">Models in use</h3>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Endpoints</th><th>Действия</th></tr>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Actions</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
@@ -810,6 +915,51 @@ class ModelUsageResetEndpoint(webserver.Endpoint):
 
 
 @webserver.register
+class ModelUsageDeleteEndpoint(webserver.Endpoint):
+    """POST /api/model-usage/delete?model=<имя> — удаление строки модели.
+
+    Удаляет модель из рабочей таблицы использованных моделей и из YAML-файла
+    (запись обновлённой таблицы без строки; см. model_usage.delete_model).
+    Кнопка «🗑» в колонке Actions таблицы (form method=post) работает по
+    PRG-паттерну: удаление + 303 See Other на GET "/" — страница
+    показывается GET-навигацией, обновление не повторяет POST (как у кнопок
+    «Сбросить»/«Перепроверить»). JSON-клиент (Content-Type:
+    application/json) получает 200 {"ok": true, "model": ...} при успехе,
+    404 {"error": ...} — строки нет (повторное удаление/неизвестная модель;
+    в отличие от reset, delete не идемпотентен — строка после успеха
+    исчезает), 400 {"error": ...} — нет query-параметра model (единый формат
+    ошибки, как в server.py). GET на префикс — 404 дефолтом Endpoint."""
+
+    prefix = "/api/model-usage/delete"
+
+    def __init__(self, context):
+        self.context = context
+
+    def POST(self, handler, remainder: str):
+        parsed = urlparse(handler.path)
+        model = parse_qs(parsed.query).get("model", [""])[0].strip()
+        ct = handler.headers.get("Content-Type", "")
+        if "application/json" not in ct:
+            # HTML-форма кнопки (application/x-www-form-urlencoded): PRG.
+            if not model:
+                handler._redirect("/")  # кнопка без model невозможна в норме
+                return
+            model_usage.delete_model(model)  # строка есть на живой странице
+            handler._redirect("/")  # 303 → GET "/" (PRG)
+            return
+        if not model:
+            body = b'{"error": "missing \'model\' query parameter"}'
+            handler._write(400, "application/json; charset=utf-8", body)
+            return
+        if not model_usage.delete_model(model):
+            body = json.dumps({"error": f"model '{model}' not in usage table"}).encode()
+            handler._write(404, "application/json; charset=utf-8", body)
+            return
+        body = json.dumps({"ok": True, "model": model}).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
+@webserver.register
 class ModelUsageReprobeEndpoint(webserver.Endpoint):
     """POST /api/model-usage/reprobe?model=<имя> — фоновая перепроверка
     эндпоинтов строки модели.
@@ -884,9 +1034,13 @@ class UsageSnapshotEndpoint(webserver.Endpoint):
 
     Лёгкий ответ для JS usage_poll на статус-странице:
     model_usage.usage_snapshot() — список строк таблицы (calls/input_tokens/
-    output_tokens/endpoints/…) в порядке первого обращения. GET ничего не
-    мутирует (кроме ленивой загрузки таблицы при первом обращении) и не
-    ходит в сеть к бэкендам — безопасно опрашивать каждые 5 с."""
+    output_tokens/endpoints/…) в порядке первого обращения, каждая строка
+    дополнена полем cost_html — готовым HTML ячейки Cost на ТЕКУЩИЙ момент
+    (см. _cost_cell_html: токены строки × тариф на лету): поллинг обновляет
+    и ячейку Cost, а не только счётчики — значение меняется синхронно с
+    ростом токенов. GET ничего не мутирует (кроме ленивой загрузки таблицы
+    при первом обращении) и не ходит в сеть к бэкендам — безопасно
+    опрашивать каждые 5 с."""
 
     prefix = "/api/model-usage/snapshot"
 
@@ -894,7 +1048,10 @@ class UsageSnapshotEndpoint(webserver.Endpoint):
         self.context = context
 
     def GET(self, handler, remainder: str):
-        body = json.dumps(model_usage.usage_snapshot()).encode("utf-8")
+        rows = model_usage.usage_snapshot()
+        for r in rows:
+            r["cost_html"] = _cost_cell_html(r)
+        body = json.dumps(rows).encode("utf-8")
         handler._write(200, "application/json; charset=utf-8", body)
 
 
@@ -947,13 +1104,17 @@ __all__ = [
     "_models_html",
     "_api_html",
     "_endpoints_cell_html",
+    "_cost_cell_html",
     "_usage_rows_html",
     "_actions_cell_html",
     "_fmt_tokens",
+    "_compact_number",
+    "_fmt_cost",
     "_render_status_page",
     "StatusEndpoint",
     "RefreshStateEndpoint",
     "ModelUsageResetEndpoint",
+    "ModelUsageDeleteEndpoint",
     "ModelUsageReprobeEndpoint",
     "ReprobeStateEndpoint",
     "UsageSnapshotEndpoint",

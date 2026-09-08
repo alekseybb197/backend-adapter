@@ -246,7 +246,7 @@ install_systemd() {
 ADAPTER_BACKEND_CONFIG=
 ADAPTER_PROXY_PORT=9999
 ADAPTER_ENDPOINT_HOST=127.0.0.1
-ADAPTER_DEBUG_ENABLE=1
+ADAPTER_DEBUG_ENABLE=0
 ADAPTER_DETACH_ENABLE=0
 EOF
 
@@ -307,7 +307,7 @@ install_launchd() {
 ADAPTER_BACKEND_CONFIG=
 ADAPTER_PROXY_PORT=9999
 ADAPTER_ENDPOINT_HOST=127.0.0.1
-ADAPTER_DEBUG_ENABLE=1
+ADAPTER_DEBUG_ENABLE=0
 ADAPTER_DETACH_ENABLE=0
 EOF
 
@@ -340,7 +340,7 @@ EOF
         <key>ADAPTER_ENDPOINT_HOST</key>
         <string>127.0.0.1</string>
         <key>ADAPTER_DEBUG_ENABLE</key>
-        <string>1</string>
+        <string>0</string>
         <key>ADAPTER_DETACH_ENABLE</key>
         <string>0</string>
     </dict>

@@ -16,8 +16,9 @@ input_tokens из usage.prompt_tokens, output_tokens из usage.completion_token
 статус-странице WEBUI "/" (см. webui_status._usage_rows_html).
 
 Персистентность: таблица сохраняется в YAML-файл `model-usage.yaml` в корне
-WEBUI (формула `ADAPTER_DEBUG_LOGPATH or "./tmp/webui"`, та же, что у корня
-веб-сервера) и при старте загружается из него, если файл есть — счётчики
+WEBUI (корень — директория `ADAPTER_DEBUG_LOGPATH`, дефолт ./tmp/logs;
+та же формула, что у корня веб-сервера) и при старте загружается из него,
+если файл есть — счётчики
 переживают перезапуски адаптера. Сохранение «грязной» таблицы — не чаще
 раза в config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL (сек); создание новой строки
 модели, обнуление счётчиков строки (reset_model, кнопка «Сбросить») и
@@ -63,6 +64,13 @@ refresh_models). Персистентность (YAML-файл) работает
 (config._BACKEND_BY_NAME): эндпоинты осиротевших бэкендов (удалены из YAML)
 в кэш не добавляются. Сети при синхронизации нет — переносится уже добытый
 результат.
+
+Тарифы моделей (колонка Cost таблицы Models in use): YAML-файл по пути
+config.ADAPTER_MODELS_TARIFFS читается с диска при загрузке накопленных
+счётчиков (см. _ensure_loaded_locked) и при добавлении НОВОЙ модели в
+таблицу (см. record_model_usage); lookup_tariff() — без сети и диска.
+Рендер Cost — в webui_status (см. _fmt_cost / _usage_rows_html): стоимость
+считается на лету из токенов строки по тарифу на момент отображения.
 """
 
 import os
@@ -93,8 +101,22 @@ MODEL_USAGE_PROBE_TIMEOUT = 10.0
 _TABLE: dict[str, dict] = {}
 _TABLE_LOCK = threading.Lock()
 
+# Тарифы моделей для колонки Cost таблицы Models in use. Источник — YAML-файл
+# по пути config.ADAPTER_MODELS_TARIFFS (см. config.py; пусто — тарифов нет,
+# колонка Cost показывает «--»). Запись нормализованного тарифа:
+#   {"input_price": float, "output_price": float, "currency": str,
+#    "price_per": float}   # price_per >= 1 (0/None в файле → 1)
+# Ключ поиска — (name, backend), где backend может быть "" — тариф-«wildcard»
+# без поля backend матчит любой бэкенд; тариф с backend — только свой.
+# _TARIFFS не мутируется после загрузки (заменяется целиком под _TARIFF_LOCK);
+# «перечитывание» = повторный вызов _load_tariffs_locked с диска (маленький
+# файл, редкое событие — см. точки вызова в _ensure_loaded_locked и
+# record_model_usage).
+_TARIFFS: dict[tuple[str, str], dict] = {}
+_TARIFF_LOCK = threading.Lock()
+
 # Персистентность (YAML-файл в корне WEBUI). _PERSIST_PATH:
-#   None (дефолт) → авто-формула (прод): config.ADAPTER_DEBUG_LOGPATH or "./tmp/webui"
+#   None (дефолт) → авто-формула (прод): config.ADAPTER_DEBUG_LOGPATH (всегда непуст)
 #   ""            → выключено (тесты, никакого файлового I/O)
 #   иначе         → явный путь к YAML-файлу (standalone webserver, тесты на tmp_path)
 # _PERSIST_LOCK сериализует запись файла; _TABLE_LOCK защищает таблицу.
@@ -142,11 +164,25 @@ def usage_persist_file() -> str | None:
 
 def flush_table() -> None:
     """Принудительно сохранить таблицу, если есть несохранённые мутации
-    (вызывается при завершении работы адаптера, в т.ч. Ctrl-C)."""
-    with _TABLE_LOCK:
-        dirty = _DIRTY
-    if dirty:
-        _save_table(force=True)
+    (вызывается при завершении работы адаптера, в т.ч. Ctrl-C).
+
+    Устойчив к повторному Ctrl-C: если запись YAML прервана сигналом
+    посреди _atomic_write_yaml, _save_table(force=True) завершается
+    исключением KeyboardInterrupt и _DIRTY остаётся True (см. _save_table) —
+    здесь мы гасим прерывание и даём таблице уйти в память (учёт не должен
+    ронять завершение адаптера; файл перепишется следующим сохранением).
+    """
+    try:
+        with _TABLE_LOCK:
+            dirty = _DIRTY
+        if dirty:
+            _save_table(force=True)
+    except KeyboardInterrupt:
+        # Повторный Ctrl-C пришёл в момент файловой записи: не даём ему
+        # уронить завершение процесса поверх (см. переключение SIGINT на
+        # os._exit в finally backend-adapter.py). Сохранение не удалось —
+        # файл останется прежним, таблица жива в памяти до выхода процесса.
+        pass
 
 
 def record_model_usage(client_model: str) -> None:
@@ -185,6 +221,14 @@ def record_model_usage(client_model: str) -> None:
             increment = False
             created = True
         need_probe = config.ADAPTER_MODEL_USAGE_ENABLE
+
+    if created:
+        # Добавление НОВОЙ модели — точка перечитывания тарифов (см. контракт
+        # в config.ADAPTER_MODELS_TARIFFS): файл маленький, событие редкое —
+        # повторное чтение с диска дёшево, а стоимость новой модели всегда
+        # считается по актуальному тарифу.
+        with _TARIFF_LOCK:
+            _load_tariffs_locked()
 
     if increment:
         # Инкремент существующей строки: периодическое сохранение «грязной»
@@ -333,6 +377,29 @@ def reset_model(model: str) -> bool:
     return existed
 
 
+def delete_model(model: str) -> bool:
+    """Удалить строку модели из рабочей таблицы и из YAML-файла.
+
+    Файл перезаписывается сразу (force-save) обновлённой таблицей без
+    указанной строки. Возвращает True, если строка существовала (в памяти
+    или в файле) и удалена; False — строки нет (второй клик по кнопке,
+    неизвестная модель). Чистка config._ENDPOINT_STATE не требуется: кэш
+    доступности эндпоинтов — общий на бэкенд, не по моделям. Безопасен при
+    идущей перепроверке строки (воркер в finally увидит row is None и не
+    мутирует). Точка вызова — ModelUsageDeleteEndpoint (POST
+    /api/model-usage/delete)."""
+    global _DIRTY
+    with _TABLE_LOCK:
+        _ensure_loaded_locked()
+        existed = model in _TABLE
+        if existed:
+            del _TABLE[model]
+            _DIRTY = True
+    if existed:
+        _save_table(force=True)
+    return existed
+
+
 def start_reprobe(client_model: str) -> bool:
     """Запустить фоновую перепроверку эндпоинтов строки модели.
 
@@ -426,14 +493,138 @@ def reprobe_model(client_model: str) -> bool:
     return True
 
 
+# ==================== ТАРИФЫ МОДЕЛЕЙ (колонка Cost) ====================
+
+
+def _as_float(v: object) -> float | None:
+    """Число из YAML-значения тарифа; None — значение не число.
+
+    Строки с запятой как десятичным разделителем ("0,02") нормализуются
+    (запятая → точка; PyYAML такие строки числами не парсит). bool/int/float
+    принимаются; bool трактуется как не-число (True→1.0 нежелателен)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip().replace(",", ".")
+        if not s:
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_tariff(raw: object) -> dict | None:
+    """Привести запись тарифа из YAML к внутренней схеме; None — битая запись.
+
+    Схема: {"name": str, "backend": str ("" — wildcard: любой бэкенд),
+    "input_price": float, "output_price": float, "currency": str,
+    "price_per": float (>= 1)}. Цены: отсутствующее поле/None → 0.0
+    (бесплатная модель — не ошибка, Cost покажет «--»); отрицательные → 0;
+    не-число → запись пропускается. price_per: 0/None/не-число → 1.0
+    (защита деления на ноль). currency обязательна непустой строкой —
+    без валюты в колонке Cost показывать нечего. name обязателен; backend
+    опционален (отсутствие → wildcard)."""
+    if not isinstance(raw, dict):
+        return None
+    name = raw.get("name")
+    if not isinstance(name, str) or not name:
+        return None
+    backend = raw.get("backend")
+    if backend is None:
+        backend = ""
+    elif not isinstance(backend, str):
+        return None
+    currency = raw.get("currency")
+    if not isinstance(currency, str) or not currency.strip():
+        return None
+    in_price = _as_float(raw.get("input_price"))
+    out_price = _as_float(raw.get("output_price"))
+    if in_price is None or out_price is None:
+        return None  # цена-мусор — битая запись
+    price_per = _as_float(raw.get("price_per"))
+    if price_per is None or price_per <= 0:
+        price_per = 1.0
+    return {
+        "name": name,
+        "backend": backend,
+        "input_price": max(in_price, 0.0),
+        "output_price": max(out_price, 0.0),
+        "currency": currency.strip(),
+        "price_per": price_per,
+    }
+
+
+def _load_tariffs_locked() -> None:
+    """(Пере)читать тарифы моделей с диска. Требует захваченного _TARIFF_LOCK.
+
+    Источник — YAML-файл по config.ADAPTER_MODELS_TARIFFS (живое чтение —
+    его могут менять тесты/пользователь между вызовами). Структура файла:
+    {"tariffs": [записи]} (см. формат в config.py). Читает файл при КАЖДОМ
+    вызове — файл маленький, а перечитывание требуется по событиям «загрузка
+    usage-файла» (см. _ensure_loaded_locked) и «добавление новой модели»
+    (см. record_model_usage): стоимость всегда считается по тарифу на момент
+    отображения. Никогда не бросает наружу: пустой путь/битый/отсутствующий
+    файл → пустые тарифы (колонка Cost — «--»), ошибка — в консольный лог.
+    Заменяет _TARIFFS целиком (публикация новой ссылки под локом)."""
+    global _TARIFFS
+    path = (config.ADAPTER_MODELS_TARIFFS or "").strip()
+    tariffs: dict[tuple[str, str], dict] = {}
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            raw_list = data.get("tariffs") if isinstance(data, dict) else None
+            if isinstance(raw_list, list):
+                for raw in raw_list:
+                    t = _normalize_tariff(raw)
+                    if t is not None:
+                        # Ключ — (name, backend); последняя запись с тем же
+                        # ключом перезаписывает предыдущую (порядок файла).
+                        tariffs[(t["name"], t["backend"])] = t
+        except Exception as e:  # noqa: BLE001 — тарифы не должны ронять учёт
+            _log("tariffs", f"ignoring unreadable file {path}: {e}")
+    _TARIFFS = tariffs
+
+
+def ensure_tariffs_loaded() -> None:
+    """(Пере)читать тарифы с диска (публичная обёртка для рендера).
+
+    Вызывается webui_status._usage_rows_html перед рендером строк Models in
+    use — каждый полноценный рендер страницы (GET "/") показывает Cost по
+    тарифу на момент отображения; лёгкий поллинг usage_poll
+    (/api/model-usage/snapshot) тарифы НЕ перечитывает (счётчики обновляет,
+    Cost — производная, обновится при следующем рендере). Не бросает."""
+    with _TARIFF_LOCK:
+        _load_tariffs_locked()
+
+
+def lookup_tariff(model: str, backend: str) -> dict | None:
+    """Тариф модели для колонки Cost; None — модели нет в тарифах.
+
+    Без сети и диска (читает загруженный кэш). Порядок матчинга: точная пара
+    (модель, бэкенд) → тариф-«wildcard» (модель без backend — любой бэкенд)
+    → None. Возвращает копию нормализованного тарифа — мутация результата не
+    затрагивает кэш."""
+    with _TARIFF_LOCK:
+        t = _TARIFFS.get((model, backend))
+        if t is None:
+            t = _TARIFFS.get((model, ""))
+        return dict(t) if t is not None else None
+
+
 # ==================== ПЕРСИСТЕНТНОСТЬ (YAML) ====================
 
 
 def _default_root() -> str:
     """Корень WEBUI — та же формула, что у webui_root в backend-adapter.py
-    (ADAPTER_DEBUG_LOGPATH or "./tmp/webui"). Читается лениво (живое чтение
-    config.ADAPTER_DEBUG_LOGPATH — его могут менять тесты между вызовами)."""
-    return config.ADAPTER_DEBUG_LOGPATH or "./tmp/webui"
+    (ADAPTER_DEBUG_LOGPATH, всегда непуст; дефолт ./tmp/logs). Читается
+    лениво (живое чтение config.ADAPTER_DEBUG_LOGPATH — его могут менять
+    тесты между вызовами)."""
+    return config.ADAPTER_DEBUG_LOGPATH
 
 
 def _default_root_file() -> str:
@@ -473,6 +664,11 @@ def _ensure_loaded_locked() -> None:
         _log("persist", f"ignoring unreadable file: {e}")
     finally:
         _LOADED = True
+        # Загрузка накопленных счётчиков — точка перечитывания тарифов (см.
+        # контракт в config.ADAPTER_MODELS_TARIFFS): стоимость на странице
+        # после рестарта считается по текущему файлу тарифов.
+        with _TARIFF_LOCK:
+            _load_tariffs_locked()
 
 
 def _read_persist_file(path: str) -> dict:
@@ -605,7 +801,11 @@ def _serialize_table() -> dict:
 def _atomic_write_yaml(path: str, payload: dict) -> None:
     """Атомарная запись YAML: временный файл в той же директории + os.replace.
     os.makedirs создаёт корень при необходимости. OSError НЕ ловится здесь —
-    его обрабатывает _save_table (учёт не должен ронять запрос)."""
+    его обрабатывает _save_table (учёт не должен ронять запрос).
+
+    Осиротевший временный файл прошлой прерванной записи (kill/Ctrl-C
+    посреди safe_dump) затирается: open(..., "w") обрезает его содержимое,
+    os.replace атомарно подменяет основной файл."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp_path = f"{path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -622,7 +822,12 @@ def _atomic_write_yaml(path: str, payload: dict) -> None:
 def _save_table(force: bool) -> None:
     """Сохранить таблицу в YAML. force=True — независимо от периода; иначе —
     только если есть грязные мутации и прошёл период. Пишет полный снимок
-    атомарно (tmp + os.replace); OSError — лог, учёт не роняет."""
+    атомарно (tmp + os.replace); OSError — лог, учёт не роняет.
+
+    _DIRTY снимается ТОЛЬКО после успешного os.replace (самый конец
+    функции): прерванная запись (исключение/KeyboardInterrupt) оставляет
+    флаг взведённым, и следующее сохранение допишет хвост. OSError ловится,
+    KeyboardInterrupt — нет (его гасит flush_table/хэндлер завершения)."""
     if _PERSIST_PATH == "":
         return
     global _DIRTY, _LAST_SAVE
@@ -717,19 +922,16 @@ def _probe_model_endpoints(backend_cfg: dict, resolved: str) -> dict:
 
 
 def _log(client_model: str, msg: str) -> None:
-    """Консольный лог строки [MODEL_USAGE]; гейт — ADAPTER_DEBUG (живое
-    чтение, как _log_probe в config.py: config/model_usage не импортируют
-    logger — корень DAG)."""
-    if config.ADAPTER_DEBUG:
-        print(f"[MODEL_USAGE] model={client_model!r}: {msg}")
+    """Консольный лог строки [MODEL_USAGE]. Печатается БЕЗУСЛОВНО (консольные
+    debug-логи не гейтятся; см. v0.8.6). config/model_usage не импортируют
+    logger — корень DAG."""
+    print(f"[MODEL_USAGE] model={client_model!r}: {msg}")
 
 
 def _log_probe(client_model: str, backend_name: str, result: dict) -> None:
     """Лог-блок [MODEL_USAGE] первой пробы модели: сырые HTTP-коды по
     ENDPOINT_PROBES (единый формат с config._log_probe). Инкременты повторных
     обращений не логируются (спам при каждом запросе — как кэш-хиты пробы)."""
-    if not config.ADAPTER_DEBUG:
-        return
     errors = result["errors"]
     if errors:
         _log(client_model, f"backend '{backend_name}': failed: {errors}")
@@ -756,7 +958,10 @@ __all__ = [
     "usage_snapshot",
     "reset_model_usage",
     "reset_model",
+    "delete_model",
     "start_reprobe",
     "reprobe_state",
     "reprobe_model",
+    "lookup_tariff",
+    "ensure_tariffs_loaded",
 ]

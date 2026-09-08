@@ -77,9 +77,11 @@ def _lookup_tool_use_name(session_id: str, tool_use_id: str):
 
 
 def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
-    # Мастер-выключатель: при ADAPTER_DEBUG_ENABLE=0 трасса не пишется.
-    # Путь — всегда директория логов сессий (ADAPTER_DEBUG_LOGPATH);
-    # запись — в per-session JSONL-файл, single-file режим удалён.
+    # Мастер-выключатель ФАЙЛОВОГО трейса: при ADAPTER_DEBUG_ENABLE=0
+    # трасса не пишется (у _trace нет консольного вывода — файловый JSONL
+    # гейтится только этим флагом). Путь — всегда директория логов сессий
+    # (ADAPTER_DEBUG_LOGPATH, дефолт ./tmp/logs); запись — в per-session
+    # JSONL-файл, single-file режим удалён.
     # config.ADAPTER_DEBUG читается ЖИВЫМ атрибутом модуля (а не разовым
     # снимком при импорте) — иначе переключение через /config API (см.
     # webui_config_api.py) не подействовало бы здесь до перезапуска.

@@ -22,14 +22,16 @@ cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
 button (JS models_toggle on the page) — see TestModelsCell. The Models in use
 table (single Endpoints column — available endpoints only, comma-separated;
 footer and the «⟳ Проверить сейчас» button sit right under the backends
-table, before the section) — see TestUsageSection. Its actions cell holds
-two PRG forms — «Перепроверить» (POST /api/model-usage/reprobe) and
-«Сбросить» (POST /api/model-usage/reset) — and renders «проверяется…» (no
+table, before the section) — see TestUsageSection. Its Actions cell holds
+three PRG forms with symbol-icon buttons (🔄 «Перепроверить» POST
+/api/model-usage/reprobe, ⏪ «Сбросить» POST /api/model-usage/reset, 🗑
+«Удалить» POST /api/model-usage/delete) and renders «проверяется…» (no
 forms) while that row is being re-probed; /reprobe answers 202 on launch /
+404 / 400 for JSON clients and 303 for the HTML form; /delete answers 200 /
 404 / 400 for JSON clients and 303 for the HTML form; /api/model-usage/
 reprobe-state serves the reprobe snapshot for the page's reprobe_poll JS
 (banner + auto-reload while running) — see TestModelUsageReprobeAPI /
-TestReprobeStateAPI. Live counters (Вызовов/Input/Output): usage rows carry
+TestModelUsageDeleteAPI / TestReprobeStateAPI. Live counters (Вызовов/Input/Output): usage rows carry
 id="usage-row-<i>" and data-calls/data-input/data-output (exact values), and
 the page embeds an unconditional usage_poll JS polling the lightweight
 /api/model-usage/snapshot every 5 s and updating only the counter cells
@@ -286,7 +288,7 @@ class TestConfigSnapshot:
         snap = ws._config_snapshot()
         assert snap["mode"] == "standalone"
         assert snap["endpoints"] == []
-        assert snap["note"] and "ADAPTER_WEBUI_ENABLE" in snap["note"]
+        assert snap["note"] and "ADAPTER_BACKEND_CONFIG" in snap["note"]
 
     def test_multi_endpoints_carry_keys(self):
         # key нужен refresh-пробе; в HTML не выводится, но в данных должен быть.
@@ -455,9 +457,10 @@ class TestModelsCell:
         config, ws = _fresh_modules()
         models = [f"m{i}" for i in range(7)]
         html = ws._models_html(models, "ok")
-        # первые MODEL_LINES строк — видимые div'ы (вне скрытого span)
-        visible = html.split('<span class="models-extra"')[0]
-        assert visible.count('<div style="line-height:1.5">') == ws.MODEL_LINES
+        # видимые строки (до скрытого span и верхней кнопки) — первые
+        # MODEL_LINES div'ов
+        head = html.split('<button type="button" class="models-collapse-top"')[0]
+        assert head.count('<div style="line-height:1.5">') == ws.MODEL_LINES
         assert '<span class="models-extra" style="display:none">' in html
         # в скрытом span — остальные (7 - MODEL_LINES) строк
         extra = html.split('<span class="models-extra" style="display:none">')[1]
@@ -467,12 +470,52 @@ class TestModelsCell:
         # кнопка вызывает models_toggle и несёт общее число моделей
         assert 'onclick="models_toggle(this)"' in html
         assert 'data-models-count="7"' in html
-        # кнопка — ПРЯМОЙ сосед скрытого span (сразу после </span>): иначе
-        # models_toggle (btn.previousElementSibling) не найдёт span и кнопка
-        # «Показать ещё» не сработает
+        # в развёрнутом виде колонка получает и ВЕРХНЮЮ «Свернуть»: кнопка
+        # сразу после видимых строк (до скрытого span), display:none, пока
+        # список свёрнут; класс — models-collapse-top (для JS models_toggle).
+        # Верхняя и нижняя кнопки несут data-models-count (общее число моделей).
+        visible, rest = html.split('<button type="button" class="models-collapse-top"', 1)
+        # видимая часть до верхней кнопки — первые MODEL_LINES строк
+        assert visible.count('<div style="line-height:1.5">') == ws.MODEL_LINES
+        assert 'style="display:none"' in rest.split(">", 1)[0]
+        assert 'data-models-count="7"' in rest.split(">", 1)[0]
+        assert html.count('onclick="models_toggle(this)"') == 2
+        assert html.count("Свернуть") == 1  # только текст верхней кнопки
+        # нижняя кнопка — сразу после </span> скрытого блока (под списком)
         assert html.split("</span>", 1)[1].lstrip().startswith("<button")
         assert "/session?model=" not in html  # иконок-ссылок нет
         assert "📋" not in html
+
+    def test_collapse_top_hidden_in_collapsed_and_toggled_by_js(self):
+        # Полная страница: верхняя «Свернуть» есть в разметке (скрыта) и JS
+        # models_toggle переключает её видимость вместе со скрытым span —
+        # класс .models-collapse-top ищется внутри .models-cell, кнопки внизу
+        # достаточно для сворачивания (работают обе).
+        config, ws = _fresh_modules()
+        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {f"m{i}": ("AAA", backend) for i in range(8)}
+        ctx = mock.Mock(version="0.0.0-test")
+        body = ws._render_status_page(ctx, refresh=_done_job(True, 8)).decode()
+        # models-cell оборачивает колонку; JS ищет span и верхнюю кнопку по
+        # классам внутри ячейки (btn.closest(".models-cell") + querySelector)
+        assert '<span class="models-cell">' in body
+        assert '<span class="models-extra" style="display:none">' in body
+        assert 'class="models-collapse-top"' in body
+        assert 'btn.closest(".models-cell")' in body
+        assert 'cell.querySelector(".models-extra")' in body
+        assert 'cell.querySelectorAll(".models-collapse-top")' in body
+        # верхняя кнопка идёт ДО скрытого span (над списком), нижняя — после
+        # (ищем в РАЗМЕТКЕ — от первого .models-cell; «models-extra» в
+        # docstring _models_html идёт раньше и в счёт не входит)
+        cell_markup = body[body.index('<span class="models-cell">'):]
+        top_pos = cell_markup.index('class="models-collapse-top"')
+        extra_pos = cell_markup.index('class="models-extra"')
+        bottom_pos = cell_markup.index("Показать ещё")
+        assert top_pos < extra_pos < bottom_pos
+        # у развёрнутой колонки — «Свернуть» и сверху, и снизу (нижняя кнопка
+        # меняет текст на «Свернуть» в JS, верхняя имеет текст сразу)
+        assert "Свернуть" in body
 
     def test_empty_shows_status_text(self):
         # Нет моделей — строка-заглушка со статусом (для колонки Models).
@@ -491,9 +534,14 @@ class TestModelsCell:
         ctx = mock.Mock(version="0.0.0-test")
         body = ws._render_status_page(ctx, refresh=_done_job(True, 6)).decode()
         assert "function models_toggle(btn)" in body
-        assert "Свернуть" in body  # JS меняет текст кнопки на «Свернуть»
+        assert "Свернуть" in body  # и в JS, и в разметке верхней кнопки
         # первая модель видна строкой, а её хвост свёрнут в models-extra
         assert "m0" in body and '<span class="models-extra" style="display:none">' in body
+        # скрытая верхняя «Свернуть» есть у свёрнутой колонки (развернёт JS)
+        assert 'class="models-collapse-top"' in body
+        assert body.index('class="models-collapse-top"') < body.index(
+            'class="models-extra"'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -536,8 +584,8 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 7 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|Endpoints|Действия).
+        # Заголовок секции + 8 колонок (Модель|Бэкенд|Вызовов|Input|
+        # Output|Cost|Endpoints|Actions).
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Models in use</h3>" in body
@@ -547,12 +595,13 @@ class TestUsageSection:
         assert "<th>Вызовов</th>" in body
         assert "<th>Input</th>" in body
         assert "<th>Output</th>" in body
+        assert "<th>Cost</th>" in body
         assert "<th>Endpoints</th>" in body
         assert "<th>completions</th>" not in body
         assert "<th>messages</th>" not in body
         assert "<th>responses</th>" not in body
         assert "<th>embeddings</th>" not in body
-        assert "<th>Действия</th>" in body
+        assert "<th>Actions</th>" in body
 
     def test_empty_table_shows_placeholder(self):
         # Пустая таблица → строка «пока нет данных», никаких строк моделей.
@@ -577,8 +626,10 @@ class TestUsageSection:
         assert "m-ok" in body and "m-none" in body
         # доступные эндпоинты — зелёным именем (одно на обе строки)
         assert body.count('style="color:#1a7f37">completions</span>') == 1
-        # серых «—» (пустая ячейка Endpoints) — ровно одна, у m-none
-        assert body.count('style="color:#aaa">—</span>') == 1
+        # серых «—» ровно три: Cost у m-ok (токены 0), Cost у m-none (токены 0)
+        # и Endpoints у m-none (доступных нет) — колонка Cost не добавляет
+        # четвёртую: у m-ok она «—» по нулевым токенам, а не по Endpoints.
+        assert body.count('style="color:#aaa">—</span>') == 3
         # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
         assert 'data-calls="1">1</td>' in body  # calls строки m-none
@@ -639,16 +690,17 @@ class TestUsageSection:
         })) == '<span style="color:#aaa">—</span>'
 
     def test_usage_rows_unit_empty_and_nonempty(self):
-        # _usage_rows_html: одна ячейка Endpoints на строку + плейсхолдер пустого.
+        # _usage_rows_html: одна ячейка Cost/Endpoints на строку + плейсхолдер
+        # пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"7\"" in html
+        assert "пока нет данных" in html and "<td colspan=\"8\"" in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+Endpoints+Действия = 7 ячеек
-        assert html.count("<td") == 7
+        # модель+бэкенд+вызовов+input+output+Cost+Endpoints+Действия = 8 ячеек
+        assert html.count("<td") == 8
         assert 'id="usage-row-0"' in html
         assert 'data-calls="1"' in html
         assert "completions" in html  # доступный эндпоинт — в ячейке Endpoints
@@ -690,14 +742,19 @@ class TestUsageSection:
         empty = self._seed(config, ws, usage_rows=[])
         assert "function compact_fmt" in empty
 
-    def test_row_has_actions_two_forms(self):
-        # Каждая строка модели несёт две form-кнопки: «Перепроверить» (POST
-        # на /api/model-usage/reprobe?model=<имя>) и «Сбросить» (POST на
-        # /api/model-usage/reset?model=<имя>) — без JS, PRG через 303.
+    def test_row_has_actions_three_forms(self):
+        # Каждая строка модели несёт три form-кнопки-иконки: 🔄 «Перепроверить»
+        # (POST /api/model-usage/reprobe?model=<имя>), ⏪ «Сбросить» (POST
+        # /api/model-usage/reset?model=<имя>), 🗑 «Удалить» (POST
+        # /api/model-usage/delete?model=<имя>) — без JS, PRG через 303.
+        # Тексты-фразы — в title/aria-label кнопок, глифы в body.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-reset")])
-        assert "Перепроверить" in body
-        assert "Сбросить" in body
+        assert "Перепроверить" in body  # title/aria-label иконки 🔄
+        assert "Сбросить" in body  # title/aria-label иконки ⏪
+        assert "Удалить" in body  # title/aria-label иконки 🗑
+        for glyph in ("🔄", "⏪", "🗑"):
+            assert glyph in body
         assert (
             '<form method="post" action="/api/model-usage/reset?model=m-reset">'
             in body
@@ -706,13 +763,18 @@ class TestUsageSection:
             '<form method="post" action="/api/model-usage/reprobe?model=m-reset">'
             in body
         )
-        assert "color:#c0392b" in body  # красная ссылка-кнопка сброса
-        # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
+        assert (
+            '<form method="post" action="/api/model-usage/delete?model=m-reset">'
+            in body
+        )
+        assert "color:#c0392b" in body  # красная иконка 🗑 (деструктивное действие)
+        assert 'title="Удалить строку модели"' in body
+        # все три формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
-        assert row_html.count("<td") == 7  # в т.ч. ячейка действий — одна
+        assert row_html.count("<td") == 8  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
-        # Имя модели со спецсимволами в обеих формах: quote(safe="") +
+        # Имя модели со спецсимволами во всех трёх формах: quote(safe="") +
         # html.escape, спецсимволы не ломают query/атрибут.
         config, ws = _fresh_modules()
         row = self._row('m & "x"/у=1')
@@ -721,6 +783,7 @@ class TestUsageSection:
         q = _quote('m & "x"/у=1', safe="")
         assert f'action="/api/model-usage/reset?model={q}"' in html
         assert f'action="/api/model-usage/reprobe?model={q}"' in html
+        assert f'action="/api/model-usage/delete?model={q}"' in html
         assert 'model=m & "' not in html  # сырые спецсимволы в action не выходят
 
     def test_row_actions_hidden_while_reprobing(self):
@@ -731,10 +794,11 @@ class TestUsageSection:
         assert "проверяется…" in html
         assert "Перепроверить" not in html
         assert "Сбросить" not in html
+        assert "Удалить" not in html
         assert "form method=\"post\"" not in html
 
     def test_row_actions_normal_when_other_reprobing(self):
-        # Перепроверяется ДРУГАЯ модель — у строки обычные кнопки.
+        # Перепроверяется ДРУГАЯ модель — у строки обычные кнопки-иконки.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html(
             [self._row("m-a"), self._row("m-b")],
@@ -745,13 +809,14 @@ class TestUsageSection:
         assert "проверяется…" in html
         assert html.index("m-a") < html.index("проверяется…")
 
-    def test_empty_table_no_reset_forms(self):
-        # У пустой таблицы (заглушка colspan=7) форм сброса/перепроверки нет.
+    def test_empty_table_no_action_forms(self):
+        # У пустой таблицы (заглушка colspan=8) форм действий нет.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[])
         assert 'form method="post" action="/api/model-usage/reset' not in body
         assert 'form method="post" action="/api/model-usage/reprobe' not in body
-        assert "colspan=\"7\"" in body
+        assert 'form method="post" action="/api/model-usage/delete' not in body
+        assert "colspan=\"8\"" in body
 
     def test_page_header_is_backend_adapter(self):
         # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —
@@ -761,6 +826,137 @@ class TestUsageSection:
         assert "Backend-Adapter — статус" in body
         assert "[CC]-adapter" not in body
         assert "https://github.com/alekseybb197/backend-adapter" in body
+
+
+# ---------------------------------------------------------------------------
+# TestCostCell — колонка Cost строк Models in use (ADAPTER_MODELS_TARIFFS)
+# ---------------------------------------------------------------------------
+
+def _seed_tariffs(config, ws, path, entries):
+    """Записать файл тарифов, навести config.ADAPTER_MODELS_TARIFFS и
+    перечитать кэш (как это делает полноценный рендер страницы через
+    model_usage.ensure_tariffs_loaded). Вернуть (config, ws)."""
+    import yaml as _yaml
+    with open(path, "w", encoding="utf-8") as f:
+        _yaml.safe_dump({"tariffs": entries}, f)
+    config.ADAPTER_MODELS_TARIFFS = str(path)
+    from backend_adapter import model_usage
+    model_usage.ensure_tariffs_loaded()
+    return config, ws
+
+
+class TestCostCell:
+    """Ячейка Cost: считается на лету из токенов строки и тарифа на момент
+    отображения; «--» — нет тарифа / бесплатная модель / токенов ещё нет."""
+
+    def test_cost_cell_computed_from_tokens(self, tmp_path):
+        # input=1000×10/1M + output=2000×20/1M → 0.01+0.04 = 0,05 USD
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m-paid", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        row = ws._usage_rows_html([self._row(
+            "m-paid", input_tokens=1000, output_tokens=2000)])
+        assert "0,05 USD" in row
+        # ровно одна ячейка Cost (не задвоилась)
+        assert row.count("0,05 USD") == 1
+
+    def test_cost_cell_no_tariff_dash(self, tmp_path):
+        # Модель не в тарифах (файл пуст/не задан) → «--», не смотря на токены.
+        config, ws = _fresh_modules()
+        row = self._row("m-x", input_tokens=1000, output_tokens=2000)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+        # явный файл, но без записи про m-x — тоже «--»
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "other", "input_price": 1, "output_price": 1,
+             "currency": "USD"},
+        ])
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+
+    def test_cost_cell_zero_tokens_dash(self, tmp_path):
+        # Токенов ещё нет (после «Сбросить» / свежая строка) → «--», даже если
+        # тариф есть (0 × цена = 0 неотличимо от «нет данных» на странице).
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        row = self._row("m", input_tokens=0, output_tokens=0)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+
+    def test_cost_cell_zero_price_is_free_dash(self, tmp_path):
+        # Бесплатная модель (нулевые цены) — в тарифах, но Cost «--» (цена 0).
+        # Нулевая цена не роняет рендер (защита от деления на ноль в том
+        # числе: price_per по умолчанию 1).
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m-free", "input_price": 0, "output_price": 0,
+             "currency": "USD"},
+        ])
+        row = self._row("m-free", input_tokens=1000, output_tokens=2000)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row)
+
+    def test_cost_cell_currency_and_backend_match(self, tmp_path):
+        # Тариф с backend матчится только для этого бэкенда; у другого — «--».
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m", "backend": "AAA", "input_price": 1, "output_price": 2,
+             "currency": "RUB", "price_per": 1},
+        ])
+        row_aaa = self._row("m", backend="AAA", input_tokens=100, output_tokens=50)
+        assert "200,00 RUB" in ws._cost_cell_html(row_aaa)  # 100×1+50×2 = 200
+        row_bbb = self._row("m", backend="BBB", input_tokens=100, output_tokens=50)
+        assert 'style="color:#aaa">—</span>' in ws._cost_cell_html(row_bbb)
+
+    def test_cost_cell_rounds_like_tokens(self, tmp_path):
+        # Сумма ≥ 10 000 — компактно как токены («12k3 USD»), меньше — точно
+        # с двумя знаками и запятой.
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m", "input_price": 1, "output_price": 1,
+             "currency": "USD", "price_per": 1},
+        ])
+        row = self._row("m", input_tokens=12345, output_tokens=0)
+        assert "12k3 USD" in ws._cost_cell_html(row)
+
+    def _row(self, model, backend="AAA", calls=1, endpoints=None,
+             input_tokens=0, output_tokens=0):
+        return {
+            "model": model,
+            "backend": backend,
+            "calls": calls,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "endpoints": endpoints or {},
+            "errors": {},
+            "first_seen": "10:00:00",
+            "probing": False,
+        }
+
+
+class TestFmtCost:
+    def _fmt(self, cost, currency="USD"):
+        config, ws = _fresh_modules()
+        return ws._fmt_cost(cost, currency)
+
+    def test_exact_two_decimals_comma(self):
+        # Запятая — десятичный разделитель, два знака до 10 000.
+        assert self._fmt(0.25, "USD") == "0,25 USD"
+        assert self._fmt(133.0, "RUB") == "133,00 RUB"
+        assert self._fmt(1234.56, "USD") == "1234,56 USD"
+        assert self._fmt(9999.99, "EUR") == "9999,99 EUR"
+
+    def test_compact_above_ten_thousand(self):
+        # ≥ 10 000 — компактно как токены (колонка узкая), с валютой.
+        assert self._fmt(12345.0, "USD") == "12k3 USD"
+        assert self._fmt(12345678.0, "RUB") == "12m3 RUB"
+
+    def test_zero_or_negative_dash(self):
+        # ≤ 0 (бесплатно/нет токенов) — «--»; пустая валюта — тоже «--».
+        assert self._fmt(0.0, "USD") == "—"
+        assert self._fmt(0.0, "") == "—"
+        assert self._fmt(-1.0, "USD") == "—"
 
 
 # ---------------------------------------------------------------------------
@@ -1392,6 +1588,161 @@ class TestModelUsageResetAPI:
 
 
 # ---------------------------------------------------------------------------
+# /api/model-usage/delete: POST — удаление строки модели из таблицы и файла
+# ---------------------------------------------------------------------------
+
+class TestModelUsageDeleteAPI:
+    def _seed_row(self, model="m-del", calls=5, input_tokens=0,
+                  output_tokens=0):
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": model, "backend": "AAA", "calls": calls,
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "endpoints": {}, "errors": {}, "first_seen": "10:00:00",
+            "probing": False,
+        }])
+
+    def test_post_form_deletes_and_redirects(self, tmp_path):
+        # HTML-кнопка (без JSON Content-Type): POST ?model=m → 303 See Other
+        # с Location "/" (PRG); строка удалена из таблицы (страницы).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-del": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        self._seed_row()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+            from backend_adapter import model_usage
+            assert model_usage.usage_snapshot() == []  # строка удалена из памяти
+            status2, body2 = _http_get(port, "/")
+            assert status2 == 200
+            assert ">m-del</td>" not in body2  # строки на странице нет
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_delete_removes_from_file(self, tmp_path):
+        # Удаление формы перезаписывает YAML-файл без строки (serve включил
+        # persist на root_dir=tmp_path).
+        config, ws = _fresh_modules()
+        config._BACKENDS = [
+            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
+        ]
+        config._MODEL_TO_BACKEND = {"m-del": ("AAA", config._BACKENDS[0])}
+        _seed_job(config, _done_job(True, 1))
+        from backend_adapter import model_usage
+        _seed_usage_rows(model_usage, [{
+            "model": "m-del", "backend": "AAA", "calls": 5,
+            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
+            "errors": {}, "first_seen": "10:00:00", "probing": False,
+        }])
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # принудительно сохранить (flush), чтобы строка была в файле
+            model_usage._DIRTY = True  # сид пишет _TABLE напрямую, без флага
+            model_usage.flush_table()
+            _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/x-www-form-urlencoded",
+            )
+            import yaml
+            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            assert "m-del" not in (data or {}).get("models", {})
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_ok_then_404(self, tmp_path):
+        # JSON-клиент: 200 {"ok": true, ...}; повторное удаление той же модели
+        # — 404 (строки уже нет; delete НЕ идемпотентен, в отличие от reset);
+        # удаление неизвестной модели — 404 {"error": ...}.
+        config, ws = _fresh_modules()
+        self._seed_row()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/json",
+            )
+            assert status == 200
+            import json
+            assert json.loads(body) == {"ok": True, "model": "m-del"}
+            from backend_adapter import model_usage
+            assert model_usage.usage_snapshot() == []
+            # Повторное удаление уже удалённой строки — 404
+            status2, _, body2 = _http_post_body(
+                port, "/api/model-usage/delete?model=m-del", b"",
+                "application/json",
+            )
+            assert status2 == 404
+            assert "error" in json.loads(body2)
+            # Удаление модели, которой нет — 404
+            status3, _, body3 = _http_post_body(
+                port, "/api/model-usage/delete?model=ghost", b"",
+                "application/json",
+            )
+            assert status3 == 404
+            assert "error" in json.loads(body3)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_missing_model_400(self, tmp_path):
+        # Без query-параметра model — 400 {"error": ...} (JSON-клиент).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _, body = _http_post_body(
+                port, "/api/model-usage/delete", b"",
+                "application/json",
+            )
+            assert status == 400
+            import json
+            assert "error" in json.loads(body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_without_model_redirects(self, tmp_path):
+        # HTML-форма без model — 303 на "/" (в норме невозможно: кнопка
+        # всегда несёт model).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, body = _http_post_body(
+                port, "/api/model-usage/delete", b"",
+                "application/x-www-form-urlencoded",
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert body == ""
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_get_returns_404(self, tmp_path):
+        # GET на префикс удаления — 404 (дефолт Endpoint; удаление только POST).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _ = _http_get(port, "/api/model-usage/delete?model=m")
+            assert status == 404
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+# ---------------------------------------------------------------------------
 # /api/model-usage/reprobe: POST — фоновая перепроверка эндпоинтов строки
 # ---------------------------------------------------------------------------
 
@@ -1530,8 +1881,8 @@ class TestModelUsageReprobeAPI:
             assert "Перепроверка модели" in body
             assert "выполняется" in body
             assert "проверяется…" in body
-            assert ">Перепроверить</button>" not in body   # кнопки строки нет
-            assert ">Сбросить</button>" not in body
+            assert "form method=\"post\"" not in body  # кнопок строки нет
+            assert 'title="Перепроверить эндпоинты модели"' not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" in body
         finally:
             httpd.shutdown()
@@ -1554,8 +1905,8 @@ class TestModelUsageReprobeAPI:
             assert status == 200
             assert "Перепроверка модели" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
-            assert ">Перепроверить</button>" in body      # кнопка строки на месте
-            assert ">Сбросить</button>" in body
+            assert 'title="Перепроверить эндпоинты модели"' in body  # 🔄 на месте
+            assert 'title="Удалить строку модели"' in body
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -1783,3 +2134,54 @@ class TestUsageSnapshotAPI:
                     httpd.server_close()
         assert m_start.call_count == 0
         assert m_refresh.call_count == 0
+
+    def test_snapshot_row_carries_cost_html(self, tmp_path):
+        # Снимок дополняет каждую строку полем cost_html — HTML ячейки Cost
+        # на ТЕКУЩИЙ момент (токены строки × тариф): JS usage_poll ставит его
+        # в ячейку Cost (индекс 5) — значение меняется синхронно со счётчиками.
+        config, ws = _fresh_modules()
+        # строка без тарифа → cost_html — серая «—» (как у _cost_cell_html)
+        self._seed_row("m-dash", calls=1, input_tokens=1000, output_tokens=500)
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            import json
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            rows = json.loads(body)
+            assert rows[0]["cost_html"] == '<span style="color:#aaa">—</span>'
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_snapshot_cost_html_tracks_updated_tokens(self, tmp_path):
+        # cost_html пересчитывается на каждом запросе снимка из ТЕКУЩИХ токенов
+        # строки: тариф задан, токены выросли → следующее обращение к
+        # эндпоинту возвращает новую стоимость (сервер не кэширует старое).
+        config, ws = _fresh_modules()
+        from backend_adapter import model_usage
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "m-snap", "input_price": 10, "output_price": 20,
+             "currency": "USD", "price_per": 1_000_000},
+        ])
+        self._seed_row("m-snap", calls=1, input_tokens=1000, output_tokens=2000)
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            import json
+            # 0,25·? — нет: 10·1000/1e6 + 20·2000/1e6 = 0,01 + 0,04 = «0,05 USD»
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            row = json.loads(body)[0]
+            assert row["cost_html"] == "0,05 USD"
+            # токены выросли (живая строка в памяти — как после реальных
+            # запросов) → следующий снимок даёт актуальную стоимость
+            with model_usage._TABLE_LOCK:
+                model_usage._TABLE["m-snap"]["input_tokens"] = 1_000_000
+                model_usage._TABLE["m-snap"]["output_tokens"] = 2_000_000
+            status, body = _http_get(port, "/api/model-usage/snapshot")
+            assert status == 200
+            row = json.loads(body)[0]
+            # 10·1e6/1e6 + 20·2e6/1e6 = 10 + 40 = «50,00 USD»
+            assert row["cost_html"] == "50,00 USD"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

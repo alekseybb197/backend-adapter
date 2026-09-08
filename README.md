@@ -1,19 +1,31 @@
-# backend-adapter — Claude Code ↔ OpenAI Backend Proxy
+# backend-adapter — [CC] ↔ [OI] Backend Proxy
 
-> **v0.8.4** — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
-> с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
+> **v0.8.6** — HTTP-прокси-адаптер, позволяющий использовать **[CC]** (CLI)
+> с бэкендом LLM, который реализует **[OI]-совместимый API** (`/v1/chat/completions`),
 > но некорректно реализует протокол Anthropic Messages API.
 
 ```
-Claude Code  ←--Anthropic API-->  adapter (localhost:9999)  ←--OpenAI API-->  LLM Backend
+[CC]  ←--Anthropic API-->  adapter (localhost:9999)  ←--[OI] API-->  LLM Backend
 ```
 
 ## Проблемы, которые решает адаптер
 
 1. **System messages**. Бэкенд кластеризует system messages в конец диалога — адаптер собирает их в одно сообщение в начале.
-2. **Format mismatch**. Claude Code отправляет запросы в формате Anthropic Messages API, а бэкенд ожидает OpenAI Chat Completions. Адаптер выполняет двунаправленную конвертацию (сообщения, инструменты, tool choice).
-3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`) через Claude Code.
+2. **Format mismatch**. [CC] отправляет запросы в формате Anthropic Messages API, а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию (сообщения, инструменты, tool choice).
+3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`) через [CC].
 4. **Qwen tool_calls fallback**. Модели Qwen иногда возвращают вызовы инструментов в текстовом формате с JSON внутри XML-подобных тегов — адаптер автоматически парсит этот формат.
+
+## Возможности
+
+- **Прозрачное проксирование**: ретраи/таймауты, конвертация Anthropic ↔ [OI] (в т.ч. стриминг SSE), маскирование секретов в логах.
+- **Логирование и наблюдаемость**: консольные debug-блоки `[...]` печатаются **всегда** (с обрезкой до `ADAPTER_DEBUG_TRIM`; `0` — без обрезки); файловая запись per-session логов (`session-*.log`/`*.jsonl`, `*.parts` дампы) — по `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH` (дефолт `./tmp/logs`), файлы несут **полные** строки без обрезки; per-session JSON/YAML-дампы всех логгируемых частей — `ADAPTER_DEBUG_PARTS=1`.
+- **WEBUI** (поднимается всегда, флага отключения нет):
+  - `/` — статус-страница: версия, LLM-эндпоинты, таблица «Models in use» с live-счётчиками вызовов/токенов и колонкой **Cost** (по тарифам `ADAPTER_MODELS_TARIFFS`); действия строки — иконки-кнопки ⟳ (перепроверить эндпоинты) / ↺ (сбросить счётчики) / ✕ (удалить строку); проверка бэкендов по кнопке «⟳ Перепроверить» (перечитывает `ADAPTER_BACKEND_CONFIG` без рестарта);
+  - `/session` — просмотр сессий (`*.parts`, дерево артефактов, hash8-алиасы);
+  - `/config` — переключение объёма debug-записи на лету (runtime-пул);
+  - `/healthz`, `/health`, `/live`, `/ready` — health-check для оркестрации;
+  - Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`, отдельный слушатель, дефолт `127.0.0.1:9100`).
+- **Мониторинг использования**: таблица использованных моделей персистентна (`model-usage.yaml` в корне WEBUI = `ADAPTER_DEBUG_LOGPATH`), счётчики строки обнуляются (↺) и строка удаляется из таблицы и файла (✕) по кнопкам/API (`POST /api/model-usage/reset`, `/delete`).
 
 ## Quick start
 
@@ -36,7 +48,7 @@ source adapter.env
 # 5. Запустить адаптер
 python3 backend-adapter.py
 
-# 6. В другом терминале запустить Claude Code
+# 6. В другом терминале запустить [CC]
 claude
 ```
 
@@ -57,25 +69,26 @@ claude
 
 ```
 backend-adapter/
-├── backend-adapter.py          # Точка входа
+├── backend-adapter.py          # Точка входа (__version__)
 ├── backend_adapter/            # Доменный пакет (26 модулей, включая __init__.py)
-│   ├── config.py               # Парсинг env, multi-backend, YAML
-│   ├── server.py               # HTTP-сервер
-│   ├── convert.py              # Anthropic ↔ OpenAI конвертация
+│   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
+│   ├── server.py               # HTTP-сервер (Anthropic ↔ [OI])
+│   ├── convert.py              # Конвертация сообщений/инструментов
 │   ├── streaming.py            # SSE streaming passthrough
 │   ├── tracer.py               # JSONL trace-логирование
 │   ├── session_log.py          # Per-session логи с FIFO eviction
 │   ├── daemon.py               # Detach (double fork)
-│   ├── logger.py               # Debug-логирование
+│   ├── logger.py               # Консольные debug-логи (безусловны)
 │   ├── redact.py               # Маскирование секретов
 │   ├── webserver.py            # WEBUI-ядро (роутинг эндпойнтов, serve(), CLI)
-│   ├── webui_status.py         # WEBUI "/": статус-страница
+│   ├── webui_status.py         # WEBUI "/": статус-страница, usage-таблица, /api/*
 │   ├── webui_ops.py            # WEBUI health: /healthz /health /live /ready
 │   ├── webui_config_api.py     # WEBUI "/config": runtime-конфиг
 │   ├── prometheus_exporter.py  # Метрики /metrics (отдельный слушатель)
 │   ├── session_viewer.py       # WEBUI "/session": просмотр *.parts сессий
+│   ├── model_usage.py          # Персистентный учёт использованных моделей, тарифы
 │   ├── artifact_tree*.py       # Генерация дерева артефактов (8 модулей)
-│   └── __init__.py             # Module-level proxy
+│   └── __init__.py             # Lazy-прокси глобалов config/logger/tracer на старте
 ├── docs/                       # Документация
 │   ├── samples/                # Примеры конфигов: sample.adapter.env (env-файл),
 │   │                           #   sample.adapter.yaml (YAML бэкендов),

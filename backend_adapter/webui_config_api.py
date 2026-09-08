@@ -10,8 +10,9 @@ webui_config_api.py — эндпойнт "/config" общего веб-серв�
 слушателей/переинициализации и сорвала бы активные соединения.
 
 Эндпойнт:
-  GET /config → HTML-форма с текущими значениями пула (12 полей: 8 bool
-                checkbox + 3 int input + 1 text для списка тегов без обрезки)
+  GET /config → HTML-форма с текущими значениями пула (9 полей: 6 bool
+                checkbox + 3 int input; строковых переменных в пуле нет —
+                селекторы подробности удалены реформой логирования v0.8.6)
   POST /config → application/x-www-form-urlencoded или JSON, применяет валидные
                  значения через config.set_runtime_config(**...), сверяет ответ
                  с посланным, редирект на GET с flash-сообщением об успехе
@@ -37,12 +38,12 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
     applied — что применилось при последнем POST (для flash-сообщения):
               {"ok": [...], "ignored": [...]}
     """
-    # Разбиваем поля по типам для правильного рендера
+    # Разбиваем поля по типам для правильного рендера. Строковых полей нет:
+    # пул — только bool/int скаляры (реформа логирования v0.8.6 удалила
+    # прежние селекторы подробности).
     bool_fields = [
         "ADAPTER_DEBUG",
-        "ADAPTER_DEBUG_TAGS_OUT",
-        "ADAPTER_DEBUG_TOOLS",
-        "ADAPTER_DEBUG_TOOLS_ERROR",
+        "ADAPTER_DEBUG_PARTS",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE",
         "ADAPTER_STREAMING_ENABLE",
         "ADAPTER_STREAM_INCLUDE_USAGE",
@@ -53,24 +54,18 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_TRACE_REASONING_MAX_CHARS",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
     ]
-    # Единственная строковая переменная пула — список тегов без обрезки
-    # (строка env-формата "TAG1,TAG2"; рабочий список живёт в config._SET).
-    str_field = "ADAPTER_DEBUG_TAGS_FULL"
 
     # Описания полей для подсказок
     field_descriptions = {
-        "ADAPTER_DEBUG": "Мастер-выключатель debug-логов (0/1)",
-        "ADAPTER_DEBUG_TAGS_OUT": "Per-session дампы протокола (.json+.yaml парой)",
-        "ADAPTER_DEBUG_TOOLS": "Логировать все результаты инструментов ([TOOL_RESULT])",
-        "ADAPTER_DEBUG_TOOLS_ERROR": "Логировать ошибки инструментов ([TOOL_RESULT_ERROR])",
+        "ADAPTER_DEBUG": "Файловая запись логов (полные, без обрезки); консоль — всегда, с обрезкой TRIM",
+        "ADAPTER_DEBUG_PARTS": "Per-session дампы частей протокола — .json+.yaml по каждому тегу",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "Отключить санитайзер логов (секреты в открытом виде!)",
         "ADAPTER_STREAMING_ENABLE": "Рубильник стриминга: 0 — всегда stream=False (аварийный)",
         "ADAPTER_STREAM_INCLUDE_USAGE": "Передавать usage-токены в стриме (stream_options)",
         "ADAPTER_STRICT_MODELS": "Строгая валидация моделей по списку бэкенда",
-        "ADAPTER_DEBUG_TRIM": "Порог обрезки логов (символы, 0=выкл.)",
+        "ADAPTER_DEBUG_TRIM": "Порог обрезки консольного вывода (символы, 0=без обрезки; файл — всегда полный)",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "Макс. символов reasoning в трейсе (0=без ограничений)",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "Макс. символов tool-полей в трейсе (0=без ограничений)",
-        "ADAPTER_DEBUG_TAGS_FULL": "Теги без обрезки (через запятую; пусто — trim везде)",
     }
 
     rows = []
@@ -78,10 +73,20 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         value = current_values.get(name, False)
         desc = field_descriptions.get(name, "")
         checked = "checked" if value else ""
+        hidden_value = "1" if value else "0"
+        # Для каждого bool-поля — ПАРА полей: checkbox (шлёт value=1, только
+        # когда отмечен) + hidden-поле текущего состояния. Hidden-поле шлёт
+        # 1/0 ВСЕГДА под именем "_<NAME>" (префикс "_" — чтобы разбор POST
+        # ниже внёс в data именно "<NAME>": сначала явное значение checkbox-а,
+        # затем всегда-присутствующее hidden-состояние). Идиома нужна потому,
+        # что снятая галка просто отсутствует в теле POST — без hidden-
+        # «соседа» выключить bool через форму было бы невозможно.
         rows.append(f"""
       <tr>
         <td><label for="{name}">{html.escape(name)}</label></td>
-        <td><input type="checkbox" id="{name}" name="{name}" value="1" {checked}></td>
+        <td><input type="checkbox" id="{name}" name="{name}" value="1" {checked}>
+            <input type="hidden" name="_{name}" value="{hidden_value}">
+        </td>
         <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
       </tr>""")
@@ -95,17 +100,6 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         <td><input type="number" id="{name}" name="{name}" value="{value}" min="0" style="width: 120px"></td>
         <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
-      </tr>""")
-
-    # Строковое поле: text input с текущим env-формат-значением пула.
-    str_value = config._ADAPTER_DEBUG_TAGS_FULL_RAW
-    str_desc = field_descriptions.get(str_field, "")
-    rows.append(f"""
-      <tr>
-        <td><label for="{str_field}">{html.escape(str_field)}</label></td>
-        <td><input type="text" id="{str_field}" name="{str_field}" value="{html.escape(str_value)}" style="width: 220px" placeholder="BODY,TOOL_RESULT,RESPONSE"></td>
-        <td style="color:#666; font-size: 13px">{html.escape(str_desc)}</td>
-        <td style="color:#999; font-size: 12px">текущее: {html.escape(str_value or "—")}</td>
       </tr>""")
 
     # Flash-сообщение о применённых изменениях
@@ -124,6 +118,7 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 <html lang="ru">
 <head>
 <meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>backend-adapter — runtime config</title>
 <style>
   body {{ font-family: -apple-system, Segoe UI, Arial, sans-serif; margin: 24px; color: #222; }}
@@ -202,25 +197,35 @@ class ConfigEndpoint(webserver.Endpoint):
             # form-data (application/x-www-form-urlencoded)
             length = int(handler.headers.get("Content-Length", 0))
             body = handler.rfile.read(length).decode("utf-8")
-            # keep_blank_values=True: пустое значение text-поля (например,
-            # ADAPTER_DEBUG_TAGS_FULL= — сброс списка тегов) должно ДОЙТИ
-            # как "", а не исчезнуть (иначе очистить поле формой нельзя).
+            # Каждое bool-поле формы шлёт ПАРУ значений: явный checkbox
+            # (value=1, только когда отмечен) и всегда-присутствующее
+            # hidden-поле "_<NAME>" с текущим состоянием (1/0). Разбор ниже:
+            # значения каждого ключа складываются в список, из которого мы
+            # берём ПОСЛЕДНЕЕ — hidden-состояние; ключ "_NAME" затем пишется
+            # в data как "NAME". Если галка отмечена — checkbox внёс "NAME"→True
+            # (состояние «включено»), если снята — остаётся только hidden
+            # "_NAME"→0 → False. int-поля всегда присутствуют (type="number").
             parsed = parse_qs(body, keep_blank_values=True)
-            # parse_qs возвращает списки значений; берём первое
             for key, values in parsed.items():
-                if values:
-                    val = values[0]
-                    # Преобразуем типы: "1"/"true"/"on" → True, "0"/"false" → False
-                    if val.lower() in ("1", "true", "on", "yes"):
-                        data[key] = True
-                    elif val.lower() in ("0", "false", "off", "no"):
-                        data[key] = False
-                    else:
-                        # Пробуем int
-                        try:
-                            data[key] = int(val)
-                        except ValueError:
-                            data[key] = val
+                if not values:
+                    continue
+                # Последнее значение: для bool — это hidden-«сосед» (при
+                # отмеченной галке checkbox "NAME"=1 идёт ПЕРВЫМ, затем
+                # hidden "_NAME"=1 — оба дают True, не конфликтуют).
+                val = values[-1]
+                # hidden-ключ "_NAME" → имя "NAME"
+                data_key = key[1:] if key.startswith("_") else key
+                # Преобразуем типы: "1"/"true"/"on" → True, "0"/"false" → False
+                if val.lower() in ("1", "true", "on", "yes"):
+                    data[data_key] = True
+                elif val.lower() in ("0", "false", "off", "no"):
+                    data[data_key] = False
+                else:
+                    # Пробуем int
+                    try:
+                        data[data_key] = int(val)
+                    except ValueError:
+                        data[data_key] = val
 
         # Применяем через set_runtime_config
         result = config.set_runtime_config(**data)

@@ -22,102 +22,61 @@ PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 # env-переменная в bind-кортеже socketserver означала бы INADDR_ANY (все
 # интерфейсы) — с `or` и незаданная, и пустая дают безопасный localhost.
 ADAPTER_ENDPOINT_HOST = os.environ.get("ADAPTER_ENDPOINT_HOST", "") or "127.0.0.1"
-ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "1").lower() not in ("0", "false", "no", "")
-# Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы).
-# ПУСТО / не задано → файловая запись ВЫКЛЮЧЕНА (zero-config: консольные
-# debug-блоки видны, ничего не пишется на диск и папка не создаётся).
-# Задано → директория логов: создаётся при необходимости на старте,
-# вся файловая запись (в т.ч. trace и *.parts дампы) подчинена
-# ADAPTER_DEBUG_ENABLE (мастер-выключатель: 0 → ничего не пишется).
-# Корень веб-интерфейса НЕ зависит от этой переменной (см. блок WEBUI).
-# Режим «один файл» удалён — путь всегда директория.
-ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "")
+# Мастер-выключатель ФАЙЛОВОЙ записи debug/trace-логов и *.parts дампов:
+#   ADAPTER_DEBUG_ENABLE=1 — файлы пишутся в ADAPTER_DEBUG_LOGPATH;
+#   0 (по умолчанию) — на диск ничего не пишется (консольные debug-блоки
+#   при этом БЕЗУСЛОВНЫ — печатаются всегда, независимо от этого флага).
+ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "0").lower() not in ("0", "false", "no", "")
+# Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы)
+# и корень веб-интерфейса (WEBUI, model-usage.yaml). ВСЕГДА непуст: пусто /
+# не задано → дефолт "./tmp/logs" (относительно папки запуска). Папка
+# создаётся на старте адаптера как корень WEBUI; лог-ФАЙЛЫ в неё пишутся
+# только при ADAPTER_DEBUG_ENABLE=1 (см. ADAPTER_DEBUG выше). Режим «один
+# файл» удалён — путь всегда директория.
+ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "") or "./tmp/logs"
 ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
 ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
+# Лимит консольного debug-вывода (v0.8.6-реформа): консоль — единственный
+# ВСЕГДА-включённый канал, поэтому любая строка обрезается до N символов
+# (0 = без обрезки). Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1)
+# лимит НЕ уважает — туда пишутся полные части (см. trim_limit() и logger.py).
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
-# Логгирование результатов работы инструментов (обработка собранных логов —
-# по умолчанию выключена, zero-config: ничего лишнего не обрабатывается):
-#   ADAPTER_DEBUG_TOOLS=1 — писать все результаты ([TOOL_RESULT]).
-#   ADAPTER_DEBUG_TOOLS_ERROR=1 — писать ошибки инструментов ([TOOL_RESULT_ERROR]).
-#   По умолчанию оба выключены (0).
-#   ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
-#   отключается обрезка (trim). Если тэг в списке — полный вывод без обрезки.
-#   Пример: BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT,TOOL_RESULT_ERROR,RESPONSE
-ADAPTER_DEBUG_TOOLS = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
-ADAPTER_DEBUG_TOOLS_ERROR = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "0").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 
 
-# ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
-# отключается обрезка (trim). Пусто / не задано — trim включён везде.
-#   * _ADAPTER_DEBUG_TAGS_FULL_RAW — СНИМОК env на импорте: значение по
-#     умолчанию. set_runtime_config() меняет его как обычный строковый
-#     глобал пула; DEFAULT_... — запасное значение при сбросе в "".
-#   * _ADAPTER_DEBUG_TAGS_FULL_SET — рабочее frozenset-представление,
-#     живое: пересчитывается set_runtime_config() из _RAW при каждом
-#     применении (frozenset неизменяем — только переприсваивание).
-#     Читается в _trim_limit().
-# Чтение через _RAW/_SET (не через прямую env-переменную) — обязательное
-# следствие включения переменной в RUNTIME_CONFIG_POOL: иначе переключение
-# через /config не действовало бы дальше config.py (см. комментарий над
-# RUNTIME_CONFIG_POOL).
-def _parse_tags_full(raw: str) -> frozenset[str]:
-    """Разобрать строку env-формата ADAPTER_DEBUG_TAGS_FULL ("TAG1,TAG2")
-    в frozenset тегов. Пусто/не задано — пустой set (trim включён везде)."""
-    if not raw or not raw.strip():
-        return frozenset()
-    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
 
 
-_ADAPTER_DEBUG_TAGS_FULL_DEFAULT = ""
-_ADAPTER_DEBUG_TAGS_FULL_RAW = os.environ.get(
-    "ADAPTER_DEBUG_TAGS_FULL", _ADAPTER_DEBUG_TAGS_FULL_DEFAULT
-)
-# Публичное имя пула (ADAPTER_DEBUG_TAGS_FULL) — та же строка env-формата:
-# по нему идёт get_runtime_config()/сверка POST; рабочий список читается
-# из _SET (см. комментарий над RUNTIME_CONFIG_POOL и _trim_limit).
-ADAPTER_DEBUG_TAGS_FULL = _ADAPTER_DEBUG_TAGS_FULL_RAW
-_ADAPTER_DEBUG_TAGS_FULL_SET: frozenset[str] = _parse_tags_full(_ADAPTER_DEBUG_TAGS_FULL_RAW)
+def trim_limit() -> int:
+    """Живой лимит обрезки консольного debug-вывода (0 = без обрезки).
 
-
-def _trim_limit(tag: str) -> int | None:
-    """Return None if trim is OFF for this tag, or ADAPTER_DEBUG_TRIM if ON."""
-    if tag in _ADAPTER_DEBUG_TAGS_FULL_SET:  # живое чтение (runtime-пул)
-        return None
+    Читает модульный глобал ADAPTER_DEBUG_TRIM на каждый вызов — тот входит
+    в RUNTIME_CONFIG_POOL и может быть изменён через /config без перезапуска
+    (см. комментарий над RUNTIME_CONFIG_POOL: live-доступ `config.X`, не
+    `from .config import X` — иначе снимок на импорте).
+    """
     return ADAPTER_DEBUG_TRIM
 
 
-ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
-# ADAPTER_DEBUG_TAGS_OUT — логический флаг: включить per-session дампы
-# (.json и .yaml парой) для всех частей протокола обмена (список частей
-# фиксирован — ADAPTER_DEBUG_TAGS_OUT_ALL). Срабатывает только при
-# ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
+# ADAPTER_DEBUG_PARTS — логический флаг: включить per-session дампы частей
+# протокола (.json и .yaml парой) для ВСЕХ логгируемых частей (BODY,
+# OPENAI_BODY, FETCH_RAW, TOOL_RESULT, RESPONSE — без фиксированного списка:
+# каждая пишущая точка сама решает, какой тег дампить). Срабатывает только
+# при ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
 # (файлы кладутся в неё). Пусто / 0 / false — выкл.
-ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() not in (
+ADAPTER_DEBUG_PARTS = os.environ.get("ADAPTER_DEBUG_PARTS", "").lower() not in (
     "0",
     "false",
     "no",
     "",
 )
-# Полный фиксированный список частей протокола, для которых пишутся дампы.
-ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
 
 # ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
 # Подмножество переменных выше, которые можно менять НЕ ПЕРЕЗАПУСКАЯ адаптер —
 # через HTTP API /config (webui_config_api.py), эндпойнт общего WEBUI-сервера
-# (тот всегда поднят, если ADAPTER_WEBUI_ENABLE=1 — см. backend-adapter.py).
+# (WEBUI поднимается всегда — см. backend-adapter.py).
 # Идея: включать накопление логов/трейсов/*.parts-дампов на время диагностики
 # конкретной проблемы и выключать обратно, без остановки самого прокси.
 #
@@ -136,23 +95,17 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # `from .config import ADAPTER_X` на уровне модуля — второе сделало бы
 # разовый снимок при импорте, и set_runtime_config() ниже не имел бы эффекта
 # нигде, кроме этого файла. Если добавляете сюда новую переменную — проверьте
-# ВСЕ её точки чтения на этот же паттерн. (Пример: ADAPTER_DEBUG_TAGS_FULL
-# хранит список тегов в _SET, но эта переменная — тоже НЕ список в пуле:
-# set_runtime_config() получает строку env-формата, а код читает _SET.)
+# ВСЕ её точки чтения на этот же паттерн.
 #
-# ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — включение
-# записи "с нуля" (когда путь изначально пуст) потребовало бы ещё и создать
-# директорию/пересоздать session_log._DEBUG_IS_DIR и т.п. на лету, это уже не
-# "переключатель объёма", а смена самой точки хранения — за рамками задачи.
-# Если ADAPTER_DEBUG_LOGPATH изначально не задан, ADAPTER_DEBUG_TAGS_OUT/
-# ADAPTER_DEBUG=1 через /config ничего на диск не запишут (некуда), только
-# в консоль — это ожидаемо, а не баг.
+# ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — это точка
+# хранения (корень WEBUI и лог-директория), а не «переключатель объёма»:
+# смена пути на лету потребовала бы пересоздания корня веб-сервера и
+# раскладки файлов посреди сессии — за рамками задачи. (Файловая запись
+# переключается пулом через ADAPTER_DEBUG: заданный LOGPATH всегда непуст,
+# поэтому 1 через /config сразу начнёт писать в него.)
 RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG",
-    "ADAPTER_DEBUG_TAGS_OUT",
-    "ADAPTER_DEBUG_TOOLS",
-    "ADAPTER_DEBUG_TOOLS_ERROR",
-    "ADAPTER_DEBUG_TAGS_FULL",
+    "ADAPTER_DEBUG_PARTS",
     "ADAPTER_DEBUG_TRIM",
     "ADAPTER_SENSITIVE_LOGGING_ENABLE",
     "ADAPTER_STREAMING_ENABLE",
@@ -162,15 +115,11 @@ RUNTIME_CONFIG_POOL = (
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
 )
 
-# Типы для валидации входа /config (POST) — bool, int или str, остальное
-# отклоняем. Единственная str-переменная — ADAPTER_DEBUG_TAGS_FULL (строка
-# env-формата "TAG1,TAG2"); прочие — bool/int.
+# Типы для валидации входа /config (POST) — bool или int, остальное
+# отклоняем (строковых переменных в пуле больше нет).
 _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
-    "ADAPTER_DEBUG_TAGS_OUT": bool,
-    "ADAPTER_DEBUG_TOOLS": bool,
-    "ADAPTER_DEBUG_TOOLS_ERROR": bool,
-    "ADAPTER_DEBUG_TAGS_FULL": str,
+    "ADAPTER_DEBUG_PARTS": bool,
     "ADAPTER_DEBUG_TRIM": int,
     "ADAPTER_SENSITIVE_LOGGING_ENABLE": bool,
     "ADAPTER_STREAMING_ENABLE": bool,
@@ -194,11 +143,10 @@ def set_runtime_config(**kwargs) -> dict:
     модульных глобалов через `global`. Для _AVAILABLE_MODELS/_MODEL_TO_BACKEND
     там используется МУТАЦИЯ НА МЕСТЕ (.clear()+.update()), т.к. это словари
     и их импортируют по ссылке в других модулях; здесь же пул — bool/int
-    скаляры плюс одна строка (ADAPTER_DEBUG_TAGS_FULL), которые в Python
-    в принципе нельзя мутировать на месте, поэтому единственный рабочий
-    вариант — переприсваивание через `global` ЗДЕСЬ, в сочетании с тем, что
-    все читатели переведены на live-доступ `config.X` (см. комментарий над
-    RUNTIME_CONFIG_POOL).
+    скаляры, которые в Python в принципе нельзя мутировать на месте, поэтому
+    единственный рабочий вариант — переприсваивание через `global` ЗДЕСЬ,
+    в сочетании с тем, что все читатели переведены на live-доступ `config.X`
+    (см. комментарий над RUNTIME_CONFIG_POOL).
 
     Неизвестные ключи и ключи вне пула ИГНОРИРУЮТСЯ МОЛЧА (не 400 — иначе
     один опечатанный лишний ключ в теле запроса откатил бы все остальные
@@ -208,12 +156,10 @@ def set_runtime_config(**kwargs) -> dict:
     ключи всё равно применяются. Возвращает get_runtime_config() ПОСЛЕ
     применения — вызывающий видит, что реально изменилось.
     """
-    global ADAPTER_DEBUG, ADAPTER_DEBUG_TAGS_OUT, ADAPTER_DEBUG_TOOLS
-    global ADAPTER_DEBUG_TOOLS_ERROR, ADAPTER_DEBUG_TAGS_FULL
-    global ADAPTER_DEBUG_TRIM, ADAPTER_SENSITIVE_LOGGING_ENABLE
-    global ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE
-    global ADAPTER_STRICT_MODELS, ADAPTER_TRACE_REASONING_MAX_CHARS
-    global ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
+    global ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS, ADAPTER_DEBUG_TRIM
+    global ADAPTER_SENSITIVE_LOGGING_ENABLE, ADAPTER_STREAMING_ENABLE
+    global ADAPTER_STREAM_INCLUDE_USAGE, ADAPTER_STRICT_MODELS
+    global ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
 
     for name, value in kwargs.items():
         if name not in RUNTIME_CONFIG_POOL:
@@ -225,38 +171,21 @@ def set_runtime_config(**kwargs) -> dict:
             continue
         if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
             continue
-        if expected is str and not isinstance(value, str):
-            continue
         globals()[name] = value
-        # Единственный не-скаляр пула — список тегов без обрезки: помимо
-        # публичного строкового глобала (как у остальных ключей) пересчитываем
-        # и рабочее frozenset-представление _SET, которое читает _trim_limit()
-        # (frozenset неизменяем — только переприсваивание). Пустая строка =
-        # «сброс»: trim включается снова для всех тегов.
-        if name == "ADAPTER_DEBUG_TAGS_FULL":
-            globals()["_ADAPTER_DEBUG_TAGS_FULL_SET"] = _parse_tags_full(value)
-            globals()["_ADAPTER_DEBUG_TAGS_FULL_RAW"] = value
 
     return get_runtime_config()
 
 
 # ===================================================
 
-# Веб-интерфейс — общий статус адаптера + просмотр сессий:
-#   ADAPTER_WEBUI_ENABLE=1 (по умолчанию) — поднять локальный веб-сервер;
-#   статус-страница "/" (версия, режим, LLM-эндпоинты) работает всегда,
-#   "/session" (просмотр *.parts сессий) — только когда задан
-#   ADAPTER_DEBUG_LOGPATH (иначе вкладки сессий пусты, т.к. логи не пишутся).
-#   Корень — директория ADAPTER_DEBUG_LOGPATH, если задана; иначе —
-#   "./tmp/webui" (отдельная папка, НЕ зависит от лог-директории).
-#   Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST (пусто/не задано →
-#   дефолт 127.0.0.1, только локально).
-ADAPTER_WEBUI_ENABLE = os.environ.get("ADAPTER_WEBUI_ENABLE", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
+# Веб-интерфейс — общий статус адаптера + просмотр сессий. Поднимается
+# ВСЕГДА (флага отключения нет): статус-страница "/" (версия, режим,
+# LLM-эндпоинты, таблица «Models in use») + health-эндпоинты (/healthz,
+# /live, /ready) + /session (просмотр *.parts сессий; при ADAPTER_DEBUG_ENABLE=0
+# логов нет — вкладки сессий пусты) + /config (runtime-пул). Корень —
+# директория ADAPTER_DEBUG_LOGPATH (см. выше; дефолт ./tmp/logs) — там же
+# лежит model-usage.yaml. Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST
+# (пусто/не задано → дефолт 127.0.0.1, только локально).
 ADAPTER_WEBUI_PORT = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
 # Адрес, на котором слушает веб-интерфейс; дефолт 127.0.0.1 (только
 # локально). "0.0.0.0" — доступ из сети (внимание: содержимое сессий —
@@ -355,6 +284,27 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
 # Дефолт 300 — приемлемая потеря хвоста ≤ 300 с (5 мин) при жёстком kill;
 # при штатном завершении таблица сохраняется всегда.
 ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
+
+# ADAPTER_MODELS_TARIFFS — путь к YAML-файлу с тарифами моделей (для колонки
+# Cost таблицы «Models in use» на статус-странице WEBUI). Формат (запятая —
+# десятичный разделитель цен):
+#   tariffs:
+#     - name: model-name        # имя клиентской модели (как в BODY запроса)
+#       backend: provider-name  # опционально; при задании тариф матчится
+#                               #   только для этого бэкенда, без поля — для
+#                               #   любого бэкенда (wildcard)
+#       input_price: 10         # цена за price_per входных токенов
+#       output_price: 20        # цена за price_per выходных токенов
+#       currency: RUB           # 3-буквенный код валюты (USD, RUB, …)
+#       price_per: 1000000      # база — на сколько токенов дана цена
+#                               #   (дефолт 1; 0/None трактуется как 1)
+# Пусто / не задано / файл не читается — колонка Cost показывает «--».
+# Нулевые цены — бесплатная модель (не ошибка; Cost тоже «--»: токены есть,
+# цена 0 → сумма 0). Список перечитывается с диска при загрузке накопленных
+# счётчиков из model-usage.yaml и при добавлении новой модели в таблицу
+# работающего адаптера (см. model_usage._load_tariffs_locked) — стоимость
+# всегда считается по тарифу на момент отображения.
+ADAPTER_MODELS_TARIFFS = os.environ.get("ADAPTER_MODELS_TARIFFS", "")
 
 # Глобальные структуры конфигурации бэкендов (единственный режим — YAML).
 # _BACKENDS — список [{name, base, key}, …]
@@ -840,11 +790,9 @@ def _log_probe(bname: str, base: str, endpoints: dict[str, dict], errors: dict[s
     пробу бэкенда; формат един для лога и страницы (порядок — ENDPOINT_PROBES,
     по коротким именам, сырые HTTP-коды). Кэш-хиты не логируются (спам при
     частых проверках; страница показывает последний результат, лог даёт
-    историю фактических проб). Гейт — ADAPTER_DEBUG (живое чтение, как
-    _d() в logger.py; config.py не может импортировать logger — цикл).
-    Содержимое ответов не пишется: дымовые запросы, секретов нет."""
-    if not ADAPTER_DEBUG:
-        return
+    историю фактических проб). Печатается БЕЗУСЛОВНО (консольные debug-логи
+    не гейтятся; см. v0.8.6). Содержимое ответов не пишется: дымовые
+    запросы, секретов нет."""
     if errors:
         print(f"[ENDPOINT_PROBE] backend '{bname}' ({base}): failed: {errors}")
         return
@@ -1198,6 +1146,27 @@ def start_refresh(timeout: float | None = None, reload: bool = True) -> bool:
         _REFRESH_JOB = snapshot
         threading.Thread(target=_refresh_worker, args=(timeout,), daemon=True).start()
         return True
+
+
+def stop_refresh(timeout: float = 2.0) -> None:
+    """Дождаться завершения идущей фоновой проверки бэкендов (до timeout).
+
+    Вызывается при вежливом завершении адаптера (Ctrl-C/SIGTERM): если
+    refresh_worker в процессе сетевого опроса, ждём его завершения, чтобы
+    снимок состояния (refresh_state) и кэши моделей/эндпоинтов были
+    консистентны на момент выхода, а консоль не обрывалась посреди
+    [REFRESH]/[ENDPOINT_PROBE]-строк. Поток daemon: если не успел за
+    timeout, выходим без ожидания — процесс завершится сам, воркер оборвётся.
+    Никаких флагов остановки воркеру не передаётся (сеть ограничена
+    таймаутами запросов; дождаться текущей итерации — достаточная
+    вежливость)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with _REFRESH_LOCK:
+            running = _REFRESH_JOB is not None and _REFRESH_JOB.get("running")
+        if not running:
+            return
+        time.sleep(0.05)
 
 
 def refresh_state() -> dict:
