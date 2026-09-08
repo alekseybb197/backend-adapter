@@ -671,7 +671,9 @@ def _render_status_page(
     # строк из памяти, сети к бэкендам нет) и обновляет ячейки счётчиков
     # (Вызовов/Input/Output) и Cost — без перезагрузки страницы. Cost в
     # снимке — готовый HTML (_cost_cell_html на токены снимка): серверный
-    # рендер и поллинг используют ОДИН форматтер, расхождений нет. Строки
+    # рендер и поллинг используют ОДИН форматтер, расхождений нет; ячейка
+    # Cost ставится через innerHTML (см. setHtml в скрипте), счётчики — текст.
+    # Строки
     # сопоставляются ПОЗИЦИОННО: и рендер, и снимок идут в порядке первого
     # обращения (usage_snapshot), поэтому экранирование имён не мешает.
     # Число строк изменилось (строка сброшена/добавлена) либо в таблице
@@ -707,16 +709,25 @@ def _render_status_page(
           var cells = trs[i].getElementsByTagName("td");
           // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output,
           // 5 Cost (cost_html — готовый HTML с сервера: токены × тариф
-          // на текущий момент; пересчитывается в каждом снимке)
+          // на текущий момент; пересчитывается в каждом снимке).
+          // Счётчики (2-4) — текст через textContent. Cost (5) — HTML с
+          // сервера (_cost_cell_html: серая «—» — <span style="color:#aaa">
+          // —</span>, суммы — plain text): ставить его надо через innerHTML,
+          // иначе textContent показывает разметку буквально.
           var set = function (idx, val) {{
             if (cells[idx] && String(cells[idx].textContent) !== String(val)) {{
               cells[idx].textContent = val;
             }}
           }};
+          var setHtml = function (idx, html) {{
+            if (cells[idx] && cells[idx].innerHTML !== html) {{
+              cells[idx].innerHTML = html;
+            }}
+          }};
           set(2, row["calls"]);
           set(3, compact_fmt(row["input_tokens"]));
           set(4, compact_fmt(row["output_tokens"]));
-          set(5, row["cost_html"]);
+          setHtml(5, row["cost_html"]);
         }}
         setTimeout(usage_poll, 5000);
       }})

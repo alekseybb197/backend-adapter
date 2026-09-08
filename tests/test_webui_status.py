@@ -735,9 +735,14 @@ class TestUsageSection:
         assert "2k5" in body and "12k3" in body  # компактный формат вместо разделителей
         # usage_poll: функция, эндпоинт снимка, форматтер токенов, интервал
         assert "function compact_fmt" in body
-        assert "function compact_fmt" in body
         assert 'fetch("/api/model-usage/snapshot")' in body
         assert "setTimeout(usage_poll, 5000)" in body
+        # Cost-ячейка (индекс 5) — готовый HTML с сервера (cost_html): пишется
+        # через setHtml/innerHTML, а НЕ textContent — иначе разметка сегой «—»
+        # (<span style="color:#aaa">—</span>) видна буквально (v0.9.0, фикс)
+        assert "var setHtml" in body
+        assert 'setHtml(5, row["cost_html"])' in body
+        assert "cells[idx].innerHTML" in body
         # usage_poll безусловен: есть и на странице без строк моделей
         empty = self._seed(config, ws, usage_rows=[])
         assert "function compact_fmt" in empty
