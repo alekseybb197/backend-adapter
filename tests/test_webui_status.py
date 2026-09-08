@@ -23,8 +23,8 @@ button (JS models_toggle on the page) — see TestModelsCell. The Models in use
 table (single Endpoints column — available endpoints only, comma-separated;
 footer and the «⟳ Проверить сейчас» button sit right under the backends
 table, before the section) — see TestUsageSection. Its Actions cell holds
-three PRG forms with symbol-icon buttons (⟳ «Перепроверить» POST
-/api/model-usage/reprobe, ↺ «Сбросить» POST /api/model-usage/reset, ✕
+three PRG forms with symbol-icon buttons (🔄 «Перепроверить» POST
+/api/model-usage/reprobe, ⏪ «Сбросить» POST /api/model-usage/reset, 🗑
 «Удалить» POST /api/model-usage/delete) and renders «проверяется…» (no
 forms) while that row is being re-probed; /reprobe answers 202 on launch /
 404 / 400 for JSON clients and 303 for the HTML form; /delete answers 200 /
@@ -743,17 +743,17 @@ class TestUsageSection:
         assert "function compact_fmt" in empty
 
     def test_row_has_actions_three_forms(self):
-        # Каждая строка модели несёт три form-кнопки-иконки: ⟳ «Перепроверить»
-        # (POST /api/model-usage/reprobe?model=<имя>), ↺ «Сбросить» (POST
-        # /api/model-usage/reset?model=<имя>), ✕ «Удалить» (POST
+        # Каждая строка модели несёт три form-кнопки-иконки: 🔄 «Перепроверить»
+        # (POST /api/model-usage/reprobe?model=<имя>), ⏪ «Сбросить» (POST
+        # /api/model-usage/reset?model=<имя>), 🗑 «Удалить» (POST
         # /api/model-usage/delete?model=<имя>) — без JS, PRG через 303.
         # Тексты-фразы — в title/aria-label кнопок, глифы в body.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-reset")])
-        assert "Перепроверить" in body  # title/aria-label иконки ⟳
-        assert "Сбросить" in body  # title/aria-label иконки ↺
-        assert "Удалить" in body  # title/aria-label иконки ✕
-        for glyph in ("⟳", "↺", "✕"):
+        assert "Перепроверить" in body  # title/aria-label иконки 🔄
+        assert "Сбросить" in body  # title/aria-label иконки ⏪
+        assert "Удалить" in body  # title/aria-label иконки 🗑
+        for glyph in ("🔄", "⏪", "🗑"):
             assert glyph in body
         assert (
             '<form method="post" action="/api/model-usage/reset?model=m-reset">'
@@ -767,7 +767,7 @@ class TestUsageSection:
             '<form method="post" action="/api/model-usage/delete?model=m-reset">'
             in body
         )
-        assert "color:#c0392b" in body  # красная иконка ✕ (деструктивное действие)
+        assert "color:#c0392b" in body  # красная иконка 🗑 (деструктивное действие)
         assert 'title="Удалить строку модели"' in body
         # все три формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
@@ -1905,7 +1905,7 @@ class TestModelUsageReprobeAPI:
             assert status == 200
             assert "Перепроверка модели" not in body
             assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
-            assert 'title="Перепроверить эндпоинты модели"' in body  # ⟳ на месте
+            assert 'title="Перепроверить эндпоинты модели"' in body  # 🔄 на месте
             assert 'title="Удалить строку модели"' in body
         finally:
             httpd.shutdown()

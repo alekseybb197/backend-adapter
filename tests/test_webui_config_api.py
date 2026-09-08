@@ -3,7 +3,7 @@
 
 Tests cover:
   - Unit: _render_config_page returns HTML with current values
-  - HTTP GET /config → 200, HTML with form (12 fields: 8 bool + 3 int + str)
+  - HTTP GET /config → 200, HTML with form (9 fields: 6 bool + 3 int)
   - HTTP POST /config → applies valid, ignores invalid, redirects with message
 """
 import os
@@ -142,11 +142,10 @@ class TestConfigHTTPGet:
             status, body = _http_get(port, "/config")
             assert status == 200
             assert "<!DOCTYPE html>" in body or "<html" in body.lower()
-            # Form with 12 fields (8 bool + 3 int + 1 str)
+            # Form with 9 fields (6 bool + 3 int; строковых полей нет —
+            # селекторы подробности удалены реформой логирования v0.8.6)
             assert "ADAPTER_DEBUG" in body
-            assert "ADAPTER_DEBUG_TAGS_OUT" in body
-            assert "ADAPTER_DEBUG_TOOLS" in body
-            assert "ADAPTER_DEBUG_TOOLS_ERROR" in body
+            assert "ADAPTER_DEBUG_PARTS" in body
             assert "ADAPTER_SENSITIVE_LOGGING_ENABLE" in body
             assert "ADAPTER_STREAMING_ENABLE" in body
             assert "ADAPTER_STREAM_INCLUDE_USAGE" in body
@@ -154,9 +153,8 @@ class TestConfigHTTPGet:
             assert "ADAPTER_TRACE_REASONING_MAX_CHARS" in body
             assert "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS" in body
             assert "ADAPTER_DEBUG_TRIM" in body
-            # Строковое поле списка тегов — как text input со значением env-формата
-            assert "ADAPTER_DEBUG_TAGS_FULL" in body
-            assert 'type="text"' in body
+            # Строковых text-полей в форме больше нет
+            assert 'type="text"' not in body
             # Favicon — общий ресурс всех страниц WEBUI (см. /favicon.svg)
             assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in body
         finally:
@@ -205,7 +203,7 @@ class TestConfigHTTPPost:
         httpd, port = _start_server(str(tmp_path))
         try:
             # POST with wrong type (bool as string for int field)
-            body = "ADAPTER_DEBUG_TRIM=not_a_number&ADAPTER_DEBUG_TAGS_OUT=1".encode()
+            body = "ADAPTER_DEBUG_TRIM=not_a_number&ADAPTER_DEBUG_PARTS=1".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
@@ -214,8 +212,8 @@ class TestConfigHTTPPost:
             # ADAPTER_DEBUG_TRIM should NOT change (invalid type)
             current = config.get_runtime_config()
             assert current["ADAPTER_DEBUG_TRIM"] == before["ADAPTER_DEBUG_TRIM"]
-            # ADAPTER_DEBUG_TAGS_OUT should apply (valid bool)
-            assert current["ADAPTER_DEBUG_TAGS_OUT"] is True
+            # ADAPTER_DEBUG_PARTS should apply (valid bool)
+            assert current["ADAPTER_DEBUG_PARTS"] is True
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -317,46 +315,35 @@ class TestConfigHTTPPost:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_post_tags_full_form_applies(self, tmp_path):
-        """/config POST (form) applies ADAPTER_DEBUG_TAGS_FULL as env-format str."""
+    def test_post_parts_checkbox_off_and_on(self, tmp_path):
+        """/config: чекбокс ADAPTER_DEBUG_PARTS переключается (bool).
+
+        Форма шлёт для каждого bool-поля пару значений: явный checkbox
+        (value=1, только когда отмечен) + hidden-поле "_<NAME>" с состоянием
+        1/0 — снятая галка без hidden-«соседа» просто отсутствовала бы в
+        теле POST и выключить bool было бы невозможно. В разборе берётся
+        последнее значение ключа (hidden), ключ "_NAME" вносится как "NAME"."""
         _reload_config()
         from backend_adapter import config
+        config.ADAPTER_DEBUG_PARTS = True  # пред-условие «включено»
 
         httpd, port = _start_server(str(tmp_path))
         try:
-            body = "ADAPTER_DEBUG_TAGS_FULL=BODY%2CTOOL_RESULT".encode()
+            # Снятая галка: checkbox отсутствует, hidden-состояние → 0
+            body = "_ADAPTER_DEBUG_PARTS=0".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
             assert status == 200
-            current = config.get_runtime_config()
-            assert current["ADAPTER_DEBUG_TAGS_FULL"] == "BODY,TOOL_RESULT"
-            # Live-эффект: trim отключён для перечисленных тегов
-            assert config._trim_limit("BODY") is None
-            assert config._trim_limit("RESPONSE") == config.ADAPTER_DEBUG_TRIM
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
+            assert config.ADAPTER_DEBUG_PARTS is False
 
-    def test_post_tags_full_empty_resets(self, tmp_path):
-        """/config POST with empty ADAPTER_DEBUG_TAGS_FULL resets trim (all tags)."""
-        _reload_config()
-        from backend_adapter import config
-        config.ADAPTER_DEBUG_TAGS_FULL = "BODY"
-        config._ADAPTER_DEBUG_TAGS_FULL_RAW = "BODY"
-        config._ADAPTER_DEBUG_TAGS_FULL_SET = config._parse_tags_full("BODY")
-
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            assert config._trim_limit("BODY") is None  # пред-условие
-            body = "ADAPTER_DEBUG_TAGS_FULL=".encode()
+            # Отмеченная галка: checkbox value=1 + hidden-состояние → 1
+            body = "ADAPTER_DEBUG_PARTS=1&_ADAPTER_DEBUG_PARTS=1".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
             assert status == 200
-            assert config.ADAPTER_DEBUG_TAGS_FULL == ""
-            assert config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
-            assert config._trim_limit("BODY") == config.ADAPTER_DEBUG_TRIM
+            assert config.ADAPTER_DEBUG_PARTS is True
         finally:
             httpd.shutdown()
             httpd.server_close()

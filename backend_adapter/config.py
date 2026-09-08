@@ -37,84 +37,41 @@ ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "") or "./tmp/lo
 ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
 ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
 ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
+# Лимит консольного debug-вывода (v0.8.6-реформа): консоль — единственный
+# ВСЕГДА-включённый канал, поэтому любая строка обрезается до N символов
+# (0 = без обрезки). Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1)
+# лимит НЕ уважает — туда пишутся полные части (см. trim_limit() и logger.py).
 ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
-# Логгирование результатов работы инструментов (обработка собранных логов —
-# по умолчанию выключена, zero-config: ничего лишнего не обрабатывается):
-#   ADAPTER_DEBUG_TOOLS=1 — писать все результаты ([TOOL_RESULT]).
-#   ADAPTER_DEBUG_TOOLS_ERROR=1 — писать ошибки инструментов ([TOOL_RESULT_ERROR]).
-#   По умолчанию оба выключены (0).
-#   ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
-#   отключается обрезка (trim). Если тэг в списке — полный вывод без обрезки.
-#   Пример: BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT,TOOL_RESULT_ERROR,RESPONSE
-ADAPTER_DEBUG_TOOLS = os.environ.get("ADAPTER_DEBUG_TOOLS", "0").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
-ADAPTER_DEBUG_TOOLS_ERROR = os.environ.get("ADAPTER_DEBUG_TOOLS_ERROR", "0").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
 ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
 ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
 
 
-# ADAPTER_DEBUG_TAGS_FULL — перечисление тегов через запятую, для которых
-# отключается обрезка (trim). Пусто / не задано — trim включён везде.
-#   * _ADAPTER_DEBUG_TAGS_FULL_RAW — СНИМОК env на импорте: значение по
-#     умолчанию. set_runtime_config() меняет его как обычный строковый
-#     глобал пула; DEFAULT_... — запасное значение при сбросе в "".
-#   * _ADAPTER_DEBUG_TAGS_FULL_SET — рабочее frozenset-представление,
-#     живое: пересчитывается set_runtime_config() из _RAW при каждом
-#     применении (frozenset неизменяем — только переприсваивание).
-#     Читается в _trim_limit().
-# Чтение через _RAW/_SET (не через прямую env-переменную) — обязательное
-# следствие включения переменной в RUNTIME_CONFIG_POOL: иначе переключение
-# через /config не действовало бы дальше config.py (см. комментарий над
-# RUNTIME_CONFIG_POOL).
-def _parse_tags_full(raw: str) -> frozenset[str]:
-    """Разобрать строку env-формата ADAPTER_DEBUG_TAGS_FULL ("TAG1,TAG2")
-    в frozenset тегов. Пусто/не задано — пустой set (trim включён везде)."""
-    if not raw or not raw.strip():
-        return frozenset()
-    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
 
 
-_ADAPTER_DEBUG_TAGS_FULL_DEFAULT = ""
-_ADAPTER_DEBUG_TAGS_FULL_RAW = os.environ.get(
-    "ADAPTER_DEBUG_TAGS_FULL", _ADAPTER_DEBUG_TAGS_FULL_DEFAULT
-)
-# Публичное имя пула (ADAPTER_DEBUG_TAGS_FULL) — та же строка env-формата:
-# по нему идёт get_runtime_config()/сверка POST; рабочий список читается
-# из _SET (см. комментарий над RUNTIME_CONFIG_POOL и _trim_limit).
-ADAPTER_DEBUG_TAGS_FULL = _ADAPTER_DEBUG_TAGS_FULL_RAW
-_ADAPTER_DEBUG_TAGS_FULL_SET: frozenset[str] = _parse_tags_full(_ADAPTER_DEBUG_TAGS_FULL_RAW)
+def trim_limit() -> int:
+    """Живой лимит обрезки консольного debug-вывода (0 = без обрезки).
 
-
-def _trim_limit(tag: str) -> int | None:
-    """Return None if trim is OFF for this tag, or ADAPTER_DEBUG_TRIM if ON."""
-    if tag in _ADAPTER_DEBUG_TAGS_FULL_SET:  # живое чтение (runtime-пул)
-        return None
+    Читает модульный глобал ADAPTER_DEBUG_TRIM на каждый вызов — тот входит
+    в RUNTIME_CONFIG_POOL и может быть изменён через /config без перезапуска
+    (см. комментарий над RUNTIME_CONFIG_POOL: live-доступ `config.X`, не
+    `from .config import X` — иначе снимок на импорте).
+    """
     return ADAPTER_DEBUG_TRIM
 
 
-ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
-# ADAPTER_DEBUG_TAGS_OUT — логический флаг: включить per-session дампы
-# (.json и .yaml парой) для всех частей протокола обмена (список частей
-# фиксирован — ADAPTER_DEBUG_TAGS_OUT_ALL). Срабатывает только при
-# ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
+# ADAPTER_DEBUG_PARTS — логический флаг: включить per-session дампы частей
+# протокола (.json и .yaml парой) для ВСЕХ логгируемых частей (BODY,
+# OPENAI_BODY, FETCH_RAW, TOOL_RESULT, RESPONSE — без фиксированного списка:
+# каждая пишущая точка сама решает, какой тег дампить). Срабатывает только
+# при ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
 # (файлы кладутся в неё). Пусто / 0 / false — выкл.
-ADAPTER_DEBUG_TAGS_OUT = os.environ.get("ADAPTER_DEBUG_TAGS_OUT", "").lower() not in (
+ADAPTER_DEBUG_PARTS = os.environ.get("ADAPTER_DEBUG_PARTS", "").lower() not in (
     "0",
     "false",
     "no",
     "",
 )
-# Полный фиксированный список частей протокола, для которых пишутся дампы.
-ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_RESULT,RESPONSE"
 
 # ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
 # Подмножество переменных выше, которые можно менять НЕ ПЕРЕЗАПУСКАЯ адаптер —
@@ -138,9 +95,7 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # `from .config import ADAPTER_X` на уровне модуля — второе сделало бы
 # разовый снимок при импорте, и set_runtime_config() ниже не имел бы эффекта
 # нигде, кроме этого файла. Если добавляете сюда новую переменную — проверьте
-# ВСЕ её точки чтения на этот же паттерн. (Пример: ADAPTER_DEBUG_TAGS_FULL
-# хранит список тегов в _SET, но эта переменная — тоже НЕ список в пуле:
-# set_runtime_config() получает строку env-формата, а код читает _SET.)
+# ВСЕ её точки чтения на этот же паттерн.
 #
 # ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — это точка
 # хранения (корень WEBUI и лог-директория), а не «переключатель объёма»:
@@ -150,10 +105,7 @@ ADAPTER_DEBUG_TAGS_OUT_ALL = "BODY,OPENAI_BODY,FETCH_RAW,TOOL_RESULT_ERROR,TOOL_
 # поэтому 1 через /config сразу начнёт писать в него.)
 RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG",
-    "ADAPTER_DEBUG_TAGS_OUT",
-    "ADAPTER_DEBUG_TOOLS",
-    "ADAPTER_DEBUG_TOOLS_ERROR",
-    "ADAPTER_DEBUG_TAGS_FULL",
+    "ADAPTER_DEBUG_PARTS",
     "ADAPTER_DEBUG_TRIM",
     "ADAPTER_SENSITIVE_LOGGING_ENABLE",
     "ADAPTER_STREAMING_ENABLE",
@@ -163,15 +115,11 @@ RUNTIME_CONFIG_POOL = (
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
 )
 
-# Типы для валидации входа /config (POST) — bool, int или str, остальное
-# отклоняем. Единственная str-переменная — ADAPTER_DEBUG_TAGS_FULL (строка
-# env-формата "TAG1,TAG2"); прочие — bool/int.
+# Типы для валидации входа /config (POST) — bool или int, остальное
+# отклоняем (строковых переменных в пуле больше нет).
 _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
-    "ADAPTER_DEBUG_TAGS_OUT": bool,
-    "ADAPTER_DEBUG_TOOLS": bool,
-    "ADAPTER_DEBUG_TOOLS_ERROR": bool,
-    "ADAPTER_DEBUG_TAGS_FULL": str,
+    "ADAPTER_DEBUG_PARTS": bool,
     "ADAPTER_DEBUG_TRIM": int,
     "ADAPTER_SENSITIVE_LOGGING_ENABLE": bool,
     "ADAPTER_STREAMING_ENABLE": bool,
@@ -195,11 +143,10 @@ def set_runtime_config(**kwargs) -> dict:
     модульных глобалов через `global`. Для _AVAILABLE_MODELS/_MODEL_TO_BACKEND
     там используется МУТАЦИЯ НА МЕСТЕ (.clear()+.update()), т.к. это словари
     и их импортируют по ссылке в других модулях; здесь же пул — bool/int
-    скаляры плюс одна строка (ADAPTER_DEBUG_TAGS_FULL), которые в Python
-    в принципе нельзя мутировать на месте, поэтому единственный рабочий
-    вариант — переприсваивание через `global` ЗДЕСЬ, в сочетании с тем, что
-    все читатели переведены на live-доступ `config.X` (см. комментарий над
-    RUNTIME_CONFIG_POOL).
+    скаляры, которые в Python в принципе нельзя мутировать на месте, поэтому
+    единственный рабочий вариант — переприсваивание через `global` ЗДЕСЬ,
+    в сочетании с тем, что все читатели переведены на live-доступ `config.X`
+    (см. комментарий над RUNTIME_CONFIG_POOL).
 
     Неизвестные ключи и ключи вне пула ИГНОРИРУЮТСЯ МОЛЧА (не 400 — иначе
     один опечатанный лишний ключ в теле запроса откатил бы все остальные
@@ -209,12 +156,10 @@ def set_runtime_config(**kwargs) -> dict:
     ключи всё равно применяются. Возвращает get_runtime_config() ПОСЛЕ
     применения — вызывающий видит, что реально изменилось.
     """
-    global ADAPTER_DEBUG, ADAPTER_DEBUG_TAGS_OUT, ADAPTER_DEBUG_TOOLS
-    global ADAPTER_DEBUG_TOOLS_ERROR, ADAPTER_DEBUG_TAGS_FULL
-    global ADAPTER_DEBUG_TRIM, ADAPTER_SENSITIVE_LOGGING_ENABLE
-    global ADAPTER_STREAMING_ENABLE, ADAPTER_STREAM_INCLUDE_USAGE
-    global ADAPTER_STRICT_MODELS, ADAPTER_TRACE_REASONING_MAX_CHARS
-    global ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
+    global ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS, ADAPTER_DEBUG_TRIM
+    global ADAPTER_SENSITIVE_LOGGING_ENABLE, ADAPTER_STREAMING_ENABLE
+    global ADAPTER_STREAM_INCLUDE_USAGE, ADAPTER_STRICT_MODELS
+    global ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
 
     for name, value in kwargs.items():
         if name not in RUNTIME_CONFIG_POOL:
@@ -226,17 +171,7 @@ def set_runtime_config(**kwargs) -> dict:
             continue
         if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
             continue
-        if expected is str and not isinstance(value, str):
-            continue
         globals()[name] = value
-        # Единственный не-скаляр пула — список тегов без обрезки: помимо
-        # публичного строкового глобала (как у остальных ключей) пересчитываем
-        # и рабочее frozenset-представление _SET, которое читает _trim_limit()
-        # (frozenset неизменяем — только переприсваивание). Пустая строка =
-        # «сброс»: trim включается снова для всех тегов.
-        if name == "ADAPTER_DEBUG_TAGS_FULL":
-            globals()["_ADAPTER_DEBUG_TAGS_FULL_SET"] = _parse_tags_full(value)
-            globals()["_ADAPTER_DEBUG_TAGS_FULL_RAW"] = value
 
     return get_runtime_config()
 

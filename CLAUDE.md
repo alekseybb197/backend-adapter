@@ -45,12 +45,12 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   `webui_status.py` (версия, LLM-эндпойнты, модели; секция «Models in use» —
   таблица `model_usage.py` персистентна: YAML `model-usage.yaml` в корне WEBUI
   (= `ADAPTER_DEBUG_LOGPATH`),
-  обнуление счётчиков строки — кнопка ↺/POST `/api/model-usage/reset` (строка
-  не удаляется), удаление строки из таблицы и файла — кнопка ✕/POST
+  обнуление счётчиков строки — кнопка ⏪/POST `/api/model-usage/reset` (строка
+  не удаляется), удаление строки из таблицы и файла — кнопка 🗑/POST
   `/api/model-usage/delete` (в отличие от reset строка уходит и из памяти,
   и из YAML — файл перезаписывается сразу без неё), перепроверка
-  эндпоинтов строки — кнопка ⟳/POST `/api/model-usage/reprobe`; действия
-  строки — иконки-кнопки ⟳/↺/✕ в колонке Actions (фразы-подписи в
+  эндпоинтов строки — кнопка 🔄/POST `/api/model-usage/reprobe`; действия
+  строки — иконки-кнопки 🔄/⏪/🗑 в колонке Actions (фразы-подписи в
   title/aria-label); счётчики Вызовов/Input/Output
   на открытой странице обновляются сами — JS usage_poll ~5 с → GET
   `/api/model-usage/snapshot`, без сети к бэкендам; проверка бэкендов —
@@ -84,11 +84,14 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
   файлами сессии; большие сессии разбиваются на страницы пагинации
   `artefacts/pages/<N>/`.
   Новый эндпойнт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
-  Per-session дампы частей протокола включаются флагом `ADAPTER_DEBUG_TAGS_OUT=1`
-  (парные `.json`+`.yaml`, фиксированный список тегов); файлы пишутся
-  только при `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH`.
-  Консольные debug-логи безусловны (печатаются всегда — v0.8.6);
-  `ADAPTER_DEBUG_ENABLE` гейтит только файловую запись, дефолт `0`.
+  Консольные debug-логи безусловны (печатаются всегда — v0.8.6) и обрезаются
+  до `ADAPTER_DEBUG_TRIM` (0 — без обрезки); `ADAPTER_DEBUG_ENABLE` гейтит
+  только файловую запись (дефолт `0`): `session-*.log` несёт ПОЛНЫЕ строки
+  без обрезки, `*.jsonl` — trace. Per-session дампы частей протокола
+  (парные `.json`+`.yaml`, ВСЕ логгируемые части — фиксированного списка
+  тегов больше нет) включаются флагом `ADAPTER_DEBUG_PARTS=1`;
+  файлы пишутся только при `ADAPTER_DEBUG_ENABLE=1` в директорию
+  `ADAPTER_DEBUG_LOGPATH`.
 - Примеры конфигов — в `docs/samples/`: `sample.adapter.env` (env-файл
   адаптера), `sample.adapter.yaml` (конфиг бэкендов), шаблоны продакшена
   `backend-adapter.service` (systemd, запуск из исходников) и
@@ -134,6 +137,59 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+### 2026-09-08 — Реформа логирования: консоль с TRIM / файл полный; удалены TAGS_FULL·TOOLS·TOOLS_ERROR; TAGS_OUT → ADAPTER_DEBUG_PARTS; иконки строк 🔄/⏪/🗑 (v0.8.6)
+
+**Контекст:** после того как консольные debug-логи стали безусловными (v0.8.6),
+устарели прежние «селекторы подробности»: в КОНСОЛЬ (всегда печатается)
+обрезка `ADAPTER_DEBUG_TRIM` гейтилась исключениями `ADAPTER_DEBUG_TAGS_FULL`
+(т.е. обрезка ограничивала единственный всегда-включённый канал); в ФАЙЛ
+(`ADAPTER_DEBUG_ENABLE=1`) попадали те же `_d`-строки — уже обрезанные,
+хотя файловый канал принципиально должен нести полные части;
+`ADAPTER_DEBUG_TOOLS`/`ADAPTER_DEBUG_TOOLS_ERROR` гейтили консольные
+content-блоки `[TOOL_RESULT]`/`[TOOL_RESULT_ERROR]`; `ADAPTER_DEBUG_TAGS_OUT`
+включал парные `.json+.yaml` дампы только для фиксированного списка тегов.
+Пользователь попросил упростить модель и сменить иконки действий строк.
+
+**Решение:**
+- **упрощённая модель логирования** — консоль: всегда, с обрезкой
+  `ADAPTER_DEBUG_TRIM` (`0` = выкл.); файл `session-*.log`: при
+  `ADAPTER_DEBUG_ENABLE=1`, ПОЛНЫЕ строки без обрезки (реформа затронула
+  `logger._d/_dr` → новый `_write(msg)`: в консоль — обрезанную копию с
+  redact, в файл — полную); `*.parts`-дампы `.json+.yaml`: при
+  `ADAPTER_DEBUG_ENABLE=1` + `ADAPTER_DEBUG_PARTS=1`, полные, для **всех**
+  логгируемых частей (BODY, TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE);
+- **удалены переменные и механизмы** — `ADAPTER_DEBUG_TAGS_FULL`
+  (+ `_parse_tags_full`/`_SET`/`_RAW`-представление), `ADAPTER_DEBUG_TOOLS`,
+  `ADAPTER_DEBUG_TOOLS_ERROR`, `ADAPTER_DEBUG_TAGS_OUT_ALL`, `_trim_limit(tag)`;
+  вместо тегового трима — `config.trim_limit()` (живое чтение
+  `ADAPTER_DEBUG_TRIM`, без тега); `ADAPTER_DEBUG_TAGS_OUT` переименован в
+  `ADAPTER_DEBUG_PARTS` (та же семантика: парные дампы, но для всех частей);
+- **`[TOOL_RESULT]` content-блок безусловен** — печатается для КАЖДОГО
+  результата единым блоком (summary остаётся); `[TOOL_RESULT_ERROR]` удалён
+  полностью (тег исчез из кода и *.parts-дампов); консольные служебные
+  print-блоки (`[INIT]`, `[REFRESH]`, `[ENDPOINT_PROBE]`) не тронуты;
+- **runtime-пул `/config`** — строковых полей больше нет: 6 bool
+  (`ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS`, `ADAPTER_SENSITIVE_LOGGING_ENABLE`,
+  `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`,
+  `ADAPTER_STRICT_MODELS`) + 3 int (`ADAPTER_DEBUG_TRIM`,
+  `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`);
+- **иконки действий строк таблицы «Models in use»** — в колонке Actions
+  глифы ⟳/↺/✕ заменены на 🔄 (U+1F504, reprobe), ⏪ (U+23EA, reset),
+  🗑 (U+1F5D1, delete, красный); текстовая кнопка «⟳ Перепроверить»
+  (POST `/`, проверка бэкендов) и глиф ⟳ в текстах/документации НЕ менялись.
+
+**Следствия:** канал «консоль» читается с обрезкой, канал «файл» несёт
+полные части — селекторы подробности больше не нужны; `.parts`-дампы по
+одному флагу покрывают все логгируемые части; одна строка лога на каждый
+tool result (ошибки и успехи единообразно). Поведение проксирования не
+меняется. Breaking change: удалены `ADAPTER_DEBUG_TAGS_FULL`,
+`ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR`; `ADAPTER_DEBUG_TAGS_OUT`
+→ `ADAPTER_DEBUG_PARTS`. Покрыто unit-тестами (logger: консоль с TRIM/файл
+полный; server: content-блок безусловен; config/webui: PARTS, удалённые
+имена; webui_status: новые глифы) и интеграционным прогоном
+(test_manual_check.py: консоль обрезана при малом TRIM, файл полный).
+Ветка feature/v0.8.6 в WIP.
 
 ### 2026-09-08 — Колонка Actions, иконки-действия строки, удаление модели из таблицы и файла (v0.8.6)
 

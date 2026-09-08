@@ -240,17 +240,18 @@ GitHub-репозиторий проекта.
 `config.set_runtime_config()` и показывает, что применилось (неверные типы и
 неизвестные ключи игнорируются).
 
-Пул — 12 переменных:
+Пул — 9 переменных:
 
-- **bool (8)** — объём записи: `ADAPTER_DEBUG`, `ADAPTER_DEBUG_TAGS_OUT`,
-  `ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR`; рубильники поведения
-  новых запросов и логов: `ADAPTER_SENSITIVE_LOGGING_ENABLE` (отключение
-  санитайзера — секреты в открытом виде), `ADAPTER_STREAMING_ENABLE`,
+- **bool (6)** — файловая запись и per-session дампы: `ADAPTER_DEBUG`
+  (файл `session-*.log` — полные строки, без обрезки; консоль — всегда,
+  с обрезкой `ADAPTER_DEBUG_TRIM`), `ADAPTER_DEBUG_PARTS` (дампы `.json`+
+  `.yaml` всех логгируемых частей); рубильники поведения новых запросов и
+  логов: `ADAPTER_SENSITIVE_LOGGING_ENABLE` (отключение санитайзера —
+  секреты в открытом виде), `ADAPTER_STREAMING_ENABLE`,
   `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS`;
-- **int (3)** — лимиты обрезки: `ADAPTER_DEBUG_TRIM`,
-  `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
-- **str (1)** — `ADAPTER_DEBUG_TAGS_FULL`: теги без обрезки, строка
-  env-формата `"TAG1,TAG2"`; пусто — сброс (trim для всех тегов).
+- **int (3)** — лимиты обрезки: `ADAPTER_DEBUG_TRIM` (консоль; `0` — без
+  обрезки), `ADAPTER_TRACE_REASONING_MAX_CHARS`,
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
 
 Читатели пула обращаются к `config.ADAPTER_X` «на лету» — изменения видны на
 следующем же запросе/вызове. На лету **нельзя** менять: сеть и адреса

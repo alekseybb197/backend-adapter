@@ -50,13 +50,16 @@ def _send_http(host, port, method, path, body=None, headers=None, timeout=3):
 class TestServer:
     """Integration tests for the HTTP server."""
 
-    def _setup_adapter(self, fake_backend):
+    def _setup_adapter(self, fake_backend, mock_logger=True):
         """Set up adapter pointing at fake backend (single-backend YAML config).
 
         Uses direct attribute patching on already-loaded modules to avoid
         circular import issues from module deletion + reimport. The backend
         config is a one-entry multi-backend structure — единственный режим
         конфигурации бэкендов.
+
+        mock_logger=False оставляет реальные logger._d/_dr (нужно тестам
+        консольного вывода — они проверяют печать через capsys).
         """
         from backend_adapter import config, server as server_mod
 
@@ -68,8 +71,9 @@ class TestServer:
         config._AVAILABLE_MODELS["test-model"] = {"id": "test-model"}
 
         # Patch server's logger helpers to avoid file I/O blocking
-        server_mod._d = lambda *a, **kw: None
-        server_mod._dr = lambda *a, **kw: None
+        if mock_logger:
+            server_mod._d = lambda *a, **kw: None
+            server_mod._dr = lambda *a, **kw: None
         server_mod._trace = lambda *a, **kw: None
         server_mod.write_debug_json = lambda *a, **kw: None
 
@@ -433,5 +437,52 @@ class TestServer:
                 assert len(rows) == 1
                 assert rows[0]["calls"] == 1
                 assert calls == []  # проба выключена флагом
+            finally:
+                server.shutdown()
+
+    def test_tool_result_content_block_unconditional(self, fake_backend, capsys):
+        """[TOOL_RESULT] content=… печатается БЕЗУСЛОВНО (флага
+        ADAPTER_DEBUG_TOOLS больше нет — удалён реформой v0.8.6):
+        tool_result в user-сообщении даёт content-блок в консоли через
+        реальный logger._dr (не замокан), независимо от значения
+        (отсутствующего) ADAPTER_DEBUG_TOOLS."""
+        from backend_adapter import config, server as server_mod
+        from backend_adapter.logger import _d as real_d, _dr as real_dr
+        config.ADAPTER_SENSITIVE_LOGGING_ENABLE = True
+
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend, mock_logger=False)
+            # Реальные logger-хелперы печатают в stdout — восстанавливаем
+            # оригиналы, которые _setup_adapter(mock_logger=False) не тронул.
+            server_mod._d = real_d
+            server_mod._dr = real_dr
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={
+                        "model": "test-model",
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "result of the tool:"},
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_abc123",
+                                    "content": "The temperature is 21 C.",
+                                },
+                            ],
+                        }],
+                        "max_tokens": 100,
+                    },
+                )
+                assert resp["status"] == 200
+                out = capsys.readouterr().out
+                assert "[TOOL_RESULT] content=" in out
+                assert "The temperature is 21 C." in out
             finally:
                 server.shutdown()

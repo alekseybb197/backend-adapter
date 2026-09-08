@@ -1,6 +1,56 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
-## v0.8.6 (WIP — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, корректное завершение по Ctrl-C/SIGTERM, Cost в live-поллинге, верхняя «Свернуть», тесты graceful shutdown и интеграционного прогона, favicon на производных страницах, удаление tmp/check_v086.py, колонка Actions с иконками-действиями строки и удаление модели, README)
+## v0.8.6 (WIP — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, корректное завершение по Ctrl-C/SIGTERM, Cost в live-поллинге, верхняя «Свернуть», тесты graceful shutdown и интеграционного прогона, favicon на производных страницах, удаление tmp/check_v086.py, колонка Actions с иконками-действиями строки и удаление модели, реформа логирования — консоль с TRIM / файл полный, удалены TAGS_FULL·TOOLS·TOOLS_ERROR, TAGS_OUT → ADAPTER_DEBUG_PARTS, иконки строк 🔄/⏪/🗑, README)
+
+### 2026-09-08 Реформа логирования: консоль с TRIM / файл полный; удалены TAGS_FULL·TOOLS·TOOLS_ERROR; TAGS_OUT → ADAPTER_DEBUG_PARTS; иконки строк 🔄/⏪/🗑
+
+**Цель:** после того как консольные debug-логи стали безусловными, убрать
+устаревшие «селекторы подробности» и зафиксировать простую модель: консоль
+всегда печатается с обрезкой `ADAPTER_DEBUG_TRIM`, файловый канал при
+`ADAPTER_DEBUG_ENABLE=1` несёт ПОЛНЫЕ строки без обрезки, per-session дампы
+`.json+.yaml` одним флагом покрывают все логгируемые части. Заодно сменить
+иконки действий строк таблицы «Models in use»: ⟳/↺/✕ → 🔄/⏪/🗑.
+
+**Решение:**
+- **`logger._write(msg)`** — единая точка вывода `_d`/`_dr`: в консоль
+  печатается строка, обрезанная до `config.trim_limit()` (живое чтение
+  `ADAPTER_DEBUG_TRIM`; `0`/None — без обрезки), с redact; при
+  `ADAPTER_DEBUG_ENABLE=1` в сессионный файл пишется та же строка ПОЛНОЙ
+  (без обрезки). Trim применяется к строке с префиксами `[ts]`/`[req_id]`;
+- **удалены** `ADAPTER_DEBUG_TAGS_FULL` (env-парсинг `_parse_tags_full`,
+  `_SET`/`_RAW`-представления, `_trim_limit(tag)`), `ADAPTER_DEBUG_TOOLS`,
+  `ADAPTER_DEBUG_TOOLS_ERROR`, `ADAPTER_DEBUG_TAGS_OUT_ALL`; вместо
+  тегового трима — публичный `config.trim_limit()` (без тега);
+- **`ADAPTER_DEBUG_TAGS_OUT` → `ADAPTER_DEBUG_PARTS`** — тот же флаг, но
+  дампы пишутся для ВСЕХ логгируемых частей (фиксированного списка тегов
+  больше нет): `BODY`, `TOOL_RESULT`, `OPENAI_BODY`, `FETCH_RAW`, `RESPONSE`;
+- **`[TOOL_RESULT]` content-блок безусловен** — на каждый результат единым
+  блоком с полным content (консоль с TRIM, файл полный); `[TOOL_RESULT_ERROR]`
+  удалён из кода и *.parts-дампов полностью; точечные trim-вызовы в
+  server.py/streaming.py упрощены до «слать полное» (консоль обрежет сама);
+- **runtime-пул `/config`** — строковых полей нет: 6 bool (`ADAPTER_DEBUG`,
+  `ADAPTER_DEBUG_PARTS`, `ADAPTER_SENSITIVE_LOGGING_ENABLE`,
+  `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`,
+  `ADAPTER_STRICT_MODELS`) + 3 int (`ADAPTER_DEBUG_TRIM`,
+  `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`);
+- **иконки строк** — `_ACTIONS` в `webui_status.py`: 🔄 (U+1F504, reprobe),
+  ⏪ (U+23EA, reset), 🗑 (U+1F5D1, delete — красный #c0392b); фразы —
+  в `title`/`aria-label`. Текстовая кнопка «⟳ Перепроверить» (POST `/`) не
+  меняется.
+
+**Следствия:** канал «консоль» всегда читается с обрезкой TRIM, канал
+«файл» при ENABLE=1 несёт полные части — отдельных рубильников
+подробности не нужно; `.parts`-дампы по одному флагу покрывают все части;
+один content-блок на каждый tool result (ошибки не выделяются отдельным
+тегом). Breaking change: удалены `ADAPTER_DEBUG_TAGS_FULL`,
+`ADAPTER_DEBUG_TOOLS`, `ADAPTER_DEBUG_TOOLS_ERROR`; `ADAPTER_DEBUG_TAGS_OUT`
+переименован в `ADAPTER_DEBUG_PARTS`. Поведение проксирования не меняется.
+Покрыто: unit — test_logger.py (консоль с TRIM / файл полный / TRIM=0 /
+runtime-live), test_server.py (content-блок безусловен), test_config.py,
+test_webui_config_api.py, test_session_log.py, test_webui_status.py (новые
+глифы 🔄/⏪/🗑); интеграция — test_manual_check.py (реальный процесс:
+консоль обрезана при малом TRIM, `session-*.log` несёт полную строку).
+Ветка feature/v0.8.6 в WIP.
 
 ### 2026-09-08 Колонка Actions, иконки-действия строки, удаление модели из таблицы и файла
 

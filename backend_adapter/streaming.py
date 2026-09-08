@@ -10,7 +10,7 @@ import json
 import uuid
 
 from . import config
-from .config import _cap, _trim_limit
+from .config import _cap
 from .logger import _dr
 from .session_log import write_debug_json
 from .tracer import _register_tool_use, _trace
@@ -273,29 +273,29 @@ def stream_openai_to_anthropic(
 
     full_text = "".join(text_buf)
     full_reasoning = "".join(reasoning_buf)
-    resp_limit = _trim_limit("RESPONSE")
 
-    # Лог агрегированного ответа стрима (аналог [_RESPONSE] в нестриминговой
-    # ветке server.py:534) — пишется один раз по завершении стрима, содержит
-    # весь текст, tool calls и reasoning; trim отключён через
-    # ADAPTER_DEBUG_TAGS_FULL.
+    # Лог агрегированного ответа стрима (аналог [RESPONSE] в нестриминговой
+    # ветке server.py) — пишется один раз по завершении стрима, содержит
+    # весь текст, tool calls и reasoning. Snapshot держит ПОЛНЫЙ текст (для
+    # файла при ADAPTER_DEBUG_ENABLE=1); консоль обрежет строку до
+    # ADAPTER_DEBUG_TRIM в logger._write. (Reasoning-поля _trace ниже
+    # по-прежнему ограничиваются ADAPTER_TRACE_REASONING_MAX_CHARS — это
+    # отдельный int-лимит trace, к консольному trim отношения не имеет.)
     # Санитайзер работает через _dr() → redact().
     resp_snapshot = {
         "streamed": True,
         "text_len": len(full_text),
         "reasoning_len": len(full_reasoning),
         "tool_uses_count": len(tool_use_summaries),
-        "text": full_text[:resp_limit] if full_text and resp_limit is not None else full_text,
-        "reasoning": full_reasoning[:resp_limit]
-        if full_reasoning and resp_limit is not None
-        else full_reasoning,
+        "text": full_text,
+        "reasoning": full_reasoning,
         "tool_uses": tool_use_summaries,
     }
     _dr(
         req_id,
-        f"[RESPONSE] {(json.dumps(resp_snapshot, ensure_ascii=False, default=str) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(resp_snapshot, ensure_ascii=False, default=str)[:lim])}",
+        f"[RESPONSE] {json.dumps(resp_snapshot, ensure_ascii=False, default=str)}",
     )
-    if config.ADAPTER_DEBUG_TAGS_OUT:
+    if config.ADAPTER_DEBUG_PARTS:
         write_debug_json(session_id, "RESPONSE", resp_snapshot)
 
     _trace(

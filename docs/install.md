@@ -453,18 +453,18 @@ export ADAPTER_DEBUG_ENABLE=0
 # файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1.
 # export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
 
-# Максимальная длина trim-блоков (символы)
+# Максимальная длина КОНСОЛЬНЫХ debug-строк (символы; 0 — без обрезки).
+# Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1) trim НЕ использует —
+# пишет полные строки (v0.8.6-реформа)
 # export ADAPTER_DEBUG_TRIM=3000
 
 # Переопределить PID-файл в detach-режиме
 # export ADAPTER_PIDFILE="/tmp/adapter.pid"
 
-# Тег-фильтры отладочных блоков (отключить trim для указанных тегов)
-# export ADAPTER_DEBUG_TAGS_FULL="BODY,TOOL_RESULT,RESPONSE"
-
-# JSON/YAML-дампы per-session всех частей протокола (требуют ADAPTER_DEBUG_ENABLE=1
-# и директорию ADAPTER_DEBUG_LOGPATH)
-# export ADAPTER_DEBUG_TAGS_OUT=1
+# JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
+# TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE — .json и .yaml парой;
+# требуют ADAPTER_DEBUG_ENABLE=1 и директорию ADAPTER_DEBUG_LOGPATH)
+# export ADAPTER_DEBUG_PARTS=1
 
 # Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий.
 # Поднимается ВСЕГДА (v0.8.6; флага ADAPTER_WEBUI_ENABLE больше нет) на 127.0.0.1:8765 —
@@ -482,10 +482,10 @@ export ADAPTER_DEBUG_ENABLE=0
 # без библиотек). Отключить: ADAPTER_EXPORTER_ENABLE=0.
 # export ADAPTER_EXPORTER_PORT=9100
 
-# Детальные логи результатов и ошибок инструментов (оба по умолчанию 0 — выкл,
-# zero-config не обрабатывает собранные логи; включите при отладке инструментов)
-# export ADAPTER_DEBUG_TOOLS=1
-# export ADAPTER_DEBUG_TOOLS_ERROR=1
+# (Прежние «селекторы подробности» — ADAPTER_DEBUG_TOOLS /
+# ADAPTER_DEBUG_TOOLS_ERROR / ADAPTER_DEBUG_TAGS_FULL — удалены в v0.8.6:
+# консоль всегда печатается с обрезкой ADAPTER_DEBUG_TRIM, файловый канал
+# при ADAPTER_DEBUG_ENABLE=1 несёт полные строки. Отдельных рубильников нет.)
 ```
 
 **Трассировка (trace)** — структурированный JSONL-лог для каждого tool call и ответа:
@@ -540,8 +540,8 @@ export ADAPTER_STRICT_MODELS=1
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
 # export ADAPTER_DEBUG_LOGPATH="./tmp/logs"   # директория логов и корень WEBUI (дефолт ./tmp/logs)
-# export ADAPTER_DEBUG_TAGS_FULL="BODY,TOOL_RESULT"
-# export ADAPTER_DEBUG_TOOLS_ERROR=1
+# export ADAPTER_DEBUG_PARTS=1    # per-session дампы .json+.yaml всех логгируемых частей
+# (ADAPTER_DEBUG_TRIM=3000 — лимит консольных строк; 0 — без обрезки; файл всегда полный)
 
 # --- Sanitizer (secret masking in logs) ---
 export ADAPTER_SENSITIVE_LOGGING_ENABLE=0

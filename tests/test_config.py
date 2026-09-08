@@ -76,7 +76,8 @@ class TestCap:
 
 
 class TestTrimLimit:
-    """Tests for _trim_limit()."""
+    """Tests for trim_limit() (v0.8.6-реформа: консольный лимит обрезки,
+    без тега — файловый канал полный; 0 = без обрезки)."""
 
     def setup_method(self):
         _reload_config()
@@ -84,16 +85,18 @@ class TestTrimLimit:
         self.config = config
 
     def test_trim_on(self):
-        """Trim ON, tag not in full list → returns ADAPTER_DEBUG_TRIM."""
+        """TRIM=N → возвращает N (консоль обрезается до N символов)."""
         self.config.ADAPTER_DEBUG_TRIM = 100
-        self.config._ADAPTER_DEBUG_TAGS_FULL_SET = frozenset()
-        assert self.config._trim_limit("BODY") == 100
+        assert self.config.trim_limit() == 100
 
-    def test_trim_off_for_tag(self):
-        """Trim OFF for specific tag → returns None."""
-        self.config.ADAPTER_DEBUG_TRIM = 100
-        self.config._ADAPTER_DEBUG_TAGS_FULL_SET = frozenset({"BODY"})
-        assert self.config._trim_limit("BODY") is None
+    def test_trim_off_zero(self):
+        """TRIM=0 → «без обрезки» (0 = выкл., не ошибка конфигурации)."""
+        self.config.ADAPTER_DEBUG_TRIM = 0
+        assert self.config.trim_limit() == 0
+
+    def test_default(self):
+        """Env не задан → дефолт ADAPTER_DEBUG_TRIM=3000."""
+        assert self.config.trim_limit() == 3000
 
 
 class TestHostVars:
@@ -133,25 +136,25 @@ class TestHostVars:
 
 
 class TestZeroConfigDefaults:
-    """Default flags for the zero-config run (v0.7.2 / v0.8.6).
+    """Default flags for the zero-config run (v0.8.6).
 
-    With env vars *absent* the adapter should: process no tool logs
-    (TOOLS_ERROR=0), NOT write log files (ADAPTER_DEBUG_ENABLE=0) and keep
-    the WEBUI always up (флага отключения больше нет — см. v0.8.6). Both
-    parse off-words incl. "" — so asserting the default requires delenv, NOT
-    setenv("", ...) (an empty env value parses as False for both)."""
+    With env vars *absent* the adapter should: NOT write *.parts дампы
+    (ADAPTER_DEBUG_PARTS=0), NOT write log files (ADAPTER_DEBUG_ENABLE=0) and
+    keep the WEBUI always up (флага отключения больше нет — см. v0.8.6).
+    Both parse off-words incl. "" — so asserting the default requires delenv,
+    NOT setenv("", ...) (an empty env value parses as False for both)."""
 
     def setup_method(self):
         _reload_config()
         from backend_adapter import config
         self.config = config
 
-    def test_tools_error_defaults_false(self, monkeypatch):
-        """TOOLS_ERROR unset → disabled (no tool-error log processing)."""
-        monkeypatch.delenv("ADAPTER_DEBUG_TOOLS_ERROR", raising=False)
+    def test_parts_defaults_false(self, monkeypatch):
+        """ADAPTER_DEBUG_PARTS unset → disabled (no per-session parts dumps)."""
+        monkeypatch.delenv("ADAPTER_DEBUG_PARTS", raising=False)
         _reload_config()
         from backend_adapter import config
-        assert config.ADAPTER_DEBUG_TOOLS_ERROR is False
+        assert config.ADAPTER_DEBUG_PARTS is False
 
 
 class TestParseBackendYaml:
@@ -953,16 +956,16 @@ class TestRuntimeConfig:
         """Valid bool/int values are applied and visible in get_runtime_config()."""
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG=False,
-            ADAPTER_DEBUG_TAGS_OUT=True,
+            ADAPTER_DEBUG_PARTS=True,
             ADAPTER_TRACE_REASONING_MAX_CHARS=500,
         )
         assert result["ADAPTER_DEBUG"] is False
-        assert result["ADAPTER_DEBUG_TAGS_OUT"] is True
+        assert result["ADAPTER_DEBUG_PARTS"] is True
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
         # Проверка через get
         current = self.config.get_runtime_config()
         assert current["ADAPTER_DEBUG"] is False
-        assert current["ADAPTER_DEBUG_TAGS_OUT"] is True
+        assert current["ADAPTER_DEBUG_PARTS"] is True
         assert current["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
 
     def test_new_bool_keys_applied(self):
@@ -1006,10 +1009,10 @@ class TestRuntimeConfig:
         debug_before = self.config.ADAPTER_DEBUG
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG="not-a-bool",  # неверный тип
-            ADAPTER_DEBUG_TAGS_OUT=True,  # верный тип
+            ADAPTER_DEBUG_PARTS=True,  # верный тип
         )
         assert result["ADAPTER_DEBUG"] is debug_before  # осталось прежнее значение
-        assert result["ADAPTER_DEBUG_TAGS_OUT"] is True  # применилось
+        assert result["ADAPTER_DEBUG_PARTS"] is True  # применилось
 
     def test_bool_not_passed_as_int(self):
         """Bool is checked BEFORE int — bool doesn't pass as int field."""
@@ -1019,28 +1022,28 @@ class TestRuntimeConfig:
         # Не применилось (int-поле отклоняет bool)
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 0  # дефолт
 
-    def test_tags_full_str_applied_and_recomputed(self):
-        """ADAPTER_DEBUG_TAGS_FULL: строка применяется, live-_SET пересчитан."""
-        result = self.config.set_runtime_config(
-            ADAPTER_DEBUG_TAGS_FULL="BODY, TOOL_RESULT_ERROR"
-        )
-        assert result["ADAPTER_DEBUG_TAGS_FULL"] == "BODY, TOOL_RESULT_ERROR"
-        assert self.config._ADAPTER_DEBUG_TAGS_FULL_RAW == "BODY, TOOL_RESULT_ERROR"
-        # Live-эффект: trim отключён для перечисленных тегов, работает для прочих
-        assert self.config._trim_limit("BODY") is None
-        assert self.config._trim_limit("TOOL_RESULT_ERROR") is None
-        assert self.config._trim_limit("RESPONSE") == self.config.ADAPTER_DEBUG_TRIM
-        # Сброс пустой строкой возвращает trim везде (как env-дефолт)
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_TAGS_FULL="")
-        assert result["ADAPTER_DEBUG_TAGS_FULL"] == ""
-        assert self.config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
-        assert self.config._trim_limit("BODY") == self.config.ADAPTER_DEBUG_TRIM
+    def test_parts_bool_applied(self):
+        """ADAPTER_DEBUG_PARTS: bool применяется и виден (str-полей в пуле нет)."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS=True)
+        assert result["ADAPTER_DEBUG_PARTS"] is True
+        assert self.config.ADAPTER_DEBUG_PARTS is True
+        # Выключение обратно
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS=False)
+        assert result["ADAPTER_DEBUG_PARTS"] is False
 
-    def test_tags_full_rejects_non_str(self):
-        """ADAPTER_DEBUG_TAGS_FULL принимает только str: bool/int игнорируются."""
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_TAGS_FULL=True)
-        assert result["ADAPTER_DEBUG_TAGS_FULL"] == ""
-        assert self.config._ADAPTER_DEBUG_TAGS_FULL_SET == frozenset()
+    def test_parts_rejects_non_bool(self):
+        """ADAPTER_DEBUG_PARTS принимает только bool: строка игнорируется."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS="yes")
+        assert result["ADAPTER_DEBUG_PARTS"] is False  # осталось прежнее значение
+
+    def test_trim_int_applied(self):
+        """ADAPTER_DEBUG_TRIM: int применяется, 0 допустим (без обрезки)."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TRIM=0)
+        assert result["ADAPTER_DEBUG_TRIM"] == 0
+        assert self.config.trim_limit() == 0
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TRIM=777)
+        assert result["ADAPTER_DEBUG_TRIM"] == 777
+        assert self.config.trim_limit() == 777
 
     def test_return_value_matches_sent(self):
         """Return value reflects actual values after application."""
@@ -1053,10 +1056,10 @@ class TestRuntimeConfig:
         # Возвращает актуальные значения (могли отличаться от посланных, если что-то отклонилось)
 
     def test_pool_not_extended(self):
-        """Return value has exactly the RUNTIME_CONFIG_POOL keys (12)."""
+        """Return value has exactly the RUNTIME_CONFIG_POOL keys (9)."""
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
-        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
+        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 9
 
 
 class TestEndpointProbe:

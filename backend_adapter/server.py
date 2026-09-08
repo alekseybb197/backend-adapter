@@ -23,7 +23,6 @@ from .config import (
     SSL_CTX,
     _cap,
     _resolve_backend,
-    _trim_limit,
 )
 from .convert import (
     convert_messages_anthropic_to_openai,
@@ -190,10 +189,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             _body = body.decode()
-            _dr(
-                req_id, f"[BODY] {(_body if (lim := _trim_limit('BODY')) is None else _body[:lim])}"
-            )
-            if config.ADAPTER_DEBUG_TAGS_OUT:
+            # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
+            # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
+            _dr(req_id, f"[BODY] {_body}")
+            if config.ADAPTER_DEBUG_PARTS:
                 write_debug_json(session_id, "BODY", _body)
 
             try:
@@ -349,7 +348,19 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     req_id,
                     f"[TOOL_RESULT] tool_name={_tool_name or '?'} tool_use_id={tr['tool_use_id']} parent_req_id={parent_req_id} is_error={tr['is_error']} len={len(tr['content'])}",
                 )
-                if config.ADAPTER_DEBUG_TAGS_OUT:
+                # Content-блок — БЕЗУСЛОВНО для каждого результата (ошибки НЕ
+                # выделяются отдельным [TOOL_RESULT_ERROR]-блоком): единый блок для
+                # всех, полный JSON; консоль обрежет TRIM, файл при
+                # ADAPTER_DEBUG_ENABLE=1 получит полный. Отдельного дампа под
+                # ADAPTER_DEBUG_PARTS нет — файловую часть несёт тот же
+                # консольный блок (см. ниже дамп TOOL_RESULT для *.parts).
+                _dr(
+                    req_id,
+                    f"[TOOL_RESULT] content={json.dumps(tr['content'], ensure_ascii=False, default=str)}",
+                )
+                if config.ADAPTER_DEBUG_PARTS:
+                    # *.parts-дамп — ОДИН на результат, полный dict (включая
+                    # content целиком): тег несёт часть полностью.
                     write_debug_json(
                         session_id,
                         "TOOL_RESULT",
@@ -361,56 +372,6 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             "content": tr["content"],
                         },
                     )
-
-                # ADAPTER_DEBUG_TOOLS=1 — писать полный content для всех результатов
-                if config.ADAPTER_DEBUG_TOOLS:
-                    _tool_content_full = tr["content"] or ""
-                    _tool_content_snippet = (
-                        _tool_content_full
-                        if (lim := _trim_limit("TOOL_RESULT")) is None
-                        else _tool_content_full[:lim]
-                    )
-                    _dr(
-                        req_id,
-                        f"[TOOL_RESULT] content={json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)}",
-                    )
-                    if config.ADAPTER_DEBUG_TAGS_OUT:
-                        write_debug_json(
-                            session_id,
-                            "TOOL_RESULT",
-                            json.loads(
-                                json.dumps(_tool_content_snippet, ensure_ascii=False, default=str)
-                            ),
-                        )
-
-                # ADAPTER_DEBUG_TOOLS_ERROR=1 (default "0" — zero-config не
-                # обрабатывает собранные логи) — писать детальный лог ошибок
-                # инструментов ([TOOL_RESULT_ERROR])
-                if tr["is_error"] and config.ADAPTER_DEBUG_TOOLS_ERROR:
-                    # При ошибке — полная запись результата (аналог [RESPONSE])
-                    # чтобы видеть что именно вернул инструмент, без копания
-                    # в JSONL trace. Санитайзер через _dr() → redact().
-                    err_content = tr["content"] or ""
-                    err_content_snippet = (
-                        err_content
-                        if (lim := _trim_limit("TOOL_RESULT_ERROR")) is None
-                        else err_content[:lim]
-                    )
-                    tool_name = _lookup_tool_use_name(session_id, tr["tool_use_id"])
-                    err_snapshot = {
-                        "tool_result": True,
-                        "tool_use_id": tr["tool_use_id"],
-                        "tool_name": tool_name or "",
-                        "parent_req_id": parent_req_id,
-                        "is_error": True,
-                        "content": err_content_snippet,
-                    }
-                    _dr(
-                        req_id,
-                        f"[TOOL_RESULT_ERROR] {json.dumps(err_snapshot, ensure_ascii=False, default=str)}",
-                    )
-                    if config.ADAPTER_DEBUG_TAGS_OUT:
-                        write_debug_json(session_id, "TOOL_RESULT_ERROR", err_snapshot)
 
             openai_body = {
                 "model": model,
@@ -463,12 +424,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     f"[WARN] First message is NOT system: {msgs[0]['role'] if msgs else 'empty'}",
                 )
 
+            # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
+            # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
             _dr(
                 req_id,
-                f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if (lim := _trim_limit('OPENAI_BODY')) is None else json.dumps(openai_body, ensure_ascii=False)[:lim])}",
+                f"[OPENAI_BODY] {json.dumps(openai_body, ensure_ascii=False)}",
             )
 
-            if config.ADAPTER_DEBUG_TAGS_OUT:
+            if config.ADAPTER_DEBUG_PARTS:
                 write_debug_json(session_id, "OPENAI_BODY", openai_body)
 
             # Построить URL и Authorization из resolved backend-конфига.
@@ -748,11 +711,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes",
                     )
-                    _dr(
-                        req_id,
-                        f"[FETCH_RAW] {(raw.decode() if (lim := _trim_limit('FETCH_RAW')) is None else raw.decode()[:lim])}",
-                    )
-                    if config.ADAPTER_DEBUG_TAGS_OUT:
+                    # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM
+                    # в logger._write, файл при ENABLE=1 получит полную.
+                    _dr(req_id, f"[FETCH_RAW] {raw.decode()}")
+                    if config.ADAPTER_DEBUG_PARTS:
                         write_debug_json(session_id, "FETCH_RAW", raw.decode())
                     _trace(
                         session_id,
@@ -775,11 +737,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
                         usage_tokens["output"] += int(u.get("completion_tokens") or 0)
 
+                    # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM
+                    # в logger._write, файл при ENABLE=1 получит полную.
                     _dr(
                         req_id,
-                        f"[RESPONSE] {(json.dumps(anthropic_resp, ensure_ascii=False) if (lim := _trim_limit('RESPONSE')) is None else json.dumps(anthropic_resp, ensure_ascii=False)[:lim])}",
+                        f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)}",
                     )
-                    if config.ADAPTER_DEBUG_TAGS_OUT:
+                    if config.ADAPTER_DEBUG_PARTS:
                         write_debug_json(session_id, "RESPONSE", anthropic_resp)
                     self._send_json(200, anthropic_resp)
                     _dr(req_id, "[OK] Done")

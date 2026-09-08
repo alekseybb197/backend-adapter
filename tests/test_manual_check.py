@@ -142,7 +142,7 @@ def _chat(proxy_port: int, body: dict) -> tuple[int, str]:
 
 def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
                  web_port: int, exp_port: int, logs_dir: str,
-                 debug_enable: str) -> dict:
+                 debug_enable: str, trim: str = "3000") -> dict:
     """env для процесса адаптера: чистое ADAPTER_-окружение + тестовые пути."""
     env = dict(os.environ)
     for k in list(env):
@@ -159,6 +159,7 @@ def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
         # WEBUI_ENABLE больше НЕ задаём — должен подняться сам (v0.8.6)
         "ADAPTER_DEBUG_ENABLE": debug_enable,
         "ADAPTER_DEBUG_LOGPATH": logs_dir,
+        "ADAPTER_DEBUG_TRIM": trim,
     })
     return env
 
@@ -356,6 +357,80 @@ class TestManualAdapterProcess:
                 out = ap.output
                 assert rc == 130, f"повторный SIGINT: rc={rc}"
                 assert "Traceback" not in out, out[-600:]
+            finally:
+                ap.proc.terminate()
+                try:
+                    ap.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    ap.proc.kill()
+        finally:
+            be.close()
+
+    def test_console_trimmed_file_full(self, tmp_path):
+        """Контракт v0.8.6-реформы на реальном процессе: при ENABLE=1 и малом
+        ADAPTER_DEBUG_TRIM консоль показывает ОБРЕЗАННУЮ [BODY]-строку,
+        session-*.log получает её ПОЛНОЙ."""
+        logs_dir = str(tmp_path / "logs")
+        os.makedirs(logs_dir)
+
+        be = FakeBackend()
+        be.models_response = {"object": "list",
+                              "data": [{"id": "qwen-test", "object": "model"}]}
+        be.serve()
+        try:
+            yaml_path = str(tmp_path / "adapter.yaml")
+            with open(yaml_path, "w") as f:
+                f.write("backend:\n"
+                        "  - name: fake\n"
+                        f"    base: {be.base_url}\n"
+                        "    key: FAKE_KEY\n"
+                        "    probe:\n"
+                        "      - completions: qwen-test\n")
+            proxy_port = _free_port()
+            web_port = _free_port()
+            exp_port = _free_port()
+            env = _adapter_env(yaml_path, "", proxy_port, web_port, exp_port,
+                               logs_dir, debug_enable="1", trim="60")
+            ap = _spawn(env)
+            try:
+                time.sleep(4)
+                assert ap.proc.poll() is None, "adapter упал при старте (TRIM=60)"
+                assert _wait_http(web_port) == 200, "WEBUI не поднялся"
+
+                # Тело ответа заметно длиннее лимита — контраст обрезки виден
+                be.completions_response = {
+                    "id": "x", "object": "chat.completion", "model": "qwen-test",
+                    "choices": [{"index": 0,
+                                 "message": {"role": "assistant",
+                                             "content": "The quick brown fox "
+                                                        "jumps over the lazy dog."},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 9,
+                              "total_tokens": 12},
+                }
+                req_body = {"model": "qwen-test",
+                            "messages": [{"role": "user", "content": "hi"}],
+                            "max_tokens": 1}
+                st, _ = _chat(proxy_port, req_body)
+                assert st == 200, st
+                time.sleep(2)
+                out = ap.output
+
+                # Консольная обрезка (TRIM=60) идёт по строке С ПРЕФИКСОМ
+                # [req_id] (см. logger._write — msg приходит уже с префиксом):
+                # начало [BODY]-тела запроса видно, хвост («"content": "hi"}»)
+                # обрезан. Служебные print-блоки ([MODEL_USAGE]) не в счёт.
+                assert '{"model": "qwen-test", "me' in out, out[-1000:]
+                assert '"content": "hi"' not in out, \
+                    "в консоли [BODY] не обрезан:\n" + out[-1000:]
+
+                # Файл session-*.log несёт ПОЛНУЮ [BODY]-строку без обрезки.
+                log_files = [f for f in sorted(os.listdir(logs_dir))
+                             if f.startswith("session-") and f.endswith(".log")]
+                assert log_files, os.listdir(logs_dir)
+                content = open(os.path.join(logs_dir, log_files[0]),
+                               encoding="utf-8").read()
+                assert '"content": "hi"' in content, "в файле [BODY] обрезан"
             finally:
                 ap.proc.terminate()
                 try:

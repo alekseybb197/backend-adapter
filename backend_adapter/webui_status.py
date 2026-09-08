@@ -386,9 +386,9 @@ def _fmt_cost(cost: float, currency: str) -> str:
 
 
 _ACTIONS = (
-    ("reprobe", "⟳", "Перепроверить эндпоинты модели", "#555"),
-    ("reset", "↺", "Сбросить счётчики модели", "#555"),
-    ("delete", "✕", "Удалить строку модели", "#c0392b"),
+    ("reprobe", "🔄", "Перепроверить эндпоинты модели", "#555"),
+    ("reset", "⏪", "Сбросить счётчики модели", "#555"),
+    ("delete", "🗑", "Удалить строку модели", "#c0392b"),
 )
 
 
@@ -397,9 +397,9 @@ def _actions_cell_html(model: str, reprobing: bool = False) -> str:
 
     Три form-кнопки целиком внутри своего <td> (валидный HTML — без
     вложенных форм и JS), тексты-фразы заменены символьными иконками с
-    title/aria-label-подписями: ⟳ (reprobe — фоновая перепроба эндпоинтов
-    строки, POST /api/model-usage/reprobe?model=…), ↺ (reset — обнуление
-    счётчиков строки, POST /api/model-usage/reset?model=…), ✕ (delete —
+    title/aria-label-подписями: 🔄 (reprobe — фоновая перепроба эндпоинтов
+    строки, POST /api/model-usage/reprobe?model=…), ⏪ (reset — обнуление
+    счётчиков строки, POST /api/model-usage/reset?model=…), 🗑 (delete —
     удаление строки модели из таблицы и YAML-файла, POST
     /api/model-usage/delete?model=…). Все три эндпоинта по PRG отвечают 303
     на GET "/". При reprobing=True (перепроверка этой модели уже идёт) вместо
@@ -444,7 +444,7 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     перезагрузки страницы (см. usage_poll в _render_status_page). ``reprobing``
     — карта client_model → True: у строки идёт фоновая перепроверка (баннер +
     авто-релоад); в ячейке Actions вместо кнопок — «проверяется…».
-    Модель/бэкенд — html.escape; иконки-действия (⟳/↺/✕) — отдельные формы
+    Модель/бэкенд — html.escape; иконки-действия (🔄/⏪/🗑) — отдельные формы
     в последнем <td> (см. _actions_cell_html)."""
     body = []
     for i, r in enumerate(rows):
@@ -920,7 +920,7 @@ class ModelUsageDeleteEndpoint(webserver.Endpoint):
 
     Удаляет модель из рабочей таблицы использованных моделей и из YAML-файла
     (запись обновлённой таблицы без строки; см. model_usage.delete_model).
-    Кнопка «✕» в колонке Actions таблицы (form method=post) работает по
+    Кнопка «🗑» в колонке Actions таблицы (form method=post) работает по
     PRG-паттерну: удаление + 303 See Other на GET "/" — страница
     показывается GET-навигацией, обновление не повторяет POST (как у кнопок
     «Сбросить»/«Перепроверить»). JSON-клиент (Content-Type:
