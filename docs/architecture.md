@@ -233,9 +233,14 @@ convert при не поддерживающем бэкенде → 502), disabl
 9. Only messages→completions conversion: trace tool_results from incoming messages
    (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
    tools, tool_choice, system)
-   Passthrough E→E: тело как пришло — единственная мутация body["model"] =
-   resolved_model (и stream:false при ADAPTER_STREAMING_ENABLE=0); конвертеры
-   не участвуют, поля запроса не валидируются (бэкенд ответит 400 сам)
+   Passthrough E→E: тело как пришло — мутация body["model"] = resolved_model
+   (и stream:false при ADAPTER_STREAMING_ENABLE=0); конвертеры не участвуют,
+   поля запроса не валидируются (бэкенд ответит 400 сам). Исключение v0.9.2:
+   только для messages→messages все role=system переносятся в начало
+   (normalize_messages_system_first, convert.py — перенос без склейки,
+   порядок остальных ролей сохраняется; system уже первым / нет system —
+   без изменений). Прочие passthrough-пути (completions→completions,
+   responses→responses) уходят дословно — там нет инварианта «system первым»
 10. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
 11. Backend URL: base + путь формата выхода (INPUT_PATHS[out_fmt]; конверсия
     messages→completions — по-прежнему /v1/chat/completions)

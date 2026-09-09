@@ -1,6 +1,38 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
+## v0.9.2 (WIP — messages→messages passthrough: system-сообщения переносятся в начало)
+
+<!-- WIP: записи по мере согласованных коммитов группы v0.9.2. -->
+
+### messages→messages passthrough: system-сообщения переносятся в начало (v0.9.2)
+
+**Цель:** инцидент `tmp/session-20260909-222202-1ad13437.err` — при
+passthrough `messages→messages` (явный `ADAPTER_MESSAGES_TARGET=messages`
+или auto) адаптер передавал тело запроса дословно, а бэкенд (vLLM-шаблон
+чата) упал 400: `Jinja Exception: System message must be at the beginning`
+— [CC]-сессия несла первым сообщением `user` (`<system-reminder>` внутри
+user) и ~70 system-сообщений (`<total_tokens>`-баннеры и др.) по ходу
+диалога. Convert-ветка `messages→completions` уже собирает system в начало
+(склейкой); в passthrough `messages→messages` этого не было.
+
+**Решение:**
+- `convert.py`: новая чистая функция `normalize_messages_system_first(messages)`
+  — возвращает новый список: все `role=system` переносятся в начало (в
+  исходном порядке, **без склейки**), остальные роли сохраняют
+  относительный порядок; сообщения НЕ пересобираются (роли/блоки content
+  как были — контракт Anthropic-формата E→E сохраняется максимально);
+- `server.py`: в passthrough-ветке при `inp_fmt == messages` и
+  `out_fmt_val == messages` (только messages→messages!) тело нормализуется
+  ДО построения `out_body` — значит, и non-stream, и stream-ветки получают
+  исправленный порядок; другие passthrough-пути (completions→completions,
+  responses→responses) уходят дословно (там нет инварианта «system первым»);
+- если `messages` пуст или system уже первым — список не меняется, лишних
+  мутаций/логов нет;
+- тесты: unit `TestNormalizeMessagesSystemFirst` (test_convert.py) + HTTP-
+  регресс в test_server.py (`TestInputEndpoints`): non-stream и stream
+  messages→messages с system не в начале, уже-system-first без изменений.
+
 ## v0.9.1 — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей, TARGET-переменные на /config, фикс «0»-int в POST /config
 
 ### 2026-09-09 Саммари ветки v0.9.1 (6 коммитов между merge PR #13 (v0.9.0) и снятием WIP)

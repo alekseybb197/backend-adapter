@@ -30,6 +30,7 @@ from .convert import (
     convert_tool_choice_anthropic_to_openai,
     convert_tools_anthropic_to_openai,
     extract_tool_results,
+    normalize_messages_system_first,
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
@@ -354,6 +355,23 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     stream_requested = False
                     _dr(req_id, "[STREAM_DISABLED] (passthrough) forcing stream=false")
                 anthropic_req["model"] = model
+                # passthrough messages→messages (v0.9.2): бэкенд (vLLM-шаблон
+                # чата) требует system первым (Jinja raise_exception 'System
+                # message must be at the beginning'), а [CC]-сессии несут
+                # system-сообщения по ходу диалога и <system-reminder> внутри
+                # user. Переносим все role=system в начало (в исходном
+                # порядке, БЕЗ склейки) — сообщения не пересобираются,
+                # контракт E→E сохраняется (та же идея, что в convert-ветке,
+                # где system собираются в начало; там — склейкой). Другие
+                # passthrough-пути (completions→completions, responses→
+                # responses) уходят дословно: там нет инварианта «system
+                # первым».
+                if inp_fmt == "messages" and out_fmt_val == "messages":
+                    original_msgs = anthropic_req.get("messages", [])
+                    reordered = normalize_messages_system_first(original_msgs)
+                    if reordered != original_msgs:
+                        anthropic_req["messages"] = reordered
+                        _dr(req_id, "[SYSTEM_FIRST] messages→messages: system перенесены в начало")
                 _trace(
                     session_id,
                     req_id,
