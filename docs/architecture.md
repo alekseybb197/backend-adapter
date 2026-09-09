@@ -195,7 +195,8 @@ API) — пути зеркалят `config.ENDPOINT_PROBES`. Что делать
 env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 `ADAPTER_COMPLETIONS_TARGET` и `ADAPTER_RESPONSES_TARGET` (дефолт `none`) —
 префикс = входной эндпоинт, значение ∈
-`completions|messages|responses|auto|none` (см. docs/environment.md §1а).
+`completions|messages|responses|auto|none`. **Принципы настройки, матрица
+«вход × значение» и перспективы — [`docs/routing.md`](routing.md).**
 
 `routing.decide(inp, backend_name)` возвращает `(action, out_fmt, msg, status)`
 по **кэшу проб** `config.endpoint_support(backend_name, pname)` (геттер

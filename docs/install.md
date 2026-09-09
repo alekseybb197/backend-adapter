@@ -538,25 +538,12 @@ export ADAPTER_MESSAGES_TARGET=completions
 # export ADAPTER_RESPONSES_TARGET=responses
 ```
 
-Допустимые значения всех трёх — `completions | messages | responses | auto | none`.
-
-- **`auto`** — адаптер сам выбирает маршрут **только по кэшу результатов проб**
-  (сети в запросе не делает): passthrough E→E, если бэкенд поддерживает входной
-  формат как целевой; иначе — реализованная конверсия из входного формата
-  (сегодня только `messages→completions`); иначе — HTTP 400 «no route».
-- **Passthrough E→E** — входной формат == целевому (`completions→completions`,
-  `messages→messages`, `responses→responses`): тело уходит бэкенду как пришло
-  (подставляется только резолвнутая модель), ответ/SSE-поток возвращаются
-  клиенту **дословно**, в родном формате входа.
-- **Нереализованные преобразования** (например `completions→messages`) — HTTP 400:
-  реестр реализованных пар (`IMPLEMENTED_CONVERSIONS` в `backend_adapter/routing.py`)
-  содержит только `messages→completions`. Если бэкенд целевой формат не
-  поддерживает — HTTP 502 (до отправки запроса).
-
-Учёт «Models in use», strict-проверка модели, маппинг, токены usage и
-`.err`-протокол работают на всех трёх входах одинаково. Подробности —
-в [`docs/environment.md`](environment.md), раздел «Входные эндпоинты:
-TARGET-маршрутизация», и [`docs/architecture.md`](architecture.md), §4.2.
+Допустимые значения всех трёх — `completions | messages | responses | auto | none`
+(`none` — вход закрыт, 404; `auto` — выбор по кэшу проб, **без сети в запросе**).
+Принципы настройки, матрица «вход × значение», реализованные маршруты и
+варианты будущих версий — в [`docs/routing.md`](routing.md). Справочник
+переменных — [`docs/environment.md`](environment.md), раздел «Входные
+эндпоинты (TARGET)»; внутреннее устройство — [`docs/architecture.md`](architecture.md), §4.2.
 
 ### 5.9 Полный пример env-файла
 
