@@ -36,6 +36,41 @@
 - вне охвата (сознательно): не-стрим «бэкенд без usage» и passthrough-ветки
   без usage `.err` НЕ пишут — в канал идут ровно два указанных события.
 
+### Фикс грязного выхода по Ctrl-C (PyInstaller-бинарь, v0.9.1)
+
+**Цель:** на PyInstaller-бинаре Ctrl-C давал «[EXIT] Bye», затем traceback
+(KeyboardInterrupt в serve_forever, «During handling of the above
+exception…») и `[PYI-7290:ERROR] Failed to execute script` + ненулевой код
+возврата. На python-исходнике не воспроизводилось.
+
+**Диагноз.** Onefile-бинарь: bootloader + дочерний python в одной группе;
+spec без `--bootloader-ignore-signals` → bootloader форвардит Ctrl-C
+дополнительно. SIGINT доставлялся дважды/со смещением: второй KI в
+микроокне между первым `raise KeyboardInterrupt` (из serve_forever) и
+переустановкой хэндлеров `install_signal_handlers(graceful=False)` в
+`graceful_shutdown` уходил непойманным → traceback, bootloader печатал
+`[PYI-7290]`, rc != 0.
+
+**Решение:**
+- `shutdown.py`: ПЕРВЫЙ сигнал обрабатывает **единый хэндлер** `_first_signal`
+  (SIGINT **и** SIGTERM) — СНАЧАЛА переключает оба сигнала на `_force_exit`
+  (`os._exit(130)`), ЗАТЕМ делает `raise KeyboardInterrupt`. Микроокно
+  «второй сигнал до переустановки» исчезает: повторный/задвоенный сигнал
+  умирает тихо 130 на любой следующей границе байткода;
+- `backend-adapter.py`: внешний предохранитель вокруг главного цикла —
+  `except KeyboardInterrupt: os_exit(130)` (если KI всё же дошёл — тихий
+  выход без traceback, контракт повторного сигнала сохранён);
+- `scripts/build-binaries.sh`: сборка с `--bootloader-ignore-signals`
+  (bootloader не форвардит сигналы дочернему python — устраняет двойную
+  доставку на будущих бинарях; бинарь пересобран и проверен);
+- тесты `test_shutdown.py`: единый хэндлер на оба сигнала, порядок
+  «переключил до raise» в суба-процессе (повторный kill → 130 без ALIVE),
+  SIGTERM первым — тоже вежливый KI, «второй сигнал в микроокне finally»
+  → тихо 130 без traceback (воспроизведение бага);
+- верификация на пересобранном `dist/binaries/macos-arm64/backend-adapter`
+  в pty: одиночный Ctrl-C → rc 0, `[EXIT] Bye`, без traceback; двойной
+  Ctrl-C → тихо 130, без traceback.
+
 ## v0.9.0 — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH
 
 ### 2026-09-09 Саммари ветки v0.9.0 (12 коммитов между merge PR #12 (v0.8.6) и снятием WIP)

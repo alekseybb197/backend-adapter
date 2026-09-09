@@ -15,7 +15,12 @@
   (flush_table), печатается «[EXIT] Bye», код возврата 0;
 - повторный сигнал во время завершения — НЕМЕДЛЕННЫЙ выход os._exit(130):
   запись YAML (flush_table) нельзя прерывать на середине — файл останется
-  с .tmp-хвостом; 130 = 128 + SIGINT (2), как у прерванного процесса;
+  с .tmp-хвостом; 130 = 128 + SIGINT (2), как у прерванного процесса.
+  С первого сигнала (v0.9.1) хэндлеры сразу переключаются на _force_exit —
+  повторный сигнал не может уйти в непойманный KeyboardInterrupt даже в
+  микроокне между первым raise и переустановкой хэндлеров в
+  graceful_shutdown (баг грязного выхода PyInstaller-бинаря по Ctrl-C:
+  bootloader форвардит сигнал группе — двойная доставка);
 - провал процедуры завершения НЕ маскирует успех: если всё вежливое
   завершение прошло (процесс сам не был прерван повторным сигналом),
   код возврата — 0 (SIGINT обработан), а не 130/1;
@@ -36,30 +41,51 @@ from collections.abc import Callable
 def install_signal_handlers(graceful: bool = True) -> None:
     """Поставить обработчики завершения (только в main-потоке).
 
-    ``graceful=True``: SIGINT оставлен дефолтным (KeyboardInterrupt — его
-    ловит главный цикл serve_forever), SIGTERM перехвачен на вежливое
-    завершение (raise KeyboardInterrupt: без этого SIGTERM убивает процесс
-    мгновенно, без finally — usage-хвост не сохранится). ``graceful=False``:
-    повторный сигнал во время процедуры завершения — немедленный выход
-    os._exit(130) (запись YAML прерывать нельзя). В не-main-потоках
-    signal.signal кидает ValueError — молча пропускаем (PEP 475 доставляет
-    KeyboardInterrupt в main-поток)."""
+    ``graceful=True``: ПЕРВЫЙ сигнал (SIGINT **и** SIGTERM) обрабатывает
+    единый хэндлер ``_first_signal`` — до raise KeyboardInterrupt он
+    переключает оба сигнала на ``_force_exit`` (os._exit(130)), поэтому
+    повторный сигнал во время процедуры завершения = немедленный выход,
+    даже если raise KI из первого хэндлера ещё не дошёл до finally и
+    ``graceful=False`` не переустановлено. Именно это закрывает баг
+    PyInstaller-бинаря: bootloader (spec без bootloader_ignore_signals)
+    форвардит Ctrl-C группе — второй KI, пришедший в микроокно между
+    первым raise и переустановкой хэндлеров, уходил непойманным и давал
+    traceback + ``[PYI-7290]``. ``graceful=False``: повторный сигнал во
+    время процедуры завершения — немедленный выход os._exit(130) (запись
+    YAML прерывать нельзя). В не-main-потоках signal.signal кидает
+    ValueError — молча пропускаем (PEP 475 доставляет KeyboardInterrupt в
+    main-поток)."""
     if threading.current_thread() is not threading.main_thread():
         return
 
-    def _force_exit(_signum: int, _frame: object) -> None:
-        os_exit(130)
-
     if graceful:
-        signal.signal(signal.SIGTERM, _graceful_signal)
+        signal.signal(signal.SIGINT, _first_signal)
+        signal.signal(signal.SIGTERM, _first_signal)
     else:
         signal.signal(signal.SIGINT, _force_exit)
         signal.signal(signal.SIGTERM, _force_exit)
 
 
-def _graceful_signal(_signum: int, _frame: object) -> None:
-    """SIGTERM → KeyboardInterrupt: как Ctrl-C (PEP 475 перезапускает
-    системный вызов serve_forever, KI прилетает в main-поток)."""
+def _force_exit(_signum: int, _frame: object) -> None:
+    """Немедленный выход os._exit(130): повторный сигнал во время процедуры
+    завершения. 130 = 128 + SIGINT (2), как у прерванного процесса. Запись
+    YAML (flush_table) прерывать нельзя — файл останется с .tmp-хвостом."""
+    os_exit(130)
+
+
+def _first_signal(_signum: int, _frame: object) -> None:
+    """Единый хэндлер ПЕРВОГО сигнала (SIGINT или SIGTERM, graceful=True).
+
+    Порядок критичен: (1) СНАЧАЛА оба сигнала переключаются на ``_force_exit``
+    — повторный (или задвоенный bootloader'ом PyInstaller) сигнал теперь
+    умирает тихо os._exit(130) на любой следующей границе байткода, у него
+    нет окна попасть в непойманный KeyboardInterrupt; (2) ЗАТЕМ raise
+    KeyboardInterrupt — главный цикл (serve_forever) выходит, finally
+    выполняет вежливое завершение (graceful_shutdown). signal.signal внутри
+    хэндлера легален: сигналы доставляются в main-поток, хэндлер выполняется
+    в нём."""
+    signal.signal(signal.SIGINT, _force_exit)
+    signal.signal(signal.SIGTERM, _force_exit)
     raise KeyboardInterrupt
 
 
@@ -154,5 +180,5 @@ def graceful_shutdown(
 
 # Хэндлеры сигналов ставятся в main-потоке при запуске адаптера
 # (backend-adapter.py): install_signal_handlers(graceful=True) до входа в
-# главный цикл serve_forever. Повторный вызов с graceful=False — в finally
-# (процедура завершения).
+# главный цикл serve_forever — единый _first_signal на SIGINT и SIGTERM.
+# Повторный вызов с graceful=False — в finally (процедура завершения).

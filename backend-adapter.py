@@ -190,16 +190,20 @@ if __name__ == "__main__":
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
 
     # === Корректное завершение (Ctrl-C / SIGTERM) ===
-    # Дефолтный SIGINT кидает KeyboardInterrupt в главный поток — serve_forever
-    # выходит, finally выполняет вежливое завершение. Проблема была в том, что
-    # ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
+    # SIGINT и SIGTERM перехвачены на KeyboardInterrupt — serve_forever
+    # выходит, finally выполняет вежливое завершение. Проблема была в том,
+    # что ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
     # запись: Python кидает KI в главный поток, где бы тот ни был. Решение
     # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см. ADR):
-    # (1) SIGTERM перехватывается на KeyboardInterrupt (как Ctrl-C) — иначе
-    # systemd/launchd/kill убивают процесс мгновенно, без finally, и
-    # usage-хвост теряется; (2) как только начали завершение, SIGINT/SIGTERM
-    # переключаются на немедленный os._exit(130) — повторный сигнал не может
-    # прервать flush_table, а просто тихо завершает процесс.
+    # (1) первый сигнал обрабатывает ЕДИНЫЙ хэндлер _first_signal, который
+    # сразу переключает SIGINT/SIGTERM на немедленный os._exit(130) и лишь
+    # затем делает raise KeyboardInterrupt — повторный/задвоенный сигнал
+    # (PyInstaller bootloader форвардит Ctrl-C группе) не может уйти в
+    # непойманный KI в микроокне между raise и переустановкой хэндлеров в
+    # graceful_shutdown (v0.9.1, баг грязного выхода бинаря); (2) как только
+    # начали завершение, SIGINT/SIGTERM переключаются на немедленный
+    # os._exit(130) — повторный сигнал не может прервать flush_table, а
+    # просто тихо завершает процесс.
     from backend_adapter.shutdown import graceful_shutdown, install_signal_handlers
 
     install_signal_handlers(graceful=True)
@@ -221,22 +225,34 @@ if __name__ == "__main__":
         except BaseException:  # noqa: BLE001 — завершение не должно падать
             pass
 
-    with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
-        finally:
-            # Переключение сигналов + остановка слушателей + фоновой проверки
-            # + финальный flush usage-таблицы + печать «[EXIT] Bye»
-            # (см. shutdown.graceful_shutdown: остановки по отдельности глотают
-            # ошибки, процедуру прервать нельзя — повторный сигнал уже =
-            # немедленный os._exit(130); маркер «[EXIT] Bye» печатает сам
-            # graceful_shutdown — контракт завершения живёт в shutdown.py).
-            graceful_shutdown(
-                httpd,
-                webui,
-                exporter,
-                ADAPTER_EXPORTER_ENABLE,
-                _finish,
-            )
+    try:
+        with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
+            finally:
+                # Переключение сигналов + остановка слушателей + фоновой проверки
+                # + финальный flush usage-таблицы + печать «[EXIT] Bye»
+                # (см. shutdown.graceful_shutdown: остановки по отдельности глотают
+                # ошибки, процедуру прервать нельзя — повторный сигнал уже =
+                # немедленный os._exit(130); маркер «[EXIT] Bye» печатает сам
+                # graceful_shutdown — контракт завершения живёт в shutdown.py).
+                graceful_shutdown(
+                    httpd,
+                    webui,
+                    exporter,
+                    ADAPTER_EXPORTER_ENABLE,
+                    _finish,
+                )
+    except KeyboardInterrupt:
+        # Внешний предохранитель (v0.9.1): если KeyboardInterrupt всё же дошёл
+        # до этой точки (не должен — единый хэндлер _first_signal с первого
+        # сигнала переключает оба сигнала на _force_exit, повторный умирает
+        # тихо os._exit(130)), выходим тихо, без traceback. Это последний
+        # рубеж против «[EXIT] Bye» + traceback + [PYI-7290] на
+        # PyInstaller-бинаре: контракт повторного сигнала (130) сохранён —
+        # повторный сигнал и так завершил бы процесс, здесь завершаем сами.
+        from backend_adapter.shutdown import os_exit
+
+        os_exit(130)

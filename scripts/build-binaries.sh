@@ -55,6 +55,14 @@ fi
 # git-ignored already.
 DIST_DIR="dist/binaries/$TARGET"
 rm -rf "$DIST_DIR" "build/$TARGET"
+# v0.9.1: --bootloader-ignore-signals — без него bootloader onefile форвардит
+# Ctrl-C группе: SIGINT приходит и bootloader'у, и дочернему python;
+# задвоенный сигнал в микроокне между первым raise KeyboardInterrupt и
+# переустановкой хэндлеров в graceful_shutdown уходил непойманным →
+# «[EXIT] Bye» + traceback + [PYI-7290]. С флагом bootloader сигналы
+# игнорирует — их получает только дочерний python (единый хэндлер
+# shutdown._first_signal закрывает остальные окна). Флаг + единый хэндлер
+# = чистый выход по Ctrl-C (см. backend_adapter/shutdown.py).
 pyinstaller \
     --onefile \
     --name backend-adapter \
@@ -63,6 +71,7 @@ pyinstaller \
     --specpath "build/$TARGET" \
     --hidden-import yaml \
     --hidden-import yaml.emitter \
+    --bootloader-ignore-signals \
     --clean \
     backend-adapter.py
 
