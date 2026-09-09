@@ -442,6 +442,44 @@ class TestConfigHTTPPost:
             httpd.shutdown()
             httpd.server_close()
 
+    def test_post_form_zero_int_applied(self, tmp_path):
+        """/config POST (form): int-поле со значением «0» применяется (регресс v0.9.1).
+
+        Браузер шлёт int-поля (type="number") строками; «0» раньше кралась
+        bool-эвристикой парсера ("0" → False), и set_runtime_config отклонял
+        bool для int-поля — лимиты с дефолтом 0 (ADAPTER_TRACE_*_MAX_CHARS,
+        ADAPTER_DEBUG_TRIM=0) уходили в «Игнорировано». Типизированный разбор
+        (по config._RUNTIME_CONFIG_TYPES) разбирает int-поля через int()
+        без bool-эвристики: "0" → 0."""
+        _reload_config()
+        from backend_adapter import config
+        # Пред-условие: лимиты НЕ 0, чтобы применение «0» было наблюдаемым.
+        config.ADAPTER_TRACE_REASONING_MAX_CHARS = 100
+        config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = 200
+        config.ADAPTER_DEBUG_TRIM = 300
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            # Ровно то, что шлёт форма при применении целиком (значения 0).
+            body = (
+                "ADAPTER_TRACE_REASONING_MAX_CHARS=0"
+                "&ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS=0"
+                "&ADAPTER_DEBUG_TRIM=0"
+            ).encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            # Все три int-поля применились как 0 — в «Игнорировано» не ушли.
+            assert config.ADAPTER_TRACE_REASONING_MAX_CHARS == 0
+            assert config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS == 0
+            assert config.ADAPTER_DEBUG_TRIM == 0
+            assert "Игнорировано" not in response_body
+            assert "Применено:" in response_body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
 
 __all__ = [
     "TestRenderConfigPage",

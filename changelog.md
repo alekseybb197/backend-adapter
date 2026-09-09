@@ -1,7 +1,7 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
-## v0.9.1 (WIP — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей, TARGET-переменные на /config)
+## v0.9.1 (WIP — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей, TARGET-переменные на /config, фикс «0»-int в POST /config)
 
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.1. -->
 
@@ -140,6 +140,33 @@ passthrough E→E `completions→completions`/`responses→responses`, auto-вы
   на лету»), сводная таблица (9 → 12); `webui.md` §5 (пул 12, enum-категория,
   строка маршрута `/config`); `routing.md` — вводный (runtime-выбор на
   `/config`) + принцип «„ничего не менять" = passthrough на себя» (п. 5).
+
+### Фикс POST /config: int-поле со значением «0» больше не уходит в «Игнорировано» (v0.9.1)
+
+**Цель:** при применении формы `/config` целиком поля
+`ADAPTER_TRACE_REASONING_MAX_CHARS` и `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`
+(дефолт 0) показывались в «Игнорировано (неверный тип/неизвестный ключ)».
+
+**Диагноз.** Браузер шлёт int-поля (`type="number"`) строками; значение «0»
+перехватывалось bool-эвристикой парсера form-urlencoded (`"0"` → `False`)
+**до** попытки разобрать int, а `set_runtime_config` строго отклоняет bool
+для int-поля (`not isinstance(value, bool)`) → «Игнорировано». Поля с
+ненулевыми значениями (например `ADAPTER_DEBUG_TRIM=3000`) не матчили
+bool-слова и проходили по int-ветке — поэтому в «Игнорировано» были ровно
+два TRACE-лимита. Баг pre-existing (эвристика была до select-фичи).
+
+**Решение:**
+- `webui_config_api.py`: разбор form-urlencoded стал **типизированным** — по
+  ожидаемому типу ключа из `config._RUNTIME_CONFIG_TYPES` (после снятия
+  `"_"`-префикса hidden-«соседа»): int-поля разбираются строго `int()`
+  (без bool-эвристики, `"0"` → `0`); bool-поля — прежняя эвристика
+  checkbox-значений `1/0`; enum-select (TARGET) и посторонние ключи — как
+  было. Идиома bool-пары checkbox+hidden и контракты int/select не меняются;
+  JSON-ветка POST не затрагивается;
+- тест: регресс-тест в `test_webui_config_api.py` — POST form-urlencoded
+  с `0` для трёх int-полей (`ADAPTER_TRACE_REASONING_MAX_CHARS`,
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM`) применяется,
+  фразы «Игнорировано» в ответе нет.
 
 ## v0.9.0 — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH
 

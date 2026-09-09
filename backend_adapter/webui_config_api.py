@@ -248,17 +248,41 @@ class ConfigEndpoint(webserver.Endpoint):
                 val = values[-1]
                 # hidden-ключ "_NAME" → имя "NAME"
                 data_key = key[1:] if key.startswith("_") else key
-                # Преобразуем типы: "1"/"true"/"on" → True, "0"/"false" → False
-                if val.lower() in ("1", "true", "on", "yes"):
-                    data[data_key] = True
-                elif val.lower() in ("0", "false", "off", "no"):
-                    data[data_key] = False
-                else:
-                    # Пробуем int
+                # Разбор по ОЖИДАЕМОМУ типу ключа (config._RUNTIME_CONFIG_TYPES),
+                # а не по значению: bool-эвристика для int-поля крадёт "0" →
+                # False (set_runtime_config отклоняет bool для int — поле
+                # уходило в «Игнорировано»). Тип смотрим по data_key (после
+                # снятия "_"-префикса — hidden-«сосед» bool-поля).
+                expected = config._RUNTIME_CONFIG_TYPES.get(data_key)
+                if expected is int:
+                    # int-поля (type="number"): значение числами 0/3000/... —
+                    # строго int(), без bool-эвристики ("0" → 0, не False).
                     try:
                         data[data_key] = int(val)
                     except ValueError:
                         data[data_key] = val
+                elif expected is bool:
+                    # bool-поля: checkbox value=1 + hidden "_NAME"=1/0.
+                    if val.lower() in ("1", "true", "on", "yes"):
+                        data[data_key] = True
+                    elif val.lower() in ("0", "false", "off", "no"):
+                        data[data_key] = False
+                    else:
+                        data[data_key] = val
+                else:
+                    # enum-select (TARGET) и посторонние ключи: select шлёт
+                    # строку из домена — как есть. Прежняя эвристика
+                    # (bool-слова → int → строка) сохраняется ТОЛЬКО для
+                    # ключей вне пула (их всё равно отклонит set_runtime_config).
+                    if val.lower() in ("1", "true", "on", "yes"):
+                        data[data_key] = True
+                    elif val.lower() in ("0", "false", "off", "no"):
+                        data[data_key] = False
+                    else:
+                        try:
+                            data[data_key] = int(val)
+                        except ValueError:
+                            data[data_key] = val
 
         # Применяем через set_runtime_config
         result = config.set_runtime_config(**data)
