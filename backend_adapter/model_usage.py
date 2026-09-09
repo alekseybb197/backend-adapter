@@ -914,6 +914,24 @@ def _probe_model_endpoints(backend_cfg: dict, resolved: str) -> dict:
     if not probes:
         return {"endpoints": {}, "errors": {}}
     result = config._probe_backend_endpoints(backend_cfg, probes, timeout=MODEL_USAGE_PROBE_TIMEOUT)
+    # JSON-дампы результатов пробы эндпоинтов МОДЕЛИ (v0.9.0): файл на каждый
+    # реально пробованный путь — <бэкенд>.<модель>.<pname>.json, где модель —
+    # resolved (которой эндпоинт пробовался). Единая точка для пер-модельных
+    # проб (первое обращение модели и reprobe строки — обе зовут эту
+    # функцию); формат payload и конвертация имени — config._write_endpoint_snapshot.
+    for path, ep in result["endpoints"].items():
+        pname = config._pname_for_path(path)
+        if pname is None:
+            continue  # путь вне ENDPOINT_PROBES — не наш (страховка)
+        config._write_endpoint_snapshot(
+            backend_cfg["name"],
+            probes[path],
+            pname,
+            path,
+            ep.get("status"),
+            bool(ep.get("found")),
+            error=result["errors"].get(pname),
+        )
     endpoints = {}
     for pname, path, _tpl in config.ENDPOINT_PROBES:
         if path in result["endpoints"]:

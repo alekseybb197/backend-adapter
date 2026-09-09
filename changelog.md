@@ -1,5 +1,221 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+## v0.9.0 — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH
+
+### 2026-09-09 Саммари ветки v0.9.0 (12 коммитов между merge PR #12 (v0.8.6) и снятием WIP)
+
+**Цель:** финальная публикация всей группы работ v0.9.0 — единая запись о
+том, что вошло в ветку между v0.8.6 и снятием WIP (детали каждой работы — в
+подзаписях ниже).
+
+**Решение:**
+- **входные эндпоинты /v1/chat/completions и /v1/responses +
+  TARGET-маршрутизация** — новый модуль `routing.py` (реестр реализованных
+  пар — **только** `messages→completions`; прочие пары честно отвергаются
+  400), TARGET-переменные `ADAPTER_MESSAGES_TARGET`/
+  `ADAPTER_COMPLETIONS_TARGET`/`ADAPTER_RESPONSES_TARGET`
+  (`completions | messages | responses | auto | none`; дефолты — нулевая
+  настройка: MESSAGES=completions, два других none — прежнее поведение
+  100%), passthrough E→E для всех трёх форматов (`relay_sse` — SSE-релей
+  без пере-фрейминга);
+- **JSON-результаты проверок в LOGPATH** — новый модуль `probe_json.py`:
+  `<имя_бэкенда>.models.json` и `<имя_бэкенда>.<модель>.<эндпоинт>.json`
+  (безусловный канал вне ENABLE/PARTS/TRIM, перезапись каждый раз,
+  секреты маскируются);
+- **CI к набору проверок** — mypy `--strict --ignore-missing-imports` в
+  lint-and-typecheck, `requirements-dev.txt` в обоих job'ах;
+- **`[EXIT] Bye`** — консольное сообщение завершения печатается из
+  `shutdown.graceful_shutdown`;
+- **PID-файл в LOGPATH** — `ADAPTER_PIDFILE` задаёт имя файла, PID-файл
+  кладётся всегда в `ADAPTER_DEBUG_LOGPATH`;
+- **шапка «Backend-Adapter Version» + навигация иконками** 🔃/📋/🔧/📊;
+- **фикс Cost-ячейки live-поллинга** — `setHtml` (innerHTML) вместо
+  textContent;
+- **.err-протокол инцидентов** — безусловный файл ошибок при финальном
+  4xx/5xx реального прокси-запроса (полный запрос + тело ошибки последней
+  попытки, без обрезки).
+
+**Следствия:** версия v0.9.0 публикуется (снятие WIP) — дефолты TARGET не
+меняют прежнее поведение (принимается только messages с конвертацией,
+два других входа 404); [OI]-клиенты могут ходить в адаптер родными
+протоколами (passthrough E→E); breaking change: `ADAPTER_PIDFILE` = имя
+(в LOGPATH), не путь.
+
+### 2026-09-09 Группа: Входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация (v0.9.0)
+
+**Цель:** адаптер слушал только `POST /v1/messages`; добавить входные
+эндпоинты `/v1/chat/completions` и `/v1/responses` и маршрутизацию каждого
+входа TARGET-переменной — `ADAPTER_MESSAGES_TARGET`,
+`ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET` (префикс = вход).
+Допустимые значения — `completions | messages | responses | auto | none`
+(целевой формат; авто — по кэшу проб, без сети; `none` — вход выключен).
+
+**Решение:**
+- **новый модуль `backend_adapter/routing.py`** (лист DAG: импортирует только
+  config, его импортирует только server.py) — `INPUT_PATHS` (три входных
+  пути), `IMPLEMENTED_CONVERSIONS` (**только** `messages→completions`),
+  `input_path_to_format`, `decide()` → passthrough E→E / convert / reject /
+  disabled по TARGET + кэшу проб `config.endpoint_support` (сети в запросе
+  нет; None = False);
+- **config.py** — `_parse_target` (невалид/пусто → `[WARN]` + `none`, не
+  fatal) и три TARGET-константы; дефолты = нулевая настройка
+  (MESSAGES=completions — прежняя messages-конверсия; COMPLETIONS=none,
+  RESPONSES=none — входы закрыты 404). В runtime-пул `/config` не входят;
+- **server.py** — роутер `input_path_to_format`; единая цепочка для всех
+  входов (тело → model → strict → маппинг → `_resolve_backend` →
+  `routing.decide`); disabled/reject — JSON-ошибка 404/400/502 ДО
+  `record_model_usage` (в счётчики не попадают, `.err` не пишется);
+  passthrough — тело как пришло (мутация только `model` на резолвнутую;
+  `stream: false` при `ADAPTER_STREAMING_ENABLE=0`), `backend_url` по
+  `INPUT_PATHS[out_fmt]`;
+- **streaming.py** — `relay_sse` (passthrough-релей: SSE-строки бэкенда —
+  клиенту дословно + flush; usage сканированием проходящих строк) и
+  `_write_sse_error_native` (событие ошибки в родном формате входа);
+- **observability** — `[ROUTE]` debug-строка + поле route в trace
+  request_start; usage-ключи по формату выхода (completions —
+  prompt/completion_tokens; responses/messages — input/output_tokens);
+  учёт/strict/маппинг/.err — на всех трёх входах одинаково.
+
+**Следствия:** [OI]-клиенты ходят в адаптер родными протоколами (passthrough
+E→E: `completions→completions`, `responses→responses`, `messages→messages`);
+нереализованные перекрёстные конвертеры отвергаются 400 «conversion … is not
+implemented» (реестр); дефолты не меняют прежнее поведение. Покрыто:
+`tests/test_routing.py` (таблица decide, отсутствие сети в auto),
+`test_server.py` (passthrough по трём форматам, 404/400/502, usage-учёт,
+`.err`), `test_streaming.py` (relay_sse, usage-скан, `_write_sse_error_native`).
+
+### 2026-09-08 Группа: CI к набору проверок, JSON-файлы результатов проверок в LOGPATH, [EXIT] Bye, PID-файл в LOGPATH (v0.9.0)
+
+**Цель:** (1) CI должен отвечать набору проверок проекта; (2) результаты
+проверок бэкендов на доступные модели и эндпоинты — в LOGPATH как плоские
+JSON-файлы фиксированных имён (безусловный канал, каждый раз перезапись);
+(3) вернуть «[EXIT] Bye» как консольное сообщение завершения; (4) PID-файл —
+в единую директорию артефактов.
+
+**Решение:**
+- **CI к набору проверок** — `.github/workflows/ci.yml`: mypy
+  `--strict --ignore-missing-imports` (как локальная проверка CLAUDE.md),
+  оба job'а ставят `requirements-dev.txt` вместо инлайн-пакетов;
+  `pyproject.toml` version синхронизирована с `__version__`;
+- **JSON-файлы результатов проверок (новый модуль `probe_json.py`)** —
+  `<имя_бэкенда>.models.json` и `<имя_бэкенда>.<конверт.модель>.
+  <pname>.json` в корне `ADAPTER_DEBUG_LOGPATH`, каждый раз перезапись
+  (tmp + os.replace); канал БЕЗУСЛОВНЫЙ (вне ENABLE/PARTS/TRIM; гейт —
+  наличие LOGPATH), провал записи молча глотается; охват — все события
+  (`.models.json`: стартовый init/фоновый refresh/reload; эндпоинт-файлы:
+  фоновая probe_endpoints и пер-модельные пробы usage-таблицы — единая
+  точка `_probe_model_endpoints`); конвертация имени модели — `/` и `:` →
+  `_`; имя эндпоинта — короткое из ENDPOINT_PROBES; санитайзер: секретные
+  ключи маскируются структурно (рекурсивно, маской redact._mask) + redact()
+  текстом, при SENSITIVE=1 — полные данные;
+- **`[EXIT] Bye`** — печать перенесена из finally backend-adapter.py внутрь
+  `shutdown.graceful_shutdown` (после успешного завершения процедуры) —
+  контракт модуля покрывается unit-тестами;
+- **PID-файл в LOGPATH** — `daemon._write_pidfile()`: `ADAPTER_PIDFILE`
+  задаёт ИМЯ (basename), файл кладётся ВСЕГДА в LOGPATH (дефолт
+  `adapter.pid`), директория создаётся при записи.
+
+**Следствия:** результаты проверок читаются из LOGPATH плоскими JSON без
+включения файловой записи (модели — даже при ENABLE=0, как .err); конец
+работы маркируется «[EXIT] Bye» из модуля завершения; PID — в единой
+директории. Breaking change: `ADAPTER_PIDFILE` = имя (в LOGPATH), не путь.
+Поведение проксирования не меняется. Покрыто unit-тестами (probe_json,
+точки записи config/model_usage, shutdown, daemon) и интеграционным
+прогоном (test_manual_check: JSON-файлы в logs_dir при ENABLE=0).
+
+### 2026-09-08 Шапка статус-страницы «Backend-Adapter Version» + навигация иконками 🔃/📋/🔧/📊 (v0.9.0)
+
+**Цель:** заменить текстовую навигацию статус-страницы и подписи-ссылки
+соседних страниц на компактные иконки с tooltip-подписями, а заголовок
+страницы — на единый формат «Backend-Adapter Version <x.x.x>».
+
+**Решение:**
+- **шапка `/`** — `<h2>Backend-Adapter Version {context.version}</h2>` вместо
+  прежнего заголовка со строкой текстовых ссылок; второй строкой — иконки:
+  🔃 (кнопка POST `/` — проверка бэкендов с перечитыванием конфига, прежняя
+  текстовая «⟳ Перепроверить»; подпись «Перепроверить бэкенды» — в
+  `title`/`aria-label`; контракт POST/PRG/303 не меняется), 📋 → `/session`
+  (title «Обзор сессий»), 🔧 → `/config` (title «Runtime config»);
+- **обратные ссылки** — на `/session` и `/config` вместо «← статус»/«config»
+  теперь «Статус 📊» (на корень `/`) и «Обзор сессий 📋»/«Runtime config 🔧»
+  между вторичными страницами — возврат к списку бэкендов и моделей одним
+  кликом; id/стили/порядок ссылок сохранены;
+- кнопка «⟳ обновить список» вкладок `/session` и глифы строк (⟳ reprobe)
+  НЕ тронуты (вне охвата — это перезагрузка списка и действие строки, а не
+  проверка бэкендов).
+
+**Следствия:** заголовок страницы несёт версию единым форматом; навигация
+компактна и читается подписью-тултипом; все POST-контракты и поведение
+проксирования не меняются. Покрыто unit/HTTP-тестами (шапка Version, иконки
+🔃/📋/🔧 в body `/`, обратные ссылки на `/session` и `/config`).
+
+### 2026-09-08 Фикс Cost-ячейки live-поллинга — setHtml/innerHTML вместо textContent (v0.9.0)
+
+**Цель:** убрать буквальную разметку `<span style="color:#aaa">—</span>` в
+колонке Cost при live-поллинге счётчиков.
+
+**Решение:** `usage_poll` ставил ячейку Cost через `set()` → `textContent`,
+а снимок `/api/model-usage/snapshot` несёт `cost_html` — готовый HTML
+(`_cost_cell_html`: серая «—» для нулевых токенов/модели без тарифа, суммы —
+plain text). Для «—»-кейсов textContent показывал разметку буквально при
+каждом поллинге/рендере. Введён отдельный сеттер `setHtml` (innerHTML-
+сравнение + присваивание) для ячейки Cost (индекс 5): серверный HTML
+ставится как HTML; счётчики Вызовов/Input/Output остаются на `textContent`;
+innerHTML-сравнение не трогает DOM, если значение не изменилось. Единый
+источник HTML — `_cost_cell_html` (рендер и снимок); контракты снимка не
+меняются.
+
+**Следствия:** «—» в колонке Cost отображается серой разметкой, а не
+текстом; реальные суммы (plain text) не ломались и не ломаются. Поведение
+проксирования не меняется. Покрыто тестами (наличие `setHtml`/
+`setHtml(5, row["cost_html"])` в usage_poll-скрипте).
+
+### 2026-09-08 .err-протокол инцидентов взаимодействия с бэкендом (v0.9.0)
+
+**Цель:** протокол «записываем взаимодействие с бэкендом до ответа»: при
+ФИНАЛЬНОМ ответе клиенту **4xx/5xx** реального прокси-запроса агента
+(`POST /v1/messages` → `server.do_POST`) — после ретраев/таймаутов/исчерпания
+попыток — в директорию логов пишется **специальный файл ошибок** `.err`
+(имя как у session-лога, расширение `.err`), с полным запросом к бэкенду и
+полным сообщением об ошибке последней попытки — **без обрезки** по
+`ADAPTER_DEBUG_TRIM` и **вне** `ADAPTER_DEBUG_ENABLE` (безусловный канал).
+
+**Решение:**
+- **`session_log.write_error_file(session_id, req_id, *, final_status,
+  backend_url, model, out_body, err_body)`** — новый безусловный канал
+  записи. Гейтится ТОЛЬКО наличием лог-директории `ADAPTER_DEBUG_LOGPATH`
+  (всегда непуста, дефолт `./tmp/logs`): НЕ зависит от `ADAPTER_DEBUG_ENABLE`
+  (при `0` тоже пишется), НЕ от `ADAPTER_DEBUG_PARTS`, НЕ обрезается по
+  `ADAPTER_DEBUG_TRIM` (полные запрос и ошибка). Санитайзер уважает
+  `ADAPTER_SENSITIVE_LOGGING_ENABLE`: по умолчанию секреты redact'ятся,
+  при `=1` — полные данные (живое чтение config, как logger._write).
+  Никогда не бросает исключений (наблюдательный канал);
+- **файл** — `session-<ts>-<safe8>.err` через `_open_session_file("err",
+  ...)`: живёт в той же директории debug-логов и **делит с `.log` общий
+  `_session_file_ts` сессии** (тот же ts — имя отличается только
+  расширением); общий FIFO-пул `_session_logs`. Формат — в духе session-
+  лога, timestamp-строки с `[req_id]`: шапка-метаданные (`session_id`,
+  `final_status`, `model`, `backend_url`), `[REQUEST]` — полное тело
+  запроса к бэкенду, `[BACKEND_ERROR]` — полное сообщение об ошибке
+  последней попытки;
+- **server.py — вызов из финальных точек ошибки** обеих веток (стрим и
+  не-стрим): `final_status` = код HTTPError последней попытки (не-retry
+  4xx; исчерпанные 429/502/503/504), `504` после таймаутов, `502` после
+  прочих ошибок. **Один `.err` на запрос**, не на попытку. Scope — только
+  реальные прокси-запросы `do_POST`; 400-пути ДО бэкенда (нет `/v1/messages`,
+  Invalid JSON, нет `model`, strict-400) `.err` НЕ пишут — бэкенд не
+  участвовал; дымовые пробы (config/webui_status) — свои консольные логи.
+
+**Следствия:** любой финальный сбой взаимодействия с бэкендом оставляет
+файл-инцидент с полными данными для разбора (причины + ошибки), независимо
+от настроек подробности файловой записи; поведение проксирования не
+меняется. Покрыто: unit-тестами `session_log` (безусловность при ENABLE=0,
+полнота при малом TRIM, redact по умолчанию / полные при SENSITIVE=1,
+общий ts с `.log`) и серверными тестами (400 не-стрим/стрим → `.err`;
+502 после ретраев → один `.err`; 200-успех → нет файла; локальные 400 ДО
+бэкенда → нет файла; redact/полные данные).
+
+
 ## v0.8.6 — тарифы моделей с колонкой Cost, пересмотр флагов логирования и WEBUI, корректное завершение по Ctrl-C/SIGTERM, Cost в live-поллинге, верхняя «Свернуть», тесты graceful shutdown и интеграционного прогона, favicon на производных страницах, удаление tmp/check_v086.py, колонка Actions с иконками-действиями строки и удаление модели, реформа логирования — консоль с TRIM / файл полный, удалены TAGS_FULL·TOOLS·TOOLS_ERROR, TAGS_OUT → ADAPTER_DEBUG_PARTS, иконки строк 🔄/⏪/🗑
 
 ### 2026-09-08 Саммари ветки v0.8.6 (11 коммитов между merge PR #11 (v0.8.5) и снятием WIP)

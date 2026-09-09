@@ -7,6 +7,8 @@ import threading
 import time
 from unittest import mock
 
+import pytest
+
 
 def _reload_config():
     """Remove backend_adapter modules from sys.modules and reimport."""
@@ -1514,8 +1516,10 @@ class TestEndpointProbe:
 
     def test_probe_against_fake_backend(self, fake_backend):
         # Реальная сеть: fake_backend отвечает на POST /v1/chat/completions
-        # (completions_status=200), остальные пути — 404, пока не заданы
-        # extra_post_paths. Проба находит только completions.
+        # (completions_status=200) и /v1/responses (responses_status=200);
+        # остальные пути — 404, пока не заданы extra_post_paths. Проба
+        # находит только completions и responses (v0.9.0: у fake-бэкенда
+        # появился responses-эндпоинт для passthrough-тестов).
         _reload_config()
         from backend_adapter import config
         cfg = config
@@ -1523,6 +1527,7 @@ class TestEndpointProbe:
         fake_backend.serve()             # фикстура только создаёт; стартуем сами
         fake_backend.models_response = {"object": "list", "data": [{"id": "m1"}]}
         fake_backend.completions_status = 200
+        fake_backend.responses_status = 200
         fake_backend.extra_post_paths = {}
         backend = {"name": "AAA", "base": fake_backend.base_url, "key": "k",
                    "probe": {"completions": "m1", "messages": "m1",
@@ -1537,8 +1542,8 @@ class TestEndpointProbe:
 
         state = result["endpoints"]["AAA"]["endpoints"]
         assert state["/v1/chat/completions"] == {"status": 200, "found": True}
+        assert state["/v1/responses"] == {"status": 200, "found": True}
         assert state["/v1/messages"]["found"] is False       # 404
-        assert state["/v1/responses"]["found"] is False
         assert state["/v1/embeddings"]["found"] is False
 
     def test_probe_extra_paths_responses_200(self, fake_backend):
@@ -1570,3 +1575,177 @@ class TestEndpointProbe:
         assert state["/v1/embeddings"] == {"status": 200, "found": True}
         assert state["/v1/messages"]["found"] is False       # 404 (не настроен)
         assert state["/v1/chat/completions"]["found"] is True  # 200 от handler
+
+
+class TestProbeJsonWritePoints:
+    """Точки записи JSON-файлов результатов проверок в LOGPATH (v0.9.0).
+
+    .models.json пишется при каждой проверке бэкенда на модели: стартовой
+    (_init_multi_backends) и фоновой (refresh_models) — успех и ошибка
+    дают файл. Эндпоинт-файлы <бэкенд>.<модель>.<pname>.json пишутся при
+    каждой фактической пробе probe_endpoints (не из кэша).
+    """
+
+    def _setup(self, backend=None, models=None, probe_enabled=True):
+        """Fresh config + один бэкенд в глобалах (+ модели в _MODEL_TO_BACKEND),
+        LOGPATH → tmp_path (иначе файлы писались бы в ./tmp/logs репозитория)."""
+        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(self._tmp)
+        _reload_config()
+        from backend_adapter import config
+        if backend is None:
+            backend = {"name": "AAA", "base": "http://aaa", "key": "k"}
+        config._BACKENDS = [backend]
+        config._BACKEND_BY_NAME = {backend["name"]: backend}
+        config._DEFAULT_BACKEND = backend
+        for mid in models or []:
+            config._MODEL_TO_BACKEND[mid] = (backend["name"], backend)
+        config.ADAPTER_ENDPOINT_PROBE = probe_enabled
+        return config
+
+    def test_init_multi_backends_writes_models_json(self, tmp_path):
+        self._tmp = tmp_path
+        yaml_file = tmp_path / "init.yaml"
+        yaml_file.write_text("""backend:
+  - name: home
+    base: http://home
+    key: k
+""")
+        cfg = self._setup()
+        with mock.patch.object(
+            cfg, "_fetch_models",
+            return_value=[{"id": "m1", "owned_by": "me"}, {"id": "m2"}],
+        ):
+            cfg._init_multi_backends(str(yaml_file))
+        payload = json.loads((tmp_path / "home.models.json").read_text())
+        assert payload["backend"] == "home"
+        assert payload["ok"] is True
+        assert payload["count"] == 2
+        assert payload["models"] == [{"id": "m1", "owned_by": "me"}, {"id": "m2"}]
+        assert "checked_at" in payload
+
+    def test_init_multi_backends_failure_writes_error_json(self, tmp_path):
+        self._tmp = tmp_path
+        yaml_file = tmp_path / "init.yaml"
+        yaml_file.write_text("""backend:
+  - name: home
+    base: http://home
+    key: k
+""")
+        cfg = self._setup()
+        with mock.patch.object(
+            cfg, "_fetch_models", side_effect=OSError("Connection refused by test")
+        ):
+            with pytest.raises(SystemExit):
+                # все бэкенды упали → [FATAL] после записи ошибки в файл
+                cfg._init_multi_backends(str(yaml_file))
+        payload = json.loads((tmp_path / "home.models.json").read_text())
+        assert payload["ok"] is False
+        assert "Connection refused by test" in payload["error"]
+
+    def test_refresh_models_writes_models_json_per_backend(self, tmp_path):
+        self._tmp = tmp_path
+        cfg = self._setup()
+        aaa = {"name": "AAA", "base": "http://aaa", "key": "k-aaa"}
+        bbb = {"name": "BBB", "base": "http://bbb", "key": "k-bbb"}
+        cfg._BACKENDS = [aaa, bbb]
+        cfg._BACKEND_BY_NAME = {"AAA": aaa, "BBB": bbb}
+        cfg._DEFAULT_BACKEND = aaa
+
+        def fake_fetch(base, key, timeout=None):
+            if "bbb" in base:
+                raise OSError("Connection refused by test")
+            return [{"id": "m-aaa"}]
+
+        with mock.patch.object(cfg, "_fetch_models", side_effect=fake_fetch):
+            cfg.refresh_models()
+        ok_payload = json.loads((tmp_path / "AAA.models.json").read_text())
+        assert ok_payload["ok"] is True
+        assert ok_payload["models"] == [{"id": "m-aaa"}]
+        err_payload = json.loads((tmp_path / "BBB.models.json").read_text())
+        assert err_payload["ok"] is False
+        assert "Connection refused by test" in err_payload["error"]
+
+    def test_refresh_models_overwrites_models_json(self, tmp_path):
+        """Каждая проверка перезаписывает .models.json целиком (файл один)."""
+        self._tmp = tmp_path
+        cfg = self._setup()
+        with mock.patch.object(cfg, "_fetch_models", return_value=[{"id": "old"}]):
+            cfg.refresh_models()
+        with mock.patch.object(cfg, "_fetch_models", return_value=[{"id": "new"}]):
+            cfg.refresh_models()
+        files = [f.name for f in tmp_path.iterdir()]
+        assert files == ["AAA.models.json"]
+        payload = json.loads((tmp_path / "AAA.models.json").read_text())
+        assert payload["models"] == [{"id": "new"}]
+
+    def test_probe_endpoints_writes_endpoint_json_per_probe(self, tmp_path):
+        """probe_endpoints пишет <бэкенд>.<модель>.<pname>.json на каждый
+        реально пробованный путь; модель файла — probe-модель пути."""
+        self._tmp = tmp_path
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "qwen3.6", "messages": "claude-m"}},
+            models=["qwen3.6", "claude-m"],
+        )
+        with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
+            res = cfg.probe_endpoints()
+        assert res["ok"] is True
+        assert (tmp_path / "AAA.qwen3.6.completions.json").exists()
+        assert (tmp_path / "AAA.claude-m.messages.json").exists()
+        payload = json.loads((tmp_path / "AAA.qwen3.6.completions.json").read_text())
+        assert payload["backend"] == "AAA"
+        assert payload["model"] == "qwen3.6"
+        assert payload["endpoint"] == "completions"
+        assert payload["status"] == 200
+        assert payload["found"] is True
+
+    def test_probe_endpoints_network_error_writes_error_json(self, tmp_path):
+        self._tmp = tmp_path
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m", "messages": "m",
+                               "responses": "m", "embeddings": "m"}},
+            models=["m"],
+        )
+        with mock.patch.object(
+            cfg, "_http_json", return_value=(None, None, "Connection refused by test")
+        ):
+            res = cfg.probe_endpoints()
+        assert res["errors"]["AAA"] != ""
+        payload = json.loads((tmp_path / "AAA.m.completions.json").read_text())
+        assert payload["status"] is None
+        assert payload["found"] is False
+        assert "Connection refused by test" in payload["error"]
+
+    def test_probe_endpoints_cache_hit_writes_no_files(self, tmp_path):
+        """Кэш-хит (повторный вызов в TTL) не трогает сеть — свежих файлов
+        не пишет: дампы — только при фактической проверке."""
+        self._tmp = tmp_path
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m", "messages": "m",
+                               "responses": "m", "embeddings": "m"}},
+            models=["m"],
+        )
+        with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
+            cfg.probe_endpoints()
+            cfg.probe_endpoints()          # второй — из кэша
+        names = sorted(f.name for f in tmp_path.iterdir())
+        # Только 4 эндпоинт-файла первой проверки (второй дампов не добавил)
+        assert names == sorted(
+            f"AAA.m.{pname}.json" for pname, _p, _t in cfg.ENDPOINT_PROBES
+        )
+
+    def test_endpoint_files_written_when_debug_enable_off(self, tmp_path):
+        """Канал безусловный: файлы пишутся при ADAPTER_DEBUG_ENABLE=0."""
+        os.environ["ADAPTER_DEBUG_ENABLE"] = "0"
+        self._tmp = tmp_path
+        cfg = self._setup(
+            backend={"name": "AAA", "base": "http://aaa", "key": "k",
+                     "probe": {"completions": "m"}},
+            models=["m"],
+        )
+        cfg.ADAPTER_DEBUG = False
+        with mock.patch.object(cfg, "_http_json", return_value=(200, {}, None)):
+            cfg.probe_endpoints()
+        assert (tmp_path / "AAA.m.completions.json").exists()

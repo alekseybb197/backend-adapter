@@ -29,6 +29,7 @@ Tests cover:
     is in flight; reprobe_state mirrors running/model
 """
 import os
+import json
 import threading
 import time
 from unittest import mock
@@ -1359,3 +1360,137 @@ class TestTariffs:
         rows = mu.usage_snapshot()
         assert len(rows) == 1
         assert mu.lookup_tariff("m1", "AAA") is not None
+
+
+class TestProbeModelEndpointJsonDumps:
+    """Пер-модельные пробы пишут <бэкенд>.<модель>.<pname>.json в LOGPATH
+    (v0.9.0): единая точка _probe_model_endpoints покрывает и первое
+    обращение модели (record_model_usage), и reprobe строки. Реальная
+    _probe_model_endpoints с моком низкоуровневой сети config._probe_backend_endpoints:
+    JSON-дампы идут от фактического результата пробы."""
+
+    def _setup(self, tmp_path, backend=None, model="m", probe=None):
+        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(tmp_path)
+        config, mu = _fresh()
+        if backend is None:
+            backend = {
+                "name": "AAA", "base": "http://aaa.local", "key": "k",
+                "probe": probe or {"completions": "m"},
+            }
+        config.ADAPTER_MODEL_USAGE_ENABLE = True
+        config._BACKEND_BY_NAME = {backend["name"]: backend}
+        config._BACKENDS = [backend]
+        config._MODEL_TO_BACKEND = {model: (backend["name"], backend)}
+        return config, mu, backend
+
+    def test_record_model_usage_writes_endpoint_json(self, tmp_path):
+        """Первое обращение модели (record) — файл <бэкенд>.<модель>.<pname>.json
+        с результатом пробы (модель файла — resolved, эндпоинт — pname)."""
+        config, mu, backend = self._setup(tmp_path)
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
+            with mock.patch.object(
+                config, "_probe_backend_endpoints",
+                return_value={
+                    "endpoints": {
+                        "/v1/chat/completions": {"status": 200, "found": True},
+                    },
+                    "errors": {},
+                },
+            ):
+                mu.record_model_usage("m")
+        path = tmp_path / "AAA.m.completions.json"
+        assert path.exists()
+        payload = json.loads(path.read_text())
+        assert payload["backend"] == "AAA"
+        assert payload["model"] == "m"
+        assert payload["endpoint"] == "completions"
+        assert payload["path"] == "/v1/chat/completions"
+        assert payload["status"] == 200
+        assert payload["found"] is True
+
+    def test_probe_network_error_writes_error_json(self, tmp_path):
+        """Сетевая ошибка пробы — файл с found=False, status=None и текстом
+        ошибки в error (дамп — безусловный наблюдательный канал)."""
+        config, mu, backend = self._setup(
+            tmp_path,
+            probe={"completions": "m", "messages": "m",
+                   "responses": "m", "embeddings": "m"},
+        )
+        result = {
+            "endpoints": {
+                "/v1/chat/completions": {"status": None, "found": False},
+                "/v1/messages": {"status": None, "found": False},
+                "/v1/responses": {"status": None, "found": False},
+                "/v1/embeddings": {"status": None, "found": False},
+            },
+            "errors": {"completions": "network error: Connection refused by test"},
+        }
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
+            with mock.patch.object(config, "_probe_backend_endpoints", return_value=result):
+                mu.record_model_usage("m")
+        payload = json.loads((tmp_path / "AAA.m.completions.json").read_text())
+        assert payload["status"] is None
+        assert payload["found"] is False
+        assert "Connection refused by test" in payload["error"]
+
+    def test_reprobe_writes_endpoint_json(self, tmp_path):
+        """Reprobe строки (кнопка 🔄) — та же единая точка: файлы
+        перезаписываются результатом перепробы."""
+        config, mu, backend = self._setup(tmp_path)
+        mu._TABLE["m"] = {
+            "backend": "AAA", "calls": 3, "probing": False,
+            "endpoints": {}, "errors": {}, "first_seen": 0.0,
+            "input_tokens": 0, "output_tokens": 0,
+        }
+        mu.set_persist_path("")   # _save_table(force=True) в reprobe — без файла
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
+            with mock.patch.object(
+                config, "_probe_backend_endpoints",
+                return_value={
+                    "endpoints": {
+                        "/v1/chat/completions": {"status": 200, "found": True},
+                    },
+                    "errors": {},
+                },
+            ):
+                ok = mu.reprobe_model("m")
+        assert ok is True
+        payload = json.loads((tmp_path / "AAA.m.completions.json").read_text())
+        assert payload["found"] is True
+
+    def test_written_when_debug_enable_off(self, tmp_path):
+        """Канал безусловный: файл пишется при ADAPTER_DEBUG_ENABLE=0."""
+        os.environ["ADAPTER_DEBUG_ENABLE"] = "0"
+        config, mu, backend = self._setup(tmp_path)
+        config.ADAPTER_DEBUG = False
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
+            with mock.patch.object(
+                config, "_probe_backend_endpoints",
+                return_value={
+                    "endpoints": {
+                        "/v1/chat/completions": {"status": 200, "found": True},
+                    },
+                    "errors": {},
+                },
+            ):
+                mu.record_model_usage("m")
+        assert (tmp_path / "AAA.m.completions.json").exists()
+
+    def test_model_name_conversion_in_filename(self, tmp_path):
+        """Конвертация имени модели в имени файла: '/' и ':' → '_'
+        (probe_json._convert_name); точки/тире остаются."""
+        config, mu, backend = self._setup(
+            tmp_path, model="org/model:v1", probe={"completions": "org/model:v1"},
+        )
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "org/model:v1")):
+            with mock.patch.object(
+                config, "_probe_backend_endpoints",
+                return_value={
+                    "endpoints": {
+                        "/v1/chat/completions": {"status": 200, "found": True},
+                    },
+                    "errors": {},
+                },
+            ):
+                mu.record_model_usage("org/model:v1")
+        assert (tmp_path / "AAA.org_model_v1.completions.json").exists()

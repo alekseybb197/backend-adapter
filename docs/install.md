@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.8.6) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **backend-adapter** (v0.9.0) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно обрабатывает протокол Anthropic Messages API.
 
@@ -93,7 +93,7 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (26 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (27 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
@@ -109,6 +109,7 @@ backend-adapter/
 │   ├── webui_config_api.py    # WEBUI-эндпойнт "/config": runtime-пул debug-переменных
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
+│   ├── probe_json.py          # JSON-результаты проверок бэкендов в LOGPATH
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
@@ -450,7 +451,11 @@ export ADAPTER_DEBUG_ENABLE=0
 # Директория логов сессий и корень WEBUI: debug-логи (session-*.log),
 # trace-логи (session-*.jsonl), *.parts дампы, model-usage.yaml. Путь всегда
 # непуст — при незаданной/пустой env дефолт ./tmp/logs (создаётся при старте);
-# файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1.
+# файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1. Исключение — файлы
+# инцидентов session-*.err (v0.9.0): пишутся в ту же директорию БЕЗУСЛОВНО при
+# финальном ответе клиенту 4xx/5xx реального прокси-запроса (полные запрос и
+# ошибка, без обрезки по TRIM; redact по умолчанию, полные данные при
+# ADAPTER_SENSITIVE_LOGGING_ENABLE=1).
 # export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
 
 # Максимальная длина КОНСОЛЬНЫХ debug-строк (символы; 0 — без обрезки).
@@ -458,8 +463,9 @@ export ADAPTER_DEBUG_ENABLE=0
 # пишет полные строки (v0.8.6-реформа)
 # export ADAPTER_DEBUG_TRIM=3000
 
-# Переопределить PID-файл в detach-режиме
-# export ADAPTER_PIDFILE="/tmp/adapter.pid"
+# Имя PID-файла в detach-режиме (v0.9.0): файл кладётся в
+# ADAPTER_DEBUG_LOGPATH (basename значения; дефолт — adapter.pid).
+# export ADAPTER_PIDFILE="adapter.pid"
 
 # JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
 # TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE — .json и .yaml парой;
@@ -509,7 +515,50 @@ export ADAPTER_DEBUG_ENABLE=0
 
 Подробнее про логирование — в [`docs/logging.md`](logging.md).
 
-### 5.8 Полный пример env-файла
+### 5.8 Входные эндпоинты и TARGET-маршрутизация (v0.9.0)
+
+Адаптер принимает **три** POST-эндпоинта: `/v1/messages` (Anthropic Messages),
+`/v1/chat/completions` ([OI] Chat Completions) и `/v1/responses` ([OI] Responses).
+Что адаптер делает с запросом на каждом входе — решает соответствующая
+TARGET-переменная (**префикс имени = входной эндпоинт**); вход, чей целевой
+формат `none`, не принимается вовсе (404):
+
+```bash
+# /v1/messages → конвертация в chat.completions (ДЕФОЛТ — нулевая настройка,
+# прежнее поведение 100%). Прочие значения: messages (passthrough E→E),
+# responses, auto (выбор по кэшу проб), none (вход выключен).
+export ADAPTER_MESSAGES_TARGET=completions
+
+# /v1/chat/completions: default none — вход закрыт (404).
+# completions → passthrough E→E на бэкенд, поддерживающий /v1/chat/completions.
+# export ADAPTER_COMPLETIONS_TARGET=completions
+
+# /v1/responses: default none — вход закрыт (404).
+# responses → passthrough E→E на бэкенд, поддерживающий /v1/responses.
+# export ADAPTER_RESPONSES_TARGET=responses
+```
+
+Допустимые значения всех трёх — `completions | messages | responses | auto | none`.
+
+- **`auto`** — адаптер сам выбирает маршрут **только по кэшу результатов проб**
+  (сети в запросе не делает): passthrough E→E, если бэкенд поддерживает входной
+  формат как целевой; иначе — реализованная конверсия из входного формата
+  (сегодня только `messages→completions`); иначе — HTTP 400 «no route».
+- **Passthrough E→E** — входной формат == целевому (`completions→completions`,
+  `messages→messages`, `responses→responses`): тело уходит бэкенду как пришло
+  (подставляется только резолвнутая модель), ответ/SSE-поток возвращаются
+  клиенту **дословно**, в родном формате входа.
+- **Нереализованные преобразования** (например `completions→messages`) — HTTP 400:
+  реестр реализованных пар (`IMPLEMENTED_CONVERSIONS` в `backend_adapter/routing.py`)
+  содержит только `messages→completions`. Если бэкенд целевой формат не
+  поддерживает — HTTP 502 (до отправки запроса).
+
+Учёт «Models in use», strict-проверка модели, маппинг, токены usage и
+`.err`-протокол работают на всех трёх входах одинаково. Подробности —
+в [`docs/environment.md`](environment.md), раздел «Входные эндпоинты:
+TARGET-маршрутизация», и [`docs/architecture.md`](architecture.md), §4.2.
+
+### 5.9 Полный пример env-файла
 
 Полный рабочий env-файл с комментариями всех переменных — в
 `docs/samples/sample.adapter.env` (скопируйте в `adapter.env` и заполните:
@@ -536,6 +585,14 @@ export ADAPTER_STREAM_INCLUDE_USAGE=1
 # --- Models ---
 export ADAPTER_STRICT_MODELS=1
 # export ADAPTER_MODELS_MAPPING=":k2-05"
+
+# --- Input endpoint routing (TARGET, v0.9.0) ---
+# Дефолты = нулевая настройка: принимается только /v1/messages и конвертируется
+# в chat.completions; /v1/chat/completions и /v1/responses закрыты (404).
+export ADAPTER_MESSAGES_TARGET=completions
+# export ADAPTER_COMPLETIONS_TARGET=completions   # passthrough E→E (вход закрыт при none)
+# export ADAPTER_RESPONSES_TARGET=responses       # passthrough E→E (вход закрыт при none)
+# export ADAPTER_COMPLETIONS_TARGET=auto          # выбор маршрута по кэшу проб (без сети)
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
@@ -579,7 +636,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.8.6 (...
+Claude Code Adapter v0.9.0 (...
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -610,15 +667,16 @@ Detach-режим (double fork UNIX-daemon pattern):
 
 - Родительский процесс завершается немедленно
 - stdio/stderr перенаправлены в `/dev/null`
-- PID-файл пишется в `/tmp/adapter.pid` (по умолчанию)
+- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH` (v0.9.0): имя — `adapter.pid`
+  или `basename(ADAPTER_PIDFILE)`)
 - Логи идут в директорию `ADAPTER_DEBUG_LOGPATH`, если задана
   (пусто — файловая запись выключена, только консоль)
 
 Управление:
 
 ```bash
-cat /tmp/adapter.pid     # прочитать PID
-kill $(cat /tmp/adapter.pid)   # остановить
+cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid"   # прочитать PID
+kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить
 ```
 
 > **Важно:** detach-режим не предназначен для продакшен-использования.
@@ -658,10 +716,19 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/ready
 # Prometheus-метрики (отдельный слушатель, порт 9100)
 curl -s http://127.0.0.1:9100/metrics | head
 
-# Попробовать запрос
+# Попробовать запрос (дефолт: /v1/messages → chat.completions)
 curl -X POST http://localhost:9999/v1/messages \
   -H "Content-Type: application/json" \
   -H "Anthropic-Version: 2023-06-01" \
+  -H "x-api-key: dummy" \
+  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
+
+# Новые входы (v0.9.0) — работают только при ненулевом TARGET:
+# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=completions (passthrough),
+# /v1/responses при ADAPTER_RESPONSES_TARGET=responses (passthrough),
+# при TARGET=none (дефолт) оба отвечают 404.
+curl -X POST http://localhost:9999/v1/chat/completions \
+  -H "Content-Type: application/json" \
   -H "x-api-key: dummy" \
   -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
 ```

@@ -70,6 +70,12 @@ def fresh_env(monkeypatch):
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
         "ADAPTER_PIDFILE": "",
+        # Input-endpoint routing (v0.9.0): zero-config defaults — only
+        # /v1/messages accepted, converted to chat completions; the other two
+        # inputs are disabled (404).
+        "ADAPTER_MESSAGES_TARGET": "completions",
+        "ADAPTER_COMPLETIONS_TARGET": "none",
+        "ADAPTER_RESPONSES_TARGET": "none",
     }
 
     for k, v in defaults.items():
@@ -119,6 +125,10 @@ def _default_config():
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
         "ADAPTER_PIDFILE": "",
+        # Input-endpoint routing (v0.9.0): zero-config defaults (see fresh_env).
+        "ADAPTER_MESSAGES_TARGET": "completions",
+        "ADAPTER_COMPLETIONS_TARGET": "none",
+        "ADAPTER_RESPONSES_TARGET": "none",
     }
     for k, v in defaults.items():
         os.environ[k] = v
@@ -209,7 +219,15 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     models_response = None
     completions_response = None
     completions_status = 200
+    # Responses API (v0.9.0): тело/статус для POST /v1/responses (passthrough
+    # E→E на новых входных эндпоинтах адаптера).
+    responses_response = None
+    responses_status = 200
     extra_post_paths = {}  # {path: status} — для endpoint-probe тестов
+    # SSE-стрим (v0.9.0): если задан список строк — ответ text/event-stream
+    # для /v1/chat/completions (построчно, как настоящий стрим), иначе —
+    # обычный JSON completions_response.
+    sse_lines = None
     request_count = 0
     requests = []  # list of all (path, method, body) requests
 
@@ -236,13 +254,43 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode() if length else None
         FakeBackendHandler.requests.append((self.path, "POST", body))
 
+        if FakeBackendHandler.sse_lines is not None and self.path in (
+            "/v1/chat/completions", "/v1/responses", "/v1/messages",
+        ):
+            # SSE-стрим (v0.9.0): отдаём настроенные строки по одной с flush —
+            # relay_sse должен получить их дословно (релей E→E). Единый хук для
+            # всех входов; заглушает JSON-ответы ниже.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for line in FakeBackendHandler.sse_lines:
+                self.wfile.write(line.encode() if isinstance(line, str) else line)
+                self.wfile.flush()
+            return
+
         if self.path == "/v1/chat/completions":
             self.send_response(FakeBackendHandler.completions_status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             if FakeBackendHandler.completions_status == 200 and FakeBackendHandler.completions_response:
                 self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
+            elif FakeBackendHandler.completions_response:
+                # Любой не-200 статус с настроенным телом — пишем его как тело
+                # ошибки (v0.9.0: .err-тесты проверяют ПОЛНОЕ сообщение бэкенда).
+                self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
             elif FakeBackendHandler.completions_status in (429, 502, 503, 504):
+                self.wfile.write(json.dumps({"error": "backend error"}).encode())
+        elif self.path == "/v1/responses":
+            self.send_response(FakeBackendHandler.responses_status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            if FakeBackendHandler.responses_status == 200 and FakeBackendHandler.responses_response:
+                self.wfile.write(json.dumps(FakeBackendHandler.responses_response).encode())
+            elif FakeBackendHandler.responses_response:
+                # Любой не-200 статус с настроенным телом — пишем его как тело
+                # ошибки (тот же контракт, что у /v1/chat/completions выше).
+                self.wfile.write(json.dumps(FakeBackendHandler.responses_response).encode())
+            elif FakeBackendHandler.responses_status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path in FakeBackendHandler.extra_post_paths:
             # Дымовые пробы остальных эндпоинтов: /v1/messages, /v1/responses,
@@ -307,6 +355,22 @@ class FakeBackend:
         FakeBackendHandler.completions_status = value
 
     @property
+    def responses_response(self):
+        return FakeBackendHandler.responses_response
+
+    @responses_response.setter
+    def responses_response(self, value):
+        FakeBackendHandler.responses_response = value
+
+    @property
+    def responses_status(self):
+        return FakeBackendHandler.responses_status
+
+    @responses_status.setter
+    def responses_status(self, value):
+        FakeBackendHandler.responses_status = value
+
+    @property
     def request_count(self):
         return FakeBackendHandler.request_count
 
@@ -321,6 +385,14 @@ class FakeBackend:
     @extra_post_paths.setter
     def extra_post_paths(self, value):
         FakeBackendHandler.extra_post_paths = value
+
+    @property
+    def sse_lines(self):
+        return FakeBackendHandler.sse_lines
+
+    @sse_lines.setter
+    def sse_lines(self, value):
+        FakeBackendHandler.sse_lines = value
 
     def serve(self):
         """Start the fake backend server in a background thread."""
@@ -353,7 +425,10 @@ def fake_backend():
     FakeBackendHandler.models_response = None
     FakeBackendHandler.completions_response = None
     FakeBackendHandler.completions_status = 200
+    FakeBackendHandler.responses_response = None
+    FakeBackendHandler.responses_status = 200
     FakeBackendHandler.extra_post_paths = {}
+    FakeBackendHandler.sse_lines = None
     FakeBackendHandler.request_count = 0
     FakeBackendHandler.requests = []
     yield backend

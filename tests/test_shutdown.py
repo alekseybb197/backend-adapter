@@ -234,3 +234,39 @@ class TestGracefulShutdown:
             )
         assert code == 0
         assert calls == ["finish"]
+
+    def test_prints_exit_bye(self, capsys):
+        # Контракт завершения (docstring модуля): «печатается «[EXIT] Bye»».
+        # Печать живёт ВНУТРИ graceful_shutdown (а не в finally main-цикла),
+        # чтобы контракт был самодостаточен и покрывался unit-тестами.
+        _reload_all()
+        from backend_adapter import shutdown
+
+        with mock.patch.object(
+            shutdown, "install_signal_handlers", return_value=None
+        ):
+            code = shutdown.graceful_shutdown(
+                None, FakeListener(), None, exporter_enabled=False, finish=lambda: None
+            )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "[EXIT] Bye" in out
+
+    def test_prints_exit_bye_even_when_finish_raises(self, capsys):
+        # Провал шага процедуры (finish кидает) не маскирует успех: код 0 и
+        # «[EXIT] Bye» печатаются — graceful_finish глотает ошибки шагов.
+        _reload_all()
+        from backend_adapter import shutdown
+
+        def finish():
+            raise RuntimeError("flush boom")
+
+        with mock.patch.object(
+            shutdown, "install_signal_handlers", return_value=None
+        ):
+            code = shutdown.graceful_shutdown(
+                None, FakeListener(), None, exporter_enabled=False, finish=finish
+            )
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "[EXIT] Bye" in out

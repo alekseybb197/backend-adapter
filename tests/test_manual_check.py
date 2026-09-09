@@ -6,8 +6,10 @@
 
 - WEBUI и Prometheus-экспортёр поднимаются без ADAPTER_WEBUI_ENABLE (его
   больше нет — v0.8.6), корень — ADAPTER_DEBUG_LOGPATH;
-- консольные debug-блоки видны при ADAPTER_DEBUG_ENABLE=0, файлов на диске
-  нет (кроме model-usage.yaml после запросов);
+- консольные debug-блоки видны при ADAPTER_DEBUG_ENABLE=0; файлов на диске
+  нет, кроме model-usage.yaml (после запросов) и БЕЗУСЛОВНЫХ JSON-файлов
+  результатов проверок (fake.models.json, fake.qwen-test.completions.json —
+  v0.9.0, пишутся всегда);
 - файловая запись session-*.log/*.jsonl появляется при ADAPTER_DEBUG_ENABLE=1;
 - колонка Cost на странице считается из токенов × тарифов;
 - корректное завершение по сигналам: SIGINT/SIGTERM → вежливое завершение
@@ -110,6 +112,19 @@ def _wait_http(port: int, path: str = "/healthz", deadline_s: float = 20) -> int
         except Exception:
             time.sleep(0.3)
     return None
+
+def _wait_files(logs_dir: str, predicate, deadline_s: float = 20) -> bool:
+    """Дождаться файлов в logs_dir, удовлетворяющих predicate (имя → bool)."""
+    deadline = time.time() + deadline_s
+    while time.time() < deadline:
+        try:
+            names = os.listdir(logs_dir)
+        except OSError:
+            names = []
+        if any(predicate(f) for f in names):
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def _http_get(url: str):
@@ -239,11 +254,26 @@ class TestManualAdapterProcess:
                 assert _wait_http(exp_port, "/metrics") == 200, \
                     f"экспортёр не поднялся на :{exp_port}"
                 out = ap.output
-                assert "Backend-Adapter v0.8.6" in out, out[:400]
+                assert "Backend-Adapter v0.9.0" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
-                files = sorted(os.listdir(logs_dir))
-                assert all(f == "model-usage.yaml" for f in files), files
+                # v0.9.0: старт пишет БЕЗУСЛОВНЫЕ JSON-файлы результатов
+                # проверок в LOGPATH (вне ADAPTER_DEBUG_ENABLE): модели —
+                # fake.models.json; проба эндпоинта (completions) —
+                # fake.qwen-test.completions.json. Прочих файлов при
+                # ENABLE=0 нет (session-*.log/*.jsonl не пишутся).
+                assert _wait_files(logs_dir, lambda f: f == "fake.models.json"), \
+                    os.listdir(logs_dir)
+                assert _wait_files(
+                    logs_dir, lambda f: f == "fake.qwen-test.completions.json"
+                ), os.listdir(logs_dir)
+                mj = json.load(open(os.path.join(logs_dir, "fake.models.json")))
+                assert mj["ok"] is True and mj["count"] == 1, mj
+                assert mj["models"] == [{"id": "qwen-test", "object": "model"}], mj
+                ej = json.load(
+                    open(os.path.join(logs_dir, "fake.qwen-test.completions.json"))
+                )
+                assert ej["found"] is True and ej["status"] == 200, ej
 
                 # --- Cost на странице и в usage-таблице ---
                 req_body = {"model": "qwen-test",

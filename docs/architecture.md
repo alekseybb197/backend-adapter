@@ -25,7 +25,8 @@ backend_adapter/
 ├── config.py               ← env vars, model mapping, backend routing, YAML parser, probe (refresh)
 ├── server.py               ← HTTP handler (Adapter), QuietThreadingHTTPServer
 ├── convert.py              ← Anthropic ↔ OpenAI conversion functions
-├── streaming.py            ← SSE streaming: OpenAI SSE → Anthropic SSE
+├── streaming.py            ← SSE streaming: [OI] SSE → Anthropic SSE (conversion)
+│                             + passthrough E→E SSE-relay (relay_sse, v0.9.0 — §4.2/§5.4)
 ├── tracer.py               ← JSONL trace logging + tool-use causality tracking
 ├── logger.py               ← human-readable debug logs (_d, _dr)
 ├── redact.py               ← secret masking (Bearer tokens, *_KEY, *_PAT, etc.)
@@ -51,6 +52,12 @@ backend_adapter/
 ├── prometheus_exporter.py  ← отдельный слушатель метрик /metrics (text exposition
 │                             0.0.4, stdlib-only) — см. §6.8
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
+├── probe_json.py           ← JSON-результаты проверок бэкендов в LOGPATH
+│                             (<бэкенд>.models.json и <бэкенд>.<модель>.<pname>.json,
+│                             безусловный канал, redact) — см. §6.9
+├── routing.py              ← входные эндпоинты и TARGET-маршрутизация (см. §4.2):
+│                             INPUT_PATHS, IMPLEMENTED_CONVERSIONS,
+│                             decide() по кэшу проб (лист DAG — импортирует config)
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
     artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
     artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
@@ -73,54 +80,58 @@ module on one level, see ADR 2026-09-01).
 ## 3. Component diagram
 
 ```
-Claude Code (Anthropic API client)
-       │
-       │  POST /v1/messages  (Anthropic format)
-       │  GET  /v1/models
-       ▼
-┌─────────────────────────────────────────────────┐
-│              backend-adapter.py                  │
-│  (entry: startup backend init → server.serve_forever()) │
-└──────────────────────┬──────────────────────────┘
-                       │
-                       ▼
-┌─────────────────────────────────────────────────┐
-│              server.py: Adapter                  │
-│                                                  │
-│  do_GET  → /v1/models → return _AVAILABLE_MODELS │
-│  do_POST → /v1/messages                          │
-│    ├─ parse & validate                           │
-│    ├─ strict model check → record_model_usage    │
-│    │     (model_usage: учёт + проба эндпоинтов   │
-│    │      модели при первом обращении, см. §6.6) │
-│    ├─ model mapping (ADAPTER_MODELS_MAPPING)     │
-│    ├─ backend resolution (_resolve_backend)      │
-│    ├─ tool_result tracing (causality lookup)     │
-│    ├─ convert Anthropic → OpenAI body            │
-│    │                                            │
-│    ├─ [stream mode] → stream_openai_to_anthropic │
-│    │       │  urllib → backend SSE reader        │
-│    │       │  _sse_write → wfile (client)        │
-│    │       │  stream converter (chunk-by-chunk)  │
-│    │                                            │
-│    └─ [non-stream] → convert_openai_to_anthropic │
-│               │  urllib → backend full response  │
-│               │  JSON convert                    │
-│               │  _send_json → client             │
-│                                                  │
-│  Cross-cutting:                                  │
-│  • _d() / _dr()     → logger + redact            │
-│  • _trace()         → tracer + redact            │
-│  • session_log      → per-session file handles   │
-│  • retry loop       │  exponential backoff       │
-│  • ADAPTER_TIMEOUT  │  per-attempt timeout       │
-└──────────────────────┬──────────────────────────┘
-                       │
-                       │  POST /v1/chat/completions  (OpenAI format)
-                       │  Bearer <key>
-                       ▼
-              OpenAI-compatible backend
-              (Kaspersky LLM Service, LiteLLM, etc.)
+[CC] (Anthropic API client)        другие клиенты: [OI]-SDK, агенты, curl
+        │                                   │
+        │                                   │
+        │  POST /v1/messages                │  POST /v1/chat/completions
+        │  GET /v1/models                   │  POST /v1/responses
+        │  (Anthropic format)               │  ([OI] / Responses format)
+        ▼                                   ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ backend-adapter.py                                              │
+│                                                                 │
+│ (entry: startup backend init, WEBUI/exporters,                  │
+│  signal handlers → server.serve_forever())                      │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ server.py: Adapter                                              │
+│                                                                 │
+│ do_GET  → /v1/models → _AVAILABLE_MODELS                        │
+│ do_POST → input_path_to_format(path) → fmt                      │
+│           (messages | completions | responses; вне трёх — 404)  │
+│   parse & validate → model обязателен → strict model check      │
+│   model mapping (ADAPTER_MODELS_MAPPING) → _resolve_backend     │
+│   routing.decide(fmt, backend_name) → action                    │
+│     решения по TARGET + кэшу endpoint_support (сети нет)        │
+│   ├─ disabled (TARGET=none) / reject                            │
+│   │    404 / 400 / 502 JSON  (usage и .err не пишутся —         │
+│   │    запрос до бэкенда не дошёл)                              │
+│   ├─ passthrough E→E (вход == выход, TARGET/auto)               │
+│   │    body["model"] = resolved_model;                          │
+│   │    backend_url = base + INPUT_PATHS[out_fmt]                │
+│   │    ├─ non-stream → _send_raw (тело бэкенда дословно)        │
+│   │    └─ stream     → relay_sse (байты + usage-скан)           │
+│   └─ convert (messages→completions — единств. пара)             │
+│        ├─ stream     → stream_openai_to_anthropic               │
+│        └─ non-stream → convert_openai_to_anthropic              │
+│   record_model_usage + usage_tokens — только принятые           │
+│   маршруты (после decide); .err на финальный 4xx/5xx            │
+│   прокси-запроса (после ретраев)                                │
+│                                                                 │
+│ Cross-cutting:                                                  │
+│   _d()/_dr() → logger + redact   retry loop (backoff)           │
+│   _trace()   → tracer + redact   ADAPTER_TIMEOUT                │
+│   session_log → per-session files, parts-дампы                  │
+└─────────────────────────────────────────────────────────────────┘
+        │
+        │  POST /v1/chat/completions ([OI] format) — convert / passthrough
+        │  POST /v1/messages | /v1/responses    — passthrough E→E
+        │  Bearer <key>
+        ▼
+  [OI]-compatible LLM backend
+  (Kaspersky LLM Service, LiteLLM, etc.)
 ```
 
 ---
@@ -163,7 +174,7 @@ Claude Code (Anthropic API client)
    **first** check automatically (`webui_status._autostart_first_check`).
    Checks are background (`config.start_refresh` runs `config.refresh_models`,
    5 s timeout per endpoint, in a daemon thread): started at adapter startup,
-   on the first GET `/`, and by the «⟳ Перепроверить» button (POST `/`),
+   on the first GET `/`, and by the 🔃 button «Перепроверить бэкенды» (POST `/`),
    which answers **303 See Other** → GET `/` (PRG pattern — page reloads
    never repeat the POST, no «resubmit» dialog). While a check runs, the page
    shows a «Проверка выполняется…» banner and polls `/api/refresh-state`;
@@ -174,35 +185,80 @@ Claude Code (Anthropic API client)
    The `/config` endpoint toggles the runtime debug-write pool
    (`config.get_runtime_config`/`set_runtime_config`, see §8.6) without a restart.
 
-### 4.2 POST /v1/messages (do_POST, server.py:148–581)
+### 4.2 Входные POST-эндпоинты и TARGET-маршрутизация (do_POST, server.py)
+
+Адаптер принимает **три** POST-входа: `/v1/messages` (Anthropic Messages API),
+`/v1/chat/completions` ([OI] Chat Completions), `/v1/responses` ([OI] Responses
+API) — пути зеркалят `config.ENDPOINT_PROBES`. Что делать с запросом на каждом
+входе решает **TARGET-маршрутизация** (`backend_adapter/routing.py`, лист DAG,
+импортирует только config; его импортирует только server.py): три
+env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
+`ADAPTER_COMPLETIONS_TARGET` и `ADAPTER_RESPONSES_TARGET` (дефолт `none`) —
+префикс = входной эндпоинт, значение ∈
+`completions|messages|responses|auto|none` (см. docs/environment.md §1а).
+
+`routing.decide(inp, backend_name)` возвращает `(action, out_fmt, msg, status)`
+по **кэшу проб** `config.endpoint_support(backend_name, pname)` (геттер
+`_ENDPOINT_STATE`; сети в запросе нет — None трактуется как False):
+action ∈ {passthrough (E→E: входной формат == целевому и бэкенд его
+поддерживает), convert (только реализованные пары — сегодня
+`messages→completions`), reject (нереализованная конверсия → 400 «conversion …
+is not implemented»; `auto` без маршрута → 400 «no route»; явный passthrough/
+convert при не поддерживающем бэкенде → 502), disabled (TARGET=none → 404)}.
+В `auto` приоритет: passthrough E→E (для messages в т.ч. `messages→messages`)
+> реализованная конверсия > 400. Реестр реализованных пар —
+`IMPLEMENTED_CONVERSIONS` в routing.py.
+
+Общий конвейер (для всех трёх входов; disabled/reject уходят ответом ДО
+обращения к бэкенду — usage-учёт и `.err` не пишутся):
 
 ```
 1. Extract session_id, req_id, update session_log context
-2. Parse & validate request JSON (require "model" field)
-3. Strict model validation (ADAPTER_STRICT_MODELS)
-4. Record usage of the client model (model_usage.record_model_usage — used-models
+2. Input-path → format (routing.input_path_to_format); прочие пути → 404
+3. Parse & validate request JSON (require "model" field) — единообразно для входов
+4. Strict model validation (ADAPTER_STRICT_MODELS)
+5. Record usage of the client model (model_usage.record_model_usage — used-models
    table; at first use of a model this synchronously smoke-probes that model's
    endpoints, see §6.6; on every exit path do_POST's finally accumulates the
    backend usage tokens via model_usage.add_usage_tokens; accounting never
    affects the request)
-5. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
-6. Backend resolution (_resolve_backend)
+6. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
+7. Backend resolution (_resolve_backend)
    - Explicit prefix (<backend>.model) → strip, route
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
-7. Trace tool_results from incoming messages (causality: tool_use_id → parent req_id)
-8. Convert Anthropic → OpenAI (messages, tools, tool_choice, system)
-9. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
-10. Retry loop (ADAPTER_RETRY times, exponential backoff):
-   ├─ Stream branch: urllib urlopen → _start_sse() → stream_openai_to_anthropic()
-   │   └─ Chunk-by-chunk SSE conversion, write Anthropic SSE events to wfile
-   └─ Non-stream branch: urllib urlopen → read full → convert_openai_to_anthropic()
-       └─ Single JSON response → _send_json()
-11. Error handling:
+8. routing.decide(fmt, backend_name) → action/out_fmt
+   - disabled/reject → JSON-ответ (404/400/502), return (запрос до бэкенда не дошёл)
+9. Only messages→completions conversion: trace tool_results from incoming messages
+   (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
+   tools, tool_choice, system)
+   Passthrough E→E: тело как пришло — единственная мутация body["model"] =
+   resolved_model (и stream:false при ADAPTER_STREAMING_ENABLE=0); конвертеры
+   не участвуют, поля запроса не валидируются (бэкенд ответит 400 сам)
+10. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
+11. Backend URL: base + путь формата выхода (INPUT_PATHS[out_fmt]; конверсия
+    messages→completions — по-прежнему /v1/chat/completions)
+12. Retry loop (ADAPTER_RETRY times, exponential backoff):
+   ├─ Stream branch:
+   │  ├─ conversion: urllib urlopen → _start_sse() → stream_openai_to_anthropic()
+   │  │   └─ Chunk-by-chunk SSE conversion, write Anthropic SSE events to wfile
+   │  └─ passthrough E→E: urllib urlopen → _start_sse() → relay_sse()
+   │      └─ Вербатим-релей байтов бэкенда клиенту (без пере-фрейминга); по пути —
+   │         скан SSE-строк на usage (см. §5.4); конец потока — по EOF бэкенда
+   │         (адаптер уже отдал Connection: close клиенту)
+   └─ Non-stream branch:
+      ├─ conversion: urllib urlopen → read full → convert_openai_to_anthropic()
+      │   └─ Single JSON response → _send_json()
+      └─ passthrough E→E: тело ответа бэкенда дословно → _send_raw(200, ...)
+13. Usage tokens из ответа по формату выхода: completions — usage.prompt_tokens/
+    completion_tokens; responses/messages — usage.input_tokens/output_tokens
+14. Error handling:
     ├─ HTTPError (retry on 429/502/503/504 only)
     ├─ TimeoutError (retry)
     ├─ BrokenPipe/ConnectionReset (client gone — silent log)
-    └─ Unexpected exceptions (streamed: SSE "error" event; non-streamed: JSON error)
+    └─ Unexpected exceptions (streamed: SSE "error" event в родном формате входа —
+       _write_sse_error_native; non-streamed: JSON error; после ретраев/исчерпания —
+       504/код/502 + файл .err, см. §8.4)
 ```
 
 ### 4.3 GET /v1/models (do_GET, server.py:131–146)
@@ -258,6 +314,33 @@ Accumulates text, reasoning_content, and tool_calls buffers across chunks, then 
 
 **Usage fix**: requests `stream_options.include_usage=true` from backend (if `ADAPTER_STREAM_INCLUDE_USAGE=1`). If backend doesn't return usage, falls back to heuristic `chars // 4` and marks as estimated in trace.
 
+### 5.4 SSE passthrough-релей E→E (`streaming.py:relay_sse`, v0.9.0)
+
+Для passthrough-маршрутов (входной формат == целевому, см. §4.2) потоковый
+ответ бэкенда **не конвертируется**, а релеится клиенту **дословно**:
+`relay_sse(resp, wfile, req_id, inp_fmt)` читает ответ построчно и пишет
+байты в wfile как есть + flush — без пере-фрейминга и пере-сериализации
+(клиент получает ровно тот поток, что прислал бэкенд, в родном формате
+входа). Конец потока — по EOF ответа бэкенда (адаптер уже отдал
+`Connection: close` в `_start_sse`, поэтому клиент понимает конец и без
+терминального события).
+
+Побочно `relay_sse` сканирует проходящие `data:`-строки на **usage-блоки**
+(для учёта WEBUI-таблицы «Models in use», §6.6) и возвращает usage
+ПОСЛЕДНЕГО встреченного usage-события (или `{}`), нормализованный в
+`input_tokens`/`output_tokens` по формату входа (`_USAGE_KEYS`): у
+completions usage — на верхнем уровне финального чанка
+(`stream_options.include_usage`), у messages — событие `message_delta`, у
+responses — во вложенном `response.usage` события `response.completed`
+(`_extract_usage`). Обрыв соединения (BrokenPipe/ConnectionReset/
+ConnectionAborted) пробрасывается наружу — вызывающий код (do_POST) решает:
+CLIENT_GONE или SSE-событие ошибки. Сбой бэкенда **после** старта потока
+(заголовки уже ушли) сообщается SSE-событием ошибки в РОДНОМ формате входа
+через `_write_sse_error_native` (responses: плоский `{type: "error", code,
+message}`; completions: `{"error": {...}}`; messages: антропик-обвязка
+`{type: "error", error: {...}}`) — клиент умеет разбирать его в своём
+протоколе; запись глотает исключения (клиент мог уже отвалиться).
+
 ---
 
 ## 6. Backend routing
@@ -304,7 +387,7 @@ POST-запросами с `max_tokens:1` по фиксированному сп
 
 Проба встроена в `config.refresh_models` (конец функции, после обновления кэша
 моделей): вызывается при каждой фоновой проверке бэкендов — при старте
-адаптера, на первом GET `/` и по кнопке «⟳ Перепроверить» (POST `/` →
+адаптера, на первом GET `/` и по кнопке-иконке 🔃 «Перепроверить бэкенды» (POST `/` →
 `config.start_refresh` → фоновый воркер, см. §6.5). Результат добавляется в
 возвращаемый dict ключом `"probe"` (старые читатели `ok/count/errors` не
 ломаются) и кэшируется в `_ENDPOINT_STATE` (~60 с, `ENDPOINT_PROBE_TTL`);
@@ -337,7 +420,7 @@ GET `/` и по кнопке:
 - **Запуск** — `start_refresh(timeout, reload=True)`: при старте адаптера
   (`backend-adapter.py` после поднятия WEBUI), на первом GET `/`
   (автостарт, `webui_status._autostart_first_check`) и по кнопке
-  «⟳ Перепроверить» (POST `/`). При `reload=True` (по умолчанию) перед
+  🔃 «Перепроверить бэкенды» (POST `/`). При `reload=True` (по умолчанию) перед
   запуском воркера вызывается `config.reload_backend_config()` — кнопка
   **перечитывает** `ADAPTER_BACKEND_CONFIG` на лету: `_BACKENDS`/
   `_BACKEND_BY_NAME`/`_DEFAULT_BACKEND` подменяются новым списком, из
@@ -356,7 +439,7 @@ GET `/` и по кнопке:
   рендерит последний результат; если проверок ещё не было (done_at пуст) и
   есть что проверять — первый заход сам запускает ПЕРВУЮ проверку
   (`_autostart_first_check`), повторные — только по кнопке. POST `/`
-  (кнопка «⟳ Перепроверить») вызывает `start_refresh(timeout=
+  (кнопка 🔃 «Перепроверить бэкенды») вызывает `start_refresh(timeout=
   PROBE_TIMEOUT)` и отвечает **303 See Other** на GET `/` (PRG: браузер
   переходит на страницу GET-навигацией, авто-релоад не повторяет POST).
   Футер проверки — «Список провайдеров обновлён в HH:MM:SS (N провайдеров,
@@ -471,7 +554,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не входит;
   персистентность работает независимо от мастер-флага.
 - **Вывод** — секция «Models in use» на статус-странице `/` сразу под
-  кнопкой «⟳ Перепроверить» (подписи-абзаца перед ней нет; футер о
+  кнопкой проверки бэкендов 🔃 (подписи-абзаца перед ней нет; футер о
   проверке и кнопка — под таблицей бэкендов), рендер —
   `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
   строк в порядке первого обращения; первый вызов после старта загружает
@@ -586,6 +669,32 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   (`\\`, `"`, перевод строки). Чтение глобалов — напрямую, как рендер
   страницы; экспортёр не должен ронять адаптер: OSError на bind → `None`
   + строка `[EXPORTER] Failed to bind ...`, остальное работает.
+
+### 6.9 JSON-результаты проверок в LOGPATH (`probe_json.py`, v0.9.0)
+
+Безусловный наблюдательный канал (как .err-файлы, см. §8): результаты
+проверок бэкендов пишутся плоскими JSON-файлами в корень
+`ADAPTER_DEBUG_LOGPATH`, рядом с `model-usage.yaml` и корнем WEBUI:
+
+- `<имя_бэкенда>.models.json` — проверка бэкенда на доступные модели
+  (`.models.json`): стартовый `_init_multi_backends` (config.py), фоновая
+  `refresh_models` (кнопка «⟳ Перепроверить»), reload-перечитывания;
+- `<имя_бэкенда>.<конверт.модель>.<pname>.json` — проверка эндпоинта модели
+  (config.py `probe_endpoints` — фоновая проба бэкенда; model_usage.py
+  `_probe_model_endpoints` — пер-модельные пробы usage-таблицы: первое
+  обращение модели и reprobe строки). `pname` — из `ENDPOINT_PROBES`:
+  `completions | messages | responses | embeddings`.
+
+Конвертация имени модели для файла: все `/` и `:` → `_`
+(`org/model:v1` → `org_model_v1`); остальные символы не трогаются.
+Каждый файл при каждой новой проверке ПЕРЕЗАПИСЫВАЕТСЯ целиком (атомарно:
+tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не гейтится
+`ADAPTER_DEBUG_ENABLE` / `ADAPTER_DEBUG_PARTS` / `ADAPTER_DEBUG_TRIM`;
+директория создаётся при записи. Секреты маскируются `redact()` по
+умолчанию (полные данные — при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`,
+живое чтение config); любая ошибка записи молча глотается — проверку не
+роняет. Модуль — лист DAG: импортируется config.py и model_usage.py
+(оба корня DAG), сам на верхнем уровне — stdlib only.
 
 ### 6.2 Разрешение коллизий имён моделей
 
@@ -761,7 +870,8 @@ and strict-models switches), flip-able without restarting the adapter:
   pool values; POST —
   `application/x-www-form-urlencoded` or JSON body → `set_runtime_config()`,
   response re-renders with a flash «Применено»/«Игнорировано» split. Links to
-  the form: session tabs panel («config») and the status page `/` («runtime config →»).
+  the form: session tabs panel («Runtime config 🔧») and the status page `/`
+  (header icons 📋 → `/session`, 🔧 → `/config`; back links «Статус 📊»).
 - The pool keys double as **env vars at startup** — the same names still read from
   the environment by `config.py`; `/config` only overrides the process state.
 
@@ -799,10 +909,17 @@ Full retry loop with exponential backoff for both stream and non-stream branches
 
 ```
 backend-adapter.py
-  ├── config.py          (no internal deps — stdlib only + os.environ;
+  ├── config.py          (no internal deps on the top level — stdlib only;
+  │                       writes probe JSON via probe_json — безусловный канал;
   │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
-  ├── server.py          → config, redact, daemon, tracer, logger, session_log, convert, streaming, model_usage
-  ├── model_usage.py     → config, yaml (used-models table, см. §6.6)
+  ├── server.py          → config, redact, daemon, tracer, logger, session_log,
+  │                       convert, streaming, model_usage, routing
+  ├── model_usage.py     → config, yaml, probe_json (used-models table, см. §6.6;
+  │                       пер-модельные пробы эндпоинтов пишут JSON-дампы в LOGPATH)
+  ├── probe_json.py      (no internal deps on the top level — stdlib only;
+  │                       config/redact читаются локально внутри записи)
+  ├── routing.py         → config (лист DAG: входные форматы, TARGET-реестр,
+  │                       decide по кэшу endpoint_support — см. §4.2)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact
@@ -851,5 +968,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.8.6** (see `backend-adapter.py`).
+Current: **v0.9.0** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

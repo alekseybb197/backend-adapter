@@ -158,6 +158,12 @@ def _open_session_file(kind: str, session_id: str):
     if kind == "debug":
         is_dir, path = _DEBUG_IS_DIR, _DEBUG_PATH
         ext = "log"
+    elif kind == "err":
+        # Файлы инцидентов .err (write_error_file) живут в той же директории
+        # debug-логов и делят с .log общий session_file_ts сессии — имя
+        # session-<ts>-<safe8>.err получается из того же _make_session_file.
+        is_dir, path = _DEBUG_IS_DIR, _DEBUG_PATH
+        ext = "err"
     else:
         is_dir, path = _TRACE_IS_DIR, _TRACE_PATH
         ext = "jsonl"
@@ -295,3 +301,79 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     yaml_text = dump_yaml(yaml_payload)
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write(yaml_text)
+
+
+# ==================== .err-файлы инцидентов ====================
+# Протокол взаимодействия с бэкендом (v0.9.0): любой реальный прокси-запрос
+# агента сохраняется до получения ответа; если финальный ответ клиенту —
+# ошибка 4xx/5xx (после ретраев/таймаутов), инцидент пишется БЕЗУСЛОВНЫМ
+# каналом в файл session-<ts>-<safe8>.err рядом с .log/.jsonl сессии.
+# Файл ошибок принципиально НЕ гейтится флагами подробности:
+#   - НЕ гейтится config.ADAPTER_DEBUG (ENABLE=0 — тоже пишется);
+#   - НЕ гейтится config.ADAPTER_DEBUG_PARTS;
+#   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и ошибка).
+# Гейтится только наличием лог-директории (ADAPTER_DEBUG_LOGPATH — всегда
+# непуста, дефолт ./tmp/logs; is_dir=True всегда — см. _resolve_log_base).
+# Санитайзер уважает ADAPTER_SENSITIVE_LOGGING_ENABLE (живое чтение config,
+# как в logger._write): по умолчанию секреты redact'ятся, при =1 пишутся
+# полные данные.
+_err_lock = threading.Lock()
+
+
+def write_error_file(
+    session_id: str,
+    req_id: str,
+    *,
+    final_status: int,
+    backend_url: str,
+    model: str,
+    out_body: bytes | str,
+    err_body: str,
+) -> None:
+    """Записать инцидент взаимодействия с бэкендом в .err-файл сессии.
+
+    Безусловный канал: файл пишется при любом финальном ответе клиенту
+    4xx/5xx (см. server.do_POST — точки после исчерпания ретраев), даже если
+    файловая запись debug-логов выключена (ADAPTER_DEBUG_ENABLE=0). Формат —
+    в духе session-лога: timestamp-строки с префиксом [req_id]; содержимое —
+    шапка-метаданные (session_id/final_status/model/backend_url), ПОЛНОЕ тело
+    запроса к бэкенду (out_body) и ПОЛНОЕ сообщение об ошибке последней
+    попытки (err_body). Без обрезки по ADAPTER_DEBUG_TRIM.
+
+    Функция никогда не бросает исключений: файл ошибок — наблюдательный
+    канал, его провал не должен ронять обработку запроса."""
+    try:
+        if not _DEBUG_IS_DIR or not _DEBUG_PATH:
+            return
+        fd = _open_session_file("err", session_id)
+        if fd is None:
+            return
+        from .config import ADAPTER_SENSITIVE_LOGGING_ENABLE
+        from .redact import redact
+
+        body_text = (
+            out_body.decode("utf-8", errors="replace")
+            if isinstance(out_body, (bytes, bytearray))
+            else str(out_body)
+        )
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        # Полные данные при SENSITIVE=1 (identity), иначе redact секретов
+        clean = (lambda s: s) if ADAPTER_SENSITIVE_LOGGING_ENABLE else redact
+        lines = [
+            "==================== ERROR ====================",
+            (
+                f"[{ts}] [{req_id}] session_id={session_id} final_status={final_status} "
+                f"model={model} backend_url={backend_url}"
+            ),
+            f"[{ts}] [{req_id}] [REQUEST] {body_text}",
+            f"[{ts}] [{req_id}] [BACKEND_ERROR] {err_body}",
+            "==================== END ERROR ====================",
+        ]
+        with _err_lock:
+            for line in lines:
+                fd.write((clean(line) + "\n").encode())
+            fd.flush()
+    except Exception:
+        # Наблюдательный канал: любая ошибка записи молча глотается — запрос
+        # (и его ответ клиенту) уже сформирован к моменту вызова.
+        pass

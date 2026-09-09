@@ -44,7 +44,23 @@ def _detach() -> None:
 
 
 def _write_pidfile() -> None:
-    """Записать PID процесса в файл pid."""
-    pidfile = os.environ.get("ADAPTER_PIDFILE", "/tmp/adapter.pid")
+    """Записать PID процесса в файл pid внутри ADAPTER_DEBUG_LOGPATH.
+
+    PID-файл живёт в общей директории логов/артефактов адаптера
+    (ADAPTER_DEBUG_LOGPATH — единый корень WEBUI, session-логов, *.parts
+    и model-usage.yaml), а не в произвольном месте. ``ADAPTER_PIDFILE``
+    задаёт ИМЯ файла (или под-путь): используется basename — абсолютный
+    путь вне LOGPATH игнорируется, файл всё равно кладётся в LOGPATH.
+    Пусто/не задано → ``adapter.pid``. Директория создаётся при
+    необходимости (вызов может произойти до создания корня WEBUI).
+
+    Модуль остаётся stdlib-only: LOGPATH читается из os.environ напрямую
+    (та же формула, что у config.ADAPTER_DEBUG_LOGPATH)."""
+    logpath = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip() or "./tmp/logs"
+    name = os.environ.get("ADAPTER_PIDFILE", "").strip()
+    if not name:
+        name = "adapter.pid"
+    pidfile = os.path.join(logpath, os.path.basename(name))
+    os.makedirs(logpath, exist_ok=True)
     with open(pidfile, "w") as f:
         f.write(str(os.getpid()))

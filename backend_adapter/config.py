@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+from . import probe_json  # JSON-дампы результатов проверок в LOGPATH (лист DAG)
+
 # ==================== НАСТРОЙКИ ====================
 PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
 # Адрес (host), на котором слушает HTTP-эндпоинт адаптера. Пусто / не задано —
@@ -277,6 +279,61 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
     "yes",
 )
 
+# ==================== РОУТИНГ ВХОДНЫХ ЭНДПОИНТОВ (TARGET) ====================
+# Три env-переменные — по одной на каждый входной POST-эндпоинт адаптера
+# (префикс имени переменной = входной эндпоинт): ADAPTER_MESSAGES_TARGET
+# управляет приёмом на /v1/messages, ADAPTER_COMPLETIONS_TARGET — на
+# /v1/chat/completions, ADAPTER_RESPONSES_TARGET — на /v1/responses.
+# Значение задаёт, ЧТО делать с запросом на этом входе:
+#   messages|completions|responses — целевой формат (куда конвертировать/
+#       передавать); разрешена только реализованная пара (реестр
+#       routing.IMPLEMENTED_CONVERSIONS) или passthrough (цель = сам вход,
+#       бэкенд поддерживает формат);
+#   auto — автовыбор: passthrough E→E, если бэкенд/модель поддерживает
+#       входной формат (по кэшу проб), иначе реализованная конверсия,
+#       иначе ошибка агенту. Сети во время запроса НЕТ — только кэш
+#       _ENDPOINT_STATE (endpoint_support ниже);
+#   none — входной эндпоинт выключен (404) — безопасный дефолт.
+# Zero-config дефолты описывают текущие возможности конвертера:
+# MESSAGES=completions (принимается только /v1/messages, конвертация в chat
+# completions), COMPLETIONS=none, RESPONSES=none.
+# В RUNTIME_CONFIG_POOL сознательно НЕ входят: значения строковые (пул —
+# только bool/int) и меняют, какие входные пути «живы» (топология
+# восприятия эндпоинтов агентом) — читаются на импорте, как и остальная
+# конфигурация сети/бэкендов. Невалидное/пустое значение НЕ роняет старт:
+# консольный [WARN] + трактовка как 'none' (безопасное выключение входа).
+
+_TARGET_FORMATS = ("messages", "completions", "responses")
+
+
+def _parse_target(value: str, var_name: str) -> str:
+    """Нормализация значения TARGET-переменной (нижний регистр, strip).
+
+    Невалидное/пустое значение не роняет старт (это рубильник поведения,
+    а не жёсткое требование как ADAPTER_BACKEND_CONFIG): печатается
+    консольный [WARN], значение трактуется как 'none' — вход выключен
+    (безопасный дефолт)."""
+    raw = (value or "").strip().lower()
+    if raw in _TARGET_FORMATS or raw in ("auto", "none"):
+        return raw
+    if value and value.strip():
+        print(
+            f"[WARN] {var_name}: invalid value {value!r} (expected "
+            f"messages|completions|responses|auto|none) — treating as 'none'"
+        )
+    return "none"
+
+
+ADAPTER_MESSAGES_TARGET = _parse_target(
+    os.environ.get("ADAPTER_MESSAGES_TARGET", "completions"), "ADAPTER_MESSAGES_TARGET"
+)
+ADAPTER_COMPLETIONS_TARGET = _parse_target(
+    os.environ.get("ADAPTER_COMPLETIONS_TARGET", "none"), "ADAPTER_COMPLETIONS_TARGET"
+)
+ADAPTER_RESPONSES_TARGET = _parse_target(
+    os.environ.get("ADAPTER_RESPONSES_TARGET", "none"), "ADAPTER_RESPONSES_TARGET"
+)
+
 # Период персистентного сохранения таблицы использованных моделей в YAML
 # (сек). «Грязная» таблица сохраняется не чаще раза в
 # ADAPTER_MODEL_USAGE_SAVE_INTERVAL; создание новой строки модели, сброс
@@ -486,13 +543,43 @@ def _fetch_models(base: str, key: str, timeout: float | None = None) -> list[dic
     return data.get("data", [])
 
 
+def _write_models_snapshot(
+    bname: str,
+    bmodels: list[dict] | None,
+    error: str | None = None,
+) -> None:
+    """JSON-дамп результата проверки бэкенда на доступные модели.
+
+    Безусловный наблюдательный канал (v0.9.0): файл
+    ``<имя_бэкенда>.models.json`` пишется в ADAPTER_DEBUG_LOGPATH при каждой
+    проверке — стартовой (_init_multi_backends) и фоновой (refresh_models /
+    reload-перечитывания) — каждый раз перезаписываясь целиком. Вне
+    ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_PARTS / TRIM (гейт — только наличие
+    LOGPATH); снимок содержит ПОЛНЫЕ записи моделей из ответа /v1/models
+    (redact-маскирование секретов — внутри probe_json). Провал записи молча
+    глотается модулем probe_json — проверку не роняет."""
+    payload = {
+        "backend": bname,
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "ok": error is None and bmodels is not None,
+    }
+    if error is not None:
+        payload["error"] = error
+    if bmodels is not None:
+        payload["count"] = len(bmodels)
+        # Копии записей ответа — в файл уходит снимок на момент проверки
+        # (бэкенд мог поменять список моделей к следующему чтению).
+        payload["models"] = [dict(m) for m in bmodels]
+    probe_json.write_models_json(bname, payload)
+
+
 # ==================== MULTI-BACKEND: ENDPOINT PROBE ====================
 # «Дымовая» проба API-эндпойнтов бэкенда: короткий POST (max_tokens:1) на
 # каждый известный путь — определить, какие эндпойнты бэкенд реально
 # обслуживает, не тратя токены на содержательный ответ. Выполняется при
 # каждом refresh_models — а тот вызывается из фонового воркера проверки
-# (start_refresh: при старте адаптера, на первом GET "/" и по кнопке
-# «⟳ Перепроверить»), не при каждой загрузке страницы; результат —
+# (start_refresh: при старте адаптера, на первом GET "/" и по кнопке 🔃
+# «Перепроверить бэкенды»), не при каждой загрузке страницы; результат —
 # колонка «Доступные API» на странице и лог-строка [ENDPOINT_PROBE] в
 # консоли. Мастер-флаг — ADAPTER_ENDPOINT_PROBE (0 — автопроба отключена).
 #
@@ -603,6 +690,46 @@ def _probe_model(backend: dict, name: str) -> tuple[str | None, bool | None]:
             return specified, True
         return None, False
     return None, None
+
+
+def _pname_for_path(path: str) -> str | None:
+    """Короткое имя эндпоинта ENDPOINT_PROBES по полному пути (или None)."""
+    for pname, ep_path, _tpl in ENDPOINT_PROBES:
+        if ep_path == path:
+            return pname
+    return None
+
+
+def _write_endpoint_snapshot(
+    bname: str,
+    model: str,
+    pname: str,
+    path: str,
+    status: int | None,
+    found: bool,
+    *,
+    error: str | None = None,
+) -> None:
+    """JSON-дамп результата пробы эндпоинта модели (v0.9.0).
+
+    Файл ``<бэкенд>.<конверт.модель>.<pname>.json`` в ADAPTER_DEBUG_LOGPATH
+    (конвертация модели — probe_json._convert_name). Безусловный
+    наблюдательный канал: пишется при каждой фактической пробе (фоновая
+    проверка бэкендов и пер-модельные пробы usage-таблицы), перезаписывая
+    файл целиком. ``status=None`` — сетевая ошибка/таймаут (found=False,
+    текст — в ``error``). Провал записи молча глотается в probe_json."""
+    payload = {
+        "backend": bname,
+        "model": model,
+        "endpoint": pname,
+        "path": path,
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "status": status,
+        "found": found,
+    }
+    if error is not None:
+        payload["error"] = error
+    probe_json.write_endpoint_json(bname, model, pname, payload)
 
 
 def probe_endpoints(timeout: float | None = None) -> dict:
@@ -727,6 +854,25 @@ def probe_endpoints(timeout: float | None = None) -> dict:
             "errors": result["errors"],
         }
         _log_probe(bname, b["base"], result["endpoints"], result["errors"])
+        # JSON-дампы результатов пробы эндпоинтов (v0.9.0): файл на каждый
+        # реально пробованный путь — <бэкенд>.<модель>.<pname>.json, где
+        # модель — та, которой эндпоинт пробовался (probes[path]). Пишутся
+        # при каждом фактическом прогоне (не из кэша), перезаписываясь
+        # целиком. (ep_name, а не pname: внешний pname-цикл выше имеет тип
+        # str, тут — str | None после _pname_for_path.)
+        for path, ep in result["endpoints"].items():
+            ep_name = _pname_for_path(path)
+            if ep_name is None:
+                continue  # путь вне ENDPOINT_PROBES — не наш (страховка)
+            _write_endpoint_snapshot(
+                bname,
+                probes[path],
+                ep_name,
+                path,
+                ep.get("status"),
+                bool(ep.get("found")),
+                error=result["errors"].get(ep_name),
+            )
 
     return {
         "ok": ok_any,
@@ -831,6 +977,31 @@ def upsert_endpoint_state(backend_name: str, pname: str, status: int | None, fou
     state["at"] = time.time()
 
 
+def endpoint_support(backend_name: str, pname: str) -> bool | None:
+    """Поддерживает ли бэкенд формат ``pname`` — ОТВЕТ ТОЛЬКО ПО КЭШУ ПРОБ.
+
+    Источник — _ENDPOINT_STATE (фоновая probe_endpoints + пер-модельные пробы
+    usage-таблицы через upsert_endpoint_state): ``found=True`` (HTTP 200) ⇔
+    поддержка. Сети здесь НЕТ — это чистый геттер кэша для роутинга
+    (routing.decide), который в режиме ``auto`` не может делать синхронных
+    проб во время запроса (решение пользователя).
+
+    Возвращает:
+    - True — бэкенд подтверждённо поддерживает формат (found=True);
+    - False — пробовался, но не поддерживает (не-200);
+    - None — неизвестно: не пробовался / пробы выключены (ADAPTER_ENDPOINT_
+      PROBE=0 и пер-модельные пробы не наполняли кэш) / ``pname`` вне
+      ENDPOINT_PROBES. Зовущий (routing.decide) трактует None как False —
+      «нет подтверждения поддержки → passthrough не выбирается»."""
+    path = next((p for n, p, _t in ENDPOINT_PROBES if n == pname), None)
+    if path is None:
+        return None
+    ep = _ENDPOINT_STATE.get(backend_name, {}).get("endpoints", {}).get(path)
+    if ep is None:
+        return None
+    return bool(ep.get("found"))
+
+
 def _init_multi_backends(config_path: str) -> None:
     """Загрузить YAML-конфиг, пробовать модели, построить model → backend map.
 
@@ -870,8 +1041,12 @@ def _init_multi_backends(config_path: str) -> None:
             bmodels = _fetch_models(base, b["key"])
         except Exception as e:
             print(f"[WARN] Failed to probe backend '{name}' at {base}: {e}")
+            _write_models_snapshot(name, None, error=str(e))
             continue
         print(f"[INIT] Backend '{name}' at {base}: ok ({len(bmodels)} models)")
+        # JSON-дамп результата стартовой проверки (v0.9.0) — пишется при
+        # каждом init, перезаписывая файл целиком.
+        _write_models_snapshot(name, bmodels)
         for m in bmodels:
             # Делаем копию, чтобы не мутировать оригинальный ответ бэкенда
             all_models.append((dict(m), b))
@@ -930,8 +1105,8 @@ def _rebuild_index(all_models: list[tuple[dict, dict]]) -> tuple[dict[str, dict]
 def reload_backend_config() -> list[dict] | None:
     """Перечитать ADAPTER_BACKEND_CONFIG и подменить глобалы бэкендов.
 
-    Кнопка «⟳ Перепроверить» на статус-странице должна не только перепроверять
-    все настроенные бэкенды, но и заново читать YAML-конфиг — добавление/
+    Кнопка 🔃 «Перепроверить бэкенды» на статус-странице должна не только
+    перепроверять все настроенные бэкенды, но и заново читать YAML-конфиг — добавление/
     удаление бэкендов работает БЕЗ рестарта адаптера. Парсер и без того
     выбирает только ключ ``backend`` (прочие ключи файла игнорируются).
 
@@ -974,8 +1149,8 @@ def refresh_models(timeout: float | None = None) -> dict:
 
     Вызывается только по явному сигналу: при старте адаптера (существующий
     init/probe), из фонового воркера проверки (config.start_refresh — старт
-    адаптера / первый GET "/" статус-страницы WEBUI / кнопка
-    «⟳ Перепроверить»).
+    адаптера / первый GET "/" статус-страницы WEBUI / кнопка 🔃
+    «Перепроверить бэкенды»).
     Периодического фонового обновления НЕТ. Бэкенд может добавлять модели
     между стартами; refresh подхватывает их без перезапуска адаптера.
 
@@ -985,8 +1160,8 @@ def refresh_models(timeout: float | None = None) -> dict:
     Основной путь — в процессе адаптера: ``_BACKENDS`` заполнен при старте;
     refresh опрашивает каждый бэкенд и пересобирает оба словаря.
     Если ``_BACKENDS`` пуст (viewer вне адаптера): блоки YAML перечитываются
-    из ADAPTER_BACKEND_CONFIG, бэкенды опрашиваются — кнопка
-    «⟳ Перепроверить» работает и без процесса адаптера.
+    из ADAPTER_BACKEND_CONFIG, бэкенды опрашиваются — кнопка 🔃
+    «Перепроверить бэкенды» работает и без процесса адаптера.
 
     Возвращает ``{"ok": bool, "count": int, "errors": {имя_бэкенда: текст}}``:
     - ``ok=True`` — кэш пересобран из ответивших бэкендов. При частичном
@@ -1016,11 +1191,17 @@ def refresh_models(timeout: float | None = None) -> dict:
     all_models: list[tuple[dict, dict]] = []
     errors: dict[str, str] = {}
     for b in backends:
+        bname = b["name"]
         try:
             bmodels = _fetch_models(b["base"], b["key"], timeout=timeout)
         except Exception as e:
-            errors[b["name"]] = str(e)
+            errors[bname] = str(e)
+            # JSON-дамп результата проверки упавшего бэкенда (v0.9.0).
+            _write_models_snapshot(bname, None, error=str(e))
             continue
+        # JSON-дамп результата фоновой проверки бэкенда (v0.9.0) — пишется
+        # при каждом refresh, перезаписывая файл целиком.
+        _write_models_snapshot(bname, bmodels)
         for m in bmodels:
             all_models.append((dict(m), b))
 
@@ -1053,7 +1234,7 @@ def refresh_models(timeout: float | None = None) -> dict:
 # Запуск сериализуется _REFRESH_LOCK: две кнопки подряд не создадут два потока.
 # Периодического фонового refresh нет — проверка только по явному
 # start_refresh(): при старте адаптера, на первом GET "/" (автостарт) и по
-# кнопке «⟳ Перепроверить» (POST "/").
+# кнопке 🔃 «Перепроверить бэкенды» (POST "/").
 
 _REFRESH_JOB: dict | None = None
 _REFRESH_LOCK = threading.Lock()
@@ -1118,8 +1299,8 @@ def start_refresh(timeout: float | None = None, reload: bool = True) -> bool:
     """Запустить фоновую проверку бэкендов (модели + проба эндпоинтов).
 
     ``reload=True`` (по умолчанию) — перед проверкой конфиг
-    ADAPTER_BACKEND_CONFIG перечитывается (reload_backend_config): кнопка
-    «⟳ Перепроверить» добавляет/удаляет бэкенды БЕЗ рестарта адаптера.
+    ADAPTER_BACKEND_CONFIG перечитывается (reload_backend_config): кнопка 🔃
+    «Перепроверить бэкенды» добавляет/удаляет бэкенды БЕЗ рестарта адаптера.
     Битый/недоступный YAML при reload — прежние бэкенды остаются ([WARN]),
     фоновая проверка всё равно перепроверяет их (reload_backend_config
     вернул None — глобалы не тронуты; refresh_models идёт по прежним).
@@ -1129,8 +1310,8 @@ def start_refresh(timeout: float | None = None, reload: bool = True) -> bool:
     страницы не блокируется: поток daemon, результат появится в состоянии
     (refresh_state) по завершении. Никакого периодического refresh — только
     явный вызов: старт адаптера (backend-adapter.py), первый GET "/"
-    (автостарт, webui_status._autostart_first_check) или кнопка
-    «⟳ Перепроверить» (POST "/")."""
+    (автостарт, webui_status._autostart_first_check) или кнопка 🔃
+    «Перепроверить бэкенды» (POST "/")."""
     global _REFRESH_JOB
     if reload and reload_backend_config() is None:
         print(

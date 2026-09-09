@@ -262,7 +262,7 @@ class TestRenderShell:
         assert "Не найдено ни одной директории" in html
         assert ".parts" in html
         # Ссылка на статус-страницу есть и на пустой странице
-        assert '<a id="status-link" href="/">← статус</a>' in html
+        assert '<a id="status-link" href="/">Статус 📊</a>' in html
 
     def test_shell_lists_session_names(self, tmp_path):
         d = _make_parts_dir(tmp_path, "session-A.parts", {
@@ -289,7 +289,7 @@ class TestRenderShell:
         sessions = self.find(str(tmp_path), verbose=True)
         html = self.render_shell(sessions, str(tmp_path))
         # Ссылка на корень (статус-страницу) — первой в панели вкладок
-        assert '<div id="tabs"><a id="status-link" href="/">← статус</a>' in html
+        assert '<div id="tabs"><a id="status-link" href="/">Статус 📊</a>' in html
         # Идентификаторы вкладок — транслитерация имени сессии: НЕ-alnum
         # символы (точка ".parts", дефис) заменяются на "_".
         assert 'id="tab-session_A_parts" class="tab active"' in html
@@ -354,7 +354,7 @@ class TestSessionHTTP:
             httpd.server_close()
 
     def test_session_page_links_to_status_root(self, tmp_path):
-        """Ссылка «← статус» ведёт на корень сервера — статус-страницу "/",
+        """Ссылка «Статус 📊» ведёт на корень сервера — статус-страницу "/",
         которая в этом же процессе отвечает 200 (эндпойнт зарегистрирован)."""
         _make_parts_dir(tmp_path, "session-A.parts", {
             "a-1-openai_body.json": _simple_ob(1),
@@ -364,7 +364,7 @@ class TestSessionHTTP:
         try:
             status, body = _http_get(port, "/session")
             assert status == 200
-            assert '<a id="status-link" href="/">← статус</a>' in body
+            assert '<a id="status-link" href="/">Статус 📊</a>' in body
             # Корень отвечает — ссылка не ведёт в никуда (в standalone root_dir
             # без env-бэкендов статус-страница отдаёт подсказку, но 200)
             status_root, _ = _http_get(port, "/")
