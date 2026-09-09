@@ -17,7 +17,7 @@
 
 ## Возможности
 
-- **Прозрачное проксирование**: ретраи/таймауты, конвертация Anthropic ↔ [OI] (в т.ч. стриминг SSE), маскирование секретов в логах.
+- **Прозрачное проксирование**: ретраи/таймауты, конвертация Anthropic ↔ [OI] (в т.ч. стриминг SSE), маскирование секретов в логах. **Входные эндпоинты** (v0.9.0): наряду с `/v1/messages` адаптер принимает `/v1/chat/completions` и `/v1/responses`; TARGET-переменные (`ADAPTER_*_TARGET`) задают целевой формат для каждого входа — конверсия `messages→completions`, **passthrough E→E** (тело и SSE-поток возвращаются дословно), `auto` (выбор по кэшу проб, без сети) или выключение входа.
 - **Логирование и наблюдаемость**: консольные debug-блоки `[...]` печатаются **всегда** (с обрезкой до `ADAPTER_DEBUG_TRIM`; `0` — без обрезки); файловая запись per-session логов (`session-*.log`/`*.jsonl`, `*.parts` дампы) — по `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH` (дефолт `./tmp/logs`), файлы несут **полные** строки без обрезки; per-session JSON/YAML-дампы всех логгируемых частей — `ADAPTER_DEBUG_PARTS=1`; **`.err`-файлы инцидентов** (v0.9.0) — при финальном ответе клиенту 4xx/5xx реального прокси-запроса пишутся в ту же директорию **безусловно** (полные запрос и ошибка, без обрезки по TRIM, вне `ADAPTER_DEBUG_ENABLE`; redact по умолчанию).
 - **WEBUI** (поднимается всегда, флага отключения нет):
   - `/` — статус-страница: шапка «Backend-Adapter Version <x.x.x>» с иконками-навигацией 🔃 (перепроверить бэкенды, POST `/`) / 📋 (`/session`) / 🔧 (`/config`), LLM-эндпоинты, таблица «Models in use» с live-счётчиками вызовов/токенов и колонкой **Cost** (по тарифам `ADAPTER_MODELS_TARIFFS`; ставится live-поллингом через innerHTML — `cost_html` с сервера); действия строки — иконки-кнопки ⟳ (перепроверить эндпоинты) / ↺ (сбросить счётчики) / ✕ (удалить строку); проверка бэкендов по кнопке-иконке 🔃 (перечитывает `ADAPTER_BACKEND_CONFIG` без рестарта);
@@ -70,11 +70,13 @@ claude
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа (__version__)
-├── backend_adapter/            # Доменный пакет (27 модулей, включая __init__.py)
+├── backend_adapter/            # Доменный пакет (28 модулей, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
-│   ├── server.py               # HTTP-сервер (Anthropic ↔ [OI])
+│   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
+│   ├── routing.py              # Входные эндпоинты/TARGET: decide() по кэшу проб
 │   ├── convert.py              # Конвертация сообщений/инструментов
-│   ├── streaming.py            # SSE streaming passthrough
+│   ├── convert.py              # Конвертация сообщений/инструментов
+│   ├── streaming.py            # SSE streaming: конверсия + passthrough E→E relay
 │   ├── tracer.py               # JSONL trace-логирование
 │   ├── session_log.py          # Per-session логи с FIFO eviction
 │   ├── daemon.py               # Detach (double fork)

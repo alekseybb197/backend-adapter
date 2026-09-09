@@ -515,7 +515,50 @@ export ADAPTER_DEBUG_ENABLE=0
 
 Подробнее про логирование — в [`docs/logging.md`](logging.md).
 
-### 5.8 Полный пример env-файла
+### 5.8 Входные эндпоинты и TARGET-маршрутизация (v0.9.0)
+
+Адаптер принимает **три** POST-эндпоинта: `/v1/messages` (Anthropic Messages),
+`/v1/chat/completions` ([OI] Chat Completions) и `/v1/responses` ([OI] Responses).
+Что адаптер делает с запросом на каждом входе — решает соответствующая
+TARGET-переменная (**префикс имени = входной эндпоинт**); вход, чей целевой
+формат `none`, не принимается вовсе (404):
+
+```bash
+# /v1/messages → конвертация в chat.completions (ДЕФОЛТ — нулевая настройка,
+# прежнее поведение 100%). Прочие значения: messages (passthrough E→E),
+# responses, auto (выбор по кэшу проб), none (вход выключен).
+export ADAPTER_MESSAGES_TARGET=completions
+
+# /v1/chat/completions: default none — вход закрыт (404).
+# completions → passthrough E→E на бэкенд, поддерживающий /v1/chat/completions.
+# export ADAPTER_COMPLETIONS_TARGET=completions
+
+# /v1/responses: default none — вход закрыт (404).
+# responses → passthrough E→E на бэкенд, поддерживающий /v1/responses.
+# export ADAPTER_RESPONSES_TARGET=responses
+```
+
+Допустимые значения всех трёх — `completions | messages | responses | auto | none`.
+
+- **`auto`** — адаптер сам выбирает маршрут **только по кэшу результатов проб**
+  (сети в запросе не делает): passthrough E→E, если бэкенд поддерживает входной
+  формат как целевой; иначе — реализованная конверсия из входного формата
+  (сегодня только `messages→completions`); иначе — HTTP 400 «no route».
+- **Passthrough E→E** — входной формат == целевому (`completions→completions`,
+  `messages→messages`, `responses→responses`): тело уходит бэкенду как пришло
+  (подставляется только резолвнутая модель), ответ/SSE-поток возвращаются
+  клиенту **дословно**, в родном формате входа.
+- **Нереализованные преобразования** (например `completions→messages`) — HTTP 400:
+  реестр реализованных пар (`IMPLEMENTED_CONVERSIONS` в `backend_adapter/routing.py`)
+  содержит только `messages→completions`. Если бэкенд целевой формат не
+  поддерживает — HTTP 502 (до отправки запроса).
+
+Учёт «Models in use», strict-проверка модели, маппинг, токены usage и
+`.err`-протокол работают на всех трёх входах одинаково. Подробности —
+в [`docs/environment.md`](environment.md), раздел «Входные эндпоинты:
+TARGET-маршрутизация», и [`docs/architecture.md`](architecture.md), §4.2.
+
+### 5.9 Полный пример env-файла
 
 Полный рабочий env-файл с комментариями всех переменных — в
 `docs/samples/sample.adapter.env` (скопируйте в `adapter.env` и заполните:
@@ -542,6 +585,14 @@ export ADAPTER_STREAM_INCLUDE_USAGE=1
 # --- Models ---
 export ADAPTER_STRICT_MODELS=1
 # export ADAPTER_MODELS_MAPPING=":k2-05"
+
+# --- Input endpoint routing (TARGET, v0.9.0) ---
+# Дефолты = нулевая настройка: принимается только /v1/messages и конвертируется
+# в chat.completions; /v1/chat/completions и /v1/responses закрыты (404).
+export ADAPTER_MESSAGES_TARGET=completions
+# export ADAPTER_COMPLETIONS_TARGET=completions   # passthrough E→E (вход закрыт при none)
+# export ADAPTER_RESPONSES_TARGET=responses       # passthrough E→E (вход закрыт при none)
+# export ADAPTER_COMPLETIONS_TARGET=auto          # выбор маршрута по кэшу проб (без сети)
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
@@ -665,10 +716,19 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8765/ready
 # Prometheus-метрики (отдельный слушатель, порт 9100)
 curl -s http://127.0.0.1:9100/metrics | head
 
-# Попробовать запрос
+# Попробовать запрос (дефолт: /v1/messages → chat.completions)
 curl -X POST http://localhost:9999/v1/messages \
   -H "Content-Type: application/json" \
   -H "Anthropic-Version: 2023-06-01" \
+  -H "x-api-key: dummy" \
+  -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
+
+# Новые входы (v0.9.0) — работают только при ненулевом TARGET:
+# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=completions (passthrough),
+# /v1/responses при ADAPTER_RESPONSES_TARGET=responses (passthrough),
+# при TARGET=none (дефолт) оба отвечают 404.
+curl -X POST http://localhost:9999/v1/chat/completions \
+  -H "Content-Type: application/json" \
   -H "x-api-key: dummy" \
   -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
 ```

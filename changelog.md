@@ -1,8 +1,51 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
-## v0.9.0 (WIP — JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH)
+## v0.9.0 (WIP — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH)
 
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.0. -->
+
+### 2026-09-09 Группа: Входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация (v0.9.0)
+
+**Цель:** адаптер слушал только `POST /v1/messages`; добавить входные
+эндпоинты `/v1/chat/completions` и `/v1/responses` и маршрутизацию каждого
+входа TARGET-переменной — `ADAPTER_MESSAGES_TARGET`,
+`ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET` (префикс = вход).
+Допустимые значения — `completions | messages | responses | auto | none`
+(целевой формат; авто — по кэшу проб, без сети; `none` — вход выключен).
+
+**Решение:**
+- **новый модуль `backend_adapter/routing.py`** (лист DAG: импортирует только
+  config, его импортирует только server.py) — `INPUT_PATHS` (три входных
+  пути), `IMPLEMENTED_CONVERSIONS` (**только** `messages→completions`),
+  `input_path_to_format`, `decide()` → passthrough E→E / convert / reject /
+  disabled по TARGET + кэшу проб `config.endpoint_support` (сети в запросе
+  нет; None = False);
+- **config.py** — `_parse_target` (невалид/пусто → `[WARN]` + `none`, не
+  fatal) и три TARGET-константы; дефолты = нулевая настройка
+  (MESSAGES=completions — прежняя messages-конверсия; COMPLETIONS=none,
+  RESPONSES=none — входы закрыты 404). В runtime-пул `/config` не входят;
+- **server.py** — роутер `input_path_to_format`; единая цепочка для всех
+  входов (тело → model → strict → маппинг → `_resolve_backend` →
+  `routing.decide`); disabled/reject — JSON-ошибка 404/400/502 ДО
+  `record_model_usage` (в счётчики не попадают, `.err` не пишется);
+  passthrough — тело как пришло (мутация только `model` на резолвнутую;
+  `stream: false` при `ADAPTER_STREAMING_ENABLE=0`), `backend_url` по
+  `INPUT_PATHS[out_fmt]`;
+- **streaming.py** — `relay_sse` (passthrough-релей: SSE-строки бэкенда —
+  клиенту дословно + flush; usage сканированием проходящих строк) и
+  `_write_sse_error_native` (событие ошибки в родном формате входа);
+- **observability** — `[ROUTE]` debug-строка + поле route в trace
+  request_start; usage-ключи по формату выхода (completions —
+  prompt/completion_tokens; responses/messages — input/output_tokens);
+  учёт/strict/маппинг/.err — на всех трёх входах одинаково.
+
+**Следствия:** [OI]-клиенты ходят в адаптер родными протоколами (passthrough
+E→E: `completions→completions`, `responses→responses`, `messages→messages`);
+нереализованные перекрёстные конвертеры отвергаются 400 «conversion … is not
+implemented» (реестр); дефолты не меняют прежнее поведение. Покрыто:
+`tests/test_routing.py` (таблица decide, отсутствие сети в auto),
+`test_server.py` (passthrough по трём форматам, 404/400/502, usage-учёт,
+`.err`), `test_streaming.py` (relay_sse, usage-скан, `_write_sse_error_native`).
 
 ### 2026-09-08 Группа: CI к набору проверок, JSON-файлы результатов проверок в LOGPATH, [EXIT] Bye, PID-файл в LOGPATH (v0.9.0)
 

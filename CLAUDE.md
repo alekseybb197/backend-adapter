@@ -29,7 +29,8 @@ Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LL
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; доменный пакет `backend_adapter/`
-  (26 модулей → 27 с probe_json.py, включая `__init__.py`; генератор дерева
+  (27 модулей → 28 с routing.py — входные эндпоинты/TARGET, включая
+  `__init__.py`; генератор дерева
   артефактов —
   группа модулей `artifact_tree*.py` из 8 файлов, публичный API —
   `artifact_tree.generate()`; см. `docs/architecture.md`).
@@ -149,6 +150,61 @@ strict-ошибки в пакете починены и регрессий бы�
 точечные багфиксы без смены контракта — в журнал не вносятся, им место
 только в changelog.md. Записи накапливаются здесь, новые сверху; каждая
 запись журнала сопровождается блоком в changelog.md.
+
+### 2026-09-09 — Входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация (v0.9.0)
+
+**Контекст:** адаптер слушал только `POST /v1/messages`. Задача — принимать
+`/v1/chat/completions` и `/v1/responses` и маршрутизировать каждый вход
+TARGET-переменной: `ADAPTER_MESSAGES_TARGET`, `ADAPTER_COMPLETIONS_TARGET`,
+`ADAPTER_RESPONSES_TARGET` (префикс = входной эндпоинт). Допустимые значения —
+`completions | messages | responses | auto | none` (целевой формат, авто по
+кэшу проб, или запрет обработки — вход выключен).
+
+**Решение:**
+- **новый модуль `backend_adapter/routing.py`** (лист DAG — импортирует только
+  config; его импортирует только server.py): `INPUT_PATHS` (три входных пути),
+  реестр реализованных пар `IMPLEMENTED_CONVERSIONS` (**только**
+  `messages→completions`; все прочие пары не реализованы → ошибка агенту),
+  `input_path_to_format`, `decide(inp, backend_name) → (action, out_fmt|None,
+  msg)`: passthrough E→E (вход == целевому), convert (messages→completions),
+  reject, disabled. **auto-решения только по кэшу проб** —
+  `config.endpoint_support(backend_name, pname)` (геттер `_ENDPOINT_STATE`;
+  сети в запросе нет, None трактуется как False); приоритет auto:
+  passthrough > convert > reject;
+- **config.py** — `_parse_target` (невалид/пусто → `[WARN]` + `none` — не
+  fatal) и три константы TARGET (дефолты — **нулевая настройка**:
+  MESSAGES=completions, COMPLETIONS=none, RESPONSES=none — прежнее поведение
+  100%: принимается только messages, конвертация; два других входа 404).
+  В runtime-пул `/config` НЕ входят (меняют топологию входов; читаются на
+  импорте);
+- **server.py** — роутер по `input_path_to_format`; фиксированная цепочка для
+  всех входов (чтение тела → model обязателен → strict → маппинг →
+  `_resolve_backend` → `routing.decide`); disabled/reject — `_send_json` +
+  return БЕЗ `record_model_usage` и `.err` (запрос до бэкенда не дошёл);
+  passthrough — тело как пришло после мутации `body["model"] =
+  resolved_model` (+`stream: false` при `ADAPTER_STREAMING_ENABLE=0`);
+  `backend_url = base + INPUT_PATHS[out_fmt]`. HTTP-коды: disabled — 404,
+  нереализованная конверсия — 400, auto без маршрута — 400, бэкенд не
+  поддерживает целевой формат — 502. Учёт/usage/strict/маппинг/.err — на
+  всех трёх входах одинаково (usage-ключи по формату выхода: completions —
+  prompt/completion_tokens; responses/messages — input/output_tokens);
+- **streaming.py** — `relay_sse` (passthrough-релей E→E: чтение SSE-строк
+  бэкенда и запись байтов дословно + flush, без пере-фрейминга; usage — скан
+  проходящих строк: `response.completed`/финальный usage-чанк) и
+  `_write_sse_error_native` (SSE-событие ошибки в родном формате входа при
+  сбое после старта стрима);
+- **ошибки** — JSON `{"error": …}`, `.err` на 4xx/5xx пишется только для
+  реальных прокси-запросов (после ретраев), как на messages-пути.
+
+**Следствия:** клиенты [OI]-совместимых бэкендов могут ходить в адаптер
+своими родными протоколами (chat completions/responses passthrough E→E) наряду
+с messages-конверсией для [CC]; нереализованные перекрёстные конвертеры
+честно отвергаются 400 (реестр), а не «молчаливой» порчей; дефолты не меняют
+прежнее поведение ни на йоту. Модуль routing.py стоит в DAG между config и
+server. Покрыто unit-тестами (tests/test_routing.py — вся таблица decide,
+отсутствие сети в auto), HTTP-интеграцией (test_server.py — passthrough по
+трём форматам, 404/400/502, usage, .err) и streaming-тестами (relay_sse,
+usage-скан, ошибки). Ветка feature/v0.9.0 в WIP, версия 0.9.0.
 
 ### 2026-09-08 — CI к набору проверок проекта, JSON-файлы результатов проверок в LOGPATH, [EXIT] Bye, PID-файл в LOGPATH (v0.9.0)
 

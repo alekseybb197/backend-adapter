@@ -96,7 +96,89 @@ backend:
 
 ---
 
-## 2. Дефолтные (zero-config): сеть и производительность
+## 1а. Входные эндпоинты: TARGET-маршрутизация (v0.9.0)
+
+> **Что это.** Адаптер принимает **три** POST-эндпоинта входных запросов —
+> `/v1/messages` (Anthropic Messages API), `/v1/chat/completions`
+> ([OI] Chat Completions), `/v1/responses` ([OI] Responses API). Что делает
+> адаптер с запросом на каждом входе (какой формат отдаёт бэкенду) — решает
+> соответствующая TARGET-переменная: **префикс имени переменной = входной
+> эндпоинт**. Входы, целевой формат которых `none`, не принимаются вовсе
+> (404).
+
+| Переменная | Default | Описание |
+|---|---|---|
+| `ADAPTER_MESSAGES_TARGET` | `completions` | Куда направлять запросы с **`/v1/messages`** (Anthropic-формат). |
+| `ADAPTER_COMPLETIONS_TARGET` | `none` | Куда направлять запросы с **`/v1/chat/completions`** ([OI]-формат). |
+| `ADAPTER_RESPONSES_TARGET` | `none` | Куда направлять запросы с **`/v1/responses`** (Responses-формат). |
+
+Допустимые значения всех трёх — одно из:
+
+- **`completions`** — целевой формат `chat.completions` (путь
+  `/v1/chat/completions`);
+- **`messages`** — целевой формат Anthropic Messages (`/v1/messages`);
+- **`responses`** — целевой формат Responses (`/v1/responses`);
+- **`auto`** — адаптер сам выбирает целевой формат (см. ниже);
+- **`none`** — вход **выключен**: запросы на этот эндпоинт не принимаются
+  (HTTP 404, текущее поведение для не-`/v1/messages` путей).
+
+> **Дефолты — это нулевая настройка (100% прежнее поведение):** принимается
+> только `/v1/messages`, который конвертируется в `chat.completions`
+> (`ADAPTER_MESSAGES_TARGET=completions`); входы
+> `/v1/chat/completions` и `/v1/responses` закрыты (`none`). Пример из
+> задачи «принимать только messages, конвертировать в chat completions» —
+> ровно эти дефолты: `ADAPTER_COMPLETIONS_TARGET=none,
+> ADAPTER_MESSAGES_TARGET=completions, ADAPTER_RESPONSES_TARGET=none`.
+
+### Как адаптер обрабатывает запрос
+
+1. **Разбор входа** — путь запроса определяет входной формат (`/v1/messages` →
+   `messages`, `/v1/chat/completions` → `completions`, `/v1/responses` →
+   `responses`); прочие пути — 404.
+2. **TARGET=auto** — выбор маршрута **только по кэшу результатов проб**:
+   - если бэкенд поддерживает входной формат как целевой (эндпоинт найден
+     пробой — HTTP 200) — **passthrough E→E** (тело как пришло, без
+     конвертации; приоритет — для `messages` в т.ч. `messages→messages`);
+   - иначе — реализованная конверсия из входного формата (сегодня это
+     только `messages→completions`), если бэкенд поддерживает целевой;
+   - иначе — HTTP 400 «no route» (адаптер не умеет нужного преобразования
+     и не знает поддерживающего бэкенда). **Сети в запросе auto не
+     делает** — только читает кэш проб (см. §1, §5).
+3. **TARGET=явный формат** (не `auto`) — passthrough E→E, если целевой
+   формат == входному и бэкенд его поддерживает; конверсия (только
+   реализованные пары) для остальных. Если бэкенд целевой формат **не
+   поддерживает** — HTTP 502 (reject до отправки запроса, `.err` не
+   пишется).
+4. **Нереализованные преобразования** (например `completions→messages`,
+   `responses→*`) — HTTP 400 «conversion … is not implemented»: реестр
+   реализованных пар в `backend_adapter/routing.py` (`IMPLEMENTED_CONVERSIONS`)
+   содержит только `messages→completions`.
+
+**Реализованные маршруты (v0.9.0):** конверсия `messages→completions`
+(существующий путь, конвертеры `convert.py`/`streaming.py`) + **passthrough
+E→E** — входной формат == целевому, бэкенд сам принимает этот формат
+(`completions→completions`, `messages→messages`, `responses→responses`); тело
+передаётся бэкенду как пришло (после подстановки резолвнутой модели),
+ответ/SSE-поток возвращаются клиенту **дословно**, в родном формате входа.
+Все прочие пары — в реестре НЕреализованные → ошибка агенту.
+
+> **В passthrough-режиме адаптер не валидирует поля запроса** (кроме
+> обязательного `model`) и не пересобирает тело — контракт формата
+> проверяет сам бэкенд. Учёт «Models in use», strict-проверка модели,
+> маппинг, токены usage и `.err`-протокол работают на всех трёх входах
+> одинаково. Использование токенов usage из ответа по формату выхода:
+> `completions` — `usage.prompt_tokens`/`completion_tokens` (как в
+> messages→completions), `responses`/`messages` —
+> `usage.input_tokens`/`output_tokens`; в passthrough-стриме usage
+> извлекается сканированием проходящих SSE-строк
+> (`response.completed` для responses, финальный usage-чанк для
+> completions).
+
+**В runtime-пул `/config` не входят** (см. §6): TARGET-переменные меняют
+топологию восприятия входных эндпоинтов и читаются на импорте, как
+бэкенды/порты.
+
+---
 
 | Переменная | Default | Описание |
 |---|---|---|
@@ -306,3 +388,7 @@ tariffs:
 | Health-check: `/healthz` `/health` `/live` — процесс жив; `/ready` — готов принимать трафик | — | `curl http://127.0.0.1:<ADAPTER_WEBUI_PORT>/healthz` (200 JSON; `/ready` — 200 при настроенных бэкендах, 503 пока кэш моделей пуст) |
 | Prometheus-метрики (текст text exposition 0.0.4, `GET /metrics`) | `ADAPTER_EXPORTER_ENABLE` | `1` (дефолт) → `0` для отключения |
 | Порт Prometheus-экспортёра | `ADAPTER_EXPORTER_PORT` | `9100` (дефолт) |
+| Принимать только `/v1/messages` (нулевая настройка; вход конвертируется в chat completions) | `ADAPTER_MESSAGES_TARGET` | `completions` (дефолт) |
+| Включить вход `/v1/chat/completions` ([OI]-клиент) | `ADAPTER_COMPLETIONS_TARGET` | `completions` (passthrough E→E на [OI]-бэкенд) — дефолт `none` (вход закрыт) |
+| Включить вход `/v1/responses` | `ADAPTER_RESPONSES_TARGET` | `responses` (passthrough E→E) — дефолт `none` (вход закрыт) |
+| Автомаршрут входа (по кэшу проб, без сети в запросе) | `ADAPTER_*_TARGET` | `auto` — passthrough E→E при поддержке бэкендом; иначе конверсия; иначе 400 «no route» (см. §1а) |
