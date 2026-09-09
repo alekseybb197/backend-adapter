@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.0
+"""[CC] <-> [OI]-backend adapter v0.9.1
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.0"
-__comment__ = "streaming SSE passthrough + keep-alive fix + timeout+retry+trace+causality + per-session logs + model probe/validation + unbuffered I/O + multi-backend config + clean _fetch_models + stream usage/input_tokens fix + domain package refactoring + HTTP log req_id + SSE response logging + unified response full logging flag + tool result debug logging + per-request OpenAI body JSON dump + JSON parts dir/session-file naming fix + tool_name in TOOL_RESULT log + merged ADAPTER_DEBUG_PARTS flag + WEBUI session viewer (artifact tree visualization) + shared web-server core + /session endpoint + / status page + console entry point + CI/PR scaffold + zero-config defaults: console-only logs (no disk dir), TOOLS_ERROR off, WEBUI status page on by default + distribution: standalone binaries (PyInstaller), build script, CI release workflow, one-line installer install.sh + runtime-config endpoint /config (live reads config.X) + incremental artifact-tree builds with checkpoints (.build_state.json) + pagination pages artefacts/pages/<N>/ + /session hash8 URL aliases + png/puml shortcuts + skill detection removed (skill.py, ADAPTER_SKILL_PATTERNS, skill_signal) + endpoint detection: smoke probe of backend API endpoints (ADAPTER_ENDPOINT_PROBE, YAML probe key) + background refresh of backend list (refresh by button, PRG redirect) + endpoint column HTTP-200-only + auto-start check on adapter start + used-models table on WEBUI status page (ADAPTER_MODEL_USAGE_ENABLE, per-model endpoint probe) + traffic counters (bytes sent/recv to backend) + logging reform: console always trimmed (ADAPTER_DEBUG_TRIM) / file always full, TAGS_FULL/TOOLS/TOOLS_ERROR removed, TAGS_OUT→ADAPTER_DEBUG_PARTS (dumps of all logged parts) + row-action icons 🔄⏪🗑 + graceful shutdown on Ctrl-C/SIGTERM (signal handler, repeat-signal force exit, listener shutdown, interrupt-safe usage flush) + Cost-cell fix in live usage polling (setHtml/innerHTML for cost_html) + .err incident protocol (unconditional session-*.err on final backend 4xx/5xx, full request+error, no TRIM) + header icons 🔃📋🔧/Статус 📊 + CI to project checks (mypy strict, requirements-dev) + [EXIT] Bye inside shutdown.graceful_shutdown + PID file into ADAPTER_DEBUG_LOGPATH + JSON probe results into LOGPATH (unconditional <backend>.models.json and <backend>.<model>.<endpoint>.json, overwrite each run) + input endpoint routing: /v1/chat/completions and /v1/responses inputs, ADAPTER_*_TARGET (messages/completions/responses/auto/none), routing.decide by probe cache (no network in request), passthrough E→E (verbatim body/SSE relay_sse), convert messages→completions only, 400/404/502 errors"
+__version__ = "0.9.1"
+__comment__ = "v0.9.0: streaming SSE passthrough + input endpoint routing (/v1/chat/completions, /v1/responses, ADAPTER_*_TARGET, passthrough E->E relay_sse) + .err incident protocol (unconditional session-*.err on final 4xx/5xx, full request+error, no TRIM) + JSON probe results into LOGPATH + [EXIT] Bye inside shutdown.graceful_shutdown + CI to project checks (mypy strict) | v0.9.1: WARN events ([USAGE_WARN] stream without usage, [WARN] First message is NOT system) written to session-*.err unconditionally (full request + report) + clean shutdown fix for PyInstaller binary on Ctrl-C (unified first-signal handler, outer KeyboardInterrupt guard) + CLAUDE.md deduped"
 
 import contextlib
 import os
@@ -190,16 +190,20 @@ if __name__ == "__main__":
     Adapter.daemon_threads = True  # type: ignore[attr-defined]
 
     # === Корректное завершение (Ctrl-C / SIGTERM) ===
-    # Дефолтный SIGINT кидает KeyboardInterrupt в главный поток — serve_forever
-    # выходит, finally выполняет вежливое завершение. Проблема была в том, что
-    # ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
+    # SIGINT и SIGTERM перехвачены на KeyboardInterrupt — serve_forever
+    # выходит, finally выполняет вежливое завершение. Проблема была в том,
+    # что ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
     # запись: Python кидает KI в главный поток, где бы тот ни был. Решение
     # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см. ADR):
-    # (1) SIGTERM перехватывается на KeyboardInterrupt (как Ctrl-C) — иначе
-    # systemd/launchd/kill убивают процесс мгновенно, без finally, и
-    # usage-хвост теряется; (2) как только начали завершение, SIGINT/SIGTERM
-    # переключаются на немедленный os._exit(130) — повторный сигнал не может
-    # прервать flush_table, а просто тихо завершает процесс.
+    # (1) первый сигнал обрабатывает ЕДИНЫЙ хэндлер _first_signal, который
+    # сразу переключает SIGINT/SIGTERM на немедленный os._exit(130) и лишь
+    # затем делает raise KeyboardInterrupt — повторный/задвоенный сигнал
+    # (PyInstaller bootloader форвардит Ctrl-C группе) не может уйти в
+    # непойманный KI в микроокне между raise и переустановкой хэндлеров в
+    # graceful_shutdown (v0.9.1, баг грязного выхода бинаря); (2) как только
+    # начали завершение, SIGINT/SIGTERM переключаются на немедленный
+    # os._exit(130) — повторный сигнал не может прервать flush_table, а
+    # просто тихо завершает процесс.
     from backend_adapter.shutdown import graceful_shutdown, install_signal_handlers
 
     install_signal_handlers(graceful=True)
@@ -221,22 +225,34 @@ if __name__ == "__main__":
         except BaseException:  # noqa: BLE001 — завершение не должно падать
             pass
 
-    with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
-        finally:
-            # Переключение сигналов + остановка слушателей + фоновой проверки
-            # + финальный flush usage-таблицы + печать «[EXIT] Bye»
-            # (см. shutdown.graceful_shutdown: остановки по отдельности глотают
-            # ошибки, процедуру прервать нельзя — повторный сигнал уже =
-            # немедленный os._exit(130); маркер «[EXIT] Bye» печатает сам
-            # graceful_shutdown — контракт завершения живёт в shutdown.py).
-            graceful_shutdown(
-                httpd,
-                webui,
-                exporter,
-                ADAPTER_EXPORTER_ENABLE,
-                _finish,
-            )
+    try:
+        with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass  # Ctrl-C / SIGTERM: ниже — вежливое завершение
+            finally:
+                # Переключение сигналов + остановка слушателей + фоновой проверки
+                # + финальный flush usage-таблицы + печать «[EXIT] Bye»
+                # (см. shutdown.graceful_shutdown: остановки по отдельности глотают
+                # ошибки, процедуру прервать нельзя — повторный сигнал уже =
+                # немедленный os._exit(130); маркер «[EXIT] Bye» печатает сам
+                # graceful_shutdown — контракт завершения живёт в shutdown.py).
+                graceful_shutdown(
+                    httpd,
+                    webui,
+                    exporter,
+                    ADAPTER_EXPORTER_ENABLE,
+                    _finish,
+                )
+    except KeyboardInterrupt:
+        # Внешний предохранитель (v0.9.1): если KeyboardInterrupt всё же дошёл
+        # до этой точки (не должен — единый хэндлер _first_signal с первого
+        # сигнала переключает оба сигнала на _force_exit, повторный умирает
+        # тихо os._exit(130)), выходим тихо, без traceback. Это последний
+        # рубеж против «[EXIT] Bye» + traceback + [PYI-7290] на
+        # PyInstaller-бинаре: контракт повторного сигнала (130) сохранён —
+        # повторный сигнал и так завершил бы процесс, здесь завершаем сами.
+        from backend_adapter.shutdown import os_exit
+
+        os_exit(130)

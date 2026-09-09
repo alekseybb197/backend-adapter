@@ -5,14 +5,15 @@ webui_config_api.py — эндпойнт "/config" общего веб-серв�
 Контракт: runtime-переключение debug-записи и поведения НОВЫХ запросов без
 перезапуска адаптера. Пул переменных (RUNTIME_CONFIG_POOL в config.py) —
 объём записи на диск (логи/трейсы/*.parts дампы), маскировка секретов
-(санитайзер), рубильники стриминга и строгая валидация моделей. Сеть/бэкенды/
+(санитайзер), рубильники стриминга, строгая валидация моделей и TARGET-
+маршрутизация входных эндпоинтов (выбор целевого формата входа). Сеть/бэкенды/
 модели/порты/точка хранения не входят — их смена на лету требует пересоздания
 слушателей/переинициализации и сорвала бы активные соединения.
 
 Эндпойнт:
-  GET /config → HTML-форма с текущими значениями пула (9 полей: 6 bool
-                checkbox + 3 int input; строковых переменных в пуле нет —
-                селекторы подробности удалены реформой логирования v0.8.6)
+  GET /config → HTML-форма с текущими значениями пула (12 полей: 6 bool
+                checkbox + 3 int input + 3 select для TARGET-переменных
+                маршрутизации входов)
   POST /config → application/x-www-form-urlencoded или JSON, применяет валидные
                  значения через config.set_runtime_config(**...), сверяет ответ
                  с посланным, редирект на GET с flash-сообщением об успехе
@@ -38,9 +39,9 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
     applied — что применилось при последнем POST (для flash-сообщения):
               {"ok": [...], "ignored": [...]}
     """
-    # Разбиваем поля по типам для правильного рендера. Строковых полей нет:
-    # пул — только bool/int скаляры (реформа логирования v0.8.6 удалила
-    # прежние селекторы подробности).
+    # Разбиваем поля по типам для правильного рендера: bool-чекбоксы,
+    # int-инпуты и enum-поля (строки с фиксированным доменом значений —
+    # TARGET-переменные маршрутизации входов, рендерятся выпадающим списком).
     bool_fields = [
         "ADAPTER_DEBUG",
         "ADAPTER_DEBUG_PARTS",
@@ -54,6 +55,14 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_TRACE_REASONING_MAX_CHARS",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
     ]
+    # enum-поля с допустимыми значениями: {имя: (домен, «порядок в форме» не
+    # нужен)}. Домен — config.TARGET_ALLOWED_VALUES (для трёх входов общий:
+    # значение сообщает и имя входа — label-строкой).
+    enum_fields = {
+        "ADAPTER_MESSAGES_TARGET": config.TARGET_ALLOWED_VALUES,
+        "ADAPTER_COMPLETIONS_TARGET": config.TARGET_ALLOWED_VALUES,
+        "ADAPTER_RESPONSES_TARGET": config.TARGET_ALLOWED_VALUES,
+    }
 
     # Описания полей для подсказок
     field_descriptions = {
@@ -66,6 +75,12 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_DEBUG_TRIM": "Порог обрезки консольного вывода (символы, 0=без обрезки; файл — всегда полный)",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "Макс. символов reasoning в трейсе (0=без ограничений)",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "Макс. символов tool-полей в трейсе (0=без ограничений)",
+        # TARGET-маршрутизация входов (см. docs/routing.md): значение задаёт,
+        # что делать с запросом на входе. Цель = сам вход → passthrough E→E;
+        # auto — по кэшу проб, без сети; none — вход закрыт (404).
+        "ADAPTER_MESSAGES_TARGET": "Куда направлять /v1/messages (Anthropic): формат-цель (messages → passthrough E→E), auto, none — вход закрыт (404)",
+        "ADAPTER_COMPLETIONS_TARGET": "Куда направлять /v1/chat/completions ([OI]): completions → passthrough E→E, auto, none — вход закрыт (404)",
+        "ADAPTER_RESPONSES_TARGET": "Куда направлять /v1/responses: responses → passthrough E→E, auto, none — вход закрыт (404)",
     }
 
     rows = []
@@ -100,6 +115,24 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         <td><input type="number" id="{name}" name="{name}" value="{value}" min="0" style="width: 120px"></td>
         <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
+      </tr>""")
+
+    for name, allowed in enum_fields.items():
+        value = current_values.get(name, "none")
+        desc = field_descriptions.get(name, "")
+        # Выпадающий список допустимых значений; текущее — selected. select
+        # шлёт одно значение (строку) — в отличие от bool-пары checkbox+hidden,
+        # отдельный «сосед» не нужен: каждое значение выбирается явно.
+        options = "".join(
+            f'<option value="{opt}"{" selected" if opt == value else ""}>{opt}</option>'
+            for opt in allowed
+        )
+        rows.append(f"""
+      <tr>
+        <td><label for="{name}">{html.escape(name)}</label></td>
+        <td><select id="{name}" name="{name}" style="min-width: 160px">{options}</select></td>
+        <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
+        <td style="color:#999; font-size: 12px">текущее: {html.escape(str(value))}</td>
       </tr>""")
 
     # Flash-сообщение о применённых изменениях
@@ -215,17 +248,41 @@ class ConfigEndpoint(webserver.Endpoint):
                 val = values[-1]
                 # hidden-ключ "_NAME" → имя "NAME"
                 data_key = key[1:] if key.startswith("_") else key
-                # Преобразуем типы: "1"/"true"/"on" → True, "0"/"false" → False
-                if val.lower() in ("1", "true", "on", "yes"):
-                    data[data_key] = True
-                elif val.lower() in ("0", "false", "off", "no"):
-                    data[data_key] = False
-                else:
-                    # Пробуем int
+                # Разбор по ОЖИДАЕМОМУ типу ключа (config._RUNTIME_CONFIG_TYPES),
+                # а не по значению: bool-эвристика для int-поля крадёт "0" →
+                # False (set_runtime_config отклоняет bool для int — поле
+                # уходило в «Игнорировано»). Тип смотрим по data_key (после
+                # снятия "_"-префикса — hidden-«сосед» bool-поля).
+                expected = config._RUNTIME_CONFIG_TYPES.get(data_key)
+                if expected is int:
+                    # int-поля (type="number"): значение числами 0/3000/... —
+                    # строго int(), без bool-эвристики ("0" → 0, не False).
                     try:
                         data[data_key] = int(val)
                     except ValueError:
                         data[data_key] = val
+                elif expected is bool:
+                    # bool-поля: checkbox value=1 + hidden "_NAME"=1/0.
+                    if val.lower() in ("1", "true", "on", "yes"):
+                        data[data_key] = True
+                    elif val.lower() in ("0", "false", "off", "no"):
+                        data[data_key] = False
+                    else:
+                        data[data_key] = val
+                else:
+                    # enum-select (TARGET) и посторонние ключи: select шлёт
+                    # строку из домена — как есть. Прежняя эвристика
+                    # (bool-слова → int → строка) сохраняется ТОЛЬКО для
+                    # ключей вне пула (их всё равно отклонит set_runtime_config).
+                    if val.lower() in ("1", "true", "on", "yes"):
+                        data[data_key] = True
+                    elif val.lower() in ("0", "false", "off", "no"):
+                        data[data_key] = False
+                    else:
+                        try:
+                            data[data_key] = int(val)
+                        except ValueError:
+                            data[data_key] = val
 
         # Применяем через set_runtime_config
         result = config.set_runtime_config(**data)
@@ -240,6 +297,14 @@ class ConfigEndpoint(webserver.Endpoint):
                 type_ok = (expected_type is bool and isinstance(value, bool)) or (
                     expected_type is int and isinstance(value, int) and not isinstance(value, bool)
                 )
+                # enum-поле (TARGET): value — строка из допустимого набора.
+                if (
+                    isinstance(expected_type, tuple)
+                    and expected_type[0] == "enum"
+                    and isinstance(value, str)
+                    and value in expected_type[1]
+                ):
+                    type_ok = True
                 if type_ok and result.get(key) == value:
                     applied_ok.append(key)
                 else:

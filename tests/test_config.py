@@ -1057,11 +1057,79 @@ class TestRuntimeConfig:
         assert result["ADAPTER_DEBUG_TRIM"] == 1000
         # Возвращает актуальные значения (могли отличаться от посланных, если что-то отклонилось)
 
-    def test_pool_not_extended(self):
-        """Return value has exactly the RUNTIME_CONFIG_POOL keys (9)."""
+    def test_pool_keys_match_pool(self):
+        """Return value has exactly the RUNTIME_CONFIG_POOL keys.
+
+        v0.9.1: пул расширен TARGET-переменными маршрутизации входов
+        (ADAPTER_*_TARGET) — их значения (строки из фиксированного домена)
+        применяются на лету, как и bool/int. Состав пула — единый источник
+        RUNTIME_CONFIG_POOL: тест фиксирует, что get/set возвращают ровно его.
+        """
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
-        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 9
+        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
+        # Три TARGET-переменные входят в пул со значениями-дефолтами env.
+        assert result["ADAPTER_MESSAGES_TARGET"] == "completions"
+        assert result["ADAPTER_COMPLETIONS_TARGET"] == "none"
+        assert result["ADAPTER_RESPONSES_TARGET"] == "none"
+
+    # -- enum-поля пула: TARGET-маршрутизация входов (v0.9.1) -------------
+
+    def test_enum_target_applied(self):
+        """TARGET-значение из домена применяется и видно в get_runtime_config()."""
+        result = self.config.set_runtime_config(
+            ADAPTER_MESSAGES_TARGET="responses",
+            ADAPTER_COMPLETIONS_TARGET="auto",
+        )
+        assert result["ADAPTER_MESSAGES_TARGET"] == "responses"
+        assert result["ADAPTER_COMPLETIONS_TARGET"] == "auto"
+        assert self.config.ADAPTER_MESSAGES_TARGET == "responses"
+        assert self.config.ADAPTER_COMPLETIONS_TARGET == "auto"
+        current = self.config.get_runtime_config()
+        assert current["ADAPTER_MESSAGES_TARGET"] == "responses"
+
+    def test_enum_target_invalid_ignored(self):
+        """Невалидная строка для TARGET игнорируется; соседние ключи применяются."""
+        before = self.config.ADAPTER_COMPLETIONS_TARGET
+        result = self.config.set_runtime_config(
+            ADAPTER_COMPLETIONS_TARGET="bogus",  # не из домена
+            ADAPTER_DEBUG=True,  # валидный соседний ключ
+        )
+        assert result["ADAPTER_COMPLETIONS_TARGET"] == before  # не изменилось
+        assert self.config.ADAPTER_COMPLETIONS_TARGET == before
+        assert result["ADAPTER_DEBUG"] is True  # применилось
+
+    def test_enum_target_rejects_non_string(self):
+        """TARGET принимает только строку из домена: bool/int игнорируются."""
+        before = self.config.ADAPTER_RESPONSES_TARGET
+        result = self.config.set_runtime_config(
+            ADAPTER_RESPONSES_TARGET=True,  # bool
+            ADAPTER_MESSAGES_TARGET=1,  # int
+        )
+        assert result["ADAPTER_RESPONSES_TARGET"] == before == "none"
+        assert result["ADAPTER_MESSAGES_TARGET"] == "completions"  # дефолт не тронут
+
+    def test_target_change_seen_by_routing(self):
+        """Смена TARGET через set_runtime_config видна маршрутизатору сразу.
+
+        routing.target_for_input читает config.ADAPTER_*_TARGET на каждый вызов
+        (атрибут модуля, не снимок импорта) — live-механизм пула (см.
+        routing.py). Прямая проверка: после set_runtime_config маршрутизатор
+        решает по НОВОМУ значению.
+        """
+        from backend_adapter import routing
+
+        # Дефолт: messages → completions (конверсия); вход закрыт = none.
+        assert routing.target_for_input("messages") == "completions"
+        assert routing.target_for_input("completions") == "none"
+
+        # Меняем на лету: messages → passthrough messages→messages.
+        self.config.set_runtime_config(ADAPTER_MESSAGES_TARGET="messages")
+        assert routing.target_for_input("messages") == "messages"
+
+        # Меняем на лету: вход /v1/chat/completions открыт (passthrough E→E).
+        self.config.set_runtime_config(ADAPTER_COMPLETIONS_TARGET="completions")
+        assert routing.target_for_input("completions") == "completions"
 
 
 class TestEndpointProbe:

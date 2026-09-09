@@ -115,10 +115,26 @@ RUNTIME_CONFIG_POOL = (
     "ADAPTER_STRICT_MODELS",
     "ADAPTER_TRACE_REASONING_MAX_CHARS",
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
+    # TARGET-маршрутизация входов (v0.9.1): целевой формат/режим каждого из
+    # трёх входных эндпоинтов. Значение применяется на следующем же запросе
+    # (routing.target_for_input читает config.ADAPTER_*_TARGET на каждый
+    # вызов) и влияет только на НОВЫЕ запросы, не рвя активные соединения —
+    # потому входит в пул, хотя меняет «топологию восприятия» входов (см.
+    # блок «РОУТИНГ ВХОДНЫХ ЭНДПОИНТОВ» ниже: там же объявления из env).
+    "ADAPTER_MESSAGES_TARGET",
+    "ADAPTER_COMPLETIONS_TARGET",
+    "ADAPTER_RESPONSES_TARGET",
 )
 
-# Типы для валидации входа /config (POST) — bool или int, остальное
-# отклоняем (строковых переменных в пуле больше нет).
+# Допустимые значения TARGET-переменных (значение → целевой формат
+# messages|completions|responses, автовыбор auto или запрет none).
+# Единый источник: объявления выше и _parse_target читают этот кортеж,
+# routing.decide валидирует значение assert-ом по нему (routing.py).
+TARGET_ALLOWED_VALUES = ("messages", "completions", "responses", "auto", "none")
+
+# Типы для валидации входа /config (POST): bool, int или enum-домен — кортеж
+# (str, допустимые_значения) для строковых полей с фиксированным набором
+# значений (в пуле это три TARGET-переменные). Остальное отклоняем.
 _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
     "ADAPTER_DEBUG_PARTS": bool,
@@ -129,6 +145,9 @@ _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_STRICT_MODELS": bool,
     "ADAPTER_TRACE_REASONING_MAX_CHARS": int,
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": int,
+    "ADAPTER_MESSAGES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
+    "ADAPTER_COMPLETIONS_TARGET": ("enum", TARGET_ALLOWED_VALUES),
+    "ADAPTER_RESPONSES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
 }
 
 
@@ -144,11 +163,11 @@ def set_runtime_config(**kwargs) -> dict:
     _MODEL_TO_BACKEND (см. refresh_models() ниже) — переприсваивание
     модульных глобалов через `global`. Для _AVAILABLE_MODELS/_MODEL_TO_BACKEND
     там используется МУТАЦИЯ НА МЕСТЕ (.clear()+.update()), т.к. это словари
-    и их импортируют по ссылке в других модулях; здесь же пул — bool/int
-    скаляры, которые в Python в принципе нельзя мутировать на месте, поэтому
-    единственный рабочий вариант — переприсваивание через `global` ЗДЕСЬ,
-    в сочетании с тем, что все читатели переведены на live-доступ `config.X`
-    (см. комментарий над RUNTIME_CONFIG_POOL).
+    и их импортируют по ссылке в других модулях; здесь же пул — bool/int/
+    str-скаляры, которые в Python в принципе нельзя мутировать на месте,
+    поэтому единственный рабочий вариант — переприсваивание через `global`
+    ЗДЕСЬ, в сочетании с тем, что все читатели переведены на live-доступ
+    `config.X` (см. комментарий над RUNTIME_CONFIG_POOL).
 
     Неизвестные ключи и ключи вне пула ИГНОРИРУЮТСЯ МОЛЧА (не 400 — иначе
     один опечатанный лишний ключ в теле запроса откатил бы все остальные
@@ -162,6 +181,7 @@ def set_runtime_config(**kwargs) -> dict:
     global ADAPTER_SENSITIVE_LOGGING_ENABLE, ADAPTER_STREAMING_ENABLE
     global ADAPTER_STREAM_INCLUDE_USAGE, ADAPTER_STRICT_MODELS
     global ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
+    global ADAPTER_MESSAGES_TARGET, ADAPTER_COMPLETIONS_TARGET, ADAPTER_RESPONSES_TARGET
 
     for name, value in kwargs.items():
         if name not in RUNTIME_CONFIG_POOL:
@@ -172,6 +192,14 @@ def set_runtime_config(**kwargs) -> dict:
         if expected is bool and not isinstance(value, bool):
             continue
         if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
+            continue
+        # enum-поле: значение — строка из допустимого набора (TARGET).
+        # Невалидная строка (или не-строка) игнорируется, как неверный тип.
+        if (
+            isinstance(expected, tuple)
+            and expected[0] == "enum"
+            and (not isinstance(value, str) or value not in expected[1])
+        ):
             continue
         globals()[name] = value
 
@@ -297,11 +325,13 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
 # Zero-config дефолты описывают текущие возможности конвертера:
 # MESSAGES=completions (принимается только /v1/messages, конвертация в chat
 # completions), COMPLETIONS=none, RESPONSES=none.
-# В RUNTIME_CONFIG_POOL сознательно НЕ входят: значения строковые (пул —
-# только bool/int) и меняют, какие входные пути «живы» (топология
-# восприятия эндпоинтов агентом) — читаются на импорте, как и остальная
-# конфигурация сети/бэкендов. Невалидное/пустое значение НЕ роняет старт:
-# консольный [WARN] + трактовка как 'none' (безопасное выключение входа).
+# Входят в RUNTIME_CONFIG_POOL (см. выше): значение меняется на лету через
+# /config (routing.target_for_input читает config.ADAPTER_*_TARGET на каждый
+# запрос) и влияет только на НОВЫЕ запросы, не рвя активные соединения.
+# Допустимый набор значений — единая константа TARGET_ALLOWED_VALUES в блоке
+# пула (тип ("enum", …) в _RUNTIME_CONFIG_TYPES). Невалидное/пустое значение
+# env при импорте НЕ роняет старт: консольный [WARN] + трактовка как 'none'
+# (безопасное выключение входа).
 
 _TARGET_FORMATS = ("messages", "completions", "responses")
 
@@ -314,7 +344,7 @@ def _parse_target(value: str, var_name: str) -> str:
     консольный [WARN], значение трактуется как 'none' — вход выключен
     (безопасный дефолт)."""
     raw = (value or "").strip().lower()
-    if raw in _TARGET_FORMATS or raw in ("auto", "none"):
+    if raw in TARGET_ALLOWED_VALUES:
         return raw
     if value and value.strip():
         print(
@@ -324,6 +354,9 @@ def _parse_target(value: str, var_name: str) -> str:
     return "none"
 
 
+# Объявления из env (импорт): значения попадают в модульные глобалы, которые
+# входят в RUNTIME_CONFIG_POOL и могут быть переприсвоены на лету через /config
+# (set_runtime_config). Дефолты — zero-config поведение (см. комментарий выше).
 ADAPTER_MESSAGES_TARGET = _parse_target(
     os.environ.get("ADAPTER_MESSAGES_TARGET", "completions"), "ADAPTER_MESSAGES_TARGET"
 )

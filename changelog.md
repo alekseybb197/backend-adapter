@@ -1,5 +1,209 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+
+## v0.9.1 — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей, TARGET-переменные на /config, фикс «0»-int в POST /config
+
+### 2026-09-09 Саммари ветки v0.9.1 (6 коммитов между merge PR #13 (v0.9.0) и снятием WIP)
+
+**Цель:** финальная публикация группы работ v0.9.1 — единая запись о том,
+что вошло в ветку между v0.9.0 и снятием WIP (детали каждой работы — в
+подзаписях ниже).
+
+**Решение:**
+- **WARN-события в .err-файл сессии** — рефактор низовых хелперов
+  `.err`-канала в `session_log.py` + новая `write_warn_file(...)`; в
+  безусловный `.err` сессии пишутся два события: `[WARN] First message is
+  NOT system` (server.py, при нарушении инварианта «первое сообщение —
+  system») и `[USAGE_WARN] Backend не вернул usage в стриме` (streaming.py),
+  с полным запросом и репортом, без TRIM;
+- **фикс грязного выхода по Ctrl-C** (PyInstaller-бинарь) — `shutdown.py`:
+  единый хэндлер `_first_signal` на SIGINT/SIGTERM (сначала переключает оба
+  на `_force_exit`, затем `raise KeyboardInterrupt`), внешний предохранитель
+  в `backend-adapter.py`; сборка `scripts/build-binaries.sh` с
+  `--bootloader-ignore-signals`; тесты `test_shutdown.py` + верификация на
+  пересобранном бинаре;
+- **CLAUDE.md без дублей** — «Ключевые факты»/«Архитектура» сжаты вдвое
+  (WEBUI-дубли убраны, добавлен v0.9.1-блок про Ctrl-C/SIGTERM);
+- **docs/routing.md** — единый документ маршрутизации входов (принципы +
+  реализованное + перспективы), environment.md §1а и install.md §5.8 сжаты
+  до таблицы/рецептов со ссылкой;
+- **TARGET-переменные на /config — выпадающие списки** — три
+  `ADAPTER_*_TARGET` в runtime-пул (пул 9 → 12) с типом-доменом
+  `("enum", TARGET_ALLOWED_VALUES)`, select-рендер на странице `/config`,
+  применение на лету (routing читает конфиг на каждый запрос);
+- **фикс POST /config** — типизированный разбор form-urlencoded по
+  `_RUNTIME_CONFIG_TYPES`: int-поле со значением «0» больше не крадётся
+  bool-эвристикой и не уходит в «Игнорировано».
+
+**Следствия:** версия v0.9.1 публикуется (снятие WIP) — диагностика
+нарушений инвариантов (не-system первым, отсутствие usage в стриме) видна
+в безусловном `.err`-канале; бинарь чисто завершается по Ctrl-C без
+traceback; маршрутизация входов управляется на лету из WEBUI. Рабочее
+дерево чистое — ветка готова к проверке и отправке в удалённый репозиторий.
+
+### WARN-события в .err-файл сессии (v0.9.1)
+
+**Цель:** два диагностических предупреждения, которые раньше уходили только в
+консоль (с обрезкой `ADAPTER_DEBUG_TRIM`) и в гейтнутый `session-*.log`
+(`ADAPTER_DEBUG_ENABLE=1`), наблюдать в **безусловном** канале `.err` — с
+полным блоком запроса и репортом, вне ENABLE/PARTS/TRIM (как v0.9.0-протокол
+инцидентов).
+
+**Решение:**
+- `session_log.py`: рефактор низовых хелперов `.err`-канала (открытие файла,
+  decode, ts, санитайзер по живому `ADAPTER_SENSITIVE_LOGGING_ENABLE`, запись
+  под `_err_lock`, «никогда не бросает») + новая
+  `write_warn_file(session_id, req_id, *, backend_url, model, out_body,
+  warn_body)` — WARNING-блок в **тот же** `session-<ts>-<safe8>.err` сессии
+  (общий `_session_file_ts`), шапка-метаданные **без `final_status`**
+  (событие бывает на успешном 200), полный `[REQUEST]` + текст, без TRIM;
+- `[WARN] First message is NOT system: <role>` (server.py) — пишется один раз
+  на запрос сразу после построения `out_body`/`backend_url` (точка покрывает
+  stream- и non-stream-ветки конвертации), роль первого сообщения
+  захватывается в точке проверки инварианта;
+- `[USAGE_WARN] Backend не вернул usage в стриме…` (streaming.py) —
+  `stream_openai_to_anthropic` принимает опциональные `out_body`/`backend_url`
+  и пишет WARN под охраной `if out_body is not None:` — прямые вызовы без
+  параметров (тесты/внешние пользователи) записи не делают; server.do_POST
+  пробрасывает построенное тело;
+- один запрос может нести в одном `.err` и WARNING-, и ERROR-блок (инвариант
+  нарушен И запрос позже упал в 4xx/5xx) — блоки самоделимитированы
+  (отражено в docs/logging.md);
+- вне охвата (сознательно): не-стрим «бэкенд без usage» и passthrough-ветки
+  без usage `.err` НЕ пишут — в канал идут ровно два указанных события.
+
+### Фикс грязного выхода по Ctrl-C (PyInstaller-бинарь, v0.9.1)
+
+**Цель:** на PyInstaller-бинаре Ctrl-C давал «[EXIT] Bye», затем traceback
+(KeyboardInterrupt в serve_forever, «During handling of the above
+exception…») и `[PYI-7290:ERROR] Failed to execute script` + ненулевой код
+возврата. На python-исходнике не воспроизводилось.
+
+**Диагноз.** Onefile-бинарь: bootloader + дочерний python в одной группе;
+spec без `--bootloader-ignore-signals` → bootloader форвардит Ctrl-C
+дополнительно. SIGINT доставлялся дважды/со смещением: второй KI в
+микроокне между первым `raise KeyboardInterrupt` (из serve_forever) и
+переустановкой хэндлеров `install_signal_handlers(graceful=False)` в
+`graceful_shutdown` уходил непойманным → traceback, bootloader печатал
+`[PYI-7290]`, rc != 0.
+
+**Решение:**
+- `shutdown.py`: ПЕРВЫЙ сигнал обрабатывает **единый хэндлер** `_first_signal`
+  (SIGINT **и** SIGTERM) — СНАЧАЛА переключает оба сигнала на `_force_exit`
+  (`os._exit(130)`), ЗАТЕМ делает `raise KeyboardInterrupt`. Микроокно
+  «второй сигнал до переустановки» исчезает: повторный/задвоенный сигнал
+  умирает тихо 130 на любой следующей границе байткода;
+- `backend-adapter.py`: внешний предохранитель вокруг главного цикла —
+  `except KeyboardInterrupt: os_exit(130)` (если KI всё же дошёл — тихий
+  выход без traceback, контракт повторного сигнала сохранён);
+- `scripts/build-binaries.sh`: сборка с `--bootloader-ignore-signals`
+  (bootloader не форвардит сигналы дочернему python — устраняет двойную
+  доставку на будущих бинарях; бинарь пересобран и проверен);
+- тесты `test_shutdown.py`: единый хэндлер на оба сигнала, порядок
+  «переключил до raise» в суба-процессе (повторный kill → 130 без ALIVE),
+  SIGTERM первым — тоже вежливый KI, «второй сигнал в микроокне finally»
+  → тихо 130 без traceback (воспроизведение бага);
+- верификация на пересобранном `dist/binaries/macos-arm64/backend-adapter`
+  в pty: одиночный Ctrl-C → rc 0, `[EXIT] Bye`, без traceback; двойной
+  Ctrl-C → тихо 130, без traceback.
+
+### CLAUDE.md без дублей (v0.9.1)
+
+**Цель:** секции «Ключевые факты» и «Архитектура» дублировали друг друга и
+docs (в первую очередь WEBUI-описание в двух местах) — сократить объём
+примерно вдвое, оставив критичное для агента, не продублированное в docs.
+
+**Решение:** «Ключевые факты» сжаты в 5 буллетов (точка входа/версия, layout
+со ссылкой §2 architecture.md вместо счётчика модулей, Python 3.10+/PyYAML,
+список docs с однострочной областью, рабочие копии
+`adapter.env`/`adapter.yaml`); WEBUI/лог-детали переехали в «Архитектуру»
+одной строкой (поведение страниц — docs/webui.md, каналы — docs/logging.md);
+добавлен блок «Завершение по Ctrl-C/SIGTERM» (v0.9.1) — единственное
+v0.9.1-поведение, специфичное для CLAUDE.md. «Цели проекта», «Принципы»,
+«Команды» и «Проверка перед коммитом» не тронуты.
+
+### docs/routing.md — единый документ маршрутизации входов (v0.9.1)
+
+**Цель:** описание настройки маршрутизации входных эндпоинтов (TARGET) было
+размазано по четырём файлам (environment.md §1а — самый полный, install.md
+§5.8/§5.9, architecture.md §4.2, README) и не разделяло «реализовано сейчас»
+и «возможные варианты будущих версий».
+
+**Решение:** новый `docs/routing.md` — канон: принципы настройки (префикс =
+вход, none = 404, auto — выбор по кэшу проб без сети, реестр реализованных
+пар, passthrough E→E, доступность бэкенда не влияет), матрица «вход ×
+значение TARGET» (реализованное: конверсия `messages→completions`,
+passthrough E→E `completions→completions`/`responses→responses`, auto-выбор;
+нереализованные пары → 400/404) и раздел «варианты следующих версий» с явной
+пометкой «не реализовано» (доп. пары конверсий, расширение auto, отбор по
+доступности — сознательно вне явного режима). `environment.md` §1а и
+`install.md` §5.8 сжаты (шаги/семантика ушли в routing.md, оставлены таблица
+и рецепты со ссылкой); `architecture.md` §4.2 и README получили ссылку.
+Код не менялся.
+
+### TARGET-переменные на странице /config — выпадающие списки (v0.9.1)
+
+**Цель:** пользователь: «у нас есть слово-действие, предписывающее роутинг
+(формат-цель), запрещающее (`none`), оставляющее решение адаптеру (`auto`), но
+нет слова „ничего не менять" — вместо него применяется указание на тот же
+роутинг (например `ADAPTER_MESSAGES_TARGET=messages` = passthrough E→E).
+Осталось задать опции выбора роутинга на странице настроек WEBUI — путь
+роутинга должен для каждой переменной предлагаться в выпадающем списке».
+Ранее TARGET-переменные сознательно не входили в runtime-пул `/config`
+(«значения строковые, пул — только bool/int; читаются на импорте»).
+
+**Решение:**
+- `config.py`: единая константа домена `TARGET_ALLOWED_VALUES`
+  (`messages | completions | responses | auto | none`), на неё переведён
+  `_parse_target`; три `ADAPTER_*_TARGET` добавлены в `RUNTIME_CONFIG_POOL`
+  (пул 9 → 12) с типом-доменом `("enum", TARGET_ALLOWED_VALUES)` в
+  `_RUNTIME_CONFIG_TYPES`; `set_runtime_config` принимает строки из домена
+  (невалидная строка/не-строка игнорируется, как неверный тип), имена —
+  в `global`;
+- `routing.py`: assert в `target_for_input` — по `config.TARGET_ALLOWED_VALUES`
+  (единый источник вместо литерала);
+- `webui_config_api.py`: три TARGET-поля рендерятся на `/config` выпадающими
+  списками (первый `<select>` на страницах WEBUI) с текущим значением
+  selected; POST-сверка понимает enum-поля;
+- смена значения применяется на лету и видна маршрутизатору немедленно:
+  `routing.target_for_input` читает `config.ADAPTER_*_TARGET` на каждый запрос
+  (live-доступ — паттерн пула, код routing/server не менялся);
+- тесты: enum-применение/отклонение в `test_config.py` (`TestRuntimeConfig`,
+  включая live-эффект через `routing.target_for_input`), select-рендер +
+  HTTP POST select (form/JSON, валид/невалид) в `test_webui_config_api.py`;
+- доки: `environment.md` §1а («в runtime-пул не входят» → «входят»), §6
+  (категория **enum (3)**, «строковых нет» уточнено, TARGET убран из «нельзя
+  на лету»), сводная таблица (9 → 12); `webui.md` §5 (пул 12, enum-категория,
+  строка маршрута `/config`); `routing.md` — вводный (runtime-выбор на
+  `/config`) + принцип «„ничего не менять" = passthrough на себя» (п. 5).
+
+### Фикс POST /config: int-поле со значением «0» больше не уходит в «Игнорировано» (v0.9.1)
+
+**Цель:** при применении формы `/config` целиком поля
+`ADAPTER_TRACE_REASONING_MAX_CHARS` и `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`
+(дефолт 0) показывались в «Игнорировано (неверный тип/неизвестный ключ)».
+
+**Диагноз.** Браузер шлёт int-поля (`type="number"`) строками; значение «0»
+перехватывалось bool-эвристикой парсера form-urlencoded (`"0"` → `False`)
+**до** попытки разобрать int, а `set_runtime_config` строго отклоняет bool
+для int-поля (`not isinstance(value, bool)`) → «Игнорировано». Поля с
+ненулевыми значениями (например `ADAPTER_DEBUG_TRIM=3000`) не матчили
+bool-слова и проходили по int-ветке — поэтому в «Игнорировано» были ровно
+два TRACE-лимита. Баг pre-existing (эвристика была до select-фичи).
+
+**Решение:**
+- `webui_config_api.py`: разбор form-urlencoded стал **типизированным** — по
+  ожидаемому типу ключа из `config._RUNTIME_CONFIG_TYPES` (после снятия
+  `"_"`-префикса hidden-«соседа»): int-поля разбираются строго `int()`
+  (без bool-эвристики, `"0"` → `0`); bool-поля — прежняя эвристика
+  checkbox-значений `1/0`; enum-select (TARGET) и посторонние ключи — как
+  было. Идиома bool-пары checkbox+hidden и контракты int/select не меняются;
+  JSON-ветка POST не затрагивается;
+- тест: регресс-тест в `test_webui_config_api.py` — POST form-urlencoded
+  с `0` для трёх int-полей (`ADAPTER_TRACE_REASONING_MAX_CHARS`,
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`, `ADAPTER_DEBUG_TRIM`) применяется,
+  фразы «Игнорировано» в ответе нет.
+
 ## v0.9.0 — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH
 
 ### 2026-09-09 Саммари ветки v0.9.0 (12 коммитов между merge PR #12 (v0.8.6) и снятием WIP)

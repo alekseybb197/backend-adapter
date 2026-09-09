@@ -12,7 +12,7 @@ import uuid
 from . import config
 from .config import _cap
 from .logger import _dr
-from .session_log import write_debug_json
+from .session_log import write_debug_json, write_warn_file
 from .tracer import _register_tool_use, _trace
 
 
@@ -26,7 +26,15 @@ def _sse_write(wfile, event: str, data: dict) -> None:
 
 
 def stream_openai_to_anthropic(
-    resp, wfile, model, session_id, req_id, approx_prompt_chars=0, bytes_sink=None
+    resp,
+    wfile,
+    model,
+    session_id,
+    req_id,
+    approx_prompt_chars=0,
+    bytes_sink=None,
+    out_body=None,
+    backend_url="",
 ):
     """Построчно читает SSE-ответ backend'а (OpenAI chat.completions
     streaming формат: строки ``data: {...}``, завершается ``data: [DONE]``)
@@ -48,7 +56,16 @@ def stream_openai_to_anthropic(
     значения), чтобы не менять пару (stop_reason, usage), которую
     распаковывают вызывающие и тесты. Сервер больше не использует его для
     учёта (учёт переведён на токены usage), параметр сохранён как публичная
-    опция."""
+    опция.
+
+    ``out_body``/``backend_url`` (v0.9.1, опционально) — полное тело запроса
+    к бэкенду и его URL, которые вызывающий код (server.do_POST) передаёт,
+    когда они уже построены. Нужны только для WARN-записи: если бэкенд не
+    вернул usage и input_tokens оценён эвристически — событие [USAGE_WARN]
+    пишется в .err-файл сессии (write_warn_file, полный [REQUEST] + репорт,
+    безусловный канал). Пока out_body не передан (None) — WARN-запись не
+    делается (консольная _dr-строка и trace пишутся всегда). Прямые вызовы
+    без этих параметров (тесты, внешние пользователи) не меняют поведения."""
     message_id = f"msg_stream_{req_id}"
     _sse_write(
         wfile,
@@ -224,12 +241,24 @@ def stream_openai_to_anthropic(
         # ЯВНО помечается как оценочная и в trace, и для будущей отладки.
         input_tokens = max(1, approx_prompt_chars // 4) if approx_prompt_chars else 0
         input_tokens_estimated = True
-        _dr(
-            req_id,
-            f"[USAGE_WARN] Backend не вернул usage в стриме — "
-            f"input_tokens оценён эвристически (~{input_tokens}, "
-            f"chars/4), реальное число неизвестно",
+        warn_text = (
+            f"Backend не вернул usage в стриме — input_tokens оценён "
+            f"эвристически (~{input_tokens}, chars/4), реальное число неизвестно"
         )
+        _dr(req_id, f"[USAGE_WARN] {warn_text}")
+        if out_body is not None:
+            # WARN-событие в .err-файл сессии (v0.9.1): полный запрос +
+            # репорт, безусловный канал (вне ENABLE/PARTS/TRIM). out_body
+            # передан только когда вызывающий код (server.do_POST) уже
+            # построил тело — прямые вызовы без параметра записи не делают.
+            write_warn_file(
+                session_id,
+                req_id,
+                backend_url=backend_url,
+                model=model,
+                out_body=out_body,
+                warn_body=warn_text,
+            )
 
     _sse_write(
         wfile,

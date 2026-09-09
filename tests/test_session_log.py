@@ -446,3 +446,132 @@ class TestWriteErrorFile:
         ts_log = log_name[len("session-") : len("session-") + 15]
         ts_err = err_name[len("session-") : len("session-") + 15]
         assert ts_log == ts_err
+
+
+class TestWriteWarnFile:
+    """Tests for write_warn_file() — WARN-события в тот же .err-файл сессии
+    (v0.9.1). Тот же безусловный канал, что и инциденты (write_error_file),
+    но БЕЗ final_status: предупреждение наблюдается и на успешном 200."""
+
+    def _fresh(self):
+        """Перезагрузить модули, указать LOGPATH на tmp_path."""
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log
+        session_log._DEBUG_IS_DIR = True
+        session_log._TRACE_IS_DIR = True
+        return session_log
+
+    def _write(self, session_log, tmp_path, **overrides):
+        args = dict(
+            backend_url="http://backend/v1/chat/completions",
+            model="qwen",
+            out_body=b'{"messages": []}',
+            warn_body="Backend не вернул usage — input_tokens оценён эвристически",
+        )
+        args.update(overrides)
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._TRACE_PATH = str(tmp_path)
+        session_log._session_file_ts["sess1"] = "20260908-120000"
+        session_log.write_warn_file("sess1", "req123", **args)
+
+    def test_writes_warn_file(self, tmp_path):
+        """write_warn_file пишет WARNING-блок в session-<ts>-<safe8>.err."""
+        session_log = self._fresh()
+        self._write(session_log, tmp_path)
+        files = list(tmp_path.glob("session-*.err"))
+        assert len(files) == 1
+        name = files[0].name
+        assert name.startswith("session-20260908-120000-")
+        assert name.endswith(".err")
+        content = files[0].read_text(encoding="utf-8")
+        assert "==================== WARNING ====================" in content
+        assert "==================== END WARNING ====================" in content
+        # Без final_status: шапка несёт метаданные без статуса
+        assert "final_status" not in content
+        assert "req123" in content
+        assert "session_id=sess1" in content
+        assert "model=qwen" in content
+        assert "http://backend/v1/chat/completions" in content
+        # Полные запрос и текст WARN
+        assert '{"messages": []}' in content
+        assert "input_tokens оценён эвристически" in content
+        assert "[WARN]" in content
+
+    def test_writes_at_enable_zero(self, tmp_path):
+        """Безусловность: WARN пишется при ADAPTER_DEBUG_ENABLE=0."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG = False  # ENABLE=0
+        self._write(session_log, tmp_path)
+        assert len(list(tmp_path.glob("session-*.err"))) == 1
+
+    def test_no_trim(self, tmp_path):
+        """Содержимое БЕЗ обрезки по ADAPTER_DEBUG_TRIM (малый TRIM не режет)."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG_TRIM = 10
+        long_req = '{"prompt": "' + "x" * 5000 + '"}'
+        self._write(session_log, tmp_path, out_body=long_req, warn_body="W" * 5000)
+        content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
+        assert '{"prompt": "' + "x" * 5000 + '"}' in content  # полный запрос
+        assert "W" * 5000 in content  # полный текст WARN
+
+    def test_redact_by_default(self, tmp_path):
+        """По умолчанию секреты в WARNING-блоке маскируются redact."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_SENSITIVE_LOGGING_ENABLE = False
+        self._write(
+            session_log, tmp_path,
+            out_body='{"text": "Authorization: Bearer sk-live-abcdef123456"}',
+        )
+        content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
+        assert "sk-live-abcdef123456" not in content
+        assert "REDACTED" in content
+
+    def test_sensitive_one_full_data(self, tmp_path):
+        """При ADAPTER_SENSITIVE_LOGGING_ENABLE=1 — полные данные без redact."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_SENSITIVE_LOGGING_ENABLE = True
+        self._write(
+            session_log, tmp_path,
+            out_body='{"text": "Authorization: Bearer sk-live-abcdef123456"}',
+        )
+        content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
+        assert "sk-live-abcdef123456" in content
+        assert "REDACTED" not in content
+
+    def test_never_raises(self, tmp_path):
+        """write_warn_file никогда не бросает исключений (пустой путь → нет файла)."""
+        session_log = self._fresh()
+        session_log._DEBUG_IS_DIR = False
+        session_log._DEBUG_PATH = ""
+        # Не должно бросить, даже с "битыми" аргументами
+        session_log.write_warn_file(
+            "sess1", "req1", backend_url="", model="",
+            out_body=None, warn_body=None,
+        )
+        assert list(tmp_path.glob("session-*.err")) == []
+
+    def test_shared_ts_with_err_and_log(self, tmp_path):
+        """WARNING и ERROR одной сессии идут в ОДИН .err (общий ts и файл)."""
+        session_log = self._fresh()
+        self._write(session_log, tmp_path, warn_body="warn one")
+        session_log.write_error_file(
+            "sess1", "req456", final_status=502,
+            backend_url="http://b", model="m", out_body="{}", err_body="err",
+        )
+        files = list(tmp_path.glob("session-*.err"))
+        assert len(files) == 1  # один файл на сессию — блоки самоделимитированы
+        content = files[0].read_text(encoding="utf-8")
+        # Два самоделимитированных блока (WARNING + ERROR) в одном файле
+        assert content.count("==================== WARNING") == 1
+        assert content.count("==================== END WARNING") == 1
+        assert content.count("==================== ERROR") == 1
+        assert content.count("==================== END ERROR") == 1
+        assert "warn one" in content
+        assert "final_status=502" in content

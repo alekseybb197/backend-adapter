@@ -100,7 +100,7 @@ def target_for_input(inp: Format) -> TargetValue:
     runtime-пул не входят, поэтому чтение через ``getattr`` эквивалентно
     импортированной константе, но переживает reload конфига в тестах."""
     value = getattr(config, _ENV_NAMES[inp], _TARGET_DEFAULTS[inp])
-    assert value in ("messages", "completions", "responses", "auto", "none"), value
+    assert value in config.TARGET_ALLOWED_VALUES, value
     return value  # type: ignore[return-value]
 
 

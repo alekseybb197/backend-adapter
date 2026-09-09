@@ -337,3 +337,81 @@ class TestWriteSseErrorNative:
             raise BrokenPipeError("gone")
         wfile.write = broken_write
         _write_sse_error_native(wfile, "responses", "boom")  # must not raise
+
+
+class TestUsageWarnErrFile:
+    """USAGE_WARN → .err (v0.9.1): когда бэкенд не вернул usage в стриме и
+    передан out_body, эвристика input_tokens пишет WARNING-блок в
+    session-*.err (безусловный канал). Без out_body записи нет — старые
+    прямые вызовы (и прежние тесты) ведут себя как раньше."""
+
+    def _fresh(self, tmp_path):
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log as slog
+        slog._DEBUG_IS_DIR = True
+        slog._TRACE_IS_DIR = True
+        slog._DEBUG_PATH = str(tmp_path)
+        slog._TRACE_PATH = str(tmp_path)
+        slog._session_logs.clear()
+        slog._session_file_ts.clear()
+        return slog
+
+    def _stream_no_usage(self):
+        """SSE-поток без usage: content + finish_reason stop."""
+        from tests.conftest import FakeRespStream
+        return FakeRespStream([
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}',
+            b'data: [DONE]',
+        ])
+
+    def test_out_body_passed_writes_err(self, tmp_path):
+        """С переданным out_body/backend_url → WARNING-блок в .err с полным
+        [REQUEST] и текстом эвристики."""
+        self._fresh(tmp_path)  # сначала перезагрузка модулей: session_log с путями tmp_path
+        from backend_adapter import session_log as slog
+        from backend_adapter.streaming import stream_openai_to_anthropic
+        from tests.conftest import FakeWfile
+        slog._session_file_ts["sess1"] = "20260909-100000"
+        out_body = b'{"model": "test", "stream": true}'
+        stream_openai_to_anthropic(
+            self._stream_no_usage(), FakeWfile(), "test", "sess1", "req1",
+            approx_prompt_chars=200, out_body=out_body, backend_url="http://b/v1",
+        )
+        files = list(tmp_path.glob("session-*.err"))
+        assert len(files) == 1
+        content = files[0].read_text(encoding="utf-8")
+        assert "==================== WARNING ====================" in content
+        assert '{"model": "test", "stream": true}' in content  # полный [REQUEST]
+        assert "input_tokens оценён эвристически" in content
+        assert "[WARN]" in content
+        assert "backend_url=http://b/v1" in content
+
+    def test_no_out_body_no_err(self, tmp_path):
+        """Без out_body (прямые вызовы/старые тесты) — .err НЕ пишется."""
+        self._fresh(tmp_path)
+        from backend_adapter.streaming import stream_openai_to_anthropic
+        from tests.conftest import FakeWfile
+        stream_openai_to_anthropic(
+            self._stream_no_usage(), FakeWfile(), "test", "sess1", "req1",
+            approx_prompt_chars=200,
+        )
+        assert list(tmp_path.glob("session-*.err")) == []
+
+    def test_backend_usage_no_warn(self, tmp_path):
+        """Бэкенд вернул usage → WARN нет, .err не создан."""
+        self._fresh(tmp_path)
+        from backend_adapter.streaming import stream_openai_to_anthropic
+        from tests.conftest import FakeRespStream, FakeWfile
+        lines = FakeRespStream([
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}], '
+            b'"usage": {"prompt_tokens": 5, "completion_tokens": 3}}',
+            b'data: [DONE]',
+        ])
+        stream_openai_to_anthropic(
+            lines, FakeWfile(), "test", "sess1", "req1",
+            approx_prompt_chars=200, out_body=b"{}", backend_url="http://b",
+        )
+        assert list(tmp_path.glob("session-*.err")) == []

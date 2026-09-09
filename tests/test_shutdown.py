@@ -5,6 +5,13 @@
 Ctrl-C/SIGTERM»), поэтому контракт можно проверить тестами без спавна
 реального процесса:
 
+- install_signal_handlers(graceful=True) ставит ЕДИНЫЙ хэндлер _first_signal
+  на SIGINT и SIGTERM (v0.9.1): СНАЧАЛА оба сигнала переключаются на
+  _force_exit (os._exit(130)), ЗАТЕМ raise KeyboardInterrupt — повторный или
+  задвоенный сигнал (PyInstaller bootloader) не может уйти в непойманный KI
+  в микроокне между первым raise и переустановкой хэндлеров (баг грязного
+  выхода бинаря по Ctrl-C). Проверяется в суба-процессах — см.
+  test_first_signal_switches_before_raise и test_repeat_signal_exits_130;
 - install_signal_handlers(graceful=False) переключает SIGINT/SIGTERM на
   немедленный os._exit(130) — повторный Ctrl-C во время завершения не
   прерывает запись YAML (flush_table). Проверяется в суба-процессе: из
@@ -90,19 +97,92 @@ class TestInstallSignalHandlers:
         assert result["ret"] is None
 
     def test_graceful_sets_sigterm_handler(self):
-        # graceful=True: SIGTERM перехвачен на KeyboardInterrupt (вежливое
-        # завершение как Ctrl-C); SIGINT остаётся дефолтным.
+        # graceful=True: ЕДИНЫЙ хэндлер _first_signal на SIGINT И SIGTERM
+        # (v0.9.1): первый сигнал переключает оба на _force_exit и делает
+        # raise KeyboardInterrupt. SIGINT больше не дефолтный — иначе второй
+        # KI при задвоенном сигнале (PyInstaller bootloader) уходил бы
+        # непойманным (traceback + [PYI-7290]).
         _reload_all()
         from backend_adapter import shutdown
 
         shutdown.install_signal_handlers(graceful=True)
         try:
-            assert signal.getsignal(signal.SIGTERM) is shutdown._graceful_signal
-            assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+            assert signal.getsignal(signal.SIGTERM) is shutdown._first_signal
+            assert signal.getsignal(signal.SIGINT) is shutdown._first_signal
         finally:
             # восстановить дефолты (не путать последующие тесты)
             signal.signal(signal.SIGINT, signal.default_int_handler)
             signal.signal(signal.SIGTERM, signal.default_int_handler)
+
+    def test_first_signal_switches_before_raise(self):
+        # Порядок «переключил до raise» — ядро фикса v0.9.1: единый хэндлер
+        # СНАЧАЛА ставит _force_exit на оба сигнала, ЗАТЕМ делает raise
+        # KeyboardInterrupt. В суба-процессе: ловим KI, проверяем хэндлеры —
+        # повторный os.kill(SIGINT) уже умирает тихо 130, без 'ALIVE'.
+        _reload_all()
+        code = (
+            "import os, signal, sys\n"
+            "from backend_adapter.shutdown import install_signal_handlers, _force_exit\n"
+            "install_signal_handlers(graceful=True)\n"
+            "try:\n"
+            "    os.kill(os.getpid(), signal.SIGINT)\n"
+            "    print('NO_KI')\n"
+            "    sys.exit(3)\n"
+            "except KeyboardInterrupt:\n"
+            "    pass\n"
+            "if signal.getsignal(signal.SIGINT) is not _force_exit:\n"
+            "    print('SIGINT_NOT_SWITCHED')\n"
+            "    sys.exit(4)\n"
+            "if signal.getsignal(signal.SIGTERM) is not _force_exit:\n"
+            "    print('SIGTERM_NOT_SWITCHED')\n"
+            "    sys.exit(5)\n"
+            "os.kill(os.getpid(), signal.SIGINT)\n"
+            "print('ALIVE')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 130  # повторный сигнал после переключения
+        assert "ALIVE" not in result.stdout
+        assert "NO_KI" not in result.stdout
+        assert "NOT_SWITCHED" not in result.stdout
+        assert "Traceback" not in result.stderr  # тихий выход, без traceback
+
+    def test_sigterm_first_signal_also_graceful(self):
+        # SIGTERM первым сигналом — то же вежливое завершение, что и Ctrl-C:
+        # хэндлер переключает оба сигнала на _force_exit и делает raise KI
+        # (systemd/launchd/kill — usage-хвост сохраняется).
+        _reload_all()
+        code = (
+            "import os, signal, sys\n"
+            "from backend_adapter.shutdown import install_signal_handlers, _force_exit\n"
+            "install_signal_handlers(graceful=True)\n"
+            "try:\n"
+            "    os.kill(os.getpid(), signal.SIGTERM)\n"
+            "    print('NO_KI')\n"
+            "    sys.exit(3)\n"
+            "except KeyboardInterrupt:\n"
+            "    pass\n"
+            "if signal.getsignal(signal.SIGINT) is not _force_exit:\n"
+            "    print('SIGINT_NOT_SWITCHED')\n"
+            "    sys.exit(4)\n"
+            "if signal.getsignal(signal.SIGTERM) is not _force_exit:\n"
+            "    print('SIGTERM_NOT_SWITCHED')\n"
+            "    sys.exit(5)\n"
+            "print('KI_OK')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0
+        assert "KI_OK" in result.stdout
+        assert "NO_KI" not in result.stdout
 
     def test_repeat_signal_exits_130(self):
         # Повторный сигнал во время завершения = немедленный os._exit(130).
@@ -125,6 +205,41 @@ class TestInstallSignalHandlers:
         )
         assert result.returncode == 130
         assert "ALIVE" not in result.stdout
+
+    def test_second_signal_during_finally_no_traceback(self):
+        # Микроокно бага v0.9.1: ПЕРВЫЙ KI пойман (как serve_forever), но
+        # install_signal_handlers(graceful=False) ещё НЕ выполнен (имитация —
+        # просто не вызываем). Раньше в этом окне SIGINT был дефолтным и
+        # повторный сигнал уходил в НЕпойманный KeyboardInterrupt →
+        # traceback (на бинаре — «[EXIT] Bye» + [PYI-7290]). С единым
+        # хэндлером _first_signal (переключил оба на _force_exit ДО raise)
+        # повторный сигнал умирает тихо os._exit(130), без traceback.
+        _reload_all()
+        code = (
+            "import os, signal, sys\n"
+            "from backend_adapter.shutdown import install_signal_handlers\n"
+            "install_signal_handlers(graceful=True)\n"
+            "try:\n"
+            "    os.kill(os.getpid(), signal.SIGINT)\n"
+            "    print('NO_KI')\n"
+            "    sys.exit(3)\n"
+            "except KeyboardInterrupt:\n"
+            "    pass  # как serve_forever: первый сигнал обработан\n"
+            "# сюда НЕ доходит install_signal_handlers(graceful=False) —\n"
+            "# симулируем микроокно до начала процедуры завершения\n"
+            "os.kill(os.getpid(), signal.SIGINT)\n"
+            "print('ALIVE')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 130  # повторный сигнал — тихий os._exit
+        assert "ALIVE" not in result.stdout
+        assert "Traceback" not in result.stderr
+        assert "KeyboardInterrupt" not in result.stderr
 
 
 class TestGracefulFinish:

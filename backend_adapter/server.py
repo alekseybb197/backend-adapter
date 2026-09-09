@@ -33,7 +33,7 @@ from .convert import (
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
-from .session_log import write_debug_json, write_error_file
+from .session_log import write_debug_json, write_error_file, write_warn_file
 from .streaming import (
     _sse_write,
     _write_sse_error_native,
@@ -1004,10 +1004,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             if system_ok:
                 _dr(req_id, "[CHECK] First message is system, OK")
             else:
-                _dr(
-                    req_id,
-                    f"[WARN] First message is NOT system: {msgs[0]['role'] if msgs else 'empty'}",
-                )
+                warn_role = msgs[0]["role"] if msgs else "empty"
+                _dr(req_id, f"[WARN] First message is NOT system: {warn_role}")
 
             # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
             # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
@@ -1027,6 +1025,22 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
             backend_key_val = backend_cfg["key"]
             out_body = json.dumps(openai_body, ensure_ascii=False).encode()
+            if not system_ok:
+                # WARN-событие инварианта конвертации — в .err-файл сессии
+                # (v0.9.1): тот же безусловный канал, что у инцидентов 4xx/5xx,
+                # но для диагностики на УСПЕШНОМ запросе. Пишется один раз на
+                # запрос, здесь — после построения out_body/backend_url (нужны
+                # для полного [REQUEST]-блока) и до urlopen (покрывает и
+                # stream-, и non-stream-ветку). Полный запрос + репорт, без
+                # TRIM, вне ADAPTER_DEBUG_ENABLE/PARTS.
+                write_warn_file(
+                    session_id,
+                    req_id,
+                    backend_url=backend_url,
+                    model=model,
+                    out_body=out_body,
+                    warn_body=f"First message is NOT system: {warn_role}",
+                )
             req = urllib.request.Request(
                 backend_url,
                 data=out_body,
@@ -1095,6 +1109,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             session_id,
                             req_id,
                             approx_prompt_chars=approx_prompt_chars,
+                            # v0.9.1: для [USAGE_WARN] в .err — полный запрос
+                            # и URL бэкенда (нужны, если usage не вернётся).
+                            out_body=out_body,
+                            backend_url=backend_url,
                         )
                         # usage — usage-блок последнего SSE-чанка (или {}):
                         # считаем токены только из реального usage, эвристика

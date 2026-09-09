@@ -59,6 +59,7 @@ claude
 | Файл | Описание |
 |---|---|
 | [docs/install.md](docs/install.md) | Установка, конфигурация, systemd/launchd, troubleshooting |
+| [docs/routing.md](docs/routing.md) | Настройка входных эндпоинтов и маршрутизации (TARGET): принципы, реализованное, перспективы |
 | [docs/environment.md](docs/environment.md) | Полный справочник всех env-переменных |
 | [docs/logging.md](docs/logging.md) | Конфигурация логирования и trace |
 | [docs/sanitizing.md](docs/sanitizing.md) | Санитизация и маскирование секретов |
