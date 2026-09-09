@@ -1,5 +1,10 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
+
+## v0.9.1 (WIP — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей)
+
+<!-- WIP: записи по мере согласованных коммитов группы v0.9.1. -->
+
 ## v0.9.0 — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH
 
 ### 2026-09-09 Саммари ветки v0.9.0 (12 коммитов между merge PR #12 (v0.8.6) и снятием WIP)
