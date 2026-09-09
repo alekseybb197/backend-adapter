@@ -3,7 +3,7 @@
 
 Tests cover:
   - Unit: _render_config_page returns HTML with current values
-  - HTTP GET /config → 200, HTML with form (9 fields: 6 bool + 3 int)
+  - HTTP GET /config → 200, HTML with form (12 fields: 6 bool + 3 int + 3 TARGET select)
   - HTTP POST /config → applies valid, ignores invalid, redirects with message
 """
 import os
@@ -99,12 +99,35 @@ class TestRenderConfigPage:
         html_bytes = self.render(current)
         html = html_bytes.decode("utf-8")
 
-        # Check all 7 keys are present
+        # Check all keys are present
         for key in config.RUNTIME_CONFIG_POOL:
             assert key in html
 
         # Check values (v0.8.6: ADAPTER_DEBUG дефолт 0 — файловая запись; другие варьируются)
         assert "ADAPTER_DEBUG" in html
+
+    def test_renders_target_selects(self):
+        """TARGET-переменные рендерятся выпадающими списками с текущим значением.
+
+        v0.9.1: три ADAPTER_*_TARGET в форме /config — <select> с доменом
+        config.TARGET_ALLOWED_VALUES; текущее значение отмечено selected."""
+        from backend_adapter import config
+        current = config.get_runtime_config()
+        html = self.render(current).decode("utf-8")
+
+        for name in (
+            "ADAPTER_MESSAGES_TARGET",
+            "ADAPTER_COMPLETIONS_TARGET",
+            "ADAPTER_RESPONSES_TARGET",
+        ):
+            # select присутствует с именем поля
+            assert f'<select id="{name}" name="{name}"' in html
+            # все допустимые значения — опциями
+            for val in config.TARGET_ALLOWED_VALUES:
+                assert f'value="{val}"' in html
+        # Дефолты: MESSAGES=completions, COMPLETIONS/RESPONSES=none — selected.
+        assert '<option value="completions" selected>completions</option>' in html
+        assert html.count('<option value="none" selected>none</option>') == 2
 
     def test_renders_with_applied_message(self):
         """HTML contains flash message when applied dict provided."""
@@ -142,8 +165,9 @@ class TestConfigHTTPGet:
             status, body = _http_get(port, "/config")
             assert status == 200
             assert "<!DOCTYPE html>" in body or "<html" in body.lower()
-            # Form with 9 fields (6 bool + 3 int; строковых полей нет —
-            # селекторы подробности удалены реформой логирования v0.8.6)
+            # Form with 12 fields (6 bool + 3 int + 3 select для TARGET;
+            # строковых text-полей нет — селекторы подробности удалены
+            # реформой логирования v0.8.6)
             assert "ADAPTER_DEBUG" in body
             assert "ADAPTER_DEBUG_PARTS" in body
             assert "ADAPTER_SENSITIVE_LOGGING_ENABLE" in body
@@ -155,6 +179,11 @@ class TestConfigHTTPGet:
             assert "ADAPTER_DEBUG_TRIM" in body
             # Строковых text-полей в форме больше нет
             assert 'type="text"' not in body
+            # TARGET-маршрутизация входов (v0.9.1): 3 выпадающих списка
+            assert "ADAPTER_MESSAGES_TARGET" in body
+            assert "ADAPTER_COMPLETIONS_TARGET" in body
+            assert "ADAPTER_RESPONSES_TARGET" in body
+            assert body.count("<select") == 3
             # Favicon — общий ресурс всех страниц WEBUI (см. /favicon.svg)
             assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in body
         finally:
@@ -344,6 +373,71 @@ class TestConfigHTTPPost:
             )
             assert status == 200
             assert config.ADAPTER_DEBUG_PARTS is True
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_target_select_applies(self, tmp_path):
+        """/config POST (form-data): select TARGET применяет значение на лету.
+
+        v0.9.1: ADAPTER_*_TARGET входят в runtime-пул — выпадающий список
+        шлёт строку из домена, set_runtime_config переприсваивает глобал
+        config, routing.target_for_input видит новое значение сразу."""
+        _reload_config()
+        from backend_adapter import config
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = "ADAPTER_COMPLETIONS_TARGET=completions".encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            # Значение применилось к модульному глобалу и видно в пуле.
+            assert config.ADAPTER_COMPLETIONS_TARGET == "completions"
+            current = config.get_runtime_config()
+            assert current["ADAPTER_COMPLETIONS_TARGET"] == "completions"
+            # Маршрутизатор читает глобал на каждый вызов — смена видна сразу.
+            from backend_adapter import routing
+            assert routing.target_for_input("completions") == "completions"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_target_invalid_ignored(self, tmp_path):
+        """/config POST: невалидное значение TARGET игнорируется, соседний ключ — нет."""
+        _reload_config()
+        from backend_adapter import config
+        before = config.ADAPTER_MESSAGES_TARGET
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = "ADAPTER_MESSAGES_TARGET=bogus&ADAPTER_DEBUG=1".encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            # TARGET не изменился (не из домена), bool применился.
+            assert config.ADAPTER_MESSAGES_TARGET == before
+            assert config.ADAPTER_DEBUG is True
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_target_json_applies(self, tmp_path):
+        """/config POST (JSON): TARGET меняется на лету."""
+        _reload_config()
+        from backend_adapter import config
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = json.dumps({"ADAPTER_MESSAGES_TARGET": "responses"}).encode()
+            status, response_body = _http_post(
+                port, "/config", "application/json", body
+            )
+            assert status == 200
+            assert config.ADAPTER_MESSAGES_TARGET == "responses"
+            assert config.get_runtime_config()["ADAPTER_MESSAGES_TARGET"] == "responses"
         finally:
             httpd.shutdown()
             httpd.server_close()

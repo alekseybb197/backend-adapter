@@ -126,9 +126,10 @@ backend:
 > ровно эти дефолты: `ADAPTER_COMPLETIONS_TARGET=none,
 > ADAPTER_MESSAGES_TARGET=completions, ADAPTER_RESPONSES_TARGET=none`.
 
-**В runtime-пул `/config` не входят** (см. §6): TARGET-переменные меняют
-топологию восприятия входных эндпоинтов и читаются на импорте, как
-бэкенды/порты.
+**Входят в runtime-пул `/config`** (см. §6): значения TARGET-переменных
+меняются на лету через WEBUI — на странице `/config` для каждой переменной —
+выпадающий список допустимых значений. Смена влияет только на новые запросы
+(маршрут выбирается на каждый запрос) и не рвёт активные соединения.
 
 ---
 
@@ -287,11 +288,18 @@ tariffs:
   выводятся в открытом виде), `ADAPTER_STREAMING_ENABLE`,
   `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS`;
 - **int**: `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`,
-  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`.
+  `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
+- **enum (3)** — TARGET-маршрутизация входов (v0.9.1, выбираются выпадающими
+  списками): `ADAPTER_MESSAGES_TARGET`, `ADAPTER_COMPLETIONS_TARGET`,
+  `ADAPTER_RESPONSES_TARGET` (см. §1а). Допустимые значения — домен
+  `TARGET_ALLOWED_VALUES` в `config.py`; значение применяется на следующем же
+  запросе (маршрутизатор читает `config.ADAPTER_*_TARGET` на каждый вызов) и
+  влияет только на новые запросы, не рвя активные соединения.
 
-Строковых переменных в пуле нет (v0.8.6: прежние селекторы подробности
-удалены — консоль всегда с обрезкой `ADAPTER_DEBUG_TRIM`, файл всегда
-полный).
+Строковые переменные в пуле представлены только enum-полями TARGET (домен
+значений фиксирован); прочих строковых переменных нет (v0.8.6: прежние
+селекторы подробности удалены — консоль всегда с обрезкой
+`ADAPTER_DEBUG_TRIM`, файл всегда полный).
 
 Переменные, менять которые на лету **нельзя** (влияют на активные соединения,
 раскладку файлов или структуру конфигурации, в пул не входят): сеть и адреса
@@ -333,7 +341,7 @@ tariffs:
 | Per-session дампы всех частей (`.json`+`.yaml` по каждому тегу) | `ADAPTER_DEBUG_PARTS` | `1` |
 | Веб-интерфейс: статус `/` по умолчанию (zero-config) | *(всегда)* | поднят на `ADAPTER_WEBUI_HOST:ADAPTER_WEBUI_PORT`; корень `./tmp/logs`; `/session` пуст, пока нет файловой записи |
 | Веб-интерфейс: полный просмотр сессий | `ADAPTER_DEBUG_ENABLE` + `ADAPTER_DEBUG_LOGPATH` | `1` + `"/tmp/adapter-logs"` |
-| Runtime-пул: переключение debug-записи и рубильников на лету (без рестарта) | `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config` | форма `RUNTIME_CONFIG_POOL` (9 переменных, см. §6) |
+| Runtime-пул: переключение debug-записи, рубильников и TARGET-маршрутизации входов на лету (без рестарта) | `http://127.0.0.1:<ADAPTER_WEBUI_PORT>/config` | форма `RUNTIME_CONFIG_POOL` (12 переменных: 6 bool + 3 int + 3 enum-select, см. §6) |
 | Порт веб-интерфейса | `ADAPTER_WEBUI_PORT` | `8765` |
 | Адрес прослушивания адаптера (все интерфейсы) | `ADAPTER_ENDPOINT_HOST` | `"0.0.0.0"` (дефолт `127.0.0.1`) |
 | Адрес прослушивания WEBUI (из сети) | `ADAPTER_WEBUI_HOST` | `"0.0.0.0"` (дефолт `127.0.0.1`) |

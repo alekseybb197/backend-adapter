@@ -1,7 +1,7 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
-## v0.9.1 (WIP — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей)
+## v0.9.1 (WIP — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей, TARGET-переменные на /config)
 
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.1. -->
 
@@ -104,6 +104,42 @@ passthrough E→E `completions→completions`/`responses→responses`, auto-вы
 `install.md` §5.8 сжаты (шаги/семантика ушли в routing.md, оставлены таблица
 и рецепты со ссылкой); `architecture.md` §4.2 и README получили ссылку.
 Код не менялся.
+
+### TARGET-переменные на странице /config — выпадающие списки (v0.9.1)
+
+**Цель:** пользователь: «у нас есть слово-действие, предписывающее роутинг
+(формат-цель), запрещающее (`none`), оставляющее решение адаптеру (`auto`), но
+нет слова „ничего не менять" — вместо него применяется указание на тот же
+роутинг (например `ADAPTER_MESSAGES_TARGET=messages` = passthrough E→E).
+Осталось задать опции выбора роутинга на странице настроек WEBUI — путь
+роутинга должен для каждой переменной предлагаться в выпадающем списке».
+Ранее TARGET-переменные сознательно не входили в runtime-пул `/config`
+(«значения строковые, пул — только bool/int; читаются на импорте»).
+
+**Решение:**
+- `config.py`: единая константа домена `TARGET_ALLOWED_VALUES`
+  (`messages | completions | responses | auto | none`), на неё переведён
+  `_parse_target`; три `ADAPTER_*_TARGET` добавлены в `RUNTIME_CONFIG_POOL`
+  (пул 9 → 12) с типом-доменом `("enum", TARGET_ALLOWED_VALUES)` в
+  `_RUNTIME_CONFIG_TYPES`; `set_runtime_config` принимает строки из домена
+  (невалидная строка/не-строка игнорируется, как неверный тип), имена —
+  в `global`;
+- `routing.py`: assert в `target_for_input` — по `config.TARGET_ALLOWED_VALUES`
+  (единый источник вместо литерала);
+- `webui_config_api.py`: три TARGET-поля рендерятся на `/config` выпадающими
+  списками (первый `<select>` на страницах WEBUI) с текущим значением
+  selected; POST-сверка понимает enum-поля;
+- смена значения применяется на лету и видна маршрутизатору немедленно:
+  `routing.target_for_input` читает `config.ADAPTER_*_TARGET` на каждый запрос
+  (live-доступ — паттерн пула, код routing/server не менялся);
+- тесты: enum-применение/отклонение в `test_config.py` (`TestRuntimeConfig`,
+  включая live-эффект через `routing.target_for_input`), select-рендер +
+  HTTP POST select (form/JSON, валид/невалид) в `test_webui_config_api.py`;
+- доки: `environment.md` §1а («в runtime-пул не входят» → «входят»), §6
+  (категория **enum (3)**, «строковых нет» уточнено, TARGET убран из «нельзя
+  на лету»), сводная таблица (9 → 12); `webui.md` §5 (пул 12, enum-категория,
+  строка маршрута `/config`); `routing.md` — вводный (runtime-выбор на
+  `/config`) + принцип «„ничего не менять" = passthrough на себя» (п. 5).
 
 ## v0.9.0 — входные эндпоинты /v1/chat/completions и /v1/responses + TARGET-маршрутизация, JSON-результаты проверок в LOGPATH, CI к набору проверок, [EXIT] Bye, PID в LOGPATH
 

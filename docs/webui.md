@@ -28,7 +28,7 @@ WEBUI — локальный веб-интерфейс адаптера: общ�
 | `/live` | `webui_ops.py` | liveness (k8s): 200 — процесс жив |
 | `/ready` | `webui_ops.py` | readiness (k8s): 200 — бэкенды настроены и кэш моделей непуст; иначе 503 |
 | `/session` | `session_viewer.py` | Просмотр `*.parts` сессий: дерево артефактов, вкладки, hash8-адреса, png/puml |
-| `/config` | `webui_config_api.py` | Runtime-переключение объёма debug-записи и рубильников (форма) |
+| `/config` | `webui_config_api.py` | Runtime-переключение объёма debug-записи, рубильников и TARGET-маршрутизации входов (форма) |
 | `/api/refresh-state` | `webui_status.py` | JSON-состояние фоновой проверки бэкендов (для JS страницы `/`) |
 | `/api/model-usage/reset` | `webui_status.py` | Обнуление счётчиков строки таблицы использованных моделей (POST) |
 | `/api/model-usage/reprobe` | `webui_status.py` | Фоновая перепроба эндпоинтов строки модели (POST) |
@@ -254,7 +254,7 @@ GitHub-репозиторий проекта.
 `config.set_runtime_config()` и показывает, что применилось (неверные типы и
 неизвестные ключи игнорируются).
 
-Пул — 9 переменных:
+Пул — 12 переменных:
 
 - **bool (6)** — файловая запись и per-session дампы: `ADAPTER_DEBUG`
   (файл `session-*.log` — полные строки, без обрезки; консоль — всегда,
@@ -266,9 +266,16 @@ GitHub-репозиторий проекта.
 - **int (3)** — лимиты обрезки: `ADAPTER_DEBUG_TRIM` (консоль; `0` — без
   обрезки), `ADAPTER_TRACE_REASONING_MAX_CHARS`,
   `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
+- **enum (3)** — TARGET-маршрутизация входов (v0.9.1): `ADAPTER_MESSAGES_TARGET`,
+  `ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET` — выпадающие списки
+  из домена `messages | completions | responses | auto | none` (какой формат
+  отдавать бэкенду для запросов соответствующего входа; полная семантика
+  значений — [`docs/routing.md`](routing.md)). Текущее значение подсвечено
+  в списке.
 
 Читатели пула обращаются к `config.ADAPTER_X` «на лету» — изменения видны на
-следующем же запросе/вызове. На лету **нельзя** менять: сеть и адреса
+следующем же запросе/вызове (маршрут каждого запроса решается по актуальному
+TARGET). На лету **нельзя** менять: сеть и адреса
 прослушивания, бэкенды (`ADAPTER_BACKEND_CONFIG`, `ADAPTER_MODELS_MAPPING`),
 таймауты/ретраи, `ADAPTER_DEBUG_LOGPATH`, `ADAPTER_MODEL_USAGE_ENABLE`,
 порты и `ADAPTER_WEBUI_*` — они влияют на активные соединения, раскладку
