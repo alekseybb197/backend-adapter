@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import config, model_usage, session_log
+from . import config, model_usage, routing, session_log
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
@@ -79,6 +79,24 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # что он не дождался ответа (свой таймаут короче, чем наш
             # ADAPTER_TIMEOUT * ADAPTER_RETRY_COUNT + backoff). Это не ошибка
             # адаптера, поэтому просто логируем и выходим, не роняя процесс.
+            _d(
+                f"[CLIENT_GONE] {type(e).__name__} during sending status={status}: client disconnected before response could be sent"
+            )
+        except Exception as e:
+            _d(f"[WARN] Error sending response: {type(e).__name__}: {e}")
+
+    def _send_raw(self, status, content_type, body):
+        """Отправляет клиенту ответ бэкенда ДОСЛОВНО: статус, Content-Type
+        и тело — как пришли (passthrough E→E, non-stream). Никакой
+        пере-сериализации: байты body пишутся как есть."""
+        try:
+            self.send_response(status)
+            if content_type:
+                self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
             _d(
                 f"[CLIENT_GONE] {type(e).__name__} during sending status={status}: client disconnected before response could be sent"
             )
@@ -182,7 +200,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 for k, v in redact_headers(self.headers).items():
                     _dr(req_id, f"  {k}: {v}")
 
-            if not self.path.startswith("/v1/messages"):
+            # === Диспетчер входных эндпоинтов (v0.9.0) ===
+            # Три входных POST-пути — /v1/messages, /v1/chat/completions,
+            # /v1/responses — по таблице routing.INPUT_PATHS (зеркало
+            # ENDPOINT_PROBES). Любой другой путь — не вход адаптера: 404
+            # с прежним текстом контракта (тест 404-контракта не меняется).
+            inp_fmt = routing.input_path_to_format(self.path)
+            if inp_fmt is None:
                 self._send_json(404, {"error": "Expected /v1/messages"})
                 return
 
@@ -224,13 +248,6 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"error": msg})
                 return
 
-            # Учёт использованной модели (таблица WEBUI «Использованные
-            # модели»): клиентское имя ДО маппинга; при первом обращении —
-            # синхронная проба эндпоинтов этой моделью (резолв внутри
-            # функции). Учёт не влияет на запрос: провал пробы не роняет его.
-            model_usage.record_model_usage(client_model)
-            usage_active = True
-
             # === Модельный маппинг (agent-facing name -> backend name) ===
             original_model = client_model
             if _MAP and client_model in _MAP:
@@ -244,13 +261,337 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             # Resolve backend для (возможно маппированного) имени.
             backend_cfg, resolved_model = _resolve_backend(model)
+            backend_name = backend_cfg["name"]
             _dr(
                 req_id,
-                f"[BACKEND_RESOLVE] model={client_model} -> backend={backend_cfg['name']}/{resolved_model}",
+                f"[BACKEND_RESOLVE] model={client_model} -> backend={backend_name}/{resolved_model}",
             )
+
+            # === Решение о маршруте (routing.decide) ===
+            # action:
+            #   disabled — вход выключен (TARGET=none) → 404 (ДО учёта usage,
+            #              как 400-пути: запрос до бэкенда не дошёл);
+            #   reject   — маршрута нет (нереализованная пара / auto без
+            #              пути / бэкенд подтверждённо не поддерживает
+            #              целевой формат) → 400|502, тоже до учёта;
+            #   passthrough — тело запроса уходит бэкенду КАК ЕСТЬ (E→E);
+            #   convert  — реализованная конверсия (messages→completions).
+            route = routing.decide(inp_fmt, backend_name)
+            route_action, out_fmt, route_msg, route_status = route
+            _dr(
+                req_id,
+                f"[ROUTE] input={inp_fmt} backend={backend_name} "
+                f"target={routing.target_for_input(inp_fmt)} -> "
+                f"{route_action}"
+                + (f" (out={out_fmt})" if out_fmt else "")
+                + (f": {route_msg}" if route_msg else ""),
+            )
+            _trace(
+                session_id,
+                req_id,
+                "route_decide",
+                input=inp_fmt,
+                backend=backend_name,
+                target=routing.target_for_input(inp_fmt),
+                action=route_action,
+                output=out_fmt,
+                error=route_msg or None,
+                http_status=route_status,
+            )
+            if route_action in ("disabled", "reject"):
+                _dr(req_id, f"[ROUTE_REJECT] {route_msg}")
+                self._send_json(route_status, {"error": route_msg})
+                return
+
+            # Маршрут определён: format'ы исходящего запроса (convert → out,
+            # passthrough E→E → сам вход) и признак passthrough (тело не
+            # пересобирается — см. ветку ниже).
+            passthrough = route_action == "passthrough"
+            if route_action == "convert":
+                assert out_fmt is not None
+                out_fmt_val = out_fmt
+            else:
+                out_fmt_val = inp_fmt
+
+            # Учёт использованной модели (таблица WEBUI «Использованные
+            # модели»): клиентское имя ДО маппинга; при первом обращении —
+            # синхронная проба эндпоинтов этой моделью (резолв внутри
+            # функции). Ставится ПОСЛЕ решения о маршруте — disabled/reject
+            # (запрос до бэкенда не дошёл) в счётчики не попадают, как
+            # 400-пути. Учёт не влияет на запрос: провал пробы не роняет его.
+            model_usage.record_model_usage(client_model)
+            usage_active = True
 
             # resolved_model — имя модели, которое пойдёт на бэкенд (без префикса)
             model = resolved_model
+
+            # === Passthrough E→E (v0.9.0) ===
+            # Тело запроса уходит бэкенду КАК ПРИШЛО — единственные мутации:
+            # ``model`` заменяется на resolved_model (маппинг/префикс бэкенда
+            # применяются и к passthrough) и, при аварийном рубильнике
+            # ADAPTER_STREAMING_ENABLE=0, ``stream`` принудительно гасится.
+            # Конвертация, strict-поля messages (max_tokens/system/tools/…) и
+            # антропик-трассировка сюда не входят: контракт формата E→E
+            # определяет бэкенд (он сам ответит 400 на невалидное тело), а
+            # не адаптер. Ответ бэкенда отдаётся клиенту ДОСЛОВНО (см.
+            # passthrough-хвост ниже) — usage читается по формату ``out_fmt``.
+            if passthrough:
+                _dr(
+                    req_id,
+                    f"[PASSTHROUGH] input={inp_fmt} target={routing.target_for_input(inp_fmt)} "
+                    f"-> backend={backend_name}/{model} (out={out_fmt_val})",
+                )
+                stream_requested = bool(anthropic_req.get("stream", False))
+                if stream_requested and not config.ADAPTER_STREAMING_ENABLE:
+                    # Тот же рубильник, что у convert-ветки ниже: клиент просил
+                    # stream=true, но стриминг выключен — форсим stream=false.
+                    anthropic_req["stream"] = False
+                    stream_requested = False
+                    _dr(req_id, "[STREAM_DISABLED] (passthrough) forcing stream=false")
+                anthropic_req["model"] = model
+                _trace(
+                    session_id,
+                    req_id,
+                    "request_start",
+                    path=self.path,
+                    model=model,
+                    input_format=inp_fmt,
+                    passthrough=True,
+                    stream_requested=stream_requested,
+                )
+                _dr(
+                    req_id,
+                    f"[OPENAI_BODY] passthrough body={json.dumps(anthropic_req, ensure_ascii=False)}",
+                )
+                if config.ADAPTER_DEBUG_PARTS:
+                    write_debug_json(session_id, "OPENAI_BODY", anthropic_req)
+                backend_url = backend_cfg["base"].rstrip("/") + routing.INPUT_PATHS[out_fmt_val]
+                backend_key_val = backend_cfg["key"]
+                out_body = json.dumps(anthropic_req, ensure_ascii=False).encode()
+                _dr(req_id, f"[BACKEND_URL] {backend_url}")
+                req = urllib.request.Request(
+                    backend_url,
+                    data=out_body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {backend_key_val}",
+                        "Connection": "keep-alive",
+                    },
+                    method="POST",
+                )
+
+                if stream_requested:
+                    # === Passthrough-стрим ===
+                    # SSE-релей (relay_sse) — следующий коммит (Коммит 4).
+                    # Здесь и сейчас стрим-запрос на passthrough-входе
+                    # обрабатывается как обычный (non-stream) запрос: тело
+                    # уходит целиком, ответ отдаётся дословно после полного
+                    # чтения (см. ветку non-stream ниже). TODO(v0.9.0): после
+                    # ввода relay_sse заменить на построчный релей.
+                    _dr(
+                        req_id,
+                        "[WARN] (passthrough) stream_requested=true обрабатывается как "
+                        "non-stream (SSE-релей — в следующем коммите)",
+                    )
+
+                # === Passthrough non-stream ===
+                # Retry loop (копия общей схемы convert-ветки): ждём ответ
+                # бэкенда целиком и отдаём клиенту ДОСЛОВНО (статус и
+                # Content-Type как у бэкенда, тело без конвертации).
+                # Маркер последней ошибки — int (HTTP-код) ИЛИ str
+                # ("timeout"/"error"); явная аннотация нужна, чтобы mypy не
+                # сузил переменную по первому присваиванию (паттерн
+                # convert-ветки ниже).
+                pt_last_error: tuple[int | str, str] | None = None
+                for attempt in range(1, ADAPTER_RETRY + 1):
+                    try:
+                        _dr(
+                            req_id,
+                            f"[FETCH] (passthrough) Attempt {attempt}/{ADAPTER_RETRY}, "
+                            f"timeout={ADAPTER_TIMEOUT}s",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_attempt",
+                            attempt=attempt,
+                            timeout=ADAPTER_TIMEOUT,
+                            passthrough=True,
+                        )
+                        t0 = time.time()
+                        resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
+                        raw = resp.read()
+                        elapsed = time.time() - t0
+                        _dr(
+                            req_id,
+                            f"[FETCH] (passthrough) Success in {elapsed:.1f}s, {resp.status}, "
+                            f"{len(raw)} bytes",
+                        )
+                        _dr(req_id, f"[FETCH_RAW] {raw.decode()}")
+                        if config.ADAPTER_DEBUG_PARTS:
+                            write_debug_json(session_id, "FETCH_RAW", raw.decode())
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=True,
+                            status=resp.status,
+                            elapsed_ms=int(elapsed * 1000),
+                            passthrough=True,
+                        )
+
+                        # Usage по формату исходящего ответа (out_fmt_val):
+                        # completions — usage.prompt_tokens/completion_tokens,
+                        # responses — usage.input_tokens/output_tokens,
+                        # messages — usage.input_tokens/output_tokens.
+                        try:
+                            o = json.loads(raw)
+                        except json.JSONDecodeError:
+                            o = None
+                        if isinstance(o, dict):
+                            u = o.get("usage") or {}
+                            if out_fmt_val == "completions":
+                                u_in, u_out = u.get("prompt_tokens"), u.get("completion_tokens")
+                            else:
+                                u_in, u_out = u.get("input_tokens"), u.get("output_tokens")
+                            if u_in or u_out:
+                                usage_tokens["input"] += int(u_in or 0)
+                                usage_tokens["output"] += int(u_out or 0)
+
+                        resp_body = raw.decode()
+                        if config.ADAPTER_DEBUG_PARTS:
+                            write_debug_json(session_id, "RESPONSE", resp_body)
+                        # Тело дословно (raw), статус и Content-Type бэкенда.
+                        self._send_raw(resp.status, resp.headers.get("Content-Type"), raw)
+                        _dr(
+                            req_id,
+                            f"[OK] Passthrough done (out={out_fmt_val}), status={resp.status}",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "request_end",
+                            http_status=resp.status,
+                            retries_used=attempt - 1,
+                            total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                            passthrough=True,
+                        )
+                        return  # Успех -- выходим
+
+                    except urllib.error.HTTPError as e:
+                        err_raw = e.read()
+                        err = err_raw.decode()
+                        _dr(
+                            req_id,
+                            f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
+                        )
+                        error_value = (
+                            err[:500]
+                            if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                            else redact(err[:500])
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status=e.code,
+                            error=error_value,
+                        )
+                        pt_last_error = (e.code, err)
+                        # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
+                        if e.code not in (429, 502, 503, 504):
+                            break
+                        if attempt < ADAPTER_RETRY:
+                            delay = 2**attempt
+                            _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                            time.sleep(delay)
+
+                    except TimeoutError as e:
+                        _dr(
+                            req_id,
+                            f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after {ADAPTER_TIMEOUT}s",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status="timeout",
+                            error=str(e),
+                        )
+                        pt_last_error = ("timeout", str(e))
+                        if attempt < ADAPTER_RETRY:
+                            delay = 2**attempt
+                            _dr(req_id, f"[RETRY] Waiting {delay}s before next attempt...")
+                            time.sleep(delay)
+
+                    except Exception as e:
+                        _dr(
+                            req_id,
+                            f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status="error",
+                            error=f"{type(e).__name__}: {e}",
+                        )
+                        pt_last_error = ("error", str(e))
+                        if attempt < ADAPTER_RETRY:
+                            delay = 2**attempt
+                            _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                            time.sleep(delay)
+
+                # Все попытки исчерпаны — как convert-ветка: 504/код/502.
+                if pt_last_error:
+                    code, msg = pt_last_error
+                    if code == "timeout":
+                        _dr(
+                            req_id, f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504."
+                        )
+                        self._send_json(
+                            504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"}
+                        )
+                        final_status = 504
+                    elif isinstance(code, int):
+                        _dr(req_id, f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
+                        self._send_json(code, {"error": f"Backend error: {msg}"})
+                        final_status = code
+                    else:
+                        _dr(req_id, f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.")
+                        self._send_json(
+                            502,
+                            {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"},
+                        )
+                        final_status = 502
+                    _trace(
+                        session_id,
+                        req_id,
+                        "request_end",
+                        http_status=final_status,
+                        retries_used=ADAPTER_RETRY,
+                        total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                        failed=True,
+                        passthrough=True,
+                    )
+                    write_error_file(
+                        session_id,
+                        req_id,
+                        final_status=final_status,
+                        backend_url=backend_url,
+                        model=model,
+                        out_body=out_body,
+                        err_body=msg,
+                    )
+                return
+
             max_tokens = anthropic_req.get("max_tokens", 4096)
             in_tools = anthropic_req.get("tools", [])
             in_tool_names = [t.get("name", "?") for t in in_tools]

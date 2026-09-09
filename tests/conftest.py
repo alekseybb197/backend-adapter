@@ -219,6 +219,10 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     models_response = None
     completions_response = None
     completions_status = 200
+    # Responses API (v0.9.0): тело/статус для POST /v1/responses (passthrough
+    # E→E на новых входных эндпоинтах адаптера).
+    responses_response = None
+    responses_status = 200
     extra_post_paths = {}  # {path: status} — для endpoint-probe тестов
     request_count = 0
     requests = []  # list of all (path, method, body) requests
@@ -257,6 +261,18 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
                 # ошибки (v0.9.0: .err-тесты проверяют ПОЛНОЕ сообщение бэкенда).
                 self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
             elif FakeBackendHandler.completions_status in (429, 502, 503, 504):
+                self.wfile.write(json.dumps({"error": "backend error"}).encode())
+        elif self.path == "/v1/responses":
+            self.send_response(FakeBackendHandler.responses_status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            if FakeBackendHandler.responses_status == 200 and FakeBackendHandler.responses_response:
+                self.wfile.write(json.dumps(FakeBackendHandler.responses_response).encode())
+            elif FakeBackendHandler.responses_response:
+                # Любой не-200 статус с настроенным телом — пишем его как тело
+                # ошибки (тот же контракт, что у /v1/chat/completions выше).
+                self.wfile.write(json.dumps(FakeBackendHandler.responses_response).encode())
+            elif FakeBackendHandler.responses_status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path in FakeBackendHandler.extra_post_paths:
             # Дымовые пробы остальных эндпоинтов: /v1/messages, /v1/responses,
@@ -321,6 +337,22 @@ class FakeBackend:
         FakeBackendHandler.completions_status = value
 
     @property
+    def responses_response(self):
+        return FakeBackendHandler.responses_response
+
+    @responses_response.setter
+    def responses_response(self, value):
+        FakeBackendHandler.responses_response = value
+
+    @property
+    def responses_status(self):
+        return FakeBackendHandler.responses_status
+
+    @responses_status.setter
+    def responses_status(self, value):
+        FakeBackendHandler.responses_status = value
+
+    @property
     def request_count(self):
         return FakeBackendHandler.request_count
 
@@ -367,6 +399,8 @@ def fake_backend():
     FakeBackendHandler.models_response = None
     FakeBackendHandler.completions_response = None
     FakeBackendHandler.completions_status = 200
+    FakeBackendHandler.responses_response = None
+    FakeBackendHandler.responses_status = 200
     FakeBackendHandler.extra_post_paths = {}
     FakeBackendHandler.request_count = 0
     FakeBackendHandler.requests = []

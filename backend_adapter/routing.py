@@ -104,56 +104,65 @@ def target_for_input(inp: Format) -> TargetValue:
     return value  # type: ignore[return-value]
 
 
-def decide(inp: Format, backend_name: str) -> tuple[str, Format | None, str]:
+def decide(inp: Format, backend_name: str) -> tuple[str, Format | None, str, int]:
     """Решение о маршруте одного запроса на входе ``inp`` к бэкенду.
 
-    Возвращает ``(action, output_fmt, error_msg)``:
-    - ``("passthrough", inp, "")`` — тело запроса уходит бэкенду КАК ЕСТЬ
-      (формат входа = формату бэкенда; бэкенд подтверждённо поддерживает
-      его по кэшу проб);
-    - ``("convert", out, "")`` — реализованная конверсия inp → out (сегодня
-      только messages → completions), бэкенд поддерживает ``out``;
-    - ``("reject", None, текст)`` — запрос валиден, но маршрута нет:
-      нереализованная пара, auto без подходящего пути, либо бэкенд не
-      поддерживает целевой формат (HTTP-код ответа выбирает сервер: 400
-      для нереализованного/auto-no-route, 502 для неподдержки бэкендом);
-    - ``("disabled", None, текст)`` — вход выключен (TARGET=none) → 404.
+    Возвращает ``(action, output_fmt, error_msg, http_status)``:
+    - ``("passthrough", inp, "", 200)`` — тело запроса уходит бэкенду КАК
+      ЕСТЬ (формат входа = формату бэкенда; поддержка подтверждена кэшем
+      проб либо — в явном режиме без данных — не опровергнута);
+    - ``("convert", out, "", 200)`` — реализованная конверсия inp → out
+      (сегодня только messages → completions), бэкенд поддерживает ``out``;
+    - ``("reject", None, текст, 400|502)`` — запрос валиден, но маршрута
+      нет: нереализованная пара / auto без подходящего пути (400), либо
+      бэкенд подтверждённо не поддерживает целевой формат (502);
+    - ``("disabled", None, текст, 404)`` — вход выключен (TARGET=none).
 
     Решения — ТОЛЬКО по кэшу проб (``config.endpoint_support``): фоновая
-    probe_endpoints + пер-модельные пробы usage-таблицы. None (не
-    пробовано / пробы выключены) трактуется как False — «нет подтверждения
-    поддержки → passthrough не выбирается». Сети здесь НЕТ.
+    probe_endpoints + пер-модельные пробы usage-таблицы. Сети здесь НЕТ.
+
+    Семантика None (эндпоинт не пробовался / пробы выключены) РАЗНАЯ для
+    режимов (решение пользователя; ADAPTER_ENDPOINT_PROBE остаётся 1):
+    - в ``auto`` None трактуется как False — passthrough/convert без
+      подтверждения поддержки (found=True) не выбираются: маршрут
+      выбирается только по факту, иначе reject 400 «no route»;
+    - в ЯВНОМ режиме (TARGET=формат) None НЕ блокирует: «нет данных» →
+      оптимистичная попытка (passthrough E→E / convert), как вёл бы себя
+      адаптер без роутинга. Отказ (502) — только при подтверждённом
+      found=False (проба была, не-HTTP-200).
     """
     target = target_for_input(inp)
     if target == "none":
-        return ("disabled", None, ERROR_DISABLED.format(env=_ENV_NAMES[inp]))
+        return ("disabled", None, ERROR_DISABLED.format(env=_ENV_NAMES[inp]), 404)
 
     supported_inp = config.endpoint_support(backend_name, inp)
 
     # --- auto: passthrough E→E при поддержке бэкендом входного формата ---
     # (для messages это passthrough messages→messages на антропик-совместимом
     # бэкенде — приоритет над конверсией в completions); иначе — реализованная
-    # конверсия из этого входа; иначе — ошибка агенту.
+    # конверсия из этого входа; иначе — ошибка агенту (400 «no route»).
     if target == "auto":
         if supported_inp is True:
-            return ("passthrough", inp, "")
+            return ("passthrough", inp, "", 200)
         for cand in ("messages", "completions", "responses"):
             if (inp, cand) in IMPLEMENTED_CONVERSIONS and IMPLEMENTED_CONVERSIONS[(inp, cand)]:
                 if config.endpoint_support(backend_name, cand) is True:
-                    return ("convert", cand, "")
+                    return ("convert", cand, "", 200)
                 break
-        return ("reject", None, ERROR_NO_ROUTE.format(inp=inp, backend=backend_name))
+        return ("reject", None, ERROR_NO_ROUTE.format(inp=inp, backend=backend_name), 400)
 
     # --- явный целевой формат (не auto/none) ---
     assert target in ("messages", "completions", "responses"), target
     out = target
     if out == inp:
-        # Passthrough E→E требует, чтобы бэкенд реально обслуживал формат.
-        if supported_inp is True:
-            return ("passthrough", inp, "")
-        return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=inp))
+        # Passthrough E→E: подтверждённая поддержка (found=True) либо нет
+        # данных (None — оптимистично, «как без роутинга»); подтверждённый
+        # отказ (found=False) — 502.
+        if supported_inp is not False:
+            return ("passthrough", inp, "", 200)
+        return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=inp), 502)
     if IMPLEMENTED_CONVERSIONS.get((inp, out)):
-        if config.endpoint_support(backend_name, out) is True:
-            return ("convert", out, "")
-        return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=out))
-    return ("reject", None, ERROR_UNIMPLEMENTED.format(inp=inp, out=out))
+        if config.endpoint_support(backend_name, out) is not False:
+            return ("convert", out, "", 200)
+        return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=out), 502)
+    return ("reject", None, ERROR_UNIMPLEMENTED.format(inp=inp, out=out), 400)

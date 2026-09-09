@@ -1516,8 +1516,10 @@ class TestEndpointProbe:
 
     def test_probe_against_fake_backend(self, fake_backend):
         # Реальная сеть: fake_backend отвечает на POST /v1/chat/completions
-        # (completions_status=200), остальные пути — 404, пока не заданы
-        # extra_post_paths. Проба находит только completions.
+        # (completions_status=200) и /v1/responses (responses_status=200);
+        # остальные пути — 404, пока не заданы extra_post_paths. Проба
+        # находит только completions и responses (v0.9.0: у fake-бэкенда
+        # появился responses-эндпоинт для passthrough-тестов).
         _reload_config()
         from backend_adapter import config
         cfg = config
@@ -1525,6 +1527,7 @@ class TestEndpointProbe:
         fake_backend.serve()             # фикстура только создаёт; стартуем сами
         fake_backend.models_response = {"object": "list", "data": [{"id": "m1"}]}
         fake_backend.completions_status = 200
+        fake_backend.responses_status = 200
         fake_backend.extra_post_paths = {}
         backend = {"name": "AAA", "base": fake_backend.base_url, "key": "k",
                    "probe": {"completions": "m1", "messages": "m1",
@@ -1539,8 +1542,8 @@ class TestEndpointProbe:
 
         state = result["endpoints"]["AAA"]["endpoints"]
         assert state["/v1/chat/completions"] == {"status": 200, "found": True}
+        assert state["/v1/responses"] == {"status": 200, "found": True}
         assert state["/v1/messages"]["found"] is False       # 404
-        assert state["/v1/responses"]["found"] is False
         assert state["/v1/embeddings"]["found"] is False
 
     def test_probe_extra_paths_responses_200(self, fake_backend):
