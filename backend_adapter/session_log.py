@@ -303,21 +303,54 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
         f.write(yaml_text)
 
 
-# ==================== .err-файлы инцидентов ====================
-# Протокол взаимодействия с бэкендом (v0.9.0): любой реальный прокси-запрос
-# агента сохраняется до получения ответа; если финальный ответ клиенту —
-# ошибка 4xx/5xx (после ретраев/таймаутов), инцидент пишется БЕЗУСЛОВНЫМ
-# каналом в файл session-<ts>-<safe8>.err рядом с .log/.jsonl сессии.
-# Файл ошибок принципиально НЕ гейтится флагами подробности:
+# ==================== .err-файлы инцидентов и WARN-событий ====================
+# Безусловный канал сессии (v0.9.0 — инциденты, v0.9.1 — WARN-события):
+# файл session-<ts>-<safe8>.err рядом с .log/.jsonl сессии (общий
+# _session_file_ts). Инцидент: любой реальный прокси-запрос агента, чей
+# финальный ответ клиенту — ошибка 4xx/5xx (после ретраев/таймаутов), пишет
+# ERROR-блок. WARN-событие: диагностическое предупреждение адаптера на
+# запросе (в т.ч. успешном) — [WARN] First message is NOT system и
+# [USAGE_WARN] стрима без usage — пишет WARNING-блок.
+# Файл принципиально НЕ гейтится флагами подробности:
 #   - НЕ гейтится config.ADAPTER_DEBUG (ENABLE=0 — тоже пишется);
 #   - НЕ гейтится config.ADAPTER_DEBUG_PARTS;
-#   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и ошибка).
+#   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и сообщение).
 # Гейтится только наличием лог-директории (ADAPTER_DEBUG_LOGPATH — всегда
 # непуста, дефолт ./tmp/logs; is_dir=True всегда — см. _resolve_log_base).
 # Санитайзер уважает ADAPTER_SENSITIVE_LOGGING_ENABLE (живое чтение config,
 # как в logger._write): по умолчанию секреты redact'ятся, при =1 пишутся
 # полные данные.
 _err_lock = threading.Lock()
+
+
+def _clean_err_line(line: str) -> str:
+    """Санитайзер строки .err-канала: полные данные при живом
+    ADAPTER_SENSITIVE_LOGGING_ENABLE=1 (identity), иначе redact секретов.
+    Живое чтение config (как в logger._write), а не import-time — тесты
+    переключают флаг без перезагрузки модуля."""
+    from .config import ADAPTER_SENSITIVE_LOGGING_ENABLE
+    from .redact import redact
+
+    if ADAPTER_SENSITIVE_LOGGING_ENABLE:
+        return line
+    return redact(line)
+
+
+def _write_err_lines(fd, lines: list[str]) -> None:
+    """Записать готовые строки блока в открытый .err-дескриптор сессии под
+    _err_lock, каждую — санитайзером. Исключений не бросает."""
+    with _err_lock:
+        for line in lines:
+            fd.write((_clean_err_line(line) + "\n").encode())
+        fd.flush()
+
+
+def _err_body_text(out_body: bytes | str) -> str:
+    """Нормализация тела запроса для .err-канала: bytes/bytearray → UTF-8
+    (потерянные байты — errors="replace", как в v0.9.0), str как есть."""
+    if isinstance(out_body, (bytes, bytearray)):
+        return out_body.decode("utf-8", errors="replace")
+    return str(out_body)
 
 
 def write_error_file(
@@ -348,32 +381,64 @@ def write_error_file(
         fd = _open_session_file("err", session_id)
         if fd is None:
             return
-        from .config import ADAPTER_SENSITIVE_LOGGING_ENABLE
-        from .redact import redact
-
-        body_text = (
-            out_body.decode("utf-8", errors="replace")
-            if isinstance(out_body, (bytes, bytearray))
-            else str(out_body)
-        )
         ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-        # Полные данные при SENSITIVE=1 (identity), иначе redact секретов
-        clean = (lambda s: s) if ADAPTER_SENSITIVE_LOGGING_ENABLE else redact
         lines = [
             "==================== ERROR ====================",
             (
                 f"[{ts}] [{req_id}] session_id={session_id} final_status={final_status} "
                 f"model={model} backend_url={backend_url}"
             ),
-            f"[{ts}] [{req_id}] [REQUEST] {body_text}",
+            f"[{ts}] [{req_id}] [REQUEST] {_err_body_text(out_body)}",
             f"[{ts}] [{req_id}] [BACKEND_ERROR] {err_body}",
             "==================== END ERROR ====================",
         ]
-        with _err_lock:
-            for line in lines:
-                fd.write((clean(line) + "\n").encode())
-            fd.flush()
+        _write_err_lines(fd, lines)
     except Exception:
         # Наблюдательный канал: любая ошибка записи молча глотается — запрос
         # (и его ответ клиенту) уже сформирован к моменту вызова.
+        pass
+
+
+def write_warn_file(
+    session_id: str,
+    req_id: str,
+    *,
+    backend_url: str,
+    model: str,
+    out_body: bytes | str,
+    warn_body: str,
+) -> None:
+    """Записать WARN-событие запроса в .err-файл сессии (v0.9.1).
+
+    Тот же безусловный канал, что и инциденты (write_error_file): файл
+    session-<ts>-<safe8>.err, общий _session_file_ts сессии, полные запрос и
+    текст события без обрезки по ADAPTER_DEBUG_TRIM, вне
+    ADAPTER_DEBUG_ENABLE/PARTS. В отличие от ERROR-блока у WARN нет
+    final_status — событие-предупреждение наблюдается и на успешном ответе
+    (200): сюда пишутся диагностические проверки адаптера —
+    [WARN] First message is NOT system: <role> (server.py, инвариант
+    конвертации) и [USAGE_WARN] Backend не вернул usage в стриме
+    (streaming.py, эвристика input_tokens). Шапка несёт метаданные без
+    статуса; один запрос может нести в одном .err и WARNING-, и ERROR-блок
+    (инвариант нарушен И запрос позже упал в 4xx/5xx) — блоки
+    самоделимитированы.
+
+    Функция никогда не бросает исключений (наблюдательный канал)."""
+    try:
+        if not _DEBUG_IS_DIR or not _DEBUG_PATH:
+            return
+        fd = _open_session_file("err", session_id)
+        if fd is None:
+            return
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        lines = [
+            "==================== WARNING ====================",
+            (f"[{ts}] [{req_id}] session_id={session_id} model={model} backend_url={backend_url}"),
+            f"[{ts}] [{req_id}] [REQUEST] {_err_body_text(out_body)}",
+            f"[{ts}] [{req_id}] [WARN] {warn_body}",
+            "==================== END WARNING ====================",
+        ]
+        _write_err_lines(fd, lines)
+    except Exception:
+        # Наблюдательный канал: провал записи не должен ронять запрос.
         pass

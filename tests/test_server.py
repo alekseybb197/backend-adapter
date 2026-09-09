@@ -82,12 +82,14 @@ class ServerSetupMixin:
             server_mod._dr = lambda *a, **kw: None
         server_mod._trace = lambda *a, **kw: None
         server_mod.write_debug_json = lambda *a, **kw: None
-        # .err-канал (v0.9.0) безусловен (не зависит от ADAPTER_DEBUG_ENABLE) —
-        # в unit-контексте без LOGPATH его надо мокать, иначе ошибки пишутся
-        # в дефолтный ./tmp/logs. Тесты самого .err ставят LOGPATH на tmp_path
-        # и вызывают _setup_adapter(mock_err=False), чтобы канал был живым.
+        # .err-канал (v0.9.0 инциденты + v0.9.1 WARN) безусловен (не зависит от
+        # ADAPTER_DEBUG_ENABLE) — в unit-контексте без LOGPATH его надо мокать,
+        # иначе записи уходят в дефолтный ./tmp/logs. Тесты самого .err ставят
+        # LOGPATH на tmp_path и вызывают _setup_adapter(mock_err=False), чтобы
+        # канал был живым (в т.ч. WARN «First message is NOT system»).
         if mock_err:
             server_mod.write_error_file = lambda *a, **kw: None
+            server_mod.write_warn_file = lambda *a, **kw: None
 
         # Used-models table: reset + mock the per-model endpoint probe so the
         # server hook never fires real network requests; tests override the
@@ -963,7 +965,29 @@ class TestErrFileProtocol(ServerSetupMixin):
     # -- успех / локальные 400 адаптера — .err НЕ пишется ------------------
 
     def test_success_no_err_file(self, fake_backend, tmp_path):
-        """200-успех → .err не создан."""
+        """200-успех с инвариантом в порядке (первое сообщение system) →
+        .err не создан."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
+                                  body={"model": "test-model",
+                                        "messages": [{"role": "system", "content": "Sys"},
+                                                     {"role": "user", "content": "Hi"}],
+                                        "max_tokens": 100})
+                assert resp["status"] == 200
+            finally:
+                server.shutdown()
+        assert self._err_files(tmp_path) == []
+
+    def test_success_non_system_first_writes_warn(self, fake_backend, tmp_path):
+        """200-успех, но первое сообщение user → WARNING-блок в .err (v0.9.1):
+        инвариант конвертации нарушен — пишется безусловно, на успешном ответе."""
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "chat1", "model": "test-model",
@@ -979,7 +1003,20 @@ class TestErrFileProtocol(ServerSetupMixin):
                 assert resp["status"] == 200
             finally:
                 server.shutdown()
-        assert self._err_files(tmp_path) == []
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        # ERROR-блока нет — только WARNING (запрос прошёл успешно)
+        assert "==================== ERROR ====================" not in content
+        assert "==================== WARNING ====================" in content
+        assert "==================== END WARNING ====================" in content
+        assert "final_status" not in content
+        assert "model=test-model" in content
+        # Полный [OI]-запрос и текст WARN
+        assert '"max_tokens": 100' in content
+        assert '"role": "user"' in content
+        assert "[WARN]" in content
+        assert "First message is NOT system" in content
 
     def test_local_400_no_backend_no_err_file(self, fake_backend, tmp_path):
         """400 ДО бэкенда (нет /v1/messages, strict-модель) → .err не создан:
