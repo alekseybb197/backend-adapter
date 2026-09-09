@@ -34,7 +34,12 @@ from .convert import (
 from .logger import _d, _dr
 from .redact import redact, redact_headers
 from .session_log import write_debug_json, write_error_file
-from .streaming import _sse_write, stream_openai_to_anthropic
+from .streaming import (
+    _sse_write,
+    _write_sse_error_native,
+    relay_sse,
+    stream_openai_to_anthropic,
+)
 from .tracer import _lookup_tool_use_name, _lookup_tool_use_producer, _trace
 
 
@@ -381,18 +386,257 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 )
 
                 if stream_requested:
-                    # === Passthrough-стрим ===
-                    # SSE-релей (relay_sse) — следующий коммит (Коммит 4).
-                    # Здесь и сейчас стрим-запрос на passthrough-входе
-                    # обрабатывается как обычный (non-stream) запрос: тело
-                    # уходит целиком, ответ отдаётся дословно после полного
-                    # чтения (см. ветку non-stream ниже). TODO(v0.9.0): после
-                    # ввода relay_sse заменить на построчный релей.
-                    _dr(
-                        req_id,
-                        "[WARN] (passthrough) stream_requested=true обрабатывается как "
-                        "non-stream (SSE-релей — в следующем коммите)",
-                    )
+                    # === Passthrough-стрим (SSE-релей E→E) ===
+                    # Поток бэкенда передаётся клиенту ДОСЛОВНО, построчно
+                    # (relay_sse), без конвертации: контракт формата входа
+                    # определяет бэкенд, адаптер лишь ретранслирует байты
+                    # как есть (никакого пере-фрейминга/пере-сериализации).
+                    # Retry возможен только ПОКА ни один байт не ушёл клиенту
+                    # — после self._start_sse() откатиться нельзя (клиент уже
+                    # получил заголовки и, возможно, часть событий), поэтому
+                    # retry действует только на этапе urlopen(), а сбой уже во
+                    # время релея обрабатывается SSE-событием "error" в родном
+                    # формате входа (_write_sse_error_native), без retry.
+                    # Маркер последней ошибки — int (HTTP-код) ИЛИ str
+                    # ("timeout"/"error"); явная аннотация нужна mypy, чтобы
+                    # не сузить переменную по первому присваиванию (e.code,
+                    # int) и не ругаться на последующие строковые маркеры.
+                    pt_stream_error: tuple[int | str, str] | None = None
+                    pt_started = False
+                    for attempt in range(1, ADAPTER_RETRY + 1):
+                        try:
+                            _dr(
+                                req_id,
+                                f"[FETCH] (passthrough stream) Attempt {attempt}/{ADAPTER_RETRY}, "
+                                f"timeout={ADAPTER_TIMEOUT}s",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_attempt",
+                                attempt=attempt,
+                                timeout=ADAPTER_TIMEOUT,
+                                streaming=True,
+                                passthrough=True,
+                            )
+                            t0 = time.time()
+                            resp = urllib.request.urlopen(
+                                req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT
+                            )
+                            _dr(
+                                req_id,
+                                f"[FETCH] (passthrough stream) Заголовки получены за "
+                                f"{time.time() - t0:.1f}s, status={resp.status}",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=True,
+                                status=resp.status,
+                                elapsed_ms=int((time.time() - t0) * 1000),
+                                passthrough=True,
+                            )
+
+                            self._start_sse(200)
+                            pt_started = True
+                            # relay_sse сам пишет байты в wfile и сканирует
+                            # проходящие строки на usage-блоки (ответ в родном
+                            # формате входа: completions — usage-поле финального
+                            # чанка, responses/messages — событие response.completed
+                            # / usage-событие). Возврат — нормализованные
+                            # input_tokens/output_tokens (или {}).
+                            pt_usage = relay_sse(resp, self.wfile, req_id, inp_fmt)
+                            if pt_usage.get("input_tokens") or pt_usage.get("output_tokens"):
+                                usage_tokens["input"] += int(pt_usage.get("input_tokens") or 0)
+                                usage_tokens["output"] += int(pt_usage.get("output_tokens") or 0)
+                            _dr(req_id, f"[OK] Passthrough stream done (out={out_fmt_val})")
+                            _trace(
+                                session_id,
+                                req_id,
+                                "request_end",
+                                http_status=200,
+                                retries_used=attempt - 1,
+                                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                streamed=True,
+                                passthrough=True,
+                            )
+                            return  # Успех -- выходим
+
+                        except urllib.error.HTTPError as e:
+                            err_raw = e.read()
+                            err = err_raw.decode()
+                            _dr(
+                                req_id,
+                                f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
+                            )
+                            error_value = (
+                                err[:500]
+                                if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                                else redact(err[:500])
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status=e.code,
+                                error=error_value,
+                            )
+                            pt_stream_error = (e.code, err)
+                            # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
+                            if e.code not in (429, 502, 503, 504):
+                                break
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                                time.sleep(delay)
+
+                        except TimeoutError as e:
+                            _dr(
+                                req_id,
+                                f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after "
+                                f"{ADAPTER_TIMEOUT}s",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status="timeout",
+                                error=str(e),
+                            )
+                            pt_stream_error = ("timeout", str(e))
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s before next attempt...")
+                                time.sleep(delay)
+
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                            # Клиент отвалился сам (по своим причинам, не по
+                            # нашей вине) прямо во время релея -- как и в
+                            # convert-стрим-ветке, это не ошибка адаптера и
+                            # логировать полный traceback не нужно.
+                            _dr(
+                                req_id,
+                                f"[CLIENT_GONE] {type(e).__name__} while streaming: "
+                                "client disconnected",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "request_end",
+                                http_status=None,
+                                retries_used=attempt - 1,
+                                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                streamed=True,
+                                client_gone=True,
+                                passthrough=True,
+                            )
+                            return
+
+                        except Exception as e:
+                            _dr(
+                                req_id,
+                                f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: "
+                                f"{type(e).__name__}: {e}",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status="error",
+                                error=f"{type(e).__name__}: {e}",
+                            )
+                            pt_stream_error = ("error", str(e))
+                            if pt_started:
+                                # Заголовки и часть событий уже ушли клиенту --
+                                # откат невозможен. SSE-событие "error" в родном
+                                # формате входа (клиент умеет разбирать его без
+                                # конвертации), повторной попытки не будет
+                                # (она породила бы второй поток внутри уже
+                                # начатого ответа).
+                                _write_sse_error_native(
+                                    self.wfile, inp_fmt, f"{type(e).__name__}: {e}"
+                                )
+                                _trace(
+                                    session_id,
+                                    req_id,
+                                    "request_end",
+                                    http_status=200,
+                                    retries_used=attempt - 1,
+                                    total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                    streamed=True,
+                                    failed_mid_stream=True,
+                                    passthrough=True,
+                                )
+                                return
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                                time.sleep(delay)
+
+                    # Все попытки исчерпаны, поток так и не начался
+                    # (pt_started=False) -- заголовки ещё не отправлены, можно
+                    # вернуть обычный JSON-error статус, как в non-stream
+                    # ветке passthrough ниже.
+                    if pt_stream_error and not pt_started:
+                        code, msg = pt_stream_error
+                        if code == "timeout":
+                            _dr(
+                                req_id,
+                                f"[FAIL] All {ADAPTER_RETRY} attempts timed out. Returning 504.",
+                            )
+                            self._send_json(
+                                504,
+                                {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"},
+                            )
+                            final_status = 504
+                        elif isinstance(code, int):
+                            _dr(req_id, f"[FAIL] Backend returned HTTP {code}. Returning {code}.")
+                            self._send_json(code, {"error": f"Backend error: {msg}"})
+                            final_status = code
+                        else:
+                            _dr(
+                                req_id,
+                                f"[FAIL] Returning 502 after {ADAPTER_RETRY} attempts.",
+                            )
+                            self._send_json(
+                                502,
+                                {
+                                    "error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"
+                                },
+                            )
+                            final_status = 502
+                        _trace(
+                            session_id,
+                            req_id,
+                            "request_end",
+                            http_status=final_status,
+                            retries_used=ADAPTER_RETRY,
+                            total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                            failed=True,
+                            streamed=True,
+                            passthrough=True,
+                        )
+                        # Протокол .err-инцидентов: финальный ответ — ошибка
+                        # 4xx/5xx, запрос дошёл до бэкенда (out_body
+                        # сформирован). Файл пишется БЕЗУСЛОВНО.
+                        write_error_file(
+                            session_id,
+                            req_id,
+                            final_status=final_status,
+                            backend_url=backend_url,
+                            model=model,
+                            out_body=out_body,
+                            err_body=msg,
+                        )
+                    return
 
                 # === Passthrough non-stream ===
                 # Retry loop (копия общей схемы convert-ветки): ждём ответ

@@ -313,3 +313,123 @@ def stream_openai_to_anthropic(
     )
 
     return stop_reason, usage
+
+
+# --- Passthrough E→E: релей SSE-потока бэкенда клиенту без конвертации ---
+
+# usage-ключи ответа по формату (в passthrough формат входа == формата
+# выхода — тело не пересобирается): у chat.completions usage несёт
+# prompt_tokens/completion_tokens, у responses/messages —
+# input_tokens/output_tokens.
+_USAGE_KEYS = {
+    "completions": ("prompt_tokens", "completion_tokens"),
+    "responses": ("input_tokens", "output_tokens"),
+    "messages": ("input_tokens", "output_tokens"),
+}
+
+
+def _extract_usage(obj: dict, inp_fmt: str) -> dict:
+    """Достаёт usage-блок из одного SSE-события по формату входа.
+
+    Расположение usage в потоке разное: у completions/messages это поле
+    верхнего уровня (у completions — финальный чанк при
+    stream_options.include_usage, у messages — событие message_delta); у
+    responses usage приходит во вложенном ``response.usage`` события
+    response.completed (в верхнеуровневом ``type``/``sequence_number`` его
+    нет). Возвращает {} для событий без usage."""
+    if inp_fmt == "responses":
+        resp_obj = obj.get("response")
+        if not isinstance(resp_obj, dict):
+            return {}
+        u = resp_obj.get("usage")
+        return u if isinstance(u, dict) else {}
+    u = obj.get("usage")
+    return u if isinstance(u, dict) else {}
+
+
+def relay_sse(resp, wfile, req_id: str, inp_fmt: str) -> dict:
+    """Релей SSE-потока бэкенда клиенту ДОСЛОВНО (passthrough E→E).
+
+    Читает ответ бэкенда построчно и пишет байты в wfile как есть — без
+    пере-фрейминга и пере-сериализации (это НЕ конвертация, а релей:
+    клиент получает ровно тот поток, что прислал бэкенд, в родном формате
+    входа). Конец стрима — по EOF ответа бэкенда (адаптер уже отдал
+    ``Connection: close`` в _start_sse, поэтому клиент понимает конец и без
+    терминального события).
+
+    Побочно сканирует проходящие строки на usage-блоки (для учёта
+    WEBUI-таблицы): вернёт usage ПОСЛЕДНЕГО встреченного usage-события
+    (или {}). Ключи возвращаемого dict — НОРМАЛИЗОВАННЫЕ
+    input_tokens/output_tokens по формату входа (см. _USAGE_KEYS); у
+    responses usage приходит событием response.completed, у completions —
+    usage-полем финального чанка (когда stream_options.include_usage).
+
+    Бросает наружу исключения чтения/записи (обрыв соединения бэкенда или
+    клиента) — вызывающий код (do_POST) решает: CLIENT_GONE / SSE-error
+    после старта.
+    """
+    usage_raw = {}
+    try:
+        for raw_line in resp:
+            wfile.write(raw_line)
+            wfile.flush()
+            try:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line[len("data:") :].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                obj = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            u = _extract_usage(obj, inp_fmt)
+            if u:
+                usage_raw = u  # последний usage-блок за стрим
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        raise
+    if not usage_raw:
+        return {}
+    in_key, out_key = _USAGE_KEYS.get(inp_fmt, ("input_tokens", "output_tokens"))
+    return {
+        "input_tokens": int(usage_raw.get(in_key) or 0),
+        "output_tokens": int(usage_raw.get(out_key) or 0),
+    }
+
+
+def _write_sse_error_native(wfile, inp_fmt: str, message: str) -> None:
+    """SSE-событие ошибки в РОДНОМ формате входа (passthrough E→E, сбой
+    после старта потока — заголовки и часть событий уже ушли клиенту,
+    откат на JSON-ответ невозможен).
+
+    Формат события повторяет то, что бэкенд сам прислал бы при ошибке на
+    этом эндпоинте (клиент умеет разбирать его в родном протоколе):
+    - responses: ``event: error`` + data {type: "error", code, message};
+    - messages/completions: событие ``error`` c Anthropic/[OI]-обвязкой
+      (error: {type: "error", message: …}).
+
+    Запись молча глотает любые исключения (клиент мог уже отвалиться) —
+    вызывающий код не должен падать из-за невозможности дописать поток."""
+    try:
+        # Явная аннотация: ветки несут разные формы (плоский dict против
+        # вложенного error-объекта), иначе mypy выводит dict[str, str] из
+        # первой ветки и ругается на остальные.
+        payload: dict[str, object]
+        if inp_fmt == "responses":
+            payload = {
+                "type": "error",
+                "code": "adapter_error",
+                "message": message,
+            }
+        elif inp_fmt == "completions":
+            payload = {"error": {"message": message, "type": "server_error"}}
+        else:  # messages — антропик-обвязка ошибки
+            payload = {"type": "error", "error": {"type": "error", "message": message}}
+        _sse_write(wfile, "error", payload)
+    except Exception:
+        pass

@@ -793,6 +793,77 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
+    # -- SSE-релей (passthrough-стрим) ------------------------------------
+
+    def test_completions_passthrough_stream_relay(self, fake_backend):
+        """ADAPTER_COMPLETIONS_TARGET=completions + stream=true: поток
+        бэкенда передаётся клиенту ДОСЛОВНО (SSE-релей E→E, без
+        конвертации в антропик-события), usage — из финального чанка."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
+        self._enable(completions="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.sse_lines = [
+            'data: {"choices": [{"delta": {"content": "Hello"}}]}\n\n',
+            'data: {"choices": [{"delta": {}}], "usage": {"prompt_tokens": 4, "completion_tokens": 6}}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "stream": True},
+                )
+                assert resp["status"] == 200
+                # поток ушёл дословно, [OI]-формат не тронут
+                assert "event: message_start" not in resp["body"]
+                assert "message_stop" not in resp["body"]
+                for line in fake_backend.sse_lines:
+                    assert line in resp["body"]
+                # usage из финального чанка попал в учёт
+                from backend_adapter import model_usage as mu
+                rows = mu.usage_snapshot()
+                assert rows[0]["input_tokens"] == 4
+                assert rows[0]["output_tokens"] == 6
+            finally:
+                server.shutdown()
+
+    def test_responses_passthrough_stream_relay_usage(self, fake_backend):
+        """responses-стрим: usage читается из вложенного response.usage
+        события response.completed (не верхнеуровневого usage)."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
+        self._enable(responses="responses")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.sse_lines = [
+            b'data: {"type": "response.output_text.delta", "delta": "Hi"}\n\n',
+            b'data: {"type": "response.completed", "response": {"usage": {"input_tokens": 3, "output_tokens": 9}}}\n\n',
+        ]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/responses", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={"model": "test-model",
+                          "input": [{"role": "user", "content": "Hi"}],
+                          "stream": True},
+                )
+                assert resp["status"] == 200
+                # поток дословно (ни одного антропик-события)
+                assert "message_start" not in resp["body"]
+                assert "response.completed" in resp["body"]
+                from backend_adapter import model_usage as mu
+                rows = mu.usage_snapshot()
+                assert rows[0]["input_tokens"] == 3
+                assert rows[0]["output_tokens"] == 9
+            finally:
+                server.shutdown()
+
 
 class TestErrFileProtocol(ServerSetupMixin):
     """Протокол .err-инцидентов (v0.9.0): финальный 4xx/5xx реального

@@ -224,6 +224,10 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     responses_response = None
     responses_status = 200
     extra_post_paths = {}  # {path: status} — для endpoint-probe тестов
+    # SSE-стрим (v0.9.0): если задан список строк — ответ text/event-stream
+    # для /v1/chat/completions (построчно, как настоящий стрим), иначе —
+    # обычный JSON completions_response.
+    sse_lines = None
     request_count = 0
     requests = []  # list of all (path, method, body) requests
 
@@ -249,6 +253,20 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode() if length else None
         FakeBackendHandler.requests.append((self.path, "POST", body))
+
+        if FakeBackendHandler.sse_lines is not None and self.path in (
+            "/v1/chat/completions", "/v1/responses", "/v1/messages",
+        ):
+            # SSE-стрим (v0.9.0): отдаём настроенные строки по одной с flush —
+            # relay_sse должен получить их дословно (релей E→E). Единый хук для
+            # всех входов; заглушает JSON-ответы ниже.
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for line in FakeBackendHandler.sse_lines:
+                self.wfile.write(line.encode() if isinstance(line, str) else line)
+                self.wfile.flush()
+            return
 
         if self.path == "/v1/chat/completions":
             self.send_response(FakeBackendHandler.completions_status)
@@ -368,6 +386,14 @@ class FakeBackend:
     def extra_post_paths(self, value):
         FakeBackendHandler.extra_post_paths = value
 
+    @property
+    def sse_lines(self):
+        return FakeBackendHandler.sse_lines
+
+    @sse_lines.setter
+    def sse_lines(self, value):
+        FakeBackendHandler.sse_lines = value
+
     def serve(self):
         """Start the fake backend server in a background thread."""
         self.server = ThreadingHTTPServer((self.host, 0), FakeBackendHandler)
@@ -402,6 +428,7 @@ def fake_backend():
     FakeBackendHandler.responses_response = None
     FakeBackendHandler.responses_status = 200
     FakeBackendHandler.extra_post_paths = {}
+    FakeBackendHandler.sse_lines = None
     FakeBackendHandler.request_count = 0
     FakeBackendHandler.requests = []
     yield backend
