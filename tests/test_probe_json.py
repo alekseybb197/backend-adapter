@@ -73,7 +73,7 @@ class TestWriteFiles:
         pj = self._logpath(tmp_path)
         pj.write_models_json("llm", {"ok": True})
         pj.write_endpoint_json("llm", "m:1", "completions", {"ok": True})
-        assert [f.name for f in tmp_path.iterdir()] == [
+        assert sorted(f.name for f in tmp_path.iterdir()) == [
             "llm.m_1.completions.json",
             "llm.models.json",
         ]
