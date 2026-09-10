@@ -74,7 +74,7 @@ WEBUI — локальный веб-интерфейс адаптера: общ�
 
 ```bash
 curl -s http://127.0.0.1:8765/healthz
-# → 200 {"status": "ok", "version": "0.9.0", "uptime": 1234.5, "pid": 4242}
+# → 200 {"status": "ok", "version": "0.9.2", "uptime": 1234.5, "pid": 4242}
 curl -s http://127.0.0.1:8765/ready
 # → 200 {"status": "ready", ...}  — бэкенды настроены и прогреты
 # → 503 {"status": "not_ready", ...} — конфиг пуст / кэш моделей пуст
