@@ -1,0 +1,154 @@
+---
+# Lifecycle step: after verify.yml has asserted the service is installed AND
+# running, run `install.sh --delete` and assert the whole installation is gone.
+#
+# This lives in side_effect (not verify) because it mutates the container: the
+# install→verify pair must observe the service still present, and only then may
+# the teardown run. `--yes` skips the interactive confirmation (there is no TTY
+# in CI/molecule); the container is root, so the installer's sudo branch is not
+# exercised here.
+- name: Delete the installation and assert it is gone
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    install_log: /opt/molecule/install.log
+    install_rc: /opt/molecule/install.rc
+    delete_log: /opt/molecule/delete.log
+    delete_rc: /opt/molecule/delete.rc
+    delete_log2: /opt/molecule/delete2.log
+    delete_rc2: /opt/molecule/delete2.rc
+    conflict_rc: /opt/molecule/conflict.rc
+    installed_bin: /usr/local/bin/backend-adapter
+    service_root: /var/lib/backend-adapter
+    service_unit: /etc/systemd/system/backend-adapter.service
+    service_user: backend-adapter
+
+  tasks:
+    - name: Run install.sh --delete --yes (stdout+stderr captured)
+      # set +e: a non-zero exit is asserted below, not here.
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          bash {{ stage_dir }}/install.sh --delete --yes > {{ delete_log }} 2>&1
+          printf '%s' "$?" > {{ delete_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the delete log and rc
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ delete_rc }}"
+        - "{{ delete_log }}"
+      register: captured
+
+    - name: Decode the delete result
+      ansible.builtin.set_fact:
+        delete_rc_text: "{{ captured.results[0].content | b64decode }}"
+        delete_log_text: "{{ captured.results[1].content | b64decode }}"
+
+    - name: Stat the artifacts the installer created
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ installed_bin }}"
+        - "{{ service_root }}"
+        - "{{ service_unit }}"
+      register: removed
+
+    - name: Look up the service user
+      # `getent passwd <user>` exits 2 when the key is absent. The getent module
+      # cannot express this: with failed_when: false it is still reported as
+      # succeeded, which would make the assertion below vacuous. Use a raw
+      # command and assert on rc instead.
+      ansible.builtin.command: getent passwd {{ service_user }}
+      register: service_passwd
+      changed_when: false
+      failed_when: false
+
+    - name: Query the unit state
+      ansible.builtin.command: "systemctl {{ item }} backend-adapter.service"
+      loop:
+        - is-enabled
+        - is-active
+      register: unit_state
+      changed_when: false
+      failed_when: false
+
+    - name: Read the unit state
+      ansible.builtin.set_fact:
+        unit_enabled: "{{ unit_state.results[0].stdout | default('') | trim }}"
+        unit_active: "{{ unit_state.results[1].stdout | default('') | trim }}"
+
+    - name: Assert the uninstall contract
+      ansible.builtin.assert:
+        that:
+          # 1. the installer itself succeeded
+          - delete_rc_text | trim == "0"
+          - "'Uninstall complete.' in delete_log_text"
+          # 2. every artifact is gone
+          - not removed.results[0].stat.exists          # binary
+          - not removed.results[1].stat.exists          # state dir (token)
+          - not removed.results[2].stat.exists          # unit
+          # 3. the dedicated service user is gone too (getent rc 2 = not found)
+          - service_passwd.rc != 0
+          # 4. systemd no longer knows the unit as enabled/active
+          - unit_enabled != 'enabled'
+          - unit_active != 'active'
+        fail_msg: |
+          install.sh --delete contract violated.
+          delete rc     = {{ delete_rc_text | trim }}
+          binary exists = {{ removed.results[0].stat.exists }}
+          root  exists  = {{ removed.results[1].stat.exists }}
+          unit  exists  = {{ removed.results[2].stat.exists }}
+          user  found   = {{ service_passwd.rc == 0 }}
+          unit enabled  = {{ unit_enabled }}
+          unit active   = {{ unit_active }}
+          --- delete.log ---
+          {{ delete_log_text }}
+
+    - name: Run install.sh --delete --yes a second time (idempotence)
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          bash {{ stage_dir }}/install.sh --delete --yes > {{ delete_log2 }} 2>&1
+          printf '%s' "$?" > {{ delete_rc2 }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the second delete rc
+      ansible.builtin.slurp:
+        src: "{{ delete_rc2 }}"
+      register: captured2
+
+    - name: Assert --delete is idempotent
+      ansible.builtin.assert:
+        that:
+          - (captured2.content | b64decode | trim) == "0"
+        fail_msg: >-
+          A second `install.sh --delete --yes` must succeed as a no-op, but it
+          exited {{ captured2.content | b64decode | trim }}.
+
+    - name: Run install.sh with conflicting --service --delete
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          bash {{ stage_dir }}/install.sh --service --delete > /dev/null 2>&1
+          printf '%s' "$?" > {{ conflict_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the conflict rc
+      ansible.builtin.slurp:
+        src: "{{ conflict_rc }}"
+      register: captured3
+
+    - name: Assert --service and --delete are rejected together
+      ansible.builtin.assert:
+        that:
+          - (captured3.content | b64decode | trim) != "0"
+        fail_msg: >-
+          Combining --service and --delete must fail, but install.sh exited 0.

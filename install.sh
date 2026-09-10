@@ -27,6 +27,12 @@
 #          sudo when it is not already root.
 #   macOS  a launchd agent (current user, ~/Library/LaunchAgents).
 #
+# With --delete it does the opposite: removes the installed binary and, when
+# present, the systemd service — the unit, the state directory (which holds
+# the token), the service user and the binary. Asks for confirmation on the
+# terminal unless --yes (or ADAPTER_DELETE_YES=1) is given. Linux only for
+# now; macOS exits with an explicit "not supported" error. Needs root.
+#
 # The script only talks to github.com (official releases + unit files of this
 # repo). Review it before running: | bash | less
 #
@@ -36,6 +42,8 @@ set -euo pipefail
 REPO="alekseybb197/backend-adapter"
 BINARY_NAME="backend-adapter"
 SERVICE_INSTALL="${SERVICE_INSTALL:-0}"
+DELETE_INSTALL="${DELETE_INSTALL:-0}"
+DELETE_YES="${ADAPTER_DELETE_YES:-0}"
 
 # Colors
 RED='\033[0;31m'
@@ -53,6 +61,8 @@ err()  { echo -e "${RED}[ERR]${NC}  $*" >&2; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --service) SERVICE_INSTALL=1; shift ;;
+    --delete) DELETE_INSTALL=1; shift ;;
+    --yes|-y) DELETE_YES=1; shift ;;
     --pip)
       err "--pip (sources install) was removed: only the latest-release binary is supported."
       info "Install from sources manually instead: git clone + venv (see docs/install.md)."
@@ -85,10 +95,19 @@ Options:
                   needed); the backend base URL and token are asked for
                   interactively unless the env vars below are set.
                   macOS: a launchd agent for the current user.
+  --delete        Remove the installed binary and, if present, the systemd
+                  service: the unit, the state directory /var/lib/backend-adapter
+                  (which holds the token), the service user and the binary.
+                  Asks for confirmation unless --yes is given. Linux only for
+                  now (macOS is not supported); requires root (sudo is used
+                  when needed). Mutually exclusive with --service.
+  --yes, -y       Skip the --delete confirmation (for scripts/CI).
   --help          Show this help
 
 Environment:
   SERVICE_INSTALL             Same as --service (1/0)
+  DELETE_INSTALL              Same as --delete (1/0)
+  ADAPTER_DELETE_YES          Same as --yes (1/0)
   ADAPTER_SERVICE_BACKEND_BASE  Backend base URL for --service (skips the prompt)
   ADAPTER_SERVICE_BACKEND_KEY   Backend API token for --service (skips the prompt)
   ADAPTER_SERVICE_ROOT          State dir (default /var/lib/backend-adapter)
@@ -104,6 +123,13 @@ EOF
     *) warn "Unknown option: $1 (ignored)"; shift ;;
   esac
 done
+
+# Installing and deleting are opposite modes: combining them is a mistake, not
+# a precedence question.
+if [[ "$SERVICE_INSTALL" == 1 && "$DELETE_INSTALL" == 1 ]]; then
+  err "--service and --delete are mutually exclusive."
+  exit 1
+fi
 
 # ── Detect platform ────────────────────────────────────────────────────
 detect_platform() {
@@ -209,7 +235,11 @@ ensure_install_dir() {
   USE_SUDO=1
 }
 
-ensure_install_dir
+# Deletion must not (re)create the install dir it may be removing — and it
+# never downloads anything, so it needs no writable INSTALL_DIR up front.
+if [[ "$DELETE_INSTALL" != 1 ]]; then
+  ensure_install_dir
+fi
 
 # ── Install binary ─────────────────────────────────────────────────────
 install_binary() {
@@ -412,6 +442,93 @@ EOF
   info "Status:  systemctl status backend-adapter"
 }
 
+# ── Delete the installed binary and service (Linux) ────────────────────
+# The inverse of the install path: stop + remove the systemd unit, the state
+# directory (adapter.env holds the token), the binary and the dedicated
+# service user. Every step tolerates a missing object, so a second --delete is
+# a clean no-op. Linux only for now — on macOS it exits with an explicit error.
+delete_install() {
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    err "--delete is only supported on Linux for now."
+    info "On macOS remove the launchd agent manually (docs/install.md §9.2):"
+    info "  launchctl unload ~/Library/LaunchAgents/com.user.backend-adapter.plist"
+    exit 1
+  fi
+  if [[ $EUID -ne 0 ]] && ! command -v sudo &>/dev/null; then
+    err "--delete removes a system service and needs root, but sudo is not available."
+    info "Run the installer as root instead: sudo bash install.sh --delete"
+    exit 1
+  fi
+
+  # Confirmation: destructive and irreversible, so ask unless --yes /
+  # ADAPTER_DELETE_YES=1 was given. Read from /dev/tty (stdin may be the piped
+  # script under `curl | bash`); the `if ! read` guard keeps set -e happy on EOF.
+  if [[ "$DELETE_YES" != 1 ]]; then
+    if [[ ! -r /dev/tty ]]; then
+      err "--delete needs confirmation but there is no terminal."
+      info "Re-run with --yes (or ADAPTER_DELETE_YES=1) for non-interactive use."
+      exit 1
+    fi
+    local answer=""
+    if ! read -r -p "Delete backend-adapter and its service? [y/N] " answer </dev/tty; then
+      err "No input on the terminal — aborted."
+      exit 1
+    fi
+    case "$answer" in
+      y|Y|yes|YES|Yes) ;;
+      *)
+        info "Aborted — nothing was removed."
+        exit 0
+        ;;
+    esac
+  fi
+
+  info "Removing backend-adapter (state '${SERVICE_ROOT}', user '${SERVICE_USER}') ..."
+
+  # 1. Stop and disable first: a still-running unit could otherwise be restarted
+  #    by Restart=on-failure while its files are being removed.
+  if [[ -f "$SERVICE_UNIT" ]]; then
+    as_root systemctl disable --now backend-adapter.service 2>/dev/null || true
+    # 2. Drop the unit and refresh systemd's view.
+    as_root rm -f "$SERVICE_UNIT"
+    as_root systemctl daemon-reload 2>/dev/null || true
+    ok "Removed systemd unit: ${SERVICE_UNIT}"
+  else
+    info "No systemd unit at ${SERVICE_UNIT} — skipped."
+  fi
+
+  # 3. State directory (adapter.yaml, adapter.env with the token, logs).
+  if [[ -e "$SERVICE_ROOT" ]]; then
+    as_root rm -rf "$SERVICE_ROOT"
+    ok "Removed state directory: ${SERVICE_ROOT}"
+  else
+    info "No state directory at ${SERVICE_ROOT} — skipped."
+  fi
+
+  # 4. The binary itself.
+  if [[ -e "${INSTALL_DIR}/${BINARY_NAME}" ]]; then
+    as_root rm -f "${INSTALL_DIR}/${BINARY_NAME}"
+    ok "Removed binary: ${INSTALL_DIR}/${BINARY_NAME}"
+  else
+    info "No binary at ${INSTALL_DIR}/${BINARY_NAME} — skipped."
+  fi
+
+  # 5. The dedicated service user (and its same-named group). Best-effort: a
+  #    user still owning running processes should not block the rest.
+  if id -u "$SERVICE_USER" &>/dev/null; then
+    if as_root userdel "$SERVICE_USER" 2>/dev/null; then
+      ok "Removed service user: ${SERVICE_USER}"
+    else
+      warn "Could not remove user ${SERVICE_USER} (still in use?) — remove it manually"
+    fi
+    as_root groupdel "$SERVICE_USER" 2>/dev/null || true
+  else
+    info "No service user '${SERVICE_USER}' — skipped."
+  fi
+
+  ok "Uninstall complete."
+}
+
 # ── Install launchd service (macOS, current user) ──────────────────────
 # Same rationale as systemd: the repo plist (docs/samples/) targets the
 # python-source layout (~/backend-adapter/backend-adapter.py). We generate
@@ -511,6 +628,15 @@ echo "╚═══════════════════════�
 echo ""
 
 info "Platform:  $PLATFORM"
+
+# Delete is the inverse of install: it must not touch the network, the
+# install dir or the service install path.
+if [[ "$DELETE_INSTALL" == 1 ]]; then
+  info "Mode:      delete"
+  delete_install
+  exit 0
+fi
+
 info "Install:   $INSTALL_DIR"
 info "Service:   $([[ $SERVICE_INSTALL == 1 ]] && echo yes || echo no)"
 

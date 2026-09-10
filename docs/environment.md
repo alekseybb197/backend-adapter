@@ -8,7 +8,9 @@
 > (`ADAPTER_SERVICE_BACKEND_BASE`, `ADAPTER_SERVICE_BACKEND_KEY`,
 > `ADAPTER_SERVICE_ROOT`, `ADAPTER_SERVICE_USER`) читает **`install.sh --service`**,
 > а не сам адаптер: это параметры установки сервиса (см. `docs/install.md`
-> §4.2). Адаптер их игнорирует.
+> §4.2). Режим удаления читает `DELETE_INSTALL` (эквивалент `--delete`) и
+> `ADAPTER_DELETE_YES` (эквивалент `--yes`). Адаптер эти переменные
+> игнорирует.
 
 ---
 

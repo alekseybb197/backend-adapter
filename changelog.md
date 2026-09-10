@@ -1,9 +1,55 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
-## v0.9.3 (WIP — install.sh: molecule-тест (Linux, latest, ubuntu 24.04), системный systemd-сервис `--service` + фикс verify())
+## v0.9.3 (WIP — install.sh: molecule-тест (Linux, latest, ubuntu 24.04), системный systemd-сервис `--service`, режим `--delete` + фикс verify())
 
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.3. -->
+
+### 2026-09-11 install.sh --delete: удаление приложения и сервиса (Linux) + molecule-проверка
+
+**Цель:** закрыть обратную операцию для установщика. `--service` теперь
+ставит системный сервис, но «снести» его можно было только вручную
+(`systemctl disable --now`, `rm` юнита/каталога/бинарника, `userdel`) — легко
+забыть юнит или каталог `/var/lib/backend-adapter`, в котором лежит **токен**.
+
+**Решение:**
+- **новый ключ `--delete`** (Linux) — снимает всё, что поставил установщик:
+  останавливает и отключает сервис (`systemctl disable --now`), удаляет
+  systemd-юнит (`/etc/systemd/system/backend-adapter.service`) с
+  `daemon-reload`, каталог состояния `/var/lib/backend-adapter` (конфиги,
+  логи, токен), бинарник `/usr/local/bin/backend-adapter` и сервисного
+  пользователя `backend-adapter` (+ одноимённую группу);
+- **подтверждение** — деструктивная и необратимая операция, поэтому на TTY
+  спрашивается `y/N` (чтение из `/dev/tty`; под `curl | bash` stdin занят
+  скриптом). Для CI/скриптов — `--yes` / `-y` / `ADAPTER_DELETE_YES=1`;
+  отказ (`n`) — `exit 0`, ничего не удалено; при отсутствии TTY и без `--yes`
+  — понятная ошибка;
+- **идемпотентность** — каждый шаг терпит отсутствующий объект (`... not
+  found — skipped`), повторный `--delete` — успешный no-op; `userdel`/
+  `groupdel` — best-effort (занятый пользователь даёт `warn`, но не валит
+  удаление остального);
+- **порядок** — сначала `disable --now`, затем файлы: иначе `Restart=on-failure`
+  мог бы поднять сервис из уже удаляемого каталога;
+- **гарды** — режим только для Linux (на macOS явная ошибка с подсказкой про
+  ручной снос launchd), требует root (при не-root — авто-`sudo`), `--delete`
+  и `--service` взаимоисключающие (ошибка); при удалении `ensure_install_dir`
+  не вызывается (иначе создался бы каталог, который удаляем);
+- **molecule** — сценарий `molecule/service/` дополнен шагом `side_effect`
+  (`side_effect.yml`) после `verify`: на том же контейнере с systemd
+  выполняется `install.sh --delete --yes`, ассертятся исчезновение юнита,
+  каталога, бинарника и пользователя (через `getent`/`command`, не модуль
+  `getent` — его `failed_when: false` маскирует отсутствие ключа),
+  идемпотентность повторного удаления и ошибка на `--service --delete`.
+  Не-вакуумность проверена: поломка удаления юнита/каталога/пользователя
+  валит `side_effect`;
+- **документация** — `docs/install.md` §4.2 (команда удаления, таблица
+  опций с `--delete`/`--yes`, security-note), §2.1 (проверка удаления в
+  сценарии `service`); `docs/environment.md` (переменные установщика
+  `DELETE_INSTALL`/`ADAPTER_DELETE_YES`).
+
+**Следствия:** установку можно снять одной командой, не забывая каталог с
+секретом; повторный запуск безопасен. macOS-ветка launchd не менялась
+(`--delete` там явно не поддерживается).
 
 ### 2026-09-11 install.sh --service: системный systemd-сервис (Linux) + molecule-сценарий
 

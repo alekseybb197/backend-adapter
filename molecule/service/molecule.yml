@@ -39,6 +39,10 @@ scenario:
   name: service
   # idempotence is intentionally absent: converge truncates the stub call log
   # and reinstalls, so a second converge would append a second URL line.
+  #
+  # side_effect runs the full lifecycle on one container: converge installs the
+  # service, verify asserts it is up, side_effect then runs `install.sh --delete`
+  # and asserts everything is gone (unit, state dir, binary, service user).
   test_sequence:
     - dependency
     - destroy
@@ -47,4 +51,5 @@ scenario:
     - prepare
     - converge
     - verify
+    - side_effect
     - destroy
