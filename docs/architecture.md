@@ -38,10 +38,12 @@ backend_adapter/
 │                             токены usage ответов (input/output) + дымовая проба
 │                             эндпоинтов по каждой модели; перепроверка строки
 │                             (reprobe); персистентный YAML (version: 2, миграция v1)
-├── session_registry.py     ← таблица активных сессий агентов (секция «Sessions»,
-│                             v0.9.2): in-memory агрегат по X-Claude-Code-Session-Id
-│                             (agent/model/backend/route, last_seen, calls, errors);
-│                             БЕЗ персистентности; лист DAG — импортирует config
+├── session_registry.py     ← таблица сессий агентов (секция «Sessions»,
+│                             v0.9.2): in-memory, строка = КОРТЕЖ (session,
+│                             agent, model, backend, route) — смена модели или
+│                             обработчика даёт новую строку (upsert по полному
+│                             кортежу), плюс last_seen/calls/errors; БЕЗ
+│                             персистентности; лист DAG — импортирует config
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
 │                             "/api/model-usage/reset", "/api/model-usage/reprobe",
 │                             "/api/model-usage/delete", "/api/model-usage/reprobe-state",
@@ -220,12 +222,14 @@ convert при не поддерживающем бэкенде → 502), disabl
 
 ```
 1. Extract session_id, req_id, update session_log context
-2. Input-path → format (routing.input_path_to_format); прочие пути → 404.
-   Для входных путей — учёт сессии (session_registry.touch: agent=User-Agent
-   до первого пробела, calls+1, эвикция по ADAPTER_SESSIONS_TABLE; v0.9.2,
-   см. §6.10) ДО чтения тела — 400 валидации тела тоже учтены
+2. Input-path → format (routing.input_path_to_format); прочие пути → 404
+   (строку сессии НЕ создаёт — учёт стоит после этого return)
 3. Parse & validate request JSON (require "model" field) — единообразно для входов
-4. Strict model validation (ADAPTER_STRICT_MODELS)
+   - 400-ветки (Invalid JSON / Missing model) — учёт сессии
+     (session_registry.register с ПУСТЫМИ model/backend/route: до routing.decide
+     не дошли; v0.9.2, см. §6.10)
+4. Strict model validation (ADAPTER_STRICT_MODELS) — 400 strict также учитывается
+   пустым кортежем
 5. Record usage of the client model (model_usage.record_model_usage — used-models
    table; at first use of a model this synchronously smoke-probes that model's
    endpoints, see §6.6; on every exit path do_POST's finally accumulates the
@@ -237,8 +241,9 @@ convert при не поддерживающем бэкенде → 502), disabl
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
 8. routing.decide(fmt, backend_name) → action/out_fmt
-   - учёт сессии (session_registry.set_route: model/backend/route — включая
-     reject/disabled: видно, куда агент пытался; v0.9.2, см. §6.10)
+   - учёт сессии (session_registry.register по полному кортежу session+agent+
+     model+backend+route — включая reject/disabled: видно, куда агент пытался;
+     upsert, calls+1, эвикция по ADAPTER_SESSIONS_TABLE; v0.9.2, см. §6.10)
    - disabled/reject → JSON-ответ (404/400/502), return (запрос до бэкенда не дошёл)
 9. Only messages→completions conversion: trace tool_results from incoming messages
    (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
@@ -714,37 +719,49 @@ tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не 
 
 ### 6.10 Таблица активных сессий агентов («Sessions», `session_registry.py`, v0.9.2)
 
-In-memory реестр (`_TABLE: dict[session_id → строка]` + lock), агрегирующий
-по **клиентской сессии** (заголовок `X-Claude-Code-Session-Id`) то, что иначе
-видно только в логе: имя агента (`User-Agent` до первого пробела),
-последние известные модель/бэкенд/правило TARGET-маршрутизации, время
-последнего обращения, счётчики обращений и ошибок. Секция «Sessions» на
-статус-странице `/` — `webui_status._sessions_rows_html`; live-обновление —
-JS `sessions_poll` → `/api/sessions/snapshot` (см. `docs/webui.md` §3/§6).
+In-memory реестр (`_TABLE: dict[SessionKey → строка]` + lock), где
+**`SessionKey = tuple[str, str, str, str, str]` = `(session, agent, model,
+backend, route)`**, а строка — «закреплённое соответствие» агента, модели,
+бэкенда и обработчика в рамках клиентской сессии (заголовок
+`X-Claude-Code-Session-Id`), плюс сопровождающие поля: время последнего
+обращения, счётчики обращений и ошибок. Смена модели агентом или смена
+обработчика (правило TARGET) — **новое событие → новая строка**; возврат к
+уже встречавшемуся кортежу — та же строка (upsert, `calls++`). Секция
+«Sessions» на статус-странице `/` — `webui_status._sessions_rows_html`;
+live-обновление — JS `sessions_poll` → `/api/sessions/snapshot` (см.
+`docs/webui.md` §3/§6).
 
-Точки учёта — `server.do_POST`:
+Точки учёта — `server.do_POST` (все через хелпер `_register_session` →
+`session_registry.register`, возвращающий ключ в thread-local
+`_req_ctx.session_key`):
 
-- `touch(session_id, agent)` — сразу после распознавания входного пути
-  (только `/v1/messages`, `/v1/chat/completions`, `/v1/responses`) и ДО
-  чтения тела, поэтому 400 «Invalid JSON»/«Missing model» тоже учтены;
-  404 на не-входной путь строку не создаёт;
-- `set_route(session_id, model=…, backend=…, route=…)` — после
-  `routing.decide`, ДО ветки disabled/reject (таблица показывает, куда агент
-  пытался: `route` = `passthrough messages→messages` / `convert
-  messages→completions` / `reject` / `disabled`);
-- `record_error(session_id)` — из общих `_send_json`/`_send_raw` по
-  финальному статусу ≥ 400 (покрывает все пути ошибок без правки ~20 точек
-  вызова). Для незарегистрированной сессии — no-op, поэтому служебные
-  ответы (404 не-входных путей, GET `/api/*`, health) в счётчик не попадают.
+- **400-ветки** («Invalid JSON», «Missing model», strict-валидация) —
+  `register` с **пустыми** `model/backend/route`: до `routing.decide` не
+  дошли. Пустой кортеж самодокументируется и не «сливается» с полной строкой
+  реальной модели (иного дефекта);
+- **после `routing.decide`** — `register(session, agent, model=client_model,
+  backend=backend_name, route=route_str)`, ДО ветки disabled/reject (таблица
+  показывает, куда агент пытался: `route` = `passthrough messages→messages` /
+  `convert messages→completions` / `reject` / `disabled`);
+- 404 на не-входной путь строку **не** создаёт — учёт стоит после `return`
+  (исключение между распознаванием пути и `register` тоже строки не создаёт);
+- `record_error(key)` — из общих `_send_json`/`_send_raw` по финальному
+  статусу ≥ 400 (покрывает все пути ошибок без правки ~20 точек вызова),
+  ключ берётся из `_req_ctx.session_key`. Для `None`/неизвестного ключа —
+  no-op, поэтому служебные ответы (404 не-входных путей, GET `/api/*`,
+  health) в счётчик не попадают.
 
-Строки сортируются по `_ts` desc (новые сверху; старая сессия всплывает при
-новом обращении). Глубина — живой лимит `config.ADAPTER_SESSIONS_TABLE`
-(дефолт 10; 0 — таблица отключена): при регистрации обращения самая старая
-строка вытесняется. **Персистентности нет** (осознанное решение): таблица
-живёт только в памяти процесса, каждый запуск начинается заново. Модуль —
-лист DAG: на верхнем уровне импортирует только config (читает
-`ADAPTER_SESSIONS_TABLE` живьём — переживает reload конфига в тестах);
-потребители — server.py (пишет) и webui_status.py (читает/рендерит).
+Строки сортируются по `_ts` desc (новые сверху; строка всплывает при новом
+обращении). Глубина — живой лимит `config.ADAPTER_SESSIONS_TABLE` (дефолт 10;
+0 — таблица отключена): лимит считает **строки (кортежи)**, а не сессии, —
+при регистрации обращения самая старая строка вытесняется. Снимок отдаёт
+поле `key` — компактную JSON-строку кортежа (`key_json`), единый
+дискриминатор строки для JS (та же строка в `data-key` HTML), т.к. `session`
+не уникален. **Персистентности нет** (осознанное решение): таблица живёт
+только в памяти процесса, каждый запуск начинается заново. Модуль — лист DAG:
+на верхнем уровне импортирует только config (читает `ADAPTER_SESSIONS_TABLE`
+живьём — переживает reload конфига в тестах); потребители — server.py (пишет)
+и webui_status.py (читает/рендерит).
 
 ### 6.2 Разрешение коллизий имён моделей
 
@@ -966,8 +983,9 @@ backend-adapter.py
   │                       convert, streaming, model_usage, routing, session_registry
   ├── model_usage.py     → config, yaml, probe_json (used-models table, см. §6.6;
   │                       пер-модельные пробы эндпоинтов пишут JSON-дампы в LOGPATH)
-  ├── session_registry.py → config (лист DAG: in-memory таблица активных сессий
-  │                       агентов, секция «Sessions» — v0.9.2)
+  ├── session_registry.py → config (лист DAG: in-memory таблица сессий агентов
+  │                       — строка = кортеж session+agent+model+backend+route,
+  │                       секция «Sessions» — v0.9.2)
   ├── probe_json.py      (no internal deps on the top level — stdlib only;
   │                       config/redact читаются локально внутри записи)
   ├── routing.py         → config (лист DAG: входные форматы, TARGET-реестр,

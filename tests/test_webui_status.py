@@ -2209,11 +2209,12 @@ class TestUsageSnapshotAPI:
 def _seed_session_rows(session_registry_mod, rows):
     """Заполнить реестр сессий строками напрямую (сид для рендера).
 
-    ``_ts`` задаётся вызывающим — от него зависит порядок snapshot
-    (новые сверху)."""
+    Ключ _TABLE — кортеж (session, agent, model, backend, route): одна сессия
+    может занимать несколько строк. ``_ts`` задаётся вызывающим — от него
+    зависит порядок snapshot (новые сверху)."""
     session_registry_mod._TABLE.clear()
     for r in rows:
-        session_registry_mod._TABLE[r["session"]] = {
+        row = {
             "session": r["session"],
             "agent": r.get("agent", ""),
             "model": r.get("model", ""),
@@ -2224,6 +2225,8 @@ def _seed_session_rows(session_registry_mod, rows):
             "errors": r.get("errors", 0),
             "_ts": r.get("_ts", 1.0),
         }
+        key = (row["session"], row["agent"], row["model"], row["backend"], row["route"])
+        session_registry_mod._TABLE[key] = row
 
 
 class TestSessionsSection:
@@ -2243,11 +2246,18 @@ class TestSessionsSection:
     def _row(self, session, agent="claude-cli/2.1.236", model="m-a",
              backend="AAA", route="passthrough messages→messages",
              last_seen="2026-09-09 10:00:00", calls=1, errors=0, ts=1.0):
-        return {
+        # "key" — как в снимке реестра: JSON-строка кортежа (дискриминатор
+        # строки для JS); сессия может занимать несколько строк.
+        from backend_adapter import session_registry
+        row = {
             "session": session, "agent": agent, "model": model,
             "backend": backend, "route": route, "last_seen": last_seen,
             "calls": calls, "errors": errors, "_ts": ts,
         }
+        row["key"] = session_registry.key_json(
+            (session, agent, model, backend, route)
+        )
+        return row
 
     def test_section_present_with_headers(self):
         # Заголовок секции + 8 колонок.
@@ -2272,19 +2282,30 @@ class TestSessionsSection:
         assert "таблица заполняется при обращениях агентов" in body
         assert 'colspan="8"' in body
 
-    def test_row_renders_cells_and_data_session(self):
-        # Строка несёт ПОЛНЫЙ session_id в data-session (JS-матчинг), в ячейке
-        # «Сессия» — первые 8 символов в <code title="полный id">.
+    def test_row_renders_cells_and_data_key(self):
+        # Строка несёт data-key (JSON-строка кортежа — JS-матчинг; одна сессия
+        # может занимать несколько строк) и data-session (полный id для
+        # наглядности), в ячейке «Сессия» — первые 8 символов в <code title>.
         config, ws = _fresh_modules()
         sid = "1ad13437-1111-2222-3333-444455556666"
-        body = self._seed(config, ws, session_rows=[self._row(sid)])
-        assert f'<tr data-session="{sid}">' in body
+        row = self._row(sid)
+        body = self._seed(config, ws, session_rows=[row])
+        assert f'<tr data-session="{sid}" data-key=' in body
         assert f'<code title="{sid}">{sid[:8]}</code>' in body
         assert "claude-cli/2.1.236" in body
         assert "passthrough messages→messages" in body
         assert 'data-calls' not in body  # sessions-строки не несут usage-атрибутов
-        html = ws._sessions_rows_html([self._row(sid)])
+        html = ws._sessions_rows_html([row])
         assert html.count("<td") == 8
+        # data-key — та же JSON-строка, что отдаёт key_json (дискриминатор).
+        from html import escape as _esc
+
+        from backend_adapter import session_registry
+
+        expected = session_registry.key_json(
+            (sid, "claude-cli/2.1.236", "m-a", "AAA", "passthrough messages→messages")
+        )
+        assert f'data-key="{_esc(expected)}"' in html
 
     def test_rows_ordered_newest_first(self):
         # Порядок — как отдаёт sessions_snapshot(): по _ts desc (новые сверху).
@@ -2298,6 +2319,19 @@ class TestSessionsSection:
         assert body.index('data-session="new"') < body.index('data-session="mid"')
         assert body.index('data-session="mid"') < body.index('data-session="old"')
 
+    def test_two_rows_of_same_session(self):
+        # Одна сессия со сменой модели — ДВЕ строки, различимые по data-key
+        # (data-session у них одинаковый).
+        config, ws = _fresh_modules()
+        sid = "1ad13437-1111-2222-3333-444455556666"
+        body = self._seed(config, ws, session_rows=[
+            self._row(sid, model="m-a", ts=1.0),
+            self._row(sid, model="m-b", route="convert messages→completions", ts=2.0),
+        ])
+        assert body.count(f'data-session="{sid}"') == 2
+        assert body.count("data-key=") == 2
+        assert ">m-a<" in body and ">m-b<" in body
+
     def test_escapes_session_and_agent(self):
         # Значения из заголовков не исполняются браузером.
         config, ws = _fresh_modules()
@@ -2310,11 +2344,11 @@ class TestSessionsSection:
 
     def test_page_has_sessions_poll(self):
         # Live-обновление: безусловный JS sessions_poll → /api/sessions/snapshot,
-        # матчинг строк по data-session, таймер 5 с.
+        # матчинг строк по data-key, таймер 5 с.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, session_rows=[self._row("sess-1")])
         assert 'fetch("/api/sessions/snapshot")' in body
-        assert 'querySelectorAll("tr[data-session]")' in body
+        assert 'querySelectorAll("tr[data-key]")' in body
         assert "setTimeout(sessions_poll, 5000)" in body
         # безусловен: есть и на странице без строк сессий
         empty = self._seed(config, ws, session_rows=[])
@@ -2356,6 +2390,35 @@ class TestSessionsSnapshotAPI:
             assert rows[0]["route"] == "convert messages→completions"
             assert rows[1]["errors"] == 1
             assert "_ts" not in rows[0]  # служебное поле не отдаётся
+            # "key" — JSON-строка кортежа (дискриминатор строки для JS).
+            assert rows[0]["key"] == (
+                '["s-new","claude-cli/2.1.236","m-b","AAA",'
+                '"convert messages→completions"]'
+            )
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_two_rows_of_same_session_in_json(self, tmp_path):
+        # Одна сессия, две модели → две строки с разными key, session одинаков.
+        config, ws = _fresh_modules()
+        from backend_adapter import session_registry
+        _seed_session_rows(session_registry, [
+            {"session": "s-1", "_ts": 1.0, "model": "m-a",
+             "agent": "claude-cli/2.1.236", "backend": "AAA",
+             "route": "passthrough messages→messages"},
+            {"session": "s-1", "_ts": 2.0, "model": "m-b",
+             "agent": "claude-cli/2.1.236", "backend": "AAA",
+             "route": "convert messages→completions"},
+        ])
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            import json
+            status, body = _http_get(port, "/api/sessions/snapshot")
+            assert status == 200
+            rows = json.loads(body)
+            assert [r["session"] for r in rows] == ["s-1", "s-1"]
+            assert len({r["key"] for r in rows}) == 2  # дискриминатор уникален
         finally:
             httpd.shutdown()
             httpd.server_close()

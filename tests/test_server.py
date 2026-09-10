@@ -972,10 +972,12 @@ class TestInputEndpoints(ServerSetupMixin):
 # ===========================================================================
 
 class TestSessionAccounting(ServerSetupMixin):
-    """Точки учёта таблицы WEBUI «Sessions»: touch после распознавания
-    входного пути (до чтения тела), set_route после routing.decide (включая
-    reject/disabled), record_error — из общих _send_json/_send_raw по
-    финальному статусу >= 400 (no-op для незарегистрированной сессии)."""
+    """Точки учёта таблицы WEBUI «Sessions»: register после routing.decide
+    (включая reject/disabled) и в 400-ветках до него (пустой кортеж);
+    record_error — из общих _send_json/_send_raw по финальному статусу >= 400
+    (no-op для незарегистрированной сессии). Ключ строки — кортеж
+    (session, agent, model, backend, route): смена модели/маршрута даёт
+    новую строку, возврат к прежнему кортежу — ту же (calls++)."""
 
     def _enable(self, **targets: str) -> None:
         from backend_adapter import config as cfg
@@ -1115,8 +1117,73 @@ class TestSessionAccounting(ServerSetupMixin):
             finally:
                 server.shutdown()
 
+    def test_model_change_creates_new_row(self, fake_backend):
+        """Смена модели агентом в одной сессии → НОВАЯ строка (кортеж иной)."""
+        from backend_adapter import config as cfg
+        self._enable(messages="messages")
+        fake_backend.models_response = {
+            "data": [{"id": "test-model"}, {"id": "test-model-2"}]
+        }
+        fake_backend.extra_post_paths = {"/v1/messages": 200}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            cfg._MODEL_TO_BACKEND["test-model-2"] = ("test", cfg._BACKENDS[0])
+            cfg._AVAILABLE_MODELS["test-model-2"] = {"id": "test-model-2"}
+            self._support("/v1/messages", True)
+            try:
+                for model in ("test-model", "test-model-2"):
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": model,
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-mm",
+                                 "User-Agent": "claude-cli/2.1.236"},
+                    )
+                    assert resp["status"] == 200
+                rows = self._sessions()
+                assert len(rows) == 2
+                assert {r["model"] for r in rows} == {"test-model", "test-model-2"}
+                assert all(r["calls"] == 1 for r in rows)
+            finally:
+                server.shutdown()
+
+    def test_return_to_previous_model_reuses_row(self, fake_backend):
+        """m1 → m2 → m1: возврат к прежнему кортежу — ТА ЖЕ строка, calls++."""
+        from backend_adapter import config as cfg
+        self._enable(messages="messages")
+        fake_backend.models_response = {
+            "data": [{"id": "test-model"}, {"id": "test-model-2"}]
+        }
+        fake_backend.extra_post_paths = {"/v1/messages": 200}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            cfg._MODEL_TO_BACKEND["test-model-2"] = ("test", cfg._BACKENDS[0])
+            cfg._AVAILABLE_MODELS["test-model-2"] = {"id": "test-model-2"}
+            self._support("/v1/messages", True)
+            try:
+                for model in ("test-model", "test-model-2", "test-model"):
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": model,
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-rt",
+                                 "User-Agent": "claude-cli/2.1.236"},
+                    )
+                    assert resp["status"] == 200
+                rows = self._sessions()
+                assert len(rows) == 2
+                m1 = next(r for r in rows if r["model"] == "test-model")
+                assert m1["calls"] == 2
+                assert next(
+                    r for r in rows if r["model"] == "test-model-2"
+                )["calls"] == 1
+            finally:
+                server.shutdown()
+
     def test_unknown_path_does_not_create_session(self, fake_backend):
-        """404 на не-входной путь строку НЕ создаёт (touch после return)."""
+        """404 на не-входной путь строку НЕ создаёт (register после return)."""
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
@@ -1132,7 +1199,7 @@ class TestSessionAccounting(ServerSetupMixin):
                 server.shutdown()
 
     def test_invalid_json_creates_session_without_route(self, fake_backend):
-        """400 «Invalid JSON»: touch сработал (до чтения тела), маршрута нет."""
+        """400 «Invalid JSON»: register с пустым кортежем, маршрута нет."""
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)

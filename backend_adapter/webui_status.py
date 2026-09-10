@@ -473,21 +473,25 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
 
 
 def _sessions_rows_html(rows: list[dict]) -> str:
-    """HTML строк таблицы Sessions (по строке на клиентскую сессию, v0.9.2).
+    """HTML строк таблицы Sessions (по строке на КОРТЕЖ session+agent+model+
+    backend+route, v0.9.2).
 
     ``rows`` — session_registry.sessions_snapshot() (уже отсортирован: новые
     сверху). Колонки: Сессия | Агент | Модель | Бэкенд | Маршрут | Последнее
-    обращение | Вызовов | Ошибок. Сессия — UUID-подобный id: показываем первые
-    8 символов в <code>, полный id — в title (36 символов не влезают в
-    колонку). Строка несёт data-session с ПОЛНЫМ id — JS sessions_poll
-    сопоставляет строки по нему (порядок меняется при всплытии сессий, в
-    отличие от позиционного сопоставления Models in use). Все значения —
-    html.escape."""
+    обращение | Вызовов | Ошибок. Одна сессия может занимать НЕСКОЛЬКО строк
+    (сменила модель/обработчик) — поэтому ``session`` не уникален: строка
+    несёт data-key с JSON-строкой всего кортежа, и JS sessions_poll
+    сопоставляет строки по нему (порядок меняется при всплытии строки вверх,
+    в отличие от позиционного сопоставления Models in use). data-session
+    (полный session_id) остаётся для наглядности/отладки. Сессия —
+    UUID-подобный id: показываем первые 8 символов в <code>, полный id — в
+    title (36 символов не влезают в колонку). Все значения — html.escape."""
     body = []
     for r in rows:
         session = str(r.get("session", ""))
+        key = str(r.get("key", ""))
         body.append(
-            f'<tr data-session="{html.escape(session)}">'
+            f'<tr data-session="{html.escape(session)}" data-key="{html.escape(key)}">'
             f'<td><code title="{html.escape(session)}">{html.escape(session[:8])}</code></td>'
             f"<td>{html.escape(str(r.get('agent', '')))}</td>"
             f"<td>{html.escape(str(r.get('model', '')))}</td>"
@@ -779,10 +783,12 @@ def _render_status_page(
     # Live-обновление секции Sessions (v0.9.2): JS sessions_poll каждые 5 с
     # опрашивает /api/sessions/snapshot (session_registry.sessions_snapshot()
     # — копии строк из памяти, сети нет) и обновляет текстовые ячейки строк.
-    # Строки сопоставляются ПО data-session (полный session_id), а НЕ
-    # позиционно: порядок меняется при всплытии сессии наверх (сортировка по
-    # последнему обращению), позиционное сопоставление перепутало бы строки.
-    # Состав/число строк не совпало (новая сессия / эвикция по глубине) —
+    # Строки сопоставляются ПО data-key (JSON-строка кортежа session+agent+
+    # model+backend+route), а НЕ по data-session: одна сессия может занимать
+    # несколько строк (сменила модель/обработчик), и session не уникален.
+    # Порядок меняется при всплытии строки наверх (сортировка по последнему
+    # обращению) — позиционное сопоставление перепутало бы строки.
+    # Состав/число строк не совпало (новый кортеж / эвикция по глубине) —
     # location.reload() перерисует таблицу (заодно и корректный порядок).
     # Оверхед — один маленький JSON раз в 5 с на вкладку; скрытую вкладку
     # браузер троттлит. Скрипт безусловный, как usage_poll.
@@ -792,12 +798,12 @@ def _render_status_page(
     fetch("/api/sessions/snapshot")
       .then(function (r) { return r.json(); })
       .then(function (rows) {
-        var trs = document.querySelectorAll("tr[data-session]");
+        var trs = document.querySelectorAll("tr[data-key]");
         if (trs.length !== rows.length) { location.reload(); return; }
-        var bySession = {};
-        for (var i = 0; i < rows.length; i++) { bySession[rows[i]["session"]] = rows[i]; }
+        var byKey = {};
+        for (var i = 0; i < rows.length; i++) { byKey[rows[i]["key"]] = rows[i]; }
         for (var j = 0; j < trs.length; j++) {
-          var row = bySession[trs[j].getAttribute("data-session")];
+          var row = byKey[trs[j].getAttribute("data-key")];
           if (!row) { location.reload(); return; }
           var cells = trs[j].getElementsByTagName("td");
           // Колонки: 0 Сессия, 1 Агент, 2 Модель, 3 Бэкенд, 4 Маршрут,
@@ -1168,11 +1174,13 @@ class SessionsSnapshotEndpoint(webserver.Endpoint):
     """Эндпойнт "/api/sessions/snapshot": снимок таблицы Sessions (JSON).
 
     Лёгкий ответ для JS sessions_poll на статус-странице (v0.9.2):
-    session_registry.sessions_snapshot() — список строк реестра сессий
-    (session/agent/model/backend/route/last_seen/calls/errors), отсортированный
-    по времени последнего обращения (новые сверху). GET ничего не мутирует и
-    не ходит в сеть к бэкендам — безопасно опрашивать каждые 5 с. Таблица
-    in-memory, без персистентности (см. session_registry)."""
+    session_registry.sessions_snapshot() — список строк реестра (по строке на
+    кортеж session+agent+model+backend+route: session/agent/model/backend/
+    route/last_seen/calls/errors + служебный "key" — JSON-строка кортежа,
+    дискриминатор строки для JS), отсортированный по времени последнего
+    обращения (новые сверху). GET ничего не мутирует и не ходит в сеть к
+    бэкендам — безопасно опрашивать каждые 5 с. Таблица in-memory, без
+    персистентности (см. session_registry)."""
 
     prefix = "/api/sessions/snapshot"
 

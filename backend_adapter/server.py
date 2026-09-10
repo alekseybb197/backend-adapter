@@ -67,22 +67,45 @@ class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
 _req_ctx = threading.local()
 
 
+def _register_session(
+    session_id: str,
+    agent: str,
+    *,
+    model: str = "",
+    backend: str = "",
+    route: str = "",
+) -> None:
+    """Учёт обращения в таблице WEBUI «Sessions» (v0.9.2): upsert строки по
+    кортежу (session, agent, model, backend, route), calls+1. Ключ строки
+    кладётся в thread-local ``_req_ctx.session_key`` — его читает
+    ``_note_session_error``, чтобы инкрементить errors именно этой строки.
+
+    Вызывается на КАЖДОМ входном запросе: в 400-ветках валидации тела (до
+    ``routing.decide``) — с пустыми model/backend/route; после
+    ``routing.decide`` — с реальными (включая reject/disabled: видно, куда
+    агент пытался). Смена модели или обработчика даёт НОВУЮ строку (кортеж
+    изменился), возврат к прежнему кортежу — ту же (calls+1). Исключений не
+    бросает: register сам возвращает None при выключенном учёте."""
+    _req_ctx.session_key = session_registry.register(
+        session_id, agent, model=model, backend=backend, route=route
+    )
+
+
 class Adapter(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         rid = getattr(_req_ctx, "req_id", "-")
         _d(f"[{rid}] [HTTP] {fmt % args}")
 
     def _note_session_error(self, status):
-        """Учёт ошибки сессии (таблица WEBUI «Sessions», v0.9.2): любой
+        """Учёт ошибки строки-кортежа таблицы «Sessions» (v0.9.2): любой
         финальный HTTP-ответ >= 400. Вызывается из общих методов отправки
-        (_send_json/_send_raw), поэтому покрывает все пути ошибок. Для
-        незарегистрированной сессии session_registry.record_error — no-op
-        (404 не-входных путей, GET /api/*, health в счётчик не попадают:
-        их сессии в реестре нет)."""
+        (_send_json/_send_raw), поэтому покрывает все пути ошибок. Ключ берётся
+        из ``_req_ctx.session_key`` (ставится ``_register_session``) — ошибка
+        ложится в ту же строку, что и обращение. Для запросов без учёта (404
+        не-входного пути, GET /api/*, health) ключа нет → record_error(None) —
+        no-op."""
         if status >= 400:
-            sid = getattr(_req_ctx, "session_id", None)
-            if sid:
-                session_registry.record_error(sid)
+            session_registry.record_error(getattr(_req_ctx, "session_key", None))
 
     def _send_json(self, status, data):
         self._note_session_error(status)
@@ -211,6 +234,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         _req_ctx.req_id = req_id
         _req_ctx.session_id = session_id
+        # Ключ строки таблицы «Sessions» (v0.9.2) ставится _register_session —
+        # на входном пути (после распознавания пути / после routing.decide).
+        # None здесь — «учёта нет»: _note_session_error тогда no-op.
+        _req_ctx.session_key = None
         try:
             # Обновляем глобальный fallback для _d(), чтобы человекочитаемый
             # лог тоже писался в правильный сессионный файл.
@@ -235,11 +262,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "Expected /v1/messages"})
                 return
 
-            # Учёт сессии для таблицы WEBUI «Sessions» (v0.9.2): регистрируем
-            # обращение сразу после распознавания входного пути и ДО чтения
-            # тела — поэтому 400 «Invalid JSON»/«Missing model» тоже учтены.
-            # 404 на не-входной путь строку НЕ создаёт (хук стоит после return).
-            session_registry.touch(session_id, agent)
+            # Учёт сессии для таблицы WEBUI «Sessions» (v0.9.2): строка —
+            # кортеж (session, agent, model, backend, route), её создаёт
+            # _register_session. Здесь, до чтения тела, вызова нет: строку
+            # поставят либо 400-ветки ниже (пустым кортежем), либо ветка после
+            # routing.decide (полным). 404 на не-входной путь строку НЕ создаёт
+            # (учёт стоит после return).
 
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
@@ -253,11 +281,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             try:
                 anthropic_req = json.loads(body)
             except json.JSONDecodeError as e:
+                # Обращение учтено пустым кортежем: до routing.decide не дошли.
+                _register_session(session_id, agent)
                 self._send_json(400, {"error": f"Invalid JSON: {e}"})
                 return
 
             model = anthropic_req.get("model")
             if not model:
+                _register_session(session_id, agent)
                 self._send_json(400, {"error": "Missing required field: model"})
                 return
 
@@ -276,6 +307,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     f"Allowed models: {', '.join(available)}"
                 )
                 _dr(req_id, f"[ERROR] {msg}")
+                # Обращение учтено пустым кортежем: до routing.decide не дошли.
+                _register_session(session_id, agent)
                 self._send_json(400, {"error": msg})
                 return
 
@@ -329,20 +362,22 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 error=route_msg or None,
                 http_status=route_status,
             )
-            # Учёт сессии (таблица WEBUI «Sessions», v0.9.2): последние
-            # известные model/backend/route. Ставится ДО ветки disabled/reject
-            # — таблица показывает, куда агент пытался (в т.ч. «reject»/
-            # «disabled»); client_model — клиентское имя до маппинга, как в
-            # таблице «Models in use». Для passthrough out_fmt=None → выходной
-            # формат равен входному (E→E).
+            # Учёт сессии (таблица WEBUI «Sessions», v0.9.2): строка — кортеж
+            # (session, agent, model, backend, route). Ставится ДО ветки
+            # disabled/reject — таблица показывает, куда агент пытался (в т.ч.
+            # «reject»/«disabled»); client_model — клиентское имя до маппинга,
+            # как в таблице «Models in use». Для passthrough out_fmt=None →
+            # выходной формат равен входному (E→E). Смена модели или
+            # обработчика даёт НОВУЮ строку; повторный запрос тем же кортежем —
+            # ту же (calls+1).
             if route_action == "passthrough":
                 route_str = f"passthrough {inp_fmt}→{inp_fmt}"
             elif route_action == "convert":
                 route_str = f"convert {inp_fmt}→{out_fmt}"
             else:
                 route_str = route_action
-            session_registry.set_route(
-                session_id, model=client_model, backend=backend_name, route=route_str
+            _register_session(
+                session_id, agent, model=client_model, backend=backend_name, route=route_str
             )
             if route_action in ("disabled", "reject"):
                 _dr(req_id, f"[ROUTE_REJECT] {route_msg}")
@@ -1569,3 +1604,4 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 )
             delattr(_req_ctx, "req_id")
             delattr(_req_ctx, "session_id")
+            delattr(_req_ctx, "session_key")
