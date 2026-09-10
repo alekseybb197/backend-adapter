@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.1
+"""[CC] <-> [OI]-backend adapter v0.9.2
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.1"
-__comment__ = "v0.9.0: streaming SSE passthrough + input endpoint routing (/v1/chat/completions, /v1/responses, ADAPTER_*_TARGET, passthrough E->E relay_sse) + .err incident protocol (unconditional session-*.err on final 4xx/5xx, full request+error, no TRIM) + JSON probe results into LOGPATH + [EXIT] Bye inside shutdown.graceful_shutdown + CI to project checks (mypy strict) | v0.9.1: WARN events ([USAGE_WARN] stream without usage, [WARN] First message is NOT system) written to session-*.err unconditionally (full request + report) + clean shutdown fix for PyInstaller binary on Ctrl-C (unified first-signal handler, outer KeyboardInterrupt guard) + CLAUDE.md deduped"
+__version__ = "0.9.2"
+__comment__ = "v0.9.0: streaming SSE passthrough + input endpoint routing (/v1/chat/completions, /v1/responses, ADAPTER_*_TARGET, passthrough E->E relay_sse) + .err incident protocol (unconditional session-*.err on final 4xx/5xx, full request+error, no TRIM) + JSON probe results into LOGPATH + [EXIT] Bye inside shutdown.graceful_shutdown + CI to project checks (mypy strict) | v0.9.1: WARN events ([USAGE_WARN] stream without usage, [WARN] First message is NOT system) written to session-*.err unconditionally (full request + report) + clean shutdown fix for PyInstaller binary on Ctrl-C (unified first-signal handler, outer KeyboardInterrupt guard) + CLAUDE.md deduped | v0.9.2: passthrough messages->messages moves all role=system to the front (normalize_messages_system_first, no merging) + agent-sessions table on WEBUI status page (/api/sessions/snapshot, session_registry.py) — row = tuple (session, agent, model, backend, route): model/handler change creates a new row, return to a previous tuple reuses it (upsert, calls++), ADAPTER_SESSIONS_TABLE counts rows, no persistence + install.sh reduced to latest-release binary only (Linux /usr/local/bin, macOS ~/.local/bin, Windows -> future install.ps1)"
 
 import contextlib
 import os

@@ -1,6 +1,120 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
+## v0.9.2 — messages→messages passthrough переносит system в начало, таблица сессий агентов в WEBUI (строка-кортеж), install.sh — только бинарник последнего релиза
+
+### 2026-09-10 Саммари ветки v0.9.2 (4 коммита между merge PR #14 (v0.9.1) и снятием WIP)
+
+**Цель:** финальная публикация группы работ v0.9.2 — единая запись о том,
+что вошло в ветку между v0.9.1 и снятием WIP (детали каждой работы — в
+подзаписях ниже).
+
+**Решение:**
+- **messages→messages passthrough: system переносится в начало** —
+  `convert.normalize_messages_system_first` (все `role=system` в начало, без
+  склейки) применяется в passthrough-ветке server.py только для
+  `messages→messages` (фикс 400 `System message must be at the beginning` от
+  vLLM-шаблона чата); прочие passthrough-пути уходят дословно;
+- **таблица сессий агентов в WEBUI** — новый модуль-лист `session_registry.py`
+  (in-memory, без персистентности) + секция «Sessions» после «Models in use»
+  и эндпойнт `/api/sessions/snapshot` (live-поллинг каждые ~5 с). **Строка —
+  кортеж** `(session, agent, model, backend, route)`: смена модели агентом
+  или обработчика (правило TARGET) создаёт **новую строку**, возврат к
+  прежнему кортежу — ту же (upsert, `calls++`); лимит
+  `ADAPTER_SESSIONS_TABLE` считает строки, а не сессии; дискриминатор строки
+  для JS — `key` (JSON-строка кортежа, она же `data-key` HTML);
+- **install.sh — только бинарник последнего релиза** — убраны сценарии
+  `--pip`/`--prefix`/`INSTALL_DIR`/`USE_PIP`; Linux → `/usr/local/bin`
+  (при отсутствии прав — через sudo), macOS → `~/.local/bin`; Windows-окружения
+  bash получают явный отказ со ссылкой на будущий `install.ps1`/WSL; опция
+  `--service` сохранена (документация/changelog/тесты не трогались — изменение
+  неокончательное).
+
+**Следствия:** версия v0.9.2 публикуется (снятие WIP) — passthrough
+`messages→messages` больше не ломается на бэкендах, требующих system первым
+сообщением; на статус-странице видна история соответствий «агент × модель ×
+обработчик» по сессиям; установщик даёт предсказуемый результат на каждой
+платформе. Рабочее дерево чистое — ветка готова к проверке и отправке в
+удалённый репозиторий.
+
+### Таблица сессий агентов в WEBUI (v0.9.2)
+
+**Цель:** видеть на статус-странице `/` (ниже таблицы «Models in use») сводку
+по **активным сеансам взаимодействия с агентами**. Данные для неё есть в
+каждом запросе, но нигде не агрегировались: имя агента (`User-Agent`,
+`claude-cli/2.1.236` — в коде вообще не читался), клиентская сессия
+(`X-Claude-Code-Session-Id`), модель, бэкенд и выбранное правило
+TARGET-маршрутизации; per-сессионного реестра и счётчика ошибок не было
+(таблица `model_usage` — по модели, не по сессии).
+
+**Решение:**
+- `session_registry.py` — новый модуль-лист DAG (импортирует только
+  `config`, по образцу `model_usage.py`): in-memory таблица, где **ключ строки
+  — кортеж** `SessionKey = (session, agent, model, backend, route)`, а строка
+  — закреплённое соответствие этих значений (last_seen/calls/errors +
+  служебный `_ts`). Смена модели агентом или смена обработчика (правило
+  TARGET) — новое событие и **новая строка**; возврат к уже встречавшемуся
+  кортежу — та же строка (upsert, `calls++`). Публичный API `register` /
+  `record_error` / `sessions_snapshot` / `key_json`. Сортировка — по времени
+  последнего обращения (новые сверху), при новом обращении строка всплывает;
+  эвикция до `ADAPTER_SESSIONS_TABLE` **строк (кортежей)**, а не сессий.
+  **Без персистентности** (осознанное решение пользователя): таблица живёт
+  только в памяти процесса, каждый запуск начинается заново;
+- `server.py` — точки учёта через хелпер `_register_session` (ключ кладётся в
+  thread-local `_req_ctx.session_key`): в 400-ветках (Invalid JSON / Missing
+  model / strict) `register` вызывается с **пустыми** model/backend/route (до
+  `routing.decide` не дошли); после `routing.decide` — с полным кортежем (и
+  для reject/disabled — видно, куда агент пытался); 404 на не-входной путь
+  строку не создаёт. `record_error` — перехват в общих `_send_json`/
+  `_send_raw` по финальному статусу ≥ 400 (покрывает все пути ошибок без
+  правки ~20 точек вызова; no-op для `None`/неизвестного ключа, поэтому
+  служебные ответы в счётчик не попадают). Имя агента — `User-Agent` до
+  первого пробела;
+- `webui_status.py` — секция «Sessions» после «Models in use» (8 колонок:
+  Сессия | Агент | Модель | Бэкенд | Маршрут | Последнее обращение | Вызовов |
+  Ошибок), рендер `_sessions_rows_html` и эндпойнт `/api/sessions/snapshot`
+  (JSON для JS `sessions_poll`, поле `key` — JSON-строка кортежа);
+  live-обновление без перезагрузки — поллинг каждые ~5 с, строки
+  сопоставляются по `data-key` (одна сессия может занимать несколько строк,
+  `data-session` не уникален; порядок меняется при всплытии), при
+  несовпадении состава — `location.reload()`;
+- `config.py` — `ADAPTER_SESSIONS_TABLE` (дефолт 10; лимит считает строки;
+  0 — таблица отключена; вне runtime-пула `/config`);
+- тесты: новый `tests/test_session_registry.py` (составной ключ/upsert/
+  эвикция строк/порядок/no-op/копия снимка/`key`), секция+эндпойнт в
+  `test_webui_status.py` (в т.ч. две строки одной сессии), учёт в
+  `test_server.py` (`TestSessionAccounting`: route/agent/calls/errors, смена
+  модели → новая строка, возврат к прежней модели → та же строка, 404
+  не-входного пути строку не создаёт).
+
+### messages→messages passthrough: system-сообщения переносятся в начало (v0.9.2)
+
+**Цель:** инцидент `tmp/session-20260909-222202-1ad13437.err` — при
+passthrough `messages→messages` (явный `ADAPTER_MESSAGES_TARGET=messages`
+или auto) адаптер передавал тело запроса дословно, а бэкенд (vLLM-шаблон
+чата) упал 400: `Jinja Exception: System message must be at the beginning`
+— [CC]-сессия несла первым сообщением `user` (`<system-reminder>` внутри
+user) и ~70 system-сообщений (`<total_tokens>`-баннеры и др.) по ходу
+диалога. Convert-ветка `messages→completions` уже собирает system в начало
+(склейкой); в passthrough `messages→messages` этого не было.
+
+**Решение:**
+- `convert.py`: новая чистая функция `normalize_messages_system_first(messages)`
+  — возвращает новый список: все `role=system` переносятся в начало (в
+  исходном порядке, **без склейки**), остальные роли сохраняют
+  относительный порядок; сообщения НЕ пересобираются (роли/блоки content
+  как были — контракт Anthropic-формата E→E сохраняется максимально);
+- `server.py`: в passthrough-ветке при `inp_fmt == messages` и
+  `out_fmt_val == messages` (только messages→messages!) тело нормализуется
+  ДО построения `out_body` — значит, и non-stream, и stream-ветки получают
+  исправленный порядок; другие passthrough-пути (completions→completions,
+  responses→responses) уходят дословно (там нет инварианта «system первым»);
+- если `messages` пуст или system уже первым — список не меняется, лишних
+  мутаций/логов нет;
+- тесты: unit `TestNormalizeMessagesSystemFirst` (test_convert.py) + HTTP-
+  регресс в test_server.py (`TestInputEndpoints`): non-stream и stream
+  messages→messages с system не в начале, уже-system-first без изменений.
+
 ## v0.9.1 — WARN-события в .err-файл сессии, фикс грязного выхода по Ctrl-C, CLAUDE.md без дублей, TARGET-переменные на /config, фикс «0»-int в POST /config
 
 ### 2026-09-09 Саммари ветки v0.9.1 (6 коммитов между merge PR #13 (v0.9.0) и снятием WIP)

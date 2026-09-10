@@ -71,7 +71,14 @@
   поведение 100%.
 - **Passthrough E→E** — целевой формат == входному: `completions→completions`,
   `responses→responses` (и `messages→messages` — по явной директиве
-  `ADAPTER_MESSAGES_TARGET=messages`). Тело передаётся дословно.
+  `ADAPTER_MESSAGES_TARGET=messages`). Тело передаётся дословно — с одним
+  исключением (v0.9.2): в `messages→messages` все `role=system` переносятся в
+  начало (`normalize_messages_system_first`, `convert.py` — перенос без
+  склейки, относительный порядок остальных ролей сохраняется), т.к. часть
+  бэкендов (vLLM-шаблон чата) падает 400 `Jinja Exception: System message
+  must be at the beginning`, когда [CC]-сессия несёт system-сообщения по ходу
+  диалога. Прочие E→E-пути (`completions→completions`, `responses→responses`)
+  уходят дословно — там инварианта «system первым» нет.
 - **`auto`** — автовыбор по кэшу проб (см. §1.3 «auto — не эвристика»): passthrough E→E, если
   бэкенд подтверждённо поддерживает входной формат (для `messages` — в т.ч.
   `messages→messages`); иначе — реализованная конверсия из входа; иначе —

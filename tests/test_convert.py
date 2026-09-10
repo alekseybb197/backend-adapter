@@ -11,6 +11,7 @@ from backend_adapter.convert import (
     convert_tool_choice_anthropic_to_openai,
     extract_tool_results,
     convert_messages_anthropic_to_openai,
+    normalize_messages_system_first,
     parse_tool_calls_from_text,
     convert_openai_to_anthropic,
 )
@@ -286,6 +287,64 @@ class TestConvertMessages:
     def test_empty_messages(self):
         result = convert_messages_anthropic_to_openai([], system="")
         assert result == []
+
+
+class TestNormalizeMessagesSystemFirst:
+    """Tests for normalize_messages_system_first() — passthrough messages→messages
+    (v0.9.2): перенос role=system в начало без склейки."""
+
+    def test_system_moved_to_front_preserving_order(self):
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "system", "content": "rules A"},
+            {"role": "user", "content": "second"},
+            {"role": "system", "content": "rules B"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result = normalize_messages_system_first(messages)
+        # system — в начале, в исходном порядке; user/assistant — как были
+        assert [m["role"] for m in result] == [
+            "system", "system", "user", "user", "assistant",
+        ]
+        assert result[0]["content"] == "rules A"
+        assert result[1]["content"] == "rules B"
+        assert result[2]["content"] == "first"
+        assert result[3]["content"] == "second"
+        assert result[4]["content"] == "reply"
+
+    def test_no_system_unchanged(self):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        result = normalize_messages_system_first(messages)
+        assert result == messages
+
+    def test_already_system_first_unchanged(self):
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        result = normalize_messages_system_first(messages)
+        assert result == messages
+
+    def test_empty_messages(self):
+        assert normalize_messages_system_first([]) == []
+
+    def test_content_blocks_preserved(self):
+        """System с content-списком блоков и user не пересобираются (passthrough
+        сохраняет Anthropic-структуру — в отличие от convert-склейки)."""
+        messages = [
+            {"role": "user", "content": [{"type": "text", "text": "Hi"}]},
+            {"role": "system", "content": [{"type": "text", "text": "rules"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+        ]
+        result = normalize_messages_system_first(messages)
+        assert result[0] is messages[1]  # тот же объект, не пересобран
+        assert result[1] is messages[0]
+        assert result[2] is messages[2]
+        assert result[0]["content"] == [{"type": "text", "text": "rules"}]
 
 
 class TestParseToolCallsFromText:

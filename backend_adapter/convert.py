@@ -28,6 +28,24 @@ def extract_text(content):
     return str(content)
 
 
+def normalize_messages_system_first(messages: list) -> list:
+    """Возвращает НОВЫЙ список сообщений: все role=system переносятся в
+    начало (в исходном порядке, БЕЗ склейки), остальные роли сохраняют
+    относительный порядок. Для passthrough messages→messages (v0.9.2):
+    некоторые бэкенды (vLLM-шаблон чата) требуют system первым
+    (Jinja raise_exception 'System message must be at the beginning'),
+    а [CC]-сессии несут system-сообщения по ходу диалога и
+    <system-reminder> внутри user. В отличие от
+    convert_messages_anthropic_to_openai (которая склеивает все system в
+    ОДНО сообщение и пересобирает роли/блоки), здесь сообщения НЕ
+    пересобираются — только переупорядочиваются: контракт Anthropic-
+    формата E→E сохраняется максимально.
+    """
+    systems = [m for m in messages if m.get("role") == "system"]
+    others = [m for m in messages if m.get("role") != "system"]
+    return systems + others
+
+
 def convert_tools_anthropic_to_openai(tools):
     """Anthropic tool -> OpenAI tool."""
     openai_tools = []

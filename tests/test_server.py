@@ -679,6 +679,106 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
+    # -- passthrough messages→messages: system переносится в начало (v0.9.2) --
+
+    def test_messages_passthrough_system_reordered(self, fake_backend):
+        """ADAPTER_MESSAGES_TARGET=messages (passthrough E→E): system-сообщения,
+        разбросанные по диалогу, переносятся в начало (без склейки), чтобы
+        бэкенд с Jinja-шаблоном (raise_exception 'System message must be at
+        the beginning') не упал 400. Тело иначе — как пришло (не конвертация)."""
+        self._enable(messages="messages")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/messages", True)
+            fake_backend.extra_post_paths = {"/v1/messages": 200}
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "max_tokens": 100,
+                          "messages": [
+                              {"role": "user", "content": "Хелло"},
+                              {"role": "system", "content": "Правила"},
+                              {"role": "user", "content": "Пока"},
+                          ]},
+                )
+                assert resp["status"] == 200
+                assert len(fake_backend.requests) == 1
+                path, _method, body = fake_backend.requests[0]
+                assert path == "/v1/messages"
+                sent = json.loads(body)
+                # system — первым; остальные роли сохраняют относительный порядок
+                assert sent["messages"][0]["role"] == "system"
+                assert sent["messages"][0]["content"] == "Правила"
+                roles = [m["role"] for m in sent["messages"]]
+                assert roles == ["system", "user", "user"]
+                assert sent["messages"][1]["content"] == "Хелло"
+                assert sent["messages"][2]["content"] == "Пока"
+                # антропик-поля не вычищены (не конвертация), model/маппинг применён
+                assert sent["model"] == "test-model"
+                assert "max_tokens" in sent
+            finally:
+                server.shutdown()
+
+    def test_messages_passthrough_system_first_unchanged(self, fake_backend):
+        """Если system уже первым — тело уходит дословно (без перестановки)."""
+        self._enable(messages="messages")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/messages", True)
+            fake_backend.extra_post_paths = {"/v1/messages": 200}
+            try:
+                body = {"model": "test-model",
+                        "messages": [
+                            {"role": "system", "content": "rules"},
+                            {"role": "user", "content": "Hi"},
+                        ],
+                        "max_tokens": 100}
+                resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages", body=body)
+                assert resp["status"] == 200
+                sent = json.loads(fake_backend.requests[0][2])
+                assert [m["role"] for m in sent["messages"]] == ["system", "user"]
+            finally:
+                server.shutdown()
+
+    def test_messages_passthrough_stream_system_reordered(self, fake_backend):
+        """messages→messages + stream=true: нормализация system в начало
+        применяется и к стрим-запросу (тело запроса уходит до SSE-релея)."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
+        self._enable(messages="messages")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.sse_lines = [
+            b'data: {"type": "message_start", "message": {"role": "assistant", "content": []}}\n\n',
+            b'data: {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "ok"}}\n\n',
+            b'data: {"type": "message_stop"}\n\n',
+        ]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/messages", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "max_tokens": 100,
+                          "stream": True,
+                          "messages": [
+                              {"role": "user", "content": "first"},
+                              {"role": "system", "content": "rules"},
+                          ]},
+                )
+                assert resp["status"] == 200
+                # запрос на бэкенд ушёл с system первым
+                assert len(fake_backend.requests) == 1
+                assert fake_backend.requests[0][0] == "/v1/messages"
+                sent = json.loads(fake_backend.requests[0][2])
+                assert sent["messages"][0]["role"] == "system"
+                assert sent["messages"][1]["role"] == "user"
+            finally:
+                server.shutdown()
+
     # -- авто: passthrough>convert / нет маршрута -------------------------
 
     def test_messages_auto_passthrough_priority(self, fake_backend):
@@ -865,6 +965,271 @@ class TestInputEndpoints(ServerSetupMixin):
                 assert rows[0]["output_tokens"] == 9
             finally:
                 server.shutdown()
+
+
+# ===========================================================================
+# Учёт сессий (v0.9.2): реестр session_registry заполняется в do_POST
+# ===========================================================================
+
+class TestSessionAccounting(ServerSetupMixin):
+    """Точки учёта таблицы WEBUI «Sessions»: register после routing.decide
+    (включая reject/disabled) и в 400-ветках до него (пустой кортеж);
+    record_error — из общих _send_json/_send_raw по финальному статусу >= 400
+    (no-op для незарегистрированной сессии). Ключ строки — кортеж
+    (session, agent, model, backend, route): смена модели/маршрута даёт
+    новую строку, возврат к прежнему кортежу — ту же (calls++)."""
+
+    def _enable(self, **targets: str) -> None:
+        from backend_adapter import config as cfg
+        for var, value in targets.items():
+            setattr(cfg, f"ADAPTER_{var.upper()}_TARGET", value)
+
+    def _support(self, path: str, found: bool) -> None:
+        from backend_adapter import config as cfg
+        state = cfg._ENDPOINT_STATE.setdefault(
+            "test", {"at": 0.0, "endpoints": {}, "errors": {}}
+        )
+        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
+
+    def _sessions(self):
+        from backend_adapter import session_registry
+        return session_registry.sessions_snapshot()
+
+    def test_session_registered_with_route(self, fake_backend):
+        """Запрос messages→messages: строка сессии с agent/model/backend/route."""
+        self._enable(messages="messages")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.extra_post_paths = {"/v1/messages": 200}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/messages", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"X-Claude-Code-Session-Id": "sess-abc",
+                             "User-Agent": "claude-cli/2.1.236 (external, cli)"},
+                )
+                assert resp["status"] == 200
+                rows = self._sessions()
+                assert len(rows) == 1
+                row = rows[0]
+                assert row["session"] == "sess-abc"
+                # агент — User-Agent до первого пробела
+                assert row["agent"] == "claude-cli/2.1.236"
+                assert row["model"] == "test-model"
+                assert row["backend"] == "test"
+                assert row["route"] == "passthrough messages→messages"
+                assert row["calls"] == 1
+                assert row["errors"] == 0
+            finally:
+                server.shutdown()
+
+    def test_convert_route_recorded(self, fake_backend):
+        """messages→completions (дефолт): route = convert messages→completions."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"X-Claude-Code-Session-Id": "sess-conv"},
+                )
+                assert resp["status"] == 200
+                row = self._sessions()[0]
+                assert row["route"] == "convert messages→completions"
+            finally:
+                server.shutdown()
+
+    def test_error_increments_counter(self, fake_backend):
+        """400 валидации (неизвестная модель, strict) → errors +1."""
+        fake_backend.models_response = {"data": [{"id": "known-model"}]}
+        fake_backend.completions_response = {}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "unknown-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"X-Claude-Code-Session-Id": "sess-err"},
+                )
+                assert resp["status"] == 400
+                row = self._sessions()[0]
+                assert row["errors"] == 1
+                # маршрут не доехал (400 до routing.decide) — model пуст
+                assert row["model"] == ""
+            finally:
+                server.shutdown()
+
+    def test_disabled_increments_errors_and_records_route(self, fake_backend):
+        """TARGET=none (disabled) → 404 + строка с route=disabled и errors=1."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model", "messages": []},
+                    headers={"X-Claude-Code-Session-Id": "sess-dis"},
+                )
+                assert resp["status"] == 404
+                row = self._sessions()[0]
+                assert row["route"] == "disabled"
+                assert row["model"] == "test-model"
+                assert row["backend"] == "test"
+                assert row["errors"] == 1
+            finally:
+                server.shutdown()
+
+    def test_repeated_calls_accumulate(self, fake_backend):
+        """Повторные обращения одной сессии: calls растёт, строка одна."""
+        self._enable(messages="messages")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.extra_post_paths = {"/v1/messages": 200}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/messages", True)
+            try:
+                for _ in range(3):
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": "test-model",
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-rep"},
+                    )
+                    assert resp["status"] == 200
+                rows = self._sessions()
+                assert len(rows) == 1
+                assert rows[0]["calls"] == 3
+                assert rows[0]["errors"] == 0
+            finally:
+                server.shutdown()
+
+    def test_model_change_creates_new_row(self, fake_backend):
+        """Смена модели агентом в одной сессии → НОВАЯ строка (кортеж иной)."""
+        from backend_adapter import config as cfg
+        self._enable(messages="messages")
+        fake_backend.models_response = {
+            "data": [{"id": "test-model"}, {"id": "test-model-2"}]
+        }
+        fake_backend.extra_post_paths = {"/v1/messages": 200}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            cfg._MODEL_TO_BACKEND["test-model-2"] = ("test", cfg._BACKENDS[0])
+            cfg._AVAILABLE_MODELS["test-model-2"] = {"id": "test-model-2"}
+            self._support("/v1/messages", True)
+            try:
+                for model in ("test-model", "test-model-2"):
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": model,
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-mm",
+                                 "User-Agent": "claude-cli/2.1.236"},
+                    )
+                    assert resp["status"] == 200
+                rows = self._sessions()
+                assert len(rows) == 2
+                assert {r["model"] for r in rows} == {"test-model", "test-model-2"}
+                assert all(r["calls"] == 1 for r in rows)
+            finally:
+                server.shutdown()
+
+    def test_return_to_previous_model_reuses_row(self, fake_backend):
+        """m1 → m2 → m1: возврат к прежнему кортежу — ТА ЖЕ строка, calls++."""
+        from backend_adapter import config as cfg
+        self._enable(messages="messages")
+        fake_backend.models_response = {
+            "data": [{"id": "test-model"}, {"id": "test-model-2"}]
+        }
+        fake_backend.extra_post_paths = {"/v1/messages": 200}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            cfg._MODEL_TO_BACKEND["test-model-2"] = ("test", cfg._BACKENDS[0])
+            cfg._AVAILABLE_MODELS["test-model-2"] = {"id": "test-model-2"}
+            self._support("/v1/messages", True)
+            try:
+                for model in ("test-model", "test-model-2", "test-model"):
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": model,
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-rt",
+                                 "User-Agent": "claude-cli/2.1.236"},
+                    )
+                    assert resp["status"] == 200
+                rows = self._sessions()
+                assert len(rows) == 2
+                m1 = next(r for r in rows if r["model"] == "test-model")
+                assert m1["calls"] == 2
+                assert next(
+                    r for r in rows if r["model"] == "test-model-2"
+                )["calls"] == 1
+            finally:
+                server.shutdown()
+
+    def test_unknown_path_does_not_create_session(self, fake_backend):
+        """404 на не-входной путь строку НЕ создаёт (register после return)."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/embeddings",
+                    body={"model": "test-model"},
+                    headers={"X-Claude-Code-Session-Id": "sess-404"},
+                )
+                assert resp["status"] == 404
+                assert self._sessions() == []
+            finally:
+                server.shutdown()
+
+    def test_invalid_json_creates_session_without_route(self, fake_backend):
+        """400 «Invalid JSON»: register с пустым кортежем, маршрута нет."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            sock = socket.create_connection(("127.0.0.1", server.port), timeout=5)
+            try:
+                raw = b"{not json"
+                sock.sendall(
+                    b"POST /v1/messages HTTP/1.0\r\nHost: localhost\r\n"
+                    b"X-Claude-Code-Session-Id: sess-badjson\r\n"
+                    b"Content-Type: application/json\r\n"
+                    b"Content-Length: " + str(len(raw)).encode() + b"\r\n\r\n" + raw
+                )
+                response = b""
+                while True:
+                    try:
+                        sock.settimeout(3)
+                        chunk = sock.recv(4096)
+                        if not chunk:
+                            break
+                        response += chunk
+                    except socket.timeout:
+                        break
+                assert b" 400 " in response.split(b"\r\n", 1)[0]
+            finally:
+                sock.close()
+                server.shutdown()
+            row = self._sessions()[0]
+            assert row["session"] == "sess-badjson"
+            assert row["route"] == ""  # до routing.decide не дошли
+            assert row["errors"] == 1
 
 
 class TestErrFileProtocol(ServerSetupMixin):

@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import config, model_usage, routing, session_log
+from . import config, model_usage, routing, session_log, session_registry
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
@@ -30,6 +30,7 @@ from .convert import (
     convert_tool_choice_anthropic_to_openai,
     convert_tools_anthropic_to_openai,
     extract_tool_results,
+    normalize_messages_system_first,
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
@@ -66,12 +67,48 @@ class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
 _req_ctx = threading.local()
 
 
+def _register_session(
+    session_id: str,
+    agent: str,
+    *,
+    model: str = "",
+    backend: str = "",
+    route: str = "",
+) -> None:
+    """Учёт обращения в таблице WEBUI «Sessions» (v0.9.2): upsert строки по
+    кортежу (session, agent, model, backend, route), calls+1. Ключ строки
+    кладётся в thread-local ``_req_ctx.session_key`` — его читает
+    ``_note_session_error``, чтобы инкрементить errors именно этой строки.
+
+    Вызывается на КАЖДОМ входном запросе: в 400-ветках валидации тела (до
+    ``routing.decide``) — с пустыми model/backend/route; после
+    ``routing.decide`` — с реальными (включая reject/disabled: видно, куда
+    агент пытался). Смена модели или обработчика даёт НОВУЮ строку (кортеж
+    изменился), возврат к прежнему кортежу — ту же (calls+1). Исключений не
+    бросает: register сам возвращает None при выключенном учёте."""
+    _req_ctx.session_key = session_registry.register(
+        session_id, agent, model=model, backend=backend, route=route
+    )
+
+
 class Adapter(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         rid = getattr(_req_ctx, "req_id", "-")
         _d(f"[{rid}] [HTTP] {fmt % args}")
 
+    def _note_session_error(self, status):
+        """Учёт ошибки строки-кортежа таблицы «Sessions» (v0.9.2): любой
+        финальный HTTP-ответ >= 400. Вызывается из общих методов отправки
+        (_send_json/_send_raw), поэтому покрывает все пути ошибок. Ключ берётся
+        из ``_req_ctx.session_key`` (ставится ``_register_session``) — ошибка
+        ложится в ту же строку, что и обращение. Для запросов без учёта (404
+        не-входного пути, GET /api/*, health) ключа нет → record_error(None) —
+        no-op."""
+        if status >= 400:
+            session_registry.record_error(getattr(_req_ctx, "session_key", None))
+
     def _send_json(self, status, data):
+        self._note_session_error(status)
         body = json.dumps(data, ensure_ascii=False).encode()
         try:
             self.send_response(status)
@@ -94,6 +131,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         """Отправляет клиенту ответ бэкенда ДОСЛОВНО: статус, Content-Type
         и тело — как пришли (passthrough E→E, non-stream). Никакой
         пере-сериализации: байты body пишутся как есть."""
+        self._note_session_error(status)
         try:
             self.send_response(status)
             if content_type:
@@ -179,6 +217,11 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         req_t0 = time.time()
         session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
         req_id = uuid.uuid4().hex[:12]
+        # Имя агента для таблицы WEBUI «Sessions» (v0.9.2): User-Agent до
+        # первого пробела — [CC] CLI шлёт «claude-cli/2.1.236 (external, cli)»,
+        # в колонку «Агент» идёт «claude-cli/2.1.236». Заголовка может не быть
+        # (иные клиенты) — тогда пустая строка.
+        agent = self.headers.get("User-Agent", "").split(" ", 1)[0]
 
         # Учёт usage (таблица WEBUI «Использованные модели», колонки
         # Input/Output): локальные аккумуляторы токенов из usage-блоков
@@ -191,6 +234,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         _req_ctx.req_id = req_id
         _req_ctx.session_id = session_id
+        # Ключ строки таблицы «Sessions» (v0.9.2) ставится _register_session —
+        # на входном пути (после распознавания пути / после routing.decide).
+        # None здесь — «учёта нет»: _note_session_error тогда no-op.
+        _req_ctx.session_key = None
         try:
             # Обновляем глобальный fallback для _d(), чтобы человекочитаемый
             # лог тоже писался в правильный сессионный файл.
@@ -215,6 +262,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "Expected /v1/messages"})
                 return
 
+            # Учёт сессии для таблицы WEBUI «Sessions» (v0.9.2): строка —
+            # кортеж (session, agent, model, backend, route), её создаёт
+            # _register_session. Здесь, до чтения тела, вызова нет: строку
+            # поставят либо 400-ветки ниже (пустым кортежем), либо ветка после
+            # routing.decide (полным). 404 на не-входной путь строку НЕ создаёт
+            # (учёт стоит после return).
+
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             _body = body.decode()
@@ -227,11 +281,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             try:
                 anthropic_req = json.loads(body)
             except json.JSONDecodeError as e:
+                # Обращение учтено пустым кортежем: до routing.decide не дошли.
+                _register_session(session_id, agent)
                 self._send_json(400, {"error": f"Invalid JSON: {e}"})
                 return
 
             model = anthropic_req.get("model")
             if not model:
+                _register_session(session_id, agent)
                 self._send_json(400, {"error": "Missing required field: model"})
                 return
 
@@ -250,6 +307,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     f"Allowed models: {', '.join(available)}"
                 )
                 _dr(req_id, f"[ERROR] {msg}")
+                # Обращение учтено пустым кортежем: до routing.decide не дошли.
+                _register_session(session_id, agent)
                 self._send_json(400, {"error": msg})
                 return
 
@@ -303,6 +362,23 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 error=route_msg or None,
                 http_status=route_status,
             )
+            # Учёт сессии (таблица WEBUI «Sessions», v0.9.2): строка — кортеж
+            # (session, agent, model, backend, route). Ставится ДО ветки
+            # disabled/reject — таблица показывает, куда агент пытался (в т.ч.
+            # «reject»/«disabled»); client_model — клиентское имя до маппинга,
+            # как в таблице «Models in use». Для passthrough out_fmt=None →
+            # выходной формат равен входному (E→E). Смена модели или
+            # обработчика даёт НОВУЮ строку; повторный запрос тем же кортежем —
+            # ту же (calls+1).
+            if route_action == "passthrough":
+                route_str = f"passthrough {inp_fmt}→{inp_fmt}"
+            elif route_action == "convert":
+                route_str = f"convert {inp_fmt}→{out_fmt}"
+            else:
+                route_str = route_action
+            _register_session(
+                session_id, agent, model=client_model, backend=backend_name, route=route_str
+            )
             if route_action in ("disabled", "reject"):
                 _dr(req_id, f"[ROUTE_REJECT] {route_msg}")
                 self._send_json(route_status, {"error": route_msg})
@@ -354,6 +430,23 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     stream_requested = False
                     _dr(req_id, "[STREAM_DISABLED] (passthrough) forcing stream=false")
                 anthropic_req["model"] = model
+                # passthrough messages→messages (v0.9.2): бэкенд (vLLM-шаблон
+                # чата) требует system первым (Jinja raise_exception 'System
+                # message must be at the beginning'), а [CC]-сессии несут
+                # system-сообщения по ходу диалога и <system-reminder> внутри
+                # user. Переносим все role=system в начало (в исходном
+                # порядке, БЕЗ склейки) — сообщения не пересобираются,
+                # контракт E→E сохраняется (та же идея, что в convert-ветке,
+                # где system собираются в начало; там — склейкой). Другие
+                # passthrough-пути (completions→completions, responses→
+                # responses) уходят дословно: там нет инварианта «system
+                # первым».
+                if inp_fmt == "messages" and out_fmt_val == "messages":
+                    original_msgs = anthropic_req.get("messages", [])
+                    reordered = normalize_messages_system_first(original_msgs)
+                    if reordered != original_msgs:
+                        anthropic_req["messages"] = reordered
+                        _dr(req_id, "[SYSTEM_FIRST] messages→messages: system перенесены в начало")
                 _trace(
                     session_id,
                     req_id,
@@ -1511,3 +1604,4 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 )
             delattr(_req_ctx, "req_id")
             delattr(_req_ctx, "session_id")
+            delattr(_req_ctx, "session_key")

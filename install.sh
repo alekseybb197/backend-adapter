@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 #
-# backend-adapter — one-line installer.
+# backend-adapter — one-line installer (binary only).
 #
 #   curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash
 #   curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash -s -- --service
 #
-# Default path: download the prebuilt binary for this platform from GitHub
-# Releases and put it into /usr/local/bin (or ~/.local/bin if not writable).
+# Downloads the prebuilt binary for this platform from GitHub Releases and
+# installs it to a FIXED per-platform path:
+#
+#   Linux  -> /usr/local/bin   (uses sudo when the directory is not writable)
+#   macOS  -> ~/.local/bin     (per-user path, no sudo)
+#
+# Windows is not supported by this bash installer: use the PowerShell
+# installer (install.ps1 — to be added separately) or run it inside WSL,
+# where the platform is detected as Linux.
+#
 # With --service it additionally generates and enables a per-user service:
 # a systemd user unit (Linux, systemctl --user) or a launchd agent (macOS,
 # current user) — both pointed at the installed binary.
@@ -19,9 +27,7 @@ set -euo pipefail
 
 REPO="alekseybb197/backend-adapter"
 BINARY_NAME="backend-adapter"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 SERVICE_INSTALL="${SERVICE_INSTALL:-0}"
-USE_PIP="${USE_PIP:-0}"
 
 # Colors
 RED='\033[0;31m'
@@ -38,27 +44,39 @@ err()  { echo -e "${RED}[ERR]${NC}  $*" >&2; }
 # ── Parse args ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --prefix) INSTALL_DIR="$2"; shift 2 ;;
     --service) SERVICE_INSTALL=1; shift ;;
-    --pip) USE_PIP=1; shift ;;
+    --pip)
+      err "--pip (sources install) was removed: only the latest-release binary is supported."
+      info "Install from sources manually instead: git clone + venv (see docs/install.md)."
+      exit 1
+      ;;
+    --prefix)
+      err "--prefix was removed: the install path is fixed per platform."
+      info "Linux -> /usr/local/bin; macOS -> ~/.local/bin."
+      exit 1
+      ;;
     --help|-h)
       cat <<'EOF'
 Usage: install.sh [OPTIONS]
 
+Downloads the prebuilt binary for this platform from the latest GitHub
+Release and installs it to a fixed path:
+  Linux   /usr/local/bin   (sudo is used when the directory is not writable)
+  macOS   ~/.local/bin     (per-user, no sudo)
+
+Windows is not supported by this bash installer — use the PowerShell
+installer (install.ps1, added separately) or run inside WSL.
+
 Options:
-  --prefix DIR    Install directory (default: /usr/local/bin)
   --service       Generate and enable a per-user service: systemd user unit
                   (Linux, systemctl --user) / launchd agent (macOS). Writes a
                   fresh env file with an empty ADAPTER_BACKEND_CONFIG; fill it
                   in, then start the service manually (systemd: the unit is
                   enabled but not started; launchd: RunAtLoad=false).
-  --pip           Install from sources via git clone + venv instead of binary
   --help          Show this help
 
 Environment:
-  INSTALL_DIR     Same as --prefix
   SERVICE_INSTALL Same as --service (1/0)
-  USE_PIP         Same as --pip (1/0)
 
 The binary needs the same config as the sources: a YAML file passed via
 ADAPTER_BACKEND_CONFIG plus the token env var named in its `key` field
@@ -92,69 +110,63 @@ detect_platform() {
         *)             echo "unsupported" ;;
       esac
       ;;
+    # Windows shells that run bash (Git Bash / MSYS2 / Cygwin). Real Windows
+    # (cmd/PowerShell) never reaches this script; WSL reports "linux".
+    mingw*|msys*|cygwin*) echo "windows" ;;
     *) echo "unsupported" ;;
   esac
 }
 
 PLATFORM=$(detect_platform)
-if [[ "$PLATFORM" == "unsupported" ]]; then
-  err "Unsupported platform: $(uname -s) $(uname -m)"
-  if [[ "$USE_PIP" != 1 ]]; then
-    err "Falling back to --pip (sources install)..."
-    USE_PIP=1
-  fi
-fi
+case "$PLATFORM" in
+  windows)
+    err "Windows is not supported by this bash installer."
+    info "Use the PowerShell installer (install.ps1 — added separately):"
+    info "  irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex"
+    info "Or run this installer inside WSL (there it is detected as Linux)."
+    exit 1
+    ;;
+  unsupported)
+    err "Unsupported platform: $(uname -s) $(uname -m)"
+    exit 1
+    ;;
+esac
 
-# ── Find writable install dir ──────────────────────────────────────────
-find_install_dir() {
-  local dir="$1"
-  if [[ -w "$dir" ]] || mkdir -p "$dir" 2>/dev/null; then
-    echo "$dir"
+# ── Fixed install dir per platform ─────────────────────────────────────
+case "$PLATFORM" in
+  macos-*) INSTALL_DIR="$HOME/.local/bin" ;;
+  *)       INSTALL_DIR="/usr/local/bin" ;;
+esac
+
+# Whether writing to INSTALL_DIR needs sudo (set by ensure_install_dir).
+USE_SUDO=0
+
+# Make sure INSTALL_DIR exists and is writable; escalate to sudo on Linux
+# when it is not (the path stays exactly /usr/local/bin either way).
+ensure_install_dir() {
+  if [[ -d "$INSTALL_DIR" && -w "$INSTALL_DIR" ]]; then
     return
   fi
-  # Fallback to user-local
-  local user_bin="$HOME/.local/bin"
-  mkdir -p "$user_bin" 2>/dev/null || true
-  warn "No write access to $dir — installing to $user_bin"
-  echo "$user_bin"
-}
-
-INSTALL_DIR=$(find_install_dir "$INSTALL_DIR")
-
-# ── Install via pip (sources) ──────────────────────────────────────────
-# `pip install backend-adapter`/`pip install .` (wheel) НЕ поддерживается:
-# в wheel входит только пакет backend_adapter/ — консольная команда
-# backend-adapter (cli.py) исполняет соседний backend-adapter.py через
-# runpy, которого в wheel нет. Поэтому --pip клонирует исходники и ставит
-# их в venv в editable-режиме (backend-adapter.py остаётся рядом).
-install_pip() {
-  if ! command -v python3 &>/dev/null; then
-    err "python3 not found. Please install Python 3.10+ first."
+  # Parent writable (or the dir absent and creatable) — no escalation needed.
+  if mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+    return
+  fi
+  if [[ "$PLATFORM" == macos-* ]]; then
+    # ~/.local/bin is per-user: failure here is not a permission problem.
+    err "Cannot create ${INSTALL_DIR}"
     exit 1
   fi
-  if ! command -v git &>/dev/null; then
-    err "git not found. Please install git first (--pip clones the repository)."
+  if ! command -v sudo &>/dev/null; then
+    err "No write access to ${INSTALL_DIR} and sudo is not available."
+    info "Run the installer as root instead: sudo bash install.sh"
     exit 1
   fi
-
-  local src_dir="${INSTALL_DIR}/src"
-  info "Cloning ${REPO} into ${src_dir} ..."
-  rm -rf "$src_dir"
-  git clone --depth 1 "https://github.com/${REPO}.git" "$src_dir"
-
-  info "Creating venv and installing dependencies ..."
-  python3 -m venv "${src_dir}/venv"
-  # shellcheck disable=SC1091
-  source "${src_dir}/venv/bin/activate"
-  python -m pip install --upgrade pip
-  pip install -e "$src_dir"
-
-  ok "Sources installed into ${src_dir}/venv"
-  info "Run: ${src_dir}/venv/bin/backend-adapter (add it to your PATH)"
-  info "Config examples: ${src_dir}/docs/samples/{sample.adapter.yaml,sample.adapter.env}"
-  info "  cp ${src_dir}/docs/samples/sample.adapter.yaml adapter.yaml, then:"
-  info "  export ADAPTER_BACKEND_CONFIG=${src_dir}/adapter.yaml"
+  warn "${INSTALL_DIR} is not writable — using sudo"
+  sudo mkdir -p "$INSTALL_DIR"
+  USE_SUDO=1
 }
+
+ensure_install_dir
 
 # ── Install binary ─────────────────────────────────────────────────────
 install_binary() {
@@ -177,7 +189,11 @@ install_binary() {
   fi
 
   chmod +x "${tmpdir}/${BINARY_NAME}"
-  mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  if [[ "$USE_SUDO" == 1 ]]; then
+    sudo mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  else
+    mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+  fi
   ok "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
 
   # macOS Gatekeeper: files downloaded via curl get the
@@ -382,11 +398,7 @@ info "Platform:  $PLATFORM"
 info "Install:   $INSTALL_DIR"
 info "Service:   $([[ $SERVICE_INSTALL == 1 ]] && echo yes || echo no)"
 
-if [[ "$USE_PIP" == 1 ]]; then
-  install_pip
-else
-  install_binary
-fi
+install_binary
 
 verify
 
