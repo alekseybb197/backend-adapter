@@ -1,0 +1,9 @@
+---
+# Collections the molecule docker driver needs (the driver declares these
+# itself; listing them here makes the requirement explicit and keeps the
+# dependency step warning-free).
+collections:
+  - name: community.docker
+    version: ">=3.10.2"
+  - name: ansible.posix
+    version: ">=1.4.0"

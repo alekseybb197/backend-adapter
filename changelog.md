@@ -1,6 +1,56 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
+## v0.9.3 (WIP — molecule-тест установщика install.sh: Linux, latest, ubuntu 24.04 + фикс verify())
+
+<!-- WIP: записи по мере согласованных коммитов группы v0.9.3. -->
+
+### 2026-09-10 molecule-тест install.sh (Linux/latest/ubuntu 24.04) + фикс бага verify()
+
+**Цель:** закрыть `install.sh` интеграционным тестом. Установщик —
+единственный путь установки для конечного пользователя (`curl | bash`), но
+в репозитории не было ни одного теста, который запускал бы сам скрипт:
+существующий CI-job `install-smoke-test` проверяет только `pip install -e .`.
+Попутно тест вскрыл **баг в `verify()`**.
+
+**Решение:**
+- **новый molecule-сценарий `molecule/install/`** — поднимает контейнер
+  **ubuntu 24.04** (свой `Dockerfile.j2`: `python3` для Ansible; намеренно
+  БЕЗ `curl`/`wget`/`sudo`), прогоняет `install.sh` и проверяет контракт:
+  бинарник скачался, лёг в `/usr/local/bin`, исполняем, запускается и
+  доходит до своего `[FATAL] ADAPTER_BACKEND_CONFIG is not set` (rc 1).
+  Область — только Linux и только установка latest (без `--service`);
+  `--service`/sudo-путь/`wget`-ветка/real-download вне охвата;
+- **оффлайн-изоляция загрузки** — `curl` подменяется PATH-стабом
+  (`molecule/install/fixtures/curl`), который пишет фикстурный бинарник в
+  `-o`-цель (штатные `chmod`/`mv` установщика отрабатывают по-настоящему) и
+  логирует запрошенный URL; `verify.yml` ассертит **точное** равенство URL
+  `.../releases/latest/download/backend-adapter-<platform>` (platform
+  вычисляется из `uname -m` — на ARM-хосте `linux-arm64`), ровно один вызов
+  curl и rc установщика 0;
+- **фикс `verify()` в install.sh** — условие
+  `if OUTPUT=$("$bin_path" 2>&1) && grep -q ...` коротко замыкалось на
+  штатном rc 1 бинарника, из-за чего `grep` не выполнялся, а ветка
+  `[OK] ... (healthy)` была **недостижима** (исправный бинарник всегда давал
+  WARN). Захват вывода и `grep` развязаны:
+  `OUTPUT=$("$bin_path" 2>&1 || true)` + отдельный `if grep -q ...`
+  (`|| true` обязателен — одиночное присваивание под `set -e` оборвалось бы
+  на rc 1); паттерн-образец — `release-binaries.yml`;
+- **CI** — новый job `install-molecule` в `.github/workflows/ci.yml`
+  (molecule из `molecule/requirements-molecule.txt`, отдельный от
+  `requirements-dev.txt`); `.molecule/` добавлен в `.gitignore`;
+- **документация** — `docs/install.md`: раздел «Тесты» дополнен §2.1
+  (molecule-сценарий, локальный запуск), дерево репозитория — строкой
+  `molecule/`; §4.2 приведён в соответствие с текущим `install.sh`
+  (удалены устаревшие `--prefix`/`--pip`/`INSTALL_DIR`/`USE_PIP`, описаны
+  фиксированные пути и Windows-отказ).
+
+**Следствия:** правки `install.sh` теперь ловятся интеграционным тестом без
+сети; исправленный `verify()` наконец печатает `[OK] ... (healthy)` для
+работоспособного бинарника. Поведение самого установщика не меняется —
+только корректность диагностики. Покрыто: `molecule test -s install`
+(локально и в CI).
+
 ## v0.9.2 — messages→messages passthrough переносит system в начало, таблица сессий агентов в WEBUI (строка-кортеж), install.sh — только бинарник последнего релиза
 
 ### 2026-09-10 Саммари ветки v0.9.2 (4 коммита между merge PR #14 (v0.9.1) и снятием WIP)

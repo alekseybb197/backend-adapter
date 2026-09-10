@@ -1,0 +1,11 @@
+# Dedicated virtualenv for the molecule scenario. Kept separate from
+# requirements-dev.txt: molecule is not needed for the pytest suite.
+# molecule itself requires Python >= 3.10.
+molecule>=25.1,<27
+molecule-plugins[docker]>=25.1,<27
+
+# ansible-core is intentionally NOT pinned: molecule declares its own
+# constraint and the docker driver installs its own pinned collections
+# (community.docker 3.10.2 / ansible.posix 1.4.0, 2024-era). If
+# `molecule dependency` fails on collection/ansible-core compatibility,
+# add a pin here, e.g.  ansible-core>=2.17,<2.19

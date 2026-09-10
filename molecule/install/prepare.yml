@@ -1,0 +1,70 @@
+---
+# Stage the installer and its fixtures inside the container. Everything the
+# converge step needs lands under /opt/molecule, so the run does not depend on
+# where the repo lives on the host.
+- name: Prepare the installer test fixture
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    stub_bin_dir: /opt/molecule/stub-bin
+    fixture_dir: /opt/molecule/fixtures
+
+  tasks:
+    - name: Create staging directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ stage_dir }}"
+        - "{{ stub_bin_dir }}"
+        - "{{ fixture_dir }}"
+
+    - name: Copy install.sh into the container
+      # playbook_dir == this scenario directory during a molecule run;
+      # MOLECULE_PROJECT_DIRECTORY (env) is the equivalent fallback.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../install.sh"
+        dest: "{{ stage_dir }}/install.sh"
+        mode: "0755"
+
+    - name: Lay out the fixture binary
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/fixtures/backend-adapter"
+        dest: "{{ fixture_dir }}/backend-adapter"
+        mode: "0755"
+
+    - name: Lay out the curl stub as the first entry of the test PATH
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/fixtures/curl"
+        dest: "{{ stub_bin_dir }}/curl"
+        mode: "0755"
+
+    - name: Reset the stub call log
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ stage_dir }}/curl-calls.log"
+        mode: "0644"
+
+    - name: Remove a binary left over from a previous run
+      ansible.builtin.file:
+        path: /usr/local/bin/backend-adapter
+        state: absent
+
+    - name: Check whether the image ships a real curl
+      # The stub still wins by PATH order, but the test would stop proving that
+      # install.sh used the stub, so fail loudly if the image changes.
+      ansible.builtin.stat:
+        path: /usr/bin/curl
+      register: real_curl
+
+    - name: Fail early if the image ships a real curl
+      ansible.builtin.assert:
+        that:
+          - not real_curl.stat.exists
+        fail_msg: >-
+          The test image now contains /usr/bin/curl. Revisit the offline-stub
+          assumption before trusting this scenario.

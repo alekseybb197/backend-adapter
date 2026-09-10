@@ -69,6 +69,40 @@ venv/bin/pytest -v         # подробно, по одному тесту на
 - интеграционные тесты поднимают фейковый бэкенд на случайном порту
   (`ADAPTER_PROXY_PORT` в тестах — **9998**, порт 9999 не используется).
 
+### 2.1 Тест установщика (molecule)
+
+`install.sh` — bash-скрипт, поэтому `pytest` его не покрывает. Для него
+заведён отдельный **molecule**-сценарий `molecule/install/`: он поднимает
+контейнер **ubuntu 24.04**, прогоняет `install.sh` и проверяет контракт
+установки — бинарник скачивается, кладётся в `/usr/local/bin`, исполняем и
+работоспособен.
+
+Область первой итерации: только **Linux** и только **установка latest-бинарника**
+(без `--service`). Сети нет: `curl` подменяется PATH-стабом
+(`molecule/install/fixtures/curl`), который отдаёт фикстурный бинарник и
+записывает запрошенный URL — тест ассертит, что URL в точности равен
+`https://github.com/alekseybb197/backend-adapter/releases/latest/download/backend-adapter-<platform>`.
+
+molecule в `requirements-dev.txt` не входит (нужен только для этого
+сценария) — ставьте его в **отдельный** venv:
+
+```bash
+python3.12 -m venv tmp/molecule-venv
+tmp/molecule-venv/bin/pip install -r molecule/requirements-molecule.txt
+
+cd <repo>
+PATH="$PWD/tmp/molecule-venv/bin:$PATH" tmp/molecule-venv/bin/molecule test -s install
+```
+
+`PATH=` с venv-каталогом впереди обязателен: иначе molecule может подхватить
+системный `ansible-galaxy` другой версии. Сценарий называется `install`
+(не `default`) — всегда указывайте `-s install`. Требуется запущенный
+Docker. Быстрый цикл: `molecule converge -s install` / `verify` / `login` /
+`destroy`.
+
+В CI этот сценарий гоняется отдельным job `install-molecule`
+(`.github/workflows/ci.yml`).
+
 ---
 
 ## 3. Клонирование
@@ -124,6 +158,9 @@ backend-adapter/
 ├── scripts/
 │   ├── build-binaries.sh        # Сборка standalone-бинарников (PyInstaller)
 │   └── dev-run.sh               # Запуск из исходников (venv + конфиг)
+├── molecule/                    # molecule-сценарий установщика (см. раздел 2):
+│   ├── requirements-molecule.txt   #   зависимости molecule (отдельный venv)
+│   └── install/                    #   сценарий "install" (Linux, latest, ubuntu 24.04)
 ├── docs/
 │   ├── install.md               # Установка (этот файл)
 │   ├── environment.md           # Полный список env-переменных
@@ -166,8 +203,9 @@ backend-adapter/
 
 Быстрая установка бинарника с GitHub Releases — однострочным установщиком
 `install.sh` из корня репозитория. Скрипт сам определяет ОС/архитектуру,
-скачивает готовый бинарник и кладёт его в `/usr/local/bin` (или
-`~/.local/bin`, если нет прав на запись):
+скачивает бинарник последнего релиза и кладёт его в **фиксированный для
+платформы** путь: Linux → `/usr/local/bin` (при отсутствии прав — через
+`sudo`), macOS → `~/.local/bin` (per-user, без `sudo`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash
@@ -205,20 +243,19 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 
 | Опция | Действие |
 |---|---|
-| `--prefix DIR` | Каталог установки (по умолчанию `/usr/local/bin`) |
-| `--service` | Дополнительно сгенерировать и включить сервис автозапуска: user-юнит systemd (Linux) / launchd-агент (macOS) |
-| `--pip` | Установить из исходников (git clone + venv), а не бинарник |
+| `--service` | Дополнительно сгенерировать и включить сервис автозапуска: user-юнит systemd (Linux) / launchd-агент (macOS). Сервис **не запускается** сразу — сначала заполните `ADAPTER_BACKEND_CONFIG` (см. ниже) |
 | `--help` | Показать справку |
 
-Те же значения задаются переменными окружения `INSTALL_DIR`,
-`SERVICE_INSTALL`, `USE_PIP` (1/0).
+Каталог установки фиксирован per-platform и **не переопределяется**: Linux →
+`/usr/local/bin`, macOS → `~/.local/bin`. Установка — только бинарник
+последнего релиза; сценарии `--pip` (из исходников) и `--prefix` (свой
+каталог) удалены — для установки из исходников используйте `git clone` +
+venv (раздел [3](#3-клонирование)). Включить сервис можно и переменной
+окружения `SERVICE_INSTALL=1` (эквивалент `--service`).
 
-> **--pip — установка из исходников.** `pip install .` (wheel) не
-> поддерживается: в wheel входит только пакет `backend_adapter/`, а
-> консольная команда `backend-adapter` (`backend_adapter/cli.py`) исполняет
-> соседний `backend-adapter.py` через runpy — в wheel его нет. Поэтому
-> `--pip` клонирует репозиторий в `<prefix>/src` и ставит его в venv
-> в editable-режиме (`backend-adapter.py` остаётся рядом с пакетом).
+> **Windows.** Bash-установщик Windows не поддерживает: он завершится с
+> явной ошибкой и ссылкой на будущий PowerShell-установщик (`install.ps1`)
+> или WSL. В WSL платформа определяется как Linux.
 
 > **Security note.** Установщик общается только с github.com (официальные
 > релизы и файлы этого репозитория); установка и сервис — в пределах

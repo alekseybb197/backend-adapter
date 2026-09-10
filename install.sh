@@ -222,7 +222,13 @@ verify() {
     # The binary has no --version flag: with an empty ADAPTER_BACKEND_CONFIG
     # it prints its banner and "[FATAL] ADAPTER_BACKEND_CONFIG is not set",
     # exiting 1 — that healthy early-exit proves the binary is alive.
-    if OUTPUT=$("$bin_path" 2>&1) && grep -q "ADAPTER_BACKEND_CONFIG is not set" <<<"$OUTPUT"; then
+    #
+    # The capture and the grep must be separate statements: the binary exits
+    # 1 by design, so `OUTPUT=$(...) && grep ...` short-circuits and the grep
+    # never runs (the healthy branch would be unreachable). `|| true` keeps
+    # the standalone assignment from tripping `set -e` on that rc 1.
+    OUTPUT=$("$bin_path" 2>&1 || true)
+    if grep -q "ADAPTER_BACKEND_CONFIG is not set" <<<"$OUTPUT"; then
       ok "Binary starts and reaches its own [FATAL] early-exit (healthy)"
     else
       warn "Binary did not produce the expected startup output"

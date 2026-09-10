@@ -1,0 +1,50 @@
+#!/bin/sh
+# Offline `curl` stand-in for the molecule scenario.
+#
+# install.sh resolves curl via `command -v curl` and invokes it as:
+#   curl -fsSL --progress-bar "<url>" -o "<tmpdir>/backend-adapter"
+# The stub ignores every option except -o, writes the fixture binary to the -o
+# target (so install.sh's own chmod/mv path is exercised for real) and appends
+# the requested URL to the call log for verify.yml to assert on.
+set -eu
+
+LOG="${STUB_LOG:-/opt/molecule/curl-calls.log}"
+FIXTURE="${STUB_FIXTURE:-/opt/molecule/fixtures/backend-adapter}"
+
+out=""
+url=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      [ "$#" -ge 2 ] || { echo "curl-stub: -o needs an argument" >&2; exit 2; }
+      out="$2"
+      shift 2
+      ;;
+    -o*)
+      out="${1#-o}"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      # -f, -s, -S, -L, --progress-bar, ... : ignored on purpose.
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+[ -n "$url" ] || { echo "curl-stub: no URL argument" >&2; exit 2; }
+[ -n "$out" ] || { echo "curl-stub: no -o target" >&2; exit 2; }
+[ -f "$FIXTURE" ] || { echo "curl-stub: fixture missing: $FIXTURE" >&2; exit 2; }
+
+printf '%s\n' "$url" >> "$LOG"
+cat "$FIXTURE" > "$out"
+chmod 0755 "$out"
+exit 0

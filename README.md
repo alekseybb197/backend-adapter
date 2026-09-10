@@ -99,6 +99,7 @@ backend-adapter/
 │   │                           #   backend-adapter.service + com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
 │   └── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
+├── molecule/                   # molecule-тест установщика install.sh (Linux, ubuntu 24.04)
 └── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 

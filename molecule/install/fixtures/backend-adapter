@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fixture stand-in for the release binary `backend-adapter`.
+#
+# It reproduces the only startup contract install.sh relies on (see
+# backend-adapter.py:99-104 and the identical self-check in
+# scripts/build-binaries.sh): with an empty ADAPTER_BACKEND_CONFIG it prints the
+# banner, prints "[FATAL] ADAPTER_BACKEND_CONFIG is not set ..." and exits 1.
+# That healthy early-exit is what verify() greps for.
+echo "Backend-Adapter v0.0.0-molecule-fixture"
+echo "======================================================================"
+
+if [ -z "${ADAPTER_BACKEND_CONFIG:-}" ]; then
+  echo "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
+  exit 1
+fi
+
+echo "fixture: config present, nothing to do"
+exit 0

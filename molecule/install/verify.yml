@@ -1,0 +1,101 @@
+---
+# Assert the installer contract:
+#   1. the binary landed in /usr/local/bin and is executable;
+#   2. the URL handed to curl is exactly the GitHub Releases URL for this arch;
+#   3. the installed binary reaches its own [FATAL] early-exit (rc 1);
+#   4. install.sh reported the healthy path and no WARN about a missing
+#      startup output.
+- name: Verify the installer result
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    install_log: /opt/molecule/install.log
+    install_rc: /opt/molecule/install.rc
+    calls_log: /opt/molecule/curl-calls.log
+    repo: alekseybb197/backend-adapter
+    installed_bin: /usr/local/bin/backend-adapter
+    arch_to_platform:
+      x86_64: linux-x64
+      amd64: linux-x64
+      aarch64: linux-arm64
+      arm64: linux-arm64
+
+  tasks:
+    - name: Determine the container architecture (same source as install.sh)
+      ansible.builtin.command: uname -m
+      register: uname_m
+      changed_when: false
+
+    - name: Compute the expected platform tag
+      # Mirrors detect_platform() in install.sh. Derived rather than hardcoded
+      # so the scenario also passes on an ARM host (aarch64 -> linux-arm64).
+      ansible.builtin.set_fact:
+        expected_platform: "{{ arch_to_platform[uname_m.stdout] | default('unsupported') }}"
+
+    - name: Compute the expected release URL
+      ansible.builtin.set_fact:
+        expected_url: "https://github.com/{{ repo }}/releases/latest/download/backend-adapter-{{ expected_platform }}"
+
+    - name: The installed binary must exist
+      ansible.builtin.stat:
+        path: "{{ installed_bin }}"
+      register: installed
+
+    - name: Read the captured files
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ install_log }}"
+        - "{{ install_rc }}"
+        - "{{ calls_log }}"
+      register: captured
+
+    - name: Decode captured files
+      ansible.builtin.set_fact:
+        install_log_text: "{{ captured.results[0].content | b64decode }}"
+        install_rc_text: "{{ captured.results[1].content | b64decode }}"
+        calls_log_text: "{{ captured.results[2].content | b64decode }}"
+
+    - name: Parse the stub call log (non-empty lines)
+      ansible.builtin.set_fact:
+        curl_calls: "{{ calls_log_text.split('\n') | reject('equalto', '') | list }}"
+
+    - name: Run the installed binary with an empty ADAPTER_BACKEND_CONFIG
+      ansible.builtin.command:
+        cmd: "{{ installed_bin }}"
+      environment:
+        ADAPTER_BACKEND_CONFIG: ""
+      register: binary_run
+      failed_when: false
+      changed_when: false
+
+    - name: Assert the installer contract
+      ansible.builtin.assert:
+        that:
+          # 1. binary present + executable
+          - installed.stat.exists
+          - installed.stat.isreg
+          - installed.stat.executable | bool
+          # 2. installer itself succeeded
+          - install_rc_text | trim == "0"
+          # 3. exactly one download, and the URL is the expected one
+          - curl_calls | length == 1
+          - curl_calls[0] == expected_url
+          # 4. the installed binary behaves like the real one
+          - binary_run.rc == 1
+          - "'[FATAL] ADAPTER_BACKEND_CONFIG is not set' in binary_run.stdout"
+          # 5. install.sh reported the healthy early-exit (post-fix), not a WARN
+          - "'early-exit (healthy)' in install_log_text"
+          - "'did not produce the expected startup output' not in install_log_text"
+          - "'Installed binary to /usr/local/bin/backend-adapter' in install_log_text"
+        fail_msg: |
+          install.sh contract violated.
+          expected_url = {{ expected_url }}
+          installer rc = {{ install_rc_text | trim }}
+          curl calls   = {{ curl_calls | join(' | ') }}
+          binary rc    = {{ binary_run.rc }}
+          --- install.log ---
+          {{ install_log_text }}
