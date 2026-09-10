@@ -83,6 +83,20 @@ venv/bin/pytest -v         # подробно, по одному тесту на
 записывает запрошенный URL — тест ассертит, что URL в точности равен
 `https://github.com/alekseybb197/backend-adapter/releases/latest/download/backend-adapter-<platform>`.
 
+Второй сценарий, **`molecule/service/`**, проверяет `install.sh --service` на
+Linux с **настоящим systemd**: контейнер запускается с `systemd` как PID 1
+(privileged + host cgroup namespace, `molecule/service/molecule.yml`),
+установщик вызывается с `ADAPTER_SERVICE_BACKEND_BASE`/`ADAPTER_SERVICE_BACKEND_KEY`
+(диалог в CI невозможен), а `verify.yml` ассертит контракт сервиса —
+сервисный пользователь, конфиги в `/var/lib/backend-adapter` (в т.ч. права
+`0600` на env-файл с токеном), системный юнит и, главное,
+`systemctl is-enabled == enabled` **и** `is-active == active` (реальный
+запуск). Запуск:
+
+```bash
+PATH="$PWD/tmp/molecule-venv/bin:$PATH" tmp/molecule-venv/bin/molecule test -s service
+```
+
 molecule в `requirements-dev.txt` не входит (нужен только для этого
 сценария) — ставьте его в **отдельный** venv:
 
@@ -225,17 +239,50 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 Установка бинарника **и** сервиса автозапуска одной командой:
 
 ```bash
-# Linux: user-юнит systemd (systemctl --user); macOS: launchd-агент
+# Linux: системный юнит systemd (/etc/systemd/system), нужен root;
+# macOS: launchd-агент текущего пользователя
 curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash -s -- --service
 ```
 
-`--service` **не запускает** сервис сразу: он пишет свежий user-level юнит
-(указывающий на установленный бинарник), env-файл со значениями по
-умолчанию и пустым `ADAPTER_BACKEND_CONFIG` и включает автозапуск. После
-установки заполните `ADAPTER_BACKEND_CONFIG` (в env-файле на Linux / в
-`EnvironmentVariables` plist на macOS — launchd не читает env-файлы) и
-запустите сервис вручную. Системные шаблоны репозитория
-(`docs/samples/backend-adapter.service`,
+**Linux (`--service`).** Установщик ставит **системный** systemd-юнит
+(`/etc/systemd/system/backend-adapter.service`, `WantedBy=multi-user.target`)
+и **сразу запускает** его (`systemctl enable --now`). Сервис работает от
+выделенного непривилегированного пользователя `backend-adapter`
+(`useradd --system --no-create-home`) с корневым каталогом состояния
+**`/var/lib/backend-adapter`**, где установщик генерирует **готовый к работе**
+конфиг:
+
+- `/var/lib/backend-adapter/adapter.yaml` — один провайдер `main`
+  (`base` — адрес бэкенда, `key: ADAPTER_BACKEND_KEY_MAIN` — *имя* переменной
+  с токеном), права `0640`, владелец `backend-adapter`;
+- `/var/lib/backend-adapter/adapter.env` — минимально достаточный набор
+  (`ADAPTER_BACKEND_CONFIG`, `ADAPTER_BACKEND_KEY_MAIN`, `ADAPTER_PROXY_PORT`,
+  `ADAPTER_ENDPOINT_HOST`, `ADAPTER_DEBUG_ENABLE`,
+  `ADAPTER_DEBUG_LOGPATH`, `ADAPTER_DETACH_ENABLE=0`), права `0600`,
+  владелец `root` (токен; systemd читает `EnvironmentFile` от root).
+
+Адрес бэкенда и токен установщик **запрашивает в диалоге** (URL — обычным
+вводом, токен — без эха). При запуске не от root установщик повышает права
+через `sudo` (проверьте, что он доступен). Для неинтерактивных прогонов
+(CI, скрипты) значения передаются переменными окружения
+`ADAPTER_SERVICE_BACKEND_BASE` и `ADAPTER_SERVICE_BACKEND_KEY` — тогда диалог
+не вызывается. Каталог состояния и имя сервисного пользователя
+переопределяются через `ADAPTER_SERVICE_ROOT` / `ADAPTER_SERVICE_USER`.
+
+Управление сервисом (пути/команды печатает установщик в конце):
+
+```bash
+systemctl status backend-adapter
+systemctl restart backend-adapter
+journalctl -u backend-adapter -f
+```
+
+**macOS (`--service`).** Ставится launchd-агент текущего пользователя
+(`~/Library/LaunchAgents`); launchd не читает env-файлы, поэтому переменные
+вписаны прямо в plist, а рядом лежит env-файл-образец для копирования.
+В отличие от Linux, агент **не запускается** сразу: заполните
+`ADAPTER_BACKEND_CONFIG` в plist и загрузите его вручную. Системные шаблоны
+репозитория (`docs/samples/backend-adapter.service`,
 `docs/samples/com.user.backend-adapter.plist`) рассчитаны на запуск из
 исходников; для бинарника юнит генерируется установщиком.
 
@@ -243,7 +290,7 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 
 | Опция | Действие |
 |---|---|
-| `--service` | Дополнительно сгенерировать и включить сервис автозапуска: user-юнит systemd (Linux) / launchd-агент (macOS). Сервис **не запускается** сразу — сначала заполните `ADAPTER_BACKEND_CONFIG` (см. ниже) |
+| `--service` | Дополнительно установить сервис автозапуска для бинарника. **Linux:** системный systemd-юнит с сервисным пользователем и готовым конфигом в `/var/lib/backend-adapter`, включается и **запускается сразу** (нужен root/`sudo`). **macOS:** launchd-агент пользователя (не запускается сразу — заполните `ADAPTER_BACKEND_CONFIG`) |
 | `--help` | Показать справку |
 
 Каталог установки фиксирован per-platform и **не переопределяется**: Linux →
@@ -258,9 +305,12 @@ venv (раздел [3](#3-клонирование)). Включить серв�
 > или WSL. В WSL платформа определяется как Linux.
 
 > **Security note.** Установщик общается только с github.com (официальные
-> релизы и файлы этого репозитория); установка и сервис — в пределах
-> текущего пользователя (user-level systemd/launchd, без root).
-> Перед выполнением просмотрите скрипт:
+> релизы и файлы этого репозитория). Установка бинарника — в пределах
+> текущего пользователя (Linux — `/usr/local/bin`; при отсутствии прав
+> `sudo`). Режим `--service` на Linux ставит **системный** юнит и требует
+> root: он создаёт сервисного пользователя, каталог `/var/lib/backend-adapter`
+> и запускает сервис. Токен хранится в `/var/lib/backend-adapter/adapter.env`
+> с правами `0600` (владелец root). Перед выполнением просмотрите скрипт:
 > `curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | less`
 
 Установленному бинарнику нужен тот же конфиг, что и исходникам (см. ниже,
@@ -821,6 +871,12 @@ Adapter cannot start. Exiting.
 отладочный detach-режим (раздел 6.2).
 
 ### 9.1 Linux — systemd
+
+> **Бинарник из установщика.** Если адаптер установлен через `install.sh`
+> (раздел [4.2](#42-установка-одной-строкой-curl--bash)), режим `--service`
+> уже ставит **системный** systemd-юнит автоматически: сервисный пользователь
+> `backend-adapter`, конфиг в `/var/lib/backend-adapter`, `enable --now`.
+> Раздел ниже описывает ручную установку **из исходников** (user-level юнит).
 
 Юнит `backend-adapter.service` (шаблон для запуска из исходников — в
 `docs/samples/`) рассчитан на установку исходников в `~/backend-adapter`

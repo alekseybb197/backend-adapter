@@ -1,9 +1,74 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
-## v0.9.3 (WIP — molecule-тест установщика install.sh: Linux, latest, ubuntu 24.04 + фикс verify())
+## v0.9.3 (WIP — install.sh: molecule-тест (Linux, latest, ubuntu 24.04), системный systemd-сервис `--service` + фикс verify())
 
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.3. -->
+
+### 2026-09-11 install.sh --service: системный systemd-сервис (Linux) + molecule-сценарий
+
+**Цель:** сделать Linux-ветку `install.sh --service` пригодной для продакшена.
+Прежний режим ставил **user-level** юнит (`~/.config/systemd/user`,
+`systemctl --user`, `WantedBy=default.target`) и создавал **пустой** env-файл:
+сервис не запускался, конфиг пользователь заполнял вручную, автозапуска без
+логина не было.
+
+**Решение:**
+- **системный unit** — `/etc/systemd/system/backend-adapter.service`
+  (`WantedBy=multi-user.target`), `systemctl daemon-reload` + `systemctl
+  enable --now`: сервис включается и **сразу запускается** (конфиг к этому
+  моменту готов);
+- **сервисный пользователь** — отдельный непривилегированный
+  `backend-adapter` (`useradd --system --no-create-home --shell <nologin>`),
+  создаётся установщиком при отсутствии;
+- **корневой каталог состояния `/var/lib/backend-adapter`** — туда пишутся
+  готовые к работе `adapter.yaml` (один провайдер `main`; `key:
+  ADAPTER_BACKEND_KEY_MAIN` — *имя* переменной с токеном) и минимально
+  достаточный `adapter.env` (`ADAPTER_BACKEND_CONFIG`,
+  `ADAPTER_BACKEND_KEY_MAIN`, `ADAPTER_PROXY_PORT`, `ADAPTER_ENDPOINT_HOST`,
+  `ADAPTER_DEBUG_ENABLE`, `ADAPTER_DEBUG_LOGPATH`, `ADAPTER_DETACH_ENABLE=0` —
+  detach несовместим с надзором systemd). Права: `adapter.yaml` — `0640`,
+  владелец сервисного юзера; `adapter.env` с токеном — `0600`, владелец root
+  (systemd читает `EnvironmentFile` от root, сам процесс его не читает);
+- **диалог адреса и токена** — `collect_service_config()`: если не заданы
+  `ADAPTER_SERVICE_BACKEND_BASE`/`ADAPTER_SERVICE_BACKEND_KEY`, значения
+  читаются из **`/dev/tty`** (не из stdin — под `curl | bash` stdin занят
+  скриптом); URL нормализуется (обрезка хвостового `/`), токен вводится без
+  эха (`read -s`). Для неинтерактивных прогонов (CI, molecule, скрипты)
+  достаточно env-переменных — диалог не вызывается. Если `/dev/tty`
+  недоступен и переменные не заданы — понятная ошибка и выход;
+- **root/sudo** — установка сервиса пишет в `/etc`, `/var/lib` и вызывает
+  `systemctl`, поэтому требует root; хелпер `as_root` повышает права через
+  `sudo`, когда скрипт запущен не от root (при отсутствии `sudo` — явная
+  ошибка с подсказкой). Провал установки сервиса больше не глотается
+  (`install_systemd` вызывается без `|| true`);
+- **molecule-сценарий `molecule/service/`** — контейнер с **настоящим
+  systemd** как PID 1 (privileged + host cgroup namespace + монт cgroup,
+  `molecule/service/molecule.yml`); установщик гоняется с env-переменными
+  (диалог в CI невозможен), `verify.yml` ассертит: бинарник установлен,
+  ровно один вызов curl и точный URL, сервисный юзер существует, конфиги в
+  `/var/lib/backend-adapter` (в т.ч. права `0600` на env), системный юнит
+  (`User=`, `EnvironmentFile=`, `WantedBy=multi-user.target`) и — главное —
+  `systemctl is-enabled == enabled` **и** `is-active == active` (реальный
+  старт). Не-вакуумность проверена: поломка `User=`/`ExecStart`/`enable --now`
+  валит verify;
+- **CI** — в job `install-molecule` добавлен шаг `molecule test -s service`;
+- **фикстура бинарника** (`molecule/install/fixtures/backend-adapter`) — при
+  **непустом** `ADAPTER_BACKEND_CONFIG` теперь «работает» вечно
+  (`exec sleep infinity`), чтобы `Type=simple` доходил до `active`; ветка
+  пустого конфига (сценарий `install`) не изменилась;
+- **документация** — `docs/install.md` §4.2 переписан под системный сервис
+  (юзер, `/var/lib/backend-adapter`, диалог/env-переменные, `enable --now`,
+  управление через `systemctl`/`journalctl`), §2.1 дополнен сценарием
+  `service`, §9.1 — пометкой, что установщик ставит системный юнит
+  автоматически; `docs/environment.md` — врезка, что `ADAPTER_SERVICE_*` —
+  переменные **установщика**, а не адаптера; `README.md` — строка про два
+  сценария.
+
+**Следствия:** `install.sh --service` на Linux даёт готовый к работе сервис
+одной командой (создаёт юзера, пишет конфиг, запускает), автозапуск работает
+без логина, состояние — в одном каталоге. macOS-ветка launchd не менялась.
+Покрыто: `molecule test -s service` (локально и в CI).
 
 ### 2026-09-10 molecule-тест install.sh (Linux/latest/ubuntu 24.04) + фикс бага verify()
 

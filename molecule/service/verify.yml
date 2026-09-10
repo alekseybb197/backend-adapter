@@ -1,0 +1,155 @@
+---
+# Assert the `--service` contract:
+#   1. the binary landed in /usr/local/bin (same download path as `install`);
+#   2. the generated config is the minimal working set for provider 'main';
+#   3. the systemd unit is a SYSTEM unit (multi-user.target, User=, EnvironmentFile=);
+#   4. the service is enabled AND actually running.
+- name: Verify the service install result
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    install_log: /opt/molecule/install.log
+    install_rc: /opt/molecule/install.rc
+    calls_log: /opt/molecule/curl-calls.log
+    repo: alekseybb197/backend-adapter
+    installed_bin: /usr/local/bin/backend-adapter
+    service_root: /var/lib/backend-adapter
+    service_unit: /etc/systemd/system/backend-adapter.service
+    service_user: backend-adapter
+    backend_base: https://llm.example.test
+    backend_key: molecule-test-token
+    arch_to_platform:
+      x86_64: linux-x64
+      amd64: linux-x64
+      aarch64: linux-arm64
+      arm64: linux-arm64
+
+  tasks:
+    - name: Determine the container architecture (same source as install.sh)
+      ansible.builtin.command: uname -m
+      register: uname_m
+      changed_when: false
+
+    - name: Compute the expected platform tag
+      # Mirrors detect_platform() in install.sh. Derived rather than hardcoded
+      # so the scenario also passes on an ARM host (aarch64 -> linux-arm64).
+      ansible.builtin.set_fact:
+        expected_platform: "{{ arch_to_platform[uname_m.stdout] | default('unsupported') }}"
+
+    - name: Compute the expected release URL
+      ansible.builtin.set_fact:
+        expected_url: "https://github.com/{{ repo }}/releases/latest/download/backend-adapter-{{ expected_platform }}"
+
+    - name: Collect the files the installer produced
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ installed_bin }}"
+        - "{{ service_root }}/adapter.yaml"
+        - "{{ service_root }}/adapter.env"
+        - "{{ service_unit }}"
+      register: service_files
+
+    - name: Read the captured and generated text files
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ install_log }}"
+        - "{{ install_rc }}"
+        - "{{ calls_log }}"
+        - "{{ service_root }}/adapter.yaml"
+        - "{{ service_root }}/adapter.env"
+        - "{{ service_unit }}"
+      register: captured
+
+    - name: Decode the captured files
+      ansible.builtin.set_fact:
+        install_log_text: "{{ captured.results[0].content | b64decode }}"
+        install_rc_text: "{{ captured.results[1].content | b64decode }}"
+        calls_log_text: "{{ captured.results[2].content | b64decode }}"
+        adapter_yaml_text: "{{ captured.results[3].content | b64decode }}"
+        adapter_env_text: "{{ captured.results[4].content | b64decode }}"
+        unit_text: "{{ captured.results[5].content | b64decode }}"
+
+    - name: Parse the stub call log (non-empty lines)
+      ansible.builtin.set_fact:
+        curl_calls: "{{ calls_log_text.split('\n') | reject('equalto', '') | list }}"
+
+    - name: Look up the service user
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ service_user }}"
+      register: service_passwd
+      failed_when: false
+
+    - name: Query the unit state
+      # retries: `systemctl enable --now` returns as soon as the start job is
+      # queued; give the fixture a moment to settle into `active`.
+      ansible.builtin.command: "systemctl {{ item }} backend-adapter.service"
+      loop:
+        - is-enabled
+        - is-active
+      register: unit_state
+      changed_when: false
+      failed_when: false
+      retries: 15
+      delay: 2
+      until: unit_state is not failed
+
+    - name: Read the unit state
+      ansible.builtin.set_fact:
+        unit_enabled: "{{ unit_state.results[0].stdout | default('') | trim }}"
+        unit_active: "{{ unit_state.results[1].stdout | default('') | trim }}"
+
+    - name: Assert the service install contract
+      ansible.builtin.assert:
+        that:
+          # 1. binary present + executable, installer succeeded
+          - service_files.results[0].stat.exists
+          - service_files.results[0].stat.executable | bool
+          - install_rc_text | trim == "0"
+          # 2. exactly one download, and the URL is the expected one
+          - curl_calls | length == 1
+          - curl_calls[0] == expected_url
+          # 3. the generated backend config describes provider 'main'
+          - service_files.results[1].stat.exists
+          - "'name: main' in adapter_yaml_text"
+          - "'base: ' ~ backend_base in adapter_yaml_text"
+          - "'key: ADAPTER_BACKEND_KEY_MAIN' in adapter_yaml_text"
+          # 4. the env file is the minimal working set, token-only (0600)
+          - service_files.results[2].stat.exists
+          - service_files.results[2].stat.mode == '0600'
+          - "'ADAPTER_BACKEND_CONFIG=' ~ service_root ~ '/adapter.yaml' in adapter_env_text"
+          - "'ADAPTER_BACKEND_KEY_MAIN=' ~ backend_key in adapter_env_text"
+          - "'ADAPTER_DETACH_ENABLE=0' in adapter_env_text"
+          # 5. the unit is a SYSTEM unit
+          - service_files.results[3].stat.exists
+          - "'User=' ~ service_user in unit_text"
+          - "'EnvironmentFile=' ~ service_root ~ '/adapter.env' in unit_text"
+          - "'ExecStart=' ~ installed_bin in unit_text"
+          - "'WantedBy=multi-user.target' in unit_text"
+          # 6. the service user exists
+          - service_passwd is succeeded
+          # 7. enabled and actually running
+          - unit_enabled == 'enabled'
+          - unit_active == 'active'
+          # 8. install.sh reported no WARN about the startup output
+          - "'did not produce the expected startup output' not in install_log_text"
+        fail_msg: |
+          install.sh --service contract violated.
+          expected_url  = {{ expected_url }}
+          installer rc  = {{ install_rc_text | trim }}
+          curl calls    = {{ curl_calls | join(' | ') }}
+          unit enabled  = {{ unit_enabled }}
+          unit active   = {{ unit_active }}
+          --- adapter.yaml ---
+          {{ adapter_yaml_text }}
+          --- adapter.env ---
+          {{ adapter_env_text }}
+          --- unit ---
+          {{ unit_text }}
+          --- install.log ---
+          {{ install_log_text }}

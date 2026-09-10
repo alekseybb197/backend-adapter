@@ -4,6 +4,12 @@
 > Все переменные читаются из окружения перед стартом (модуль `backend_adapter/config.py`).
 > Если не заданы — используются значения по умолчанию, указанные в столбце *Default*.
 
+> **Не путать с переменными установщика.** Префикс `ADAPTER_SERVICE_*`
+> (`ADAPTER_SERVICE_BACKEND_BASE`, `ADAPTER_SERVICE_BACKEND_KEY`,
+> `ADAPTER_SERVICE_ROOT`, `ADAPTER_SERVICE_USER`) читает **`install.sh --service`**,
+> а не сам адаптер: это параметры установки сервиса (см. `docs/install.md`
+> §4.2). Адаптер их игнорирует.
+
 ---
 
 ## Ноль-конфиг (zero-config) против полной настройки

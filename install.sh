@@ -15,14 +15,22 @@
 # installer (install.ps1 — to be added separately) or run it inside WSL,
 # where the platform is detected as Linux.
 #
-# With --service it additionally generates and enables a per-user service:
-# a systemd user unit (Linux, systemctl --user) or a launchd agent (macOS,
-# current user) — both pointed at the installed binary.
+# With --service it additionally installs a persistent service pointed at the
+# installed binary:
+#
+#   Linux  a SYSTEM systemd unit (/etc/systemd/system), run as a dedicated
+#          unprivileged user and rooted at /var/lib/backend-adapter, where a
+#          ready-to-run adapter.yaml + adapter.env are generated. The backend
+#          base URL and token are asked interactively (or taken from the
+#          ADAPTER_SERVICE_BACKEND_BASE / ADAPTER_SERVICE_BACKEND_KEY env vars
+#          for non-interactive runs). Needs root — the script escalates with
+#          sudo when it is not already root.
+#   macOS  a launchd agent (current user, ~/Library/LaunchAgents).
 #
 # The script only talks to github.com (official releases + unit files of this
 # repo). Review it before running: | bash | less
 #
-# See docs/install.md (section 4.4, "Однострочный установщик") for the guide.
+# See docs/install.md (section 4.2, "Установка одной строкой") for the guide.
 set -euo pipefail
 
 REPO="alekseybb197/backend-adapter"
@@ -68,15 +76,23 @@ Windows is not supported by this bash installer — use the PowerShell
 installer (install.ps1, added separately) or run inside WSL.
 
 Options:
-  --service       Generate and enable a per-user service: systemd user unit
-                  (Linux, systemctl --user) / launchd agent (macOS). Writes a
-                  fresh env file with an empty ADAPTER_BACKEND_CONFIG; fill it
-                  in, then start the service manually (systemd: the unit is
-                  enabled but not started; launchd: RunAtLoad=false).
+  --service       Install a persistent service for the binary.
+                  Linux: a SYSTEM systemd unit (/etc/systemd/system) run as
+                  the dedicated user 'backend-adapter', rooted at
+                  /var/lib/backend-adapter with a generated adapter.yaml
+                  (provider 'main') and adapter.env. The service is enabled
+                  and started immediately. Requires root (sudo is used when
+                  needed); the backend base URL and token are asked for
+                  interactively unless the env vars below are set.
+                  macOS: a launchd agent for the current user.
   --help          Show this help
 
 Environment:
-  SERVICE_INSTALL Same as --service (1/0)
+  SERVICE_INSTALL             Same as --service (1/0)
+  ADAPTER_SERVICE_BACKEND_BASE  Backend base URL for --service (skips the prompt)
+  ADAPTER_SERVICE_BACKEND_KEY   Backend API token for --service (skips the prompt)
+  ADAPTER_SERVICE_ROOT          State dir (default /var/lib/backend-adapter)
+  ADAPTER_SERVICE_USER          Service user (default backend-adapter)
 
 The binary needs the same config as the sources: a YAML file passed via
 ADAPTER_BACKEND_CONFIG plus the token env var named in its `key` field
@@ -140,6 +156,33 @@ esac
 
 # Whether writing to INSTALL_DIR needs sudo (set by ensure_install_dir).
 USE_SUDO=0
+
+# ── System service layout (Linux, --service) ───────────────────────────
+# Rooted at a single state directory that holds both configs and logs; the
+# service runs as a dedicated unprivileged system user. Overridable for tests
+# and non-standard layouts.
+SERVICE_ROOT="${ADAPTER_SERVICE_ROOT:-/var/lib/backend-adapter}"
+SERVICE_USER="${ADAPTER_SERVICE_USER:-backend-adapter}"
+SERVICE_UNIT="/etc/systemd/system/backend-adapter.service"
+SERVICE_ENV="${SERVICE_ROOT}/adapter.env"
+SERVICE_YAML="${SERVICE_ROOT}/adapter.yaml"
+SERVICE_LOGS="${SERVICE_ROOT}/logs"
+
+# Backend base URL / token for the generated config. When empty, --service
+# asks for them interactively (see collect_service_config).
+SERVICE_BASE="${ADAPTER_SERVICE_BACKEND_BASE:-}"
+SERVICE_KEY="${ADAPTER_SERVICE_BACKEND_KEY:-}"
+
+# Run a command with root privileges: directly when already root, via sudo
+# otherwise. Used only by the --service path (it writes to /etc, /var/lib,
+# creates a user and calls systemctl). set -e aborts on a failed sudo.
+as_root() {
+  if [[ $EUID -eq 0 ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
 
 # Make sure INSTALL_DIR exists and is writable; escalate to sudo on Linux
 # when it is not (the path stays exactly /usr/local/bin either way).
@@ -239,49 +282,115 @@ verify() {
   fi
 }
 
-# ── Install systemd service (Linux, user-level) ────────────────────────
-# The repo's docs/samples/backend-adapter.service is a python-source
-# template (/usr/bin/python3 %h/backend-adapter/backend-adapter.py,
-# User=username); it does not fit a binary install. For the binary we
-# generate a user-level unit (systemctl --user) pointing at the installed
-# binary and an env file created next to it.
+# ── Collect the backend URL + token for the generated config ───────────
+# Non-interactive callers (CI, molecule, scripted installs) pass both via
+# ADAPTER_SERVICE_BACKEND_BASE / ADAPTER_SERVICE_BACKEND_KEY. Otherwise ask on
+# the controlling terminal: under `curl | bash` stdin is the piped script, so
+# reading stdin would consume the installer itself.
+collect_service_config() {
+  if [[ -z "$SERVICE_BASE" || -z "$SERVICE_KEY" ]]; then
+    if [[ ! -r /dev/tty ]]; then
+      err "--service needs the backend URL and token."
+      info "Set ADAPTER_SERVICE_BACKEND_BASE and ADAPTER_SERVICE_BACKEND_KEY,"
+      info "or run the installer from an interactive terminal."
+      exit 1
+    fi
+    while [[ -z "$SERVICE_BASE" ]]; do
+      if ! read -r -p "Backend base URL (e.g. https://llm.example.com): " SERVICE_BASE </dev/tty; then
+        err "No input on the terminal — aborted."
+        exit 1
+      fi
+    done
+    while [[ -z "$SERVICE_KEY" ]]; do
+      # -s: do not echo the token; the newline is swallowed by -s, so add one.
+      if ! read -r -s -p "Backend API token: " SERVICE_KEY </dev/tty; then
+        err "No input on the terminal — aborted."
+        exit 1
+      fi
+      echo >/dev/tty
+    done
+  fi
+  # A trailing slash would yield '//v1/...' in request URLs.
+  SERVICE_BASE="${SERVICE_BASE%/}"
+}
+
+# ── Install systemd service (Linux, system) ────────────────────────────
+# The repo's docs/samples/backend-adapter.service is a python-source template
+# (/usr/bin/python3 %h/backend-adapter/backend-adapter.py, User=username); it
+# does not fit a binary install. For the binary we generate a SYSTEM unit
+# (/etc/systemd/system, multi-user.target) run as a dedicated unprivileged
+# user, with both configs under SERVICE_ROOT so the service is ready to run.
 install_systemd() {
   if [[ "$(uname -s)" != "Linux" ]]; then
     return
   fi
-  local unit_dir="$HOME/.config/systemd/user"
-  local env_file="$HOME/.config/backend-adapter/backend-adapter.env"
-  local unit_file="$unit_dir/backend-adapter.service"
+  if [[ $EUID -ne 0 ]] && ! command -v sudo &>/dev/null; then
+    err "--service installs a system service and needs root, but sudo is not available."
+    info "Run the installer as root instead: sudo bash install.sh --service"
+    exit 1
+  fi
+  if ! command -v systemctl &>/dev/null; then
+    err "systemctl not found — cannot install a systemd service on this host."
+    exit 1
+  fi
 
-  info "Installing systemd user unit ..."
-  mkdir -p "$unit_dir" "$(dirname "$env_file")"
+  collect_service_config
 
-  # Fresh env file: ADAPTER_BACKEND_CONFIG is required, the rest are the
-  # documented defaults. The user edits this file after install.
-  cat > "$env_file" <<EOF
+  info "Installing systemd system service (user '${SERVICE_USER}', root '${SERVICE_ROOT}') ..."
+  as_root mkdir -p "$SERVICE_ROOT" "$SERVICE_LOGS"
+
+  if ! id -u "$SERVICE_USER" &>/dev/null; then
+    # --no-create-home: the state dir is SERVICE_ROOT, not a home directory.
+    local nologin=/usr/sbin/nologin
+    [[ -x "$nologin" ]] || nologin=/bin/false
+    as_root useradd --system --no-create-home \
+      --home-dir "$SERVICE_ROOT" --shell "$nologin" "$SERVICE_USER"
+  fi
+
+  # Backend YAML: one provider 'main'; the token itself lives in the env file
+  # (key: is the *name* of the env var holding it — see docs/environment.md).
+  as_root tee "$SERVICE_YAML" >/dev/null <<EOF
+# backend-adapter config (generated by install.sh --service)
+backend:
+  - name: main
+    base: ${SERVICE_BASE}
+    key: ADAPTER_BACKEND_KEY_MAIN
+EOF
+
+  # Env file: minimal working set. ADAPTER_DETACH_ENABLE=0 is mandatory —
+  # detach (double fork) is incompatible with systemd supervision.
+  as_root tee "$SERVICE_ENV" >/dev/null <<EOF
 # backend-adapter env (generated by install.sh --service)
-# Fill in ADAPTER_BACKEND_CONFIG with your backend YAML path, then start
-# the unit (the installer only enabled it — the empty config would crash
-# the service on boot):
-#   systemctl --user daemon-reload
-#   systemctl --user start backend-adapter.service
-ADAPTER_BACKEND_CONFIG=
+ADAPTER_BACKEND_CONFIG=${SERVICE_YAML}
+ADAPTER_BACKEND_KEY_MAIN=${SERVICE_KEY}
 ADAPTER_PROXY_PORT=9999
 ADAPTER_ENDPOINT_HOST=127.0.0.1
 ADAPTER_DEBUG_ENABLE=0
+ADAPTER_DEBUG_LOGPATH=${SERVICE_LOGS}
 ADAPTER_DETACH_ENABLE=0
 EOF
 
-  cat > "$unit_file" <<EOF
+  # Ownership: the service user owns its config and log dir; the env file with
+  # the token stays root-only (systemd reads EnvironmentFile as root, the
+  # process itself never needs it).
+  as_root chown "$SERVICE_USER:$SERVICE_USER" "$SERVICE_YAML" "$SERVICE_LOGS"
+  as_root chmod 0640 "$SERVICE_YAML"
+  as_root chown root:root "$SERVICE_ENV"
+  as_root chmod 0600 "$SERVICE_ENV"
+
+  as_root tee "$SERVICE_UNIT" >/dev/null <<EOF
 [Unit]
 Description=backend-adapter proxy ([CC] <-> [OI])
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=$INSTALL_DIR
-EnvironmentFile=$env_file
-ExecStart=$INSTALL_DIR/backend-adapter
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+WorkingDirectory=${SERVICE_ROOT}
+EnvironmentFile=${SERVICE_ENV}
+ExecStart=${INSTALL_DIR}/${BINARY_NAME}
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
@@ -289,17 +398,18 @@ StandardError=journal
 SyslogIdentifier=backend-adapter
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
 
-  systemctl --user daemon-reload
-  # enable only — no --now / no start: ADAPTER_BACKEND_CONFIG is still empty
-  # in the env file, the user fills it in before the first start.
-  systemctl --user enable backend-adapter.service
-  ok "systemd user unit installed: ${unit_file}"
-  info "Env file: ${env_file} (set ADAPTER_BACKEND_CONFIG to your YAML)"
-  info "Then start: systemctl --user start backend-adapter.service"
-  info "Check status: systemctl --user status backend-adapter.service"
+  as_root systemctl daemon-reload
+  # enable --now: autostart on boot AND start right away — the config is
+  # complete, so the service can come up immediately.
+  as_root systemctl enable --now backend-adapter.service
+  ok "systemd system unit installed and started: ${SERVICE_UNIT}"
+  info "Config:  ${SERVICE_YAML} (provider 'main', base ${SERVICE_BASE})"
+  info "Env:     ${SERVICE_ENV} (token, mode 0600)"
+  info "Logs:    ${SERVICE_LOGS} (journal: journalctl -u backend-adapter -f)"
+  info "Status:  systemctl status backend-adapter"
 }
 
 # ── Install launchd service (macOS, current user) ──────────────────────
@@ -409,23 +519,36 @@ install_binary
 verify
 
 if [[ "$SERVICE_INSTALL" == 1 ]]; then
-  install_systemd || true
+  # A failed system-service install must be visible (non-zero exit), unlike the
+  # launchd agent, which is best-effort.
+  install_systemd
   install_launchd || true
 fi
 
 echo ""
 ok "Installation complete!"
 echo ""
-echo "Next steps:"
-echo "  1. Create the backend config (YAML) and point to it:"
-echo "     export ADAPTER_BACKEND_CONFIG=/path/to/adapter.yaml"
-echo "     # example: docs/samples/sample.adapter.yaml in the repo"
-echo "     # (structure backend: name/base/key; key names the token env var)"
-echo ""
-echo "  2. Run the adapter:"
-echo "     backend-adapter"
-echo ""
-echo "  3. Point [CC] to the proxy:"
-echo "     export ANTHROPIC_BASE_URL=http://localhost:9999"
-echo "     claude"
-echo ""
+if [[ "$SERVICE_INSTALL" == 1 && "$PLATFORM" == linux-* ]]; then
+  echo "The service is enabled and already running. Point [CC] to the proxy:"
+  echo "  export ANTHROPIC_BASE_URL=http://localhost:9999"
+  echo "  claude"
+  echo ""
+  echo "Manage it with:"
+  echo "  systemctl status backend-adapter"
+  echo "  journalctl -u backend-adapter -f"
+  echo ""
+else
+  echo "Next steps:"
+  echo "  1. Create the backend config (YAML) and point to it:"
+  echo "     export ADAPTER_BACKEND_CONFIG=/path/to/adapter.yaml"
+  echo "     # example: docs/samples/sample.adapter.yaml in the repo"
+  echo "     # (structure backend: name/base/key; key names the token env var)"
+  echo ""
+  echo "  2. Run the adapter:"
+  echo "     backend-adapter"
+  echo ""
+  echo "  3. Point [CC] to the proxy:"
+  echo "     export ANTHROPIC_BASE_URL=http://localhost:9999"
+  echo "     claude"
+  echo ""
+fi

@@ -129,6 +129,17 @@ jobs:
           ANSIBLE_FORCE_COLOR: '1'
           PY_COLORS: '1'
 
+      - name: Run molecule service scenario
+        # `install.sh --service` installs a SYSTEM systemd unit and asserts it
+        # actually starts (is-active=active), so the scenario needs a container
+        # running systemd as PID 1 — hence a privileged container with the host
+        # cgroup namespace (see molecule/service/molecule.yml). The GitHub
+        # runner is a systemd host with cgroup v2, so this works there.
+        run: molecule test -s service
+        env:
+          ANSIBLE_FORCE_COLOR: '1'
+          PY_COLORS: '1'
+
   webui-smoke:
     name: WEBUI Smoke Test
     runs-on: ubuntu-latest

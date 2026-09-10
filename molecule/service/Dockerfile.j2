@@ -1,0 +1,32 @@
+# Test image for the `--service` scenario: ubuntu:24.04 + a bootable systemd.
+#
+# ubuntu:24.04 ships only libsystemd0 — no systemctl, no /sbin/init — so the
+# systemd package set is installed explicitly. systemd-sysv provides /sbin/init,
+# which molecule starts via platforms[].command.
+#
+# No curl, no wget, no sudo on purpose: `curl` must resolve to the PATH stub
+# (offline download), and the installer runs as root so its sudo branch is not
+# taken (the non-root path is covered manually, not here).
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+# Lets systemd know it runs in a container (skips some host-only units).
+ENV container=docker
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        systemd \
+        systemd-sysv \
+        python3 \
+    && rm -rf /var/lib/apt/lists/* \
+    # Trim units that make no sense in a container and can hang boot.
+    && rm -f /lib/systemd/system/multi-user.target.wants/* \
+             /etc/systemd/system/*.wants/* \
+             /lib/systemd/system/local-fs.target.wants/* \
+             /lib/systemd/system/sockets.target.wants/*udev* \
+             /lib/systemd/system/sockets.target.wants/*initctl* \
+             /lib/systemd/system/sysinit.target.wants/systemd-tmpfiles-setup* \
+             /lib/systemd/system/systemd-update-utmp*
+
+CMD ["/sbin/init"]

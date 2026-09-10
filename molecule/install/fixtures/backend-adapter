@@ -1,11 +1,14 @@
 #!/bin/sh
 # Fixture stand-in for the release binary `backend-adapter`.
 #
-# It reproduces the only startup contract install.sh relies on (see
+# It reproduces the two startup behaviours install.sh relies on (see
 # backend-adapter.py:99-104 and the identical self-check in
-# scripts/build-binaries.sh): with an empty ADAPTER_BACKEND_CONFIG it prints the
-# banner, prints "[FATAL] ADAPTER_BACKEND_CONFIG is not set ..." and exits 1.
-# That healthy early-exit is what verify() greps for.
+# scripts/build-binaries.sh):
+#
+#   * empty ADAPTER_BACKEND_CONFIG -> banner + "[FATAL] ... is not set" + exit 1
+#     (the healthy early-exit that verify() greps for);
+#   * non-empty ADAPTER_BACKEND_CONFIG -> keep running, so the systemd unit
+#     (Type=simple, --service scenario) actually reaches `active`.
 echo "Backend-Adapter v0.0.0-molecule-fixture"
 echo "======================================================================"
 
@@ -14,5 +17,5 @@ if [ -z "${ADAPTER_BACKEND_CONFIG:-}" ]; then
   exit 1
 fi
 
-echo "fixture: config present, nothing to do"
-exit 0
+echo "fixture: config present, running (sleep infinity)"
+exec sleep infinity
