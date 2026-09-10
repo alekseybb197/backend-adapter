@@ -375,6 +375,14 @@ ADAPTER_RESPONSES_TARGET = _parse_target(
 # при штатном завершении таблица сохраняется всегда.
 ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
 
+# Глубина таблицы активных сессий агентов на статус-странице WEBUI (секция
+# «Sessions», v0.9.2): сколько последних сессий держать в памяти. Таблица
+# НЕ персистится — при каждом запуске адаптера пуста. Значение — живой
+# лимит: читается session_registry._limit() при каждой регистрации
+# обращения; 0 — таблица отключена (ничего не хранится). В runtime-пул
+# (/config) не входит — смена требует перезапуска, как у прочих лимитов.
+ADAPTER_SESSIONS_TABLE = int(os.environ.get("ADAPTER_SESSIONS_TABLE", "10"))
+
 # ADAPTER_MODELS_TARIFFS — путь к YAML-файлу с тарифами моделей (для колонки
 # Cost таблицы «Models in use» на статус-странице WEBUI). Формат (запятая —
 # десятичный разделитель цен):

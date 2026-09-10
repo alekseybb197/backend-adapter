@@ -105,7 +105,7 @@ import os
 import time
 from urllib.parse import parse_qs, quote, urlparse
 
-from . import config, model_usage, webserver
+from . import config, model_usage, session_registry, webserver
 
 logger = logging.getLogger("webui_status")
 
@@ -472,6 +472,40 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     return "".join(body)
 
 
+def _sessions_rows_html(rows: list[dict]) -> str:
+    """HTML строк таблицы Sessions (по строке на клиентскую сессию, v0.9.2).
+
+    ``rows`` — session_registry.sessions_snapshot() (уже отсортирован: новые
+    сверху). Колонки: Сессия | Агент | Модель | Бэкенд | Маршрут | Последнее
+    обращение | Вызовов | Ошибок. Сессия — UUID-подобный id: показываем первые
+    8 символов в <code>, полный id — в title (36 символов не влезают в
+    колонку). Строка несёт data-session с ПОЛНЫМ id — JS sessions_poll
+    сопоставляет строки по нему (порядок меняется при всплытии сессий, в
+    отличие от позиционного сопоставления Models in use). Все значения —
+    html.escape."""
+    body = []
+    for r in rows:
+        session = str(r.get("session", ""))
+        body.append(
+            f'<tr data-session="{html.escape(session)}">'
+            f'<td><code title="{html.escape(session)}">{html.escape(session[:8])}</code></td>'
+            f"<td>{html.escape(str(r.get('agent', '')))}</td>"
+            f"<td>{html.escape(str(r.get('model', '')))}</td>"
+            f"<td>{html.escape(str(r.get('backend', '')))}</td>"
+            f"<td>{html.escape(str(r.get('route', '')))}</td>"
+            f"<td>{html.escape(str(r.get('last_seen', '')))}</td>"
+            f"<td>{r.get('calls', 0)}</td>"
+            f"<td>{r.get('errors', 0)}</td>"
+            "</tr>"
+        )
+    if not body:
+        body.append(
+            '<tr><td colspan="8" style="color:#888">пока нет данных — '
+            "таблица заполняется при обращениях агентов</td></tr>"
+        )
+    return "".join(body)
+
+
 def _render_status_page(
     context, refresh=None, checked_at=None, running=None, started_at=None
 ) -> bytes:
@@ -742,6 +776,53 @@ def _render_status_page(
 </script>
 """
 
+    # Live-обновление секции Sessions (v0.9.2): JS sessions_poll каждые 5 с
+    # опрашивает /api/sessions/snapshot (session_registry.sessions_snapshot()
+    # — копии строк из памяти, сети нет) и обновляет текстовые ячейки строк.
+    # Строки сопоставляются ПО data-session (полный session_id), а НЕ
+    # позиционно: порядок меняется при всплытии сессии наверх (сортировка по
+    # последнему обращению), позиционное сопоставление перепутало бы строки.
+    # Состав/число строк не совпало (новая сессия / эвикция по глубине) —
+    # location.reload() перерисует таблицу (заодно и корректный порядок).
+    # Оверхед — один маленький JSON раз в 5 с на вкладку; скрытую вкладку
+    # браузер троттлит. Скрипт безусловный, как usage_poll.
+    sessions_poll_script = """
+<script>
+  function sessions_poll() {
+    fetch("/api/sessions/snapshot")
+      .then(function (r) { return r.json(); })
+      .then(function (rows) {
+        var trs = document.querySelectorAll("tr[data-session]");
+        if (trs.length !== rows.length) { location.reload(); return; }
+        var bySession = {};
+        for (var i = 0; i < rows.length; i++) { bySession[rows[i]["session"]] = rows[i]; }
+        for (var j = 0; j < trs.length; j++) {
+          var row = bySession[trs[j].getAttribute("data-session")];
+          if (!row) { location.reload(); return; }
+          var cells = trs[j].getElementsByTagName("td");
+          // Колонки: 0 Сессия, 1 Агент, 2 Модель, 3 Бэкенд, 4 Маршрут,
+          // 5 Последнее обращение, 6 Вызовов, 7 Ошибок.
+          var set = function (idx, val) {
+            if (cells[idx] && String(cells[idx].textContent) !== String(val)) {
+              cells[idx].textContent = val;
+            }
+          };
+          set(1, row["agent"]);
+          set(2, row["model"]);
+          set(3, row["backend"]);
+          set(4, row["route"]);
+          set(5, row["last_seen"]);
+          set(6, row["calls"]);
+          set(7, row["errors"]);
+        }
+        setTimeout(sessions_poll, 5000);
+      })
+      .catch(function () { setTimeout(sessions_poll, 5000); });
+  }
+  window.addEventListener("load", function () { setTimeout(sessions_poll, 5000); });
+</script>
+"""
+
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -773,6 +854,7 @@ def _render_status_page(
 {poll_script}
 {reprobe_poll_script}
 {usage_poll_script}
+{sessions_poll_script}
 </head>
 <body>
 <h2>Backend-Adapter Version {html.escape(context.version)}</h2>
@@ -796,6 +878,11 @@ def _render_status_page(
 <table>
   <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Actions</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
+</table>
+<h3 style="margin-top:24px">Sessions</h3>
+<table>
+  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Маршрут</th><th>Последнее обращение</th><th>Вызовов</th><th>Ошибок</th></tr>
+  {_sessions_rows_html(session_registry.sessions_snapshot())}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
   <a href="https://github.com/alekseybb197/backend-adapter">backend-adapter на GitHub</a>
@@ -1076,6 +1163,27 @@ class UsageSnapshotEndpoint(webserver.Endpoint):
         handler._write(200, "application/json; charset=utf-8", body)
 
 
+@webserver.register
+class SessionsSnapshotEndpoint(webserver.Endpoint):
+    """Эндпойнт "/api/sessions/snapshot": снимок таблицы Sessions (JSON).
+
+    Лёгкий ответ для JS sessions_poll на статус-странице (v0.9.2):
+    session_registry.sessions_snapshot() — список строк реестра сессий
+    (session/agent/model/backend/route/last_seen/calls/errors), отсортированный
+    по времени последнего обращения (новые сверху). GET ничего не мутирует и
+    не ходит в сеть к бэкендам — безопасно опрашивать каждые 5 с. Таблица
+    in-memory, без персистентности (см. session_registry)."""
+
+    prefix = "/api/sessions/snapshot"
+
+    def __init__(self, context):
+        self.context = context
+
+    def GET(self, handler, remainder: str):
+        body = json.dumps(session_registry.sessions_snapshot()).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
 def _last_result(state: dict) -> dict | None:
     """refresh-срез состояния для _render_status_page (или None).
 
@@ -1127,6 +1235,7 @@ __all__ = [
     "_endpoints_cell_html",
     "_cost_cell_html",
     "_usage_rows_html",
+    "_sessions_rows_html",
     "_actions_cell_html",
     "_fmt_tokens",
     "_compact_number",
@@ -1139,6 +1248,7 @@ __all__ = [
     "ModelUsageReprobeEndpoint",
     "ReprobeStateEndpoint",
     "UsageSnapshotEndpoint",
+    "SessionsSnapshotEndpoint",
     "_last_result",
     "_autostart_first_check",
 ]

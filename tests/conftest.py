@@ -188,6 +188,12 @@ def isolate_logs(fresh_env):
     config._ENDPOINT_STATE.clear()
     config._REFRESH_JOB = None
 
+    # Reset sessions table (session_registry keeps its own module global —
+    # in-memory registry of agent sessions, v0.9.2).
+    from backend_adapter import session_registry
+
+    session_registry._TABLE.clear()
+
     # Reset used-models table (model_usage keeps its own module global).
     # Persistence is OFF by default in all tests ("" — no file I/O); tests of
     # persistence enable it themselves on tmp_path.

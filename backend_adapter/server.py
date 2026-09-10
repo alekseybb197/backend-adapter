@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import config, model_usage, routing, session_log
+from . import config, model_usage, routing, session_log, session_registry
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
@@ -72,7 +72,20 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         rid = getattr(_req_ctx, "req_id", "-")
         _d(f"[{rid}] [HTTP] {fmt % args}")
 
+    def _note_session_error(self, status):
+        """Учёт ошибки сессии (таблица WEBUI «Sessions», v0.9.2): любой
+        финальный HTTP-ответ >= 400. Вызывается из общих методов отправки
+        (_send_json/_send_raw), поэтому покрывает все пути ошибок. Для
+        незарегистрированной сессии session_registry.record_error — no-op
+        (404 не-входных путей, GET /api/*, health в счётчик не попадают:
+        их сессии в реестре нет)."""
+        if status >= 400:
+            sid = getattr(_req_ctx, "session_id", None)
+            if sid:
+                session_registry.record_error(sid)
+
     def _send_json(self, status, data):
+        self._note_session_error(status)
         body = json.dumps(data, ensure_ascii=False).encode()
         try:
             self.send_response(status)
@@ -95,6 +108,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         """Отправляет клиенту ответ бэкенда ДОСЛОВНО: статус, Content-Type
         и тело — как пришли (passthrough E→E, non-stream). Никакой
         пере-сериализации: байты body пишутся как есть."""
+        self._note_session_error(status)
         try:
             self.send_response(status)
             if content_type:
@@ -180,6 +194,11 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         req_t0 = time.time()
         session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
         req_id = uuid.uuid4().hex[:12]
+        # Имя агента для таблицы WEBUI «Sessions» (v0.9.2): User-Agent до
+        # первого пробела — [CC] CLI шлёт «claude-cli/2.1.236 (external, cli)»,
+        # в колонку «Агент» идёт «claude-cli/2.1.236». Заголовка может не быть
+        # (иные клиенты) — тогда пустая строка.
+        agent = self.headers.get("User-Agent", "").split(" ", 1)[0]
 
         # Учёт usage (таблица WEBUI «Использованные модели», колонки
         # Input/Output): локальные аккумуляторы токенов из usage-блоков
@@ -215,6 +234,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             if inp_fmt is None:
                 self._send_json(404, {"error": "Expected /v1/messages"})
                 return
+
+            # Учёт сессии для таблицы WEBUI «Sessions» (v0.9.2): регистрируем
+            # обращение сразу после распознавания входного пути и ДО чтения
+            # тела — поэтому 400 «Invalid JSON»/«Missing model» тоже учтены.
+            # 404 на не-входной путь строку НЕ создаёт (хук стоит после return).
+            session_registry.touch(session_id, agent)
 
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
@@ -303,6 +328,21 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 output=out_fmt,
                 error=route_msg or None,
                 http_status=route_status,
+            )
+            # Учёт сессии (таблица WEBUI «Sessions», v0.9.2): последние
+            # известные model/backend/route. Ставится ДО ветки disabled/reject
+            # — таблица показывает, куда агент пытался (в т.ч. «reject»/
+            # «disabled»); client_model — клиентское имя до маппинга, как в
+            # таблице «Models in use». Для passthrough out_fmt=None → выходной
+            # формат равен входному (E→E).
+            if route_action == "passthrough":
+                route_str = f"passthrough {inp_fmt}→{inp_fmt}"
+            elif route_action == "convert":
+                route_str = f"convert {inp_fmt}→{out_fmt}"
+            else:
+                route_str = route_action
+            session_registry.set_route(
+                session_id, model=client_model, backend=backend_name, route=route_str
             )
             if route_action in ("disabled", "reject"):
                 _dr(req_id, f"[ROUTE_REJECT] {route_msg}")
