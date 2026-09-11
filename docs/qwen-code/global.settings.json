@@ -1,0 +1,78 @@
+{
+  "outboundCorrelation": {
+    "allowDynamicHeaderValues": true
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "local",
+        "name": "local",
+        "baseUrl": "http://127.0.0.1:9999/v1",
+        "description": "Local",
+        "envKey": "LOCAL_API_KEY",
+        "generationConfig": {
+          "timeout": 300000,
+          "maxRetries": 1,
+          "contextWindowSize": "128000",
+          "samplingParams": {
+            "temperature": 0.6,
+            "top_p": 0.9,
+            "max_tokens": 8192,
+            "presence_penalty": 0,
+            "frequency_penalty": 0
+          },
+          "extra_body": {
+            "enable_thinking": true
+          },
+          "customHeaders": {
+            "X-Claude-Code-Session-Id": "${session_id}"
+          }
+        }
+      }
+    ],
+    "anthropic": [
+      {
+        "id": "remote",
+        "name": "remote",
+        "baseUrl": "http://127.0.0.1:9999",
+        "description": "Remote",
+        "envKey": "LOCAL_API_KEY",
+        "generationConfig": {
+          "timeout": 300000,
+          "maxRetries": 1,
+          "contextWindowSize": "262144",
+          "samplingParams": {
+            "temperature": 0.6,
+            "top_p": 0.9,
+            "max_tokens": 8192,
+            "presence_penalty": 0,
+            "frequency_penalty": 0
+          },
+          "extra_body": {
+            "enable_thinking": true
+          },
+          "customHeaders": {
+            "X-Claude-Code-Session-Id": "${session_id}"
+          }
+        }
+      }
+    ]
+  },
+  "env": {
+    "LOCAL_API_KEY": "dummy",
+    "LOCAL_BASE_URL": "http://127.0.0.1:9999"
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "local",
+    "baseUrl": "http://127.0.0.1:9999/v1"
+  },
+  "tools": {
+    "approvalMode": "default"
+  },
+  "$version": 4
+}

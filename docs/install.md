@@ -202,12 +202,15 @@ backend-adapter/
 │   ├── sanitizing.md            # Sanitization секретов
 │   ├── webui.md                 # Руководство по WEBUI и API
 │   ├── architecture.md          # Архитектура
+│   ├── claude_code.md           # Настройка клиента [CC]
+│   ├── qwen-code.md             # Настройка клиента QwenCode
 │   ├── samples/                 # Примеры конфигов (см. раздел 3):
 │   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
 │   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
 │   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
 │   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
-│   └── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
+│   ├── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
+│   └── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
 └── changelog.md                 # История версий
 ```
 

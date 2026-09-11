@@ -59,6 +59,8 @@ claude
 | Файл | Описание |
 |---|---|
 | [docs/install.md](docs/install.md) | Установка, конфигурация, systemd/launchd, troubleshooting |
+| [docs/claude_code.md](docs/claude_code.md) | Настройка клиента [CC]: профиль, проектные настройки, статус-строка, модели и контекст |
+| [docs/qwen-code.md](docs/qwen-code.md) | Настройка клиента QwenCode: `modelProviders`, модели с разным контекстным окном, id сессии |
 | [docs/routing.md](docs/routing.md) | Настройка входных эндпоинтов и маршрутизации (TARGET): принципы, реализованное, перспективы |
 | [docs/environment.md](docs/environment.md) | Полный справочник всех env-переменных |
 | [docs/logging.md](docs/logging.md) | Конфигурация логирования и trace |
@@ -98,7 +100,8 @@ backend-adapter/
 │   │                           #   sample.adapter.yaml (YAML бэкендов),
 │   │                           #   backend-adapter.service + com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
-│   └── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
+│   ├── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
+│   └── qwen-code/              # Локальные настройки клиента QwenCode (settings)
 ├── molecule/                   # molecule-тесты install.sh (Linux, ubuntu 24.04):
 │                               #   install — установка/обновление бинарника;
 │                               #   service — системный systemd, обновление и --delete
