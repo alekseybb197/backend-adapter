@@ -11,16 +11,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Гейт по путям для install-molecule: сценарии molecule проверяют только
-  # установщик (molecule/*/prepare.yml копирует корневой install.sh) и сами
-  # себя, поэтому на правках кода/доков их гонять незачем. Фильтр считает
-  # diff текущего PR/push, а сам job изменения не вносит — потому это
-  # отдельный лёгкий job, а не paths: на уровне workflow (тот отключил бы
-  # сразу ВСЕ джобы).
+  # Гейт по путям: каждый дорогой job гоняется только на правках «своей»
+  # части репозитория. Фильтр считает diff текущего PR/push, а сам job
+  # изменения не вносит — потому это отдельный лёгкий job, а не paths: на
+  # уровне workflow (тот отключил бы сразу ВСЕ джобы).
   #
-  # ВНИМАНИЕ: при правках вне install.sh/molecule job install-molecule
-  # получает статус skipped. Если он объявлен required в branch-protection,
-  # это заблокирует merge — настройку правила нужно вести осознанно.
+  # Три фильтра:
+  #   install — установщик: сценарии molecule копируют корневой install.sh
+  #             (molecule/*/prepare.yml) и проверяют сами себя;
+  #   code    — код приложения + тесты + конфиги, влияющие на прогон
+  #             (pyproject.toml, pytest.ini, requirements*.txt): линт, типы,
+  #             юнит-тесты;
+  #   runtime — то, что попадает в сборку/установку пакета: smoke-проверки
+  #             установки и WEBUI (tests/** и pytest.ini на них не влияют).
+  #
+  # ВНИМАНИЕ: при правках вне этих путей соответствующий job получает статус
+  # skipped. Если job объявлен required в branch-protection, это заблокирует
+  # merge — настройку правил нужно вести осознанно (проще всего требовать
+  # только те job'ы, которые не гейтятся, либо учитывать skipped явно).
   changes:
     name: Detect changed paths
     runs-on: ubuntu-latest
@@ -32,6 +40,8 @@ jobs:
       pull-requests: read
     outputs:
       install: ${{ steps.filter.outputs.install }}
+      code: ${{ steps.filter.outputs.code }}
+      runtime: ${{ steps.filter.outputs.runtime }}
     steps:
       - name: Checkout
         # fetch-depth: 0 — на push paths-filter сравнивает github.event.before
@@ -50,9 +60,26 @@ jobs:
             install:
               - 'install.sh'
               - 'molecule/**'
+            code:
+              - 'backend_adapter/**'
+              - 'backend-adapter.py'
+              - 'tests/**'
+              - 'pyproject.toml'
+              - 'pytest.ini'
+              - 'requirements*.txt'
+            runtime:
+              - 'backend_adapter/**'
+              - 'backend-adapter.py'
+              - 'pyproject.toml'
+              - 'requirements*.txt'
 
   lint-and-typecheck:
     name: Lint & Type Check
+    # Гейт: ruff/mypy идут по backend_adapter/ + backend-adapter.py, а их
+    # настройки и версии инструментов живут в pyproject.toml/requirements* —
+    # фильтр `code` покрывает и то, и другое, и тесты.
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -85,6 +112,11 @@ jobs:
 
   test:
     name: Test
+    # Гейт `code`: прогон имеет смысл только при правках кода, тестов или
+    # конфигов, влияющих на их запуск (pyproject.toml, pytest.ini,
+    # requirements*.txt).
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -117,6 +149,10 @@ jobs:
 
   install-smoke-test:
     name: Install Smoke Test
+    # Гейт `runtime`: проверяется `pip install -e .` и импорт пакета, поэтому
+    # достаточно путей, попадающих в сборку (тесты и pytest.ini не влияют).
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -186,6 +222,13 @@ jobs:
 
   webui-smoke:
     name: WEBUI Smoke Test
+    # Гейт `runtime`: smoke-проверка поднимает WEBUI-ядро, которое импортирует
+    # почти весь базовый пакет (config, logger, redact, session_log,
+    # model_usage, artifact_tree*, probe_json). Узкий список webui-модулей дал
+    # бы ложные пропуски при правке базового модуля — это опасная сторона
+    # (поломка не поймана), тогда как лишний прогон стоит ~30 с.
+    needs: changes
+    if: needs.changes.outputs.runtime == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

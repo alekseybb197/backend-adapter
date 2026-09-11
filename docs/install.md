@@ -133,9 +133,33 @@ Docker. Быстрый цикл: `molecule converge -s install` / `verify` / `lo
 установщик: job включается фильтром `dorny/paths-filter` по путям `install.sh`
 и `molecule/**` (сценарии читают корневой `install.sh` —
 `molecule/install/prepare.yml`). На правках кода, тестов или документации job
-пропускается (`skipped`), чтобы не занимать раннер. При этом прочие job'ы
-(`lint-and-typecheck`, `test`, `install-smoke-test`, `webui-smoke`) работают
-как прежде — фильтр стоит только на `install-molecule`.
+пропускается (`skipped`), чтобы не занимать раннер.
+
+Так же по путям гейтятся и остальные job'ы — каждый запускается только на
+правках «своей» части репозитория. Фильтры считает лёгкий job `changes`
+(он выполняется всегда), а гейт-джобы ссылаются на его output через
+`needs` + `if`:
+
+| Фильтр | Пути | Job'ы |
+|---|---|---|
+| `install` | `install.sh`, `molecule/**` | `install-molecule` |
+| `code` | `backend_adapter/**`, `backend-adapter.py`, `tests/**`, `pyproject.toml`, `pytest.ini`, `requirements*.txt` | `lint-and-typecheck`, `test` |
+| `runtime` | `backend_adapter/**`, `backend-adapter.py`, `pyproject.toml`, `requirements*.txt` | `install-smoke-test`, `webui-smoke` |
+
+Фильтр `runtime` — это «то, что попадает в сборку пакета»: `tests/**` и
+`pytest.ini` на smoke-проверки не влияют, поэтому в него не входят. А
+`webui-smoke` намеренно делит гейт с `install-smoke-test`, а не имеет своего
+узкого списка webui-модулей: WEBUI-ядро импортирует почти весь базовый пакет
+(`config`, `logger`, `redact`, `session_log`, `model_usage`,
+`artifact_tree*`, `probe_json`), и узкий список давал бы ложные пропуски при
+правке базового модуля.
+
+Практическое следствие: PR, который правит только документацию, прогоняет
+лишь job `changes`; правка только `tests/**` запускает `lint-and-typecheck` и
+`test`, но не smoke-джобы. Обратная сторона — job без затронутых путей
+получает статус `skipped`, поэтому если он объявлен required в
+branch-protection, merge заблокируется; набор обязательных проверок нужно
+настраивать осознанно.
 
 ---
 

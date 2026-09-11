@@ -1,7 +1,7 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
-## v0.9.4 (WIP — CI: molecule-джоб только при изменениях install.sh/molecule; session id агентов не-[CC] (QwenCode); фикс двойного префикса ADAPTER_ в тексте 404; гайд по настройке QwenCode)
+## v0.9.4 (WIP — CI: path-гейты для всех job'ов; session id агентов не-[CC] (QwenCode); фикс двойного префикса ADAPTER_ в тексте 404; гайд по настройке QwenCode; клиент-агностичное описание)
 
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.4. -->
 
@@ -138,6 +138,40 @@ QwenCode; настройка жила только в подразделе `docs
 **Следствия:** у обоих поддерживаемых клиентов есть собственное руководство,
 а разница подходов к моделям (гибкость против предварительного объявления)
 описана явно и с двух сторон.
+
+
+### 2026-09-11 CI: path-гейты для остальных job'ов (линт, тесты, smoke-проверки)
+
+**Цель:** после гейта `install-molecule` (запись выше) остальные четыре job'а
+всё ещё гонялись на **любой** push/PR в `main` — включая правки только
+документации. Матричный `test` (Python 3.10–3.13) и smoke-проверки занимали
+раннеры там, где ничего проверить не могли.
+
+**Решение** (`.github/workflows/ci.yml`):
+- job `changes` расширен до трёх фильтров и трёх output'ов:
+  `install` (`install.sh`, `molecule/**`), `code` (`backend_adapter/**`,
+  `backend-adapter.py`, `tests/**`, `pyproject.toml`, `pytest.ini`,
+  `requirements*.txt`) и `runtime` (`backend_adapter/**`,
+  `backend-adapter.py`, `pyproject.toml`, `requirements*.txt`);
+- `lint-and-typecheck` и `test` получают `needs: changes` +
+  `if: needs.changes.outputs.code == 'true'`;
+- `install-smoke-test` и `webui-smoke` — `if: needs.changes.outputs.runtime
+  == 'true'`;
+- `webui-smoke` намеренно делит гейт `runtime` с `install-smoke-test`, а не
+  имеет узкого списка webui-модулей: WEBUI-ядро импортирует почти весь
+  базовый пакет, и узкий список давал бы ложные пропуски (опасная сторона —
+  не поймать поломку) ради экономии ~30 с;
+- шапка `ci.yml` переписана под общую схему, предупреждение о
+  `skipped`/branch-protection усилено (теперь `skipped` может получить любой
+  job);
+- `docs/install.md` §2.1 — таблица «фильтр → пути → job'ы» и практические
+  следствия.
+
+**Следствия:** правка только документации прогоняет лишь job `changes`;
+правка только `tests/**` — `lint-and-typecheck` и `test`; smoke-джобы
+запускаются на изменениях кода/сборки. Обратная сторона та же, что и у
+molecule-гейта: job без затронутых путей получает `skipped`, поэтому набор
+required-проверок в branch-protection нужно настраивать осознанно.
 
 
 ## v0.9.3 — install.sh: molecule-тест, системный systemd-сервис `--service`, режим `--delete`, повторная установка как корректное обновление; WEBUI — удаление строк Sessions и runtime-маппинг моделей
