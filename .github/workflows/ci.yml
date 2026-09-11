@@ -11,6 +11,46 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Гейт по путям для install-molecule: сценарии molecule проверяют только
+  # установщик (molecule/*/prepare.yml копирует корневой install.sh) и сами
+  # себя, поэтому на правках кода/доков их гонять незачем. Фильтр считает
+  # diff текущего PR/push, а сам job изменения не вносит — потому это
+  # отдельный лёгкий job, а не paths: на уровне workflow (тот отключил бы
+  # сразу ВСЕ джобы).
+  #
+  # ВНИМАНИЕ: при правках вне install.sh/molecule job install-molecule
+  # получает статус skipped. Если он объявлен required в branch-protection,
+  # это заблокирует merge — настройку правила нужно вести осознанно.
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    # dorny/paths-filter читает список изменённых файлов PR через API — на
+    # pull_request ему нужен pull-requests: read. Права заданы на уровне job,
+    # чтобы не менять их для остальных джобов.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      install: ${{ steps.filter.outputs.install }}
+    steps:
+      - name: Checkout
+        # fetch-depth: 0 — на push paths-filter сравнивает github.event.before
+        # с github.sha, и базовый коммит должен быть в локальной истории;
+        # при дефолтной глубине 1 (и 2 на многокоммитном push) его нет.
+        # На pull_request action идёт через API и глубины не требует.
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            install:
+              - 'install.sh'
+              - 'molecule/**'
+
   lint-and-typecheck:
     name: Lint & Type Check
     runs-on: ubuntu-latest
@@ -99,6 +139,10 @@ jobs:
 
   install-molecule:
     name: Install Script (molecule, docker)
+    # Гейт по путям (job `changes` выше): molecule-сценарии читают install.sh
+    # и molecule/**, поэтому запускаются только когда эти пути затронуты.
+    needs: changes
+    if: needs.changes.outputs.install == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

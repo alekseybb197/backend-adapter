@@ -128,8 +128,14 @@ PATH="$PWD/tmp/molecule-venv/bin:$PATH" tmp/molecule-venv/bin/molecule test -s i
 Docker. Быстрый цикл: `molecule converge -s install` / `verify` / `login` /
 `destroy`.
 
-В CI этот сценарий гоняется отдельным job `install-molecule`
-(`.github/workflows/ci.yml`).
+В CI эти сценарии гоняет отдельный job `install-molecule`
+(`.github/workflows/ci.yml`) — но только когда изменения затрагивают сам
+установщик: job включается фильтром `dorny/paths-filter` по путям `install.sh`
+и `molecule/**` (сценарии читают корневой `install.sh` —
+`molecule/install/prepare.yml`). На правках кода, тестов или документации job
+пропускается (`skipped`), чтобы не занимать раннер. При этом прочие job'ы
+(`lint-and-typecheck`, `test`, `install-smoke-test`, `webui-smoke`) работают
+как прежде — фильтр стоит только на `install-molecule`.
 
 ---
 

@@ -1,6 +1,37 @@
 # Claude Code <-> OpenAI-backend adapter — history / changelog
 
 
+## v0.9.4 (WIP — CI: molecule-джоб только при изменениях install.sh/molecule; session id агентов не-[CC] (QwenCode); фикс двойного префикса ADAPTER_ в тексте 404)
+
+<!-- WIP: записи по мере согласованных коммитов группы v0.9.4. -->
+
+### 2026-09-11 CI: molecule-джоб запускается только при изменениях install.sh/molecule
+
+**Цель:** job `install-molecule` (`.github/workflows/ci.yml`) гонялся на
+каждый push/PR в `main`, хотя проверяет исключительно установщик: сценарии
+molecule читают корневой `install.sh` (`molecule/install/prepare.yml`) и сами
+себя. На правках кода, тестов и документации два docker-сценария с systemd
+занимали раннер и удлиняли CI без пользы.
+
+**Решение:**
+- новый лёгкий job `changes` (`dorny/paths-filter@v3`) вычисляет флаг по
+  путям `install.sh` и `molecule/**`; job объявляет output `install` и права
+  `contents: read` + `pull-requests: read` (на `pull_request` action читает
+  список файлов через REST API), checkout — с `fetch-depth: 0` (на `push`
+  сравнение идёт git-командами);
+- `install-molecule` получает `needs: changes` и
+  `if: needs.changes.outputs.install == 'true'` — остальные четыре job
+  (`lint-and-typecheck`, `test`, `install-smoke-test`, `webui-smoke`) не
+  затронуты;
+- `docs/install.md` §2.1 — описано условие запуска job.
+
+**Следствия:** molecule прогоняется только там, где может что-то поймать;
+правки вне установщика больше не ждут docker-сценариев. Обратная сторона —
+при правках вне `install.sh`/`molecule` job получает статус `skipped`, поэтому
+если он объявлен required в branch-protection, правило нужно настраивать
+осознанно (предупреждение оставлено комментарием в `ci.yml`).
+
+
 ## v0.9.3 — install.sh: molecule-тест, системный systemd-сервис `--service`, режим `--delete`, повторная установка как корректное обновление; WEBUI — удаление строк Sessions и runtime-маппинг моделей
 
 ### 2026-09-11 Саммари ветки v0.9.3 (5 коммитов между merge PR #15 (v0.9.2) и снятием WIP)
