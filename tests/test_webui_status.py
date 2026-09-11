@@ -44,6 +44,7 @@ from the server), counters via textContent — see
 TestUsageSection.test_rows_carry_data_attrs_and_page_has_usage_poll /
 TestUsageSnapshotAPI.
 """
+import json
 import socket
 import threading
 from unittest import mock
@@ -2260,12 +2261,12 @@ class TestSessionsSection:
         return row
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 8 колонок.
+        # Заголовок секции + 9 колонок (8 информационных + Actions с 🗑).
         config, ws = _fresh_modules()
         body = self._seed(config, ws, session_rows=[self._row("sess-1")])
         assert "<h3 style=\"margin-top:24px\">Sessions</h3>" in body
         for header in ("Сессия", "Агент", "Модель", "Бэкенд", "Маршрут",
-                       "Последнее обращение", "Вызовов", "Ошибок"):
+                       "Последнее обращение", "Вызовов", "Ошибок", "Actions"):
             assert f"<th>{header}</th>" in body
 
     def test_section_after_models_in_use(self):
@@ -2275,12 +2276,12 @@ class TestSessionsSection:
         assert body.index("Models in use") < body.index(">Sessions<")
 
     def test_empty_table_shows_placeholder(self):
-        # Пустой реестр → строка «пока нет данных», colspan на 8 колонок.
+        # Пустой реестр → строка «пока нет данных», colspan на 9 колонок.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, session_rows=[])
         assert "пока нет данных" in body
         assert "таблица заполняется при обращениях агентов" in body
-        assert 'colspan="8"' in body
+        assert 'colspan="9"' in body
 
     def test_row_renders_cells_and_data_key(self):
         # Строка несёт data-key (JSON-строка кортежа — JS-матчинг; одна сессия
@@ -2296,7 +2297,7 @@ class TestSessionsSection:
         assert "passthrough messages→messages" in body
         assert 'data-calls' not in body  # sessions-строки не несут usage-атрибутов
         html = ws._sessions_rows_html([row])
-        assert html.count("<td") == 8
+        assert html.count("<td") == 9  # 8 информационных + Actions (🗑)
         # data-key — та же JSON-строка, что отдаёт key_json (дискриминатор).
         from html import escape as _esc
 
@@ -2355,13 +2356,39 @@ class TestSessionsSection:
         assert "function sessions_poll" in empty
 
     def test_sessions_rows_unit_empty_and_nonempty(self):
-        # _sessions_rows_html: плейсхолдер пустого / 8 ячеек непустого.
+        # _sessions_rows_html: плейсхолдер пустого / 9 ячеек непустого.
         config, ws = _fresh_modules()
-        assert 'colspan="8"' in ws._sessions_rows_html([])
+        assert 'colspan="9"' in ws._sessions_rows_html([])
         html = ws._sessions_rows_html([self._row("sess-1", calls=4, errors=2)])
-        assert html.count("<td") == 8
+        assert html.count("<td") == 9
         assert ">4</td>" in html
         assert ">2</td>" in html
+
+    def test_row_has_delete_form(self):
+        # Последняя ячейка строки — форма-кнопка 🗑 (удаление строки сессии,
+        # PRG через 303): action с query key=<JSON-строка кортежа>, глиф,
+        # title/aria-label, красный цвет; key кодируется quote(safe="").
+        config, ws = _fresh_modules()
+        row = self._row("sess-del")
+        html = ws._sessions_rows_html([row])
+        from urllib.parse import quote as _quote
+        q = _quote(row["key"], safe="")
+        assert f'action="/api/sessions/delete?key={q}"' in html
+        assert "🗑" in html
+        assert 'title="Удалить строку сессии"' in html
+        assert 'aria-label="Удалить строку сессии"' in html
+        assert "color:#c0392b" in html  # деструктивное действие — красное
+
+    def test_delete_form_escapes_special_key(self):
+        # key со спецсимволами: quote(safe="") + html.escape не ломают
+        # query-параметр и атрибут action.
+        config, ws = _fresh_modules()
+        row = self._row('s & "x"/у=1', agent="a<b>&c")
+        html = ws._sessions_rows_html([row])
+        from urllib.parse import quote as _quote
+        q = _quote(row["key"], safe="")
+        assert f'action="/api/sessions/delete?key={q}"' in html
+        assert "<script>" not in html
 
 
 class TestSessionsSnapshotAPI:
@@ -2431,6 +2458,146 @@ class TestSessionsSnapshotAPI:
             status, body = _http_get(port, "/api/sessions/snapshot")
             assert status == 200
             assert json.loads(body) == []
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+class TestSessionDeleteAPI:
+    """POST /api/sessions/delete — удаление строки таблицы Sessions (v0.9.3).
+
+    Кнопка 🗑 (form) → PRG: 303 на GET "/". JSON-клиент: 200/404/400.
+    key — компактная JSON-строка кортежа (session_registry.key_json)."""
+
+    def _seed_one(self):
+        config, ws = _fresh_modules()
+        from backend_adapter import session_registry
+        _seed_session_rows(session_registry, [
+            {"session": "s-1", "_ts": 1.0, "model": "m-a",
+             "agent": "claude-cli/2.1.236", "backend": "AAA",
+             "route": "passthrough messages→messages"},
+        ])
+        key = session_registry.key_json(
+            ("s-1", "claude-cli/2.1.236", "m-a", "AAA",
+             "passthrough messages→messages")
+        )
+        return session_registry, key
+
+    def test_post_form_deletes_and_redirects(self, tmp_path):
+        # HTML-форма кнопки: 303 See Other на "/" (PRG), строка удалена.
+        session_registry, key = self._seed_one()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            from urllib.parse import quote
+            status, headers, _ = _http_raw(
+                port, "POST", "/api/sessions/delete?key=" + quote(key, safe="")
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert session_registry.sessions_snapshot() == []
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_ok(self, tmp_path):
+        # JSON-клиент: 200 {"ok": true, "key": ...}, строка удалена.
+        session_registry, key = self._seed_one()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            from urllib.parse import quote
+            status, _, body = _http_post_body(
+                port,
+                "/api/sessions/delete?key=" + quote(key, safe=""),
+                b"",
+                "application/json",
+            )
+            assert status == 200
+            payload = json.loads(body)
+            assert payload["ok"] is True
+            assert session_registry.sessions_snapshot() == []
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_missing_row_404(self, tmp_path):
+        # Строки нет (или удалена) → 404 (delete не идемпотентен, как у
+        # Models in use: второй клик по кнопке — строки уже нет).
+        config, ws = _fresh_modules()
+        from backend_adapter import session_registry
+        _seed_session_rows(session_registry, [])
+        key = session_registry.key_json(("ghost", "a", "m", "b", "r"))
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            from urllib.parse import quote
+            status, _, body = _http_post_body(
+                port,
+                "/api/sessions/delete?key=" + quote(key, safe=""),
+                b"",
+                "application/json",
+            )
+            assert status == 404
+            assert "error" in json.loads(body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_missing_key_400(self, tmp_path):
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _, body = _http_post_body(
+                port, "/api/sessions/delete", b"", "application/json"
+            )
+            assert status == 400
+            assert "key" in json.loads(body)["error"]
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_json_bad_key_400(self, tmp_path):
+        # key — не JSON-список из 5 строк (битый/подделка/неверная арность).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            for bad in ("not-json", "%5B%22a%22%5D", "%5B1%2C2%2C3%2C4%2C5%5D"):
+                status, _, body = _http_post_body(
+                    port,
+                    "/api/sessions/delete?key=" + bad,
+                    b"",
+                    "application/json",
+                )
+                assert status == 400, bad
+                assert "error" in json.loads(body)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_form_bad_key_redirects(self, tmp_path):
+        # Форма с битым key не роняет запрос: no-op + обычный PRG-редирект.
+        config, ws = _fresh_modules()
+        from backend_adapter import session_registry
+        _seed_session_rows(session_registry, [
+            {"session": "s-1", "_ts": 1.0, "model": "m-a"},
+        ])
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, headers, _ = _http_raw(
+                port, "POST", "/api/sessions/delete?key=garbage"
+            )
+            assert status == 303
+            assert headers.get("location") == "/"
+            assert len(session_registry.sessions_snapshot()) == 1  # строка цела
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_get_is_404(self, tmp_path):
+        # GET на префикс — 404 дефолтом Endpoint (эндпойнт только POST).
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _ = _http_get(port, "/api/sessions/delete")
+            assert status == 404
         finally:
             httpd.shutdown()
             httpd.server_close()

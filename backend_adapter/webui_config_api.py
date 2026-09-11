@@ -5,18 +5,20 @@ webui_config_api.py — эндпойнт "/config" общего веб-серв�
 Контракт: runtime-переключение debug-записи и поведения НОВЫХ запросов без
 перезапуска адаптера. Пул переменных (RUNTIME_CONFIG_POOL в config.py) —
 объём записи на диск (логи/трейсы/*.parts дампы), маскировка секретов
-(санитайзер), рубильники стриминга, строгая валидация моделей и TARGET-
-маршрутизация входных эндпоинтов (выбор целевого формата входа). Сеть/бэкенды/
-модели/порты/точка хранения не входят — их смена на лету требует пересоздания
-слушателей/переинициализации и сорвала бы активные соединения.
+(санитайзер), рубильники стриминга, строгая валидация моделей, TARGET-
+маршрутизация входных эндпоинтов (выбор целевого формата входа) и строка
+маппинга моделей agent→backend. Сеть/бэкенды/порты/точка хранения не входят —
+их смена на лету требует пересоздания слушателей/переинициализации и сорвала
+бы активные соединения.
 
 Эндпойнт:
-  GET /config → HTML-форма с текущими значениями пула (12 полей: 6 bool
-                checkbox + 3 int input + 3 select для TARGET-переменных
-                маршрутизации входов)
+  GET /config → HTML-форма с текущими значениями пула (13 полей: 6 bool
+                checkbox + 3 int input + 1 text (маппинг моделей) + 3 select
+                для TARGET-переменных маршрутизации входов)
   POST /config → application/x-www-form-urlencoded или JSON, применяет валидные
-                 значения через config.set_runtime_config(**...), сверяет ответ
-                 с посланным, редирект на GET с flash-сообщением об успехе
+                 значения через config.set_runtime_config(**...); страница
+                 сообщает ТОЛЬКО об ошибках (игнорированные ключи/неверный тип),
+                 успешное применение ничего не печатает
 """
 
 import html
@@ -36,8 +38,8 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
     """HTML-форма runtime-конфига.
 
     current_values — dict из config.get_runtime_config(): {имя: значение}
-    applied — что применилось при последнем POST (для flash-сообщения):
-              {"ok": [...], "ignored": [...]}
+    applied — ошибки последнего POST (для flash-сообщения): {"ignored": [...]}
+              (успешное применение не сообщается — плашка «Применено» убрана)
     """
     # Разбиваем поля по типам для правильного рендера: bool-чекбоксы,
     # int-инпуты и enum-поля (строки с фиксированным доменом значений —
@@ -54,6 +56,11 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_DEBUG_TRIM",
         "ADAPTER_TRACE_REASONING_MAX_CHARS",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
+    ]
+    # Строковые поля свободного формата (без фиксированного домена): сейчас
+    # одно — строка маппинга моделей (формат env ``agent:backend,…``).
+    str_fields = [
+        "ADAPTER_MODELS_MAPPING",
     ]
     # enum-поля с допустимыми значениями: {имя: (домен, «порядок в форме» не
     # нужен)}. Домен — config.TARGET_ALLOWED_VALUES (для трёх входов общий:
@@ -81,6 +88,11 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_MESSAGES_TARGET": "Куда направлять /v1/messages (Anthropic): формат-цель (messages → passthrough E→E), auto, none — вход закрыт (404)",
         "ADAPTER_COMPLETIONS_TARGET": "Куда направлять /v1/chat/completions ([OI]): completions → passthrough E→E, auto, none — вход закрыт (404)",
         "ADAPTER_RESPONSES_TARGET": "Куда направлять /v1/responses: responses → passthrough E→E, auto, none — вход закрыт (404)",
+        # Маппинг моделей agent→backend: тот же формат, что у env
+        # ADAPTER_MODELS_MAPPING (docs/environment.md §4). Применяется на
+        # лету — config._MAP перестраивается на месте, следующий запрос
+        # резолвит модель по новому маппингу.
+        "ADAPTER_MODELS_MAPPING": "Маппинг моделей agent→backend: agent:backend,agent2:backend2 (пусто — маппинг отключён)",
     }
 
     rows = []
@@ -117,6 +129,19 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
       </tr>""")
 
+    for name in str_fields:
+        value = current_values.get(name, "")
+        desc = field_descriptions.get(name, "")
+        # Текстовое поле свободного формата: значение как есть (экранируем
+        # только HTML). width — чтобы длинная строка маппинга была видна.
+        rows.append(f"""
+      <tr>
+        <td><label for="{name}">{html.escape(name)}</label></td>
+        <td><input type="text" id="{name}" name="{name}" value="{html.escape(str(value))}" style="width: 360px"></td>
+        <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
+        <td style="color:#999; font-size: 12px">текущее: {html.escape(str(value))}</td>
+      </tr>""")
+
     for name, allowed in enum_fields.items():
         value = current_values.get(name, "none")
         desc = field_descriptions.get(name, "")
@@ -135,17 +160,17 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         <td style="color:#999; font-size: 12px">текущее: {html.escape(str(value))}</td>
       </tr>""")
 
-    # Flash-сообщение о применённых изменениях
+    # Flash-сообщение: ТОЛЬКО об ошибках. Успешное применение ничего не
+    # печатает — обновлённые значения и так видны в колонке «текущее», а
+    # зелёная плашка «Применено: …» была лишним шумом.
     flash_html = ""
     if applied:
-        ok_list = applied.get("ok", [])
         ignored_list = applied.get("ignored", [])
-        if ok_list:
-            flash_html = (
-                f'<p style="color:#1a7f37">Применено: {html.escape(", ".join(ok_list))}</p>'
-            )
         if ignored_list:
-            flash_html += f'<p style="color:#b8860b">Игнорировано (неверный тип/неизвестный ключ): {html.escape(", ".join(ignored_list))}</p>'
+            flash_html = (
+                f'<p style="color:#b8860b">Игнорировано (неверный тип/неизвестный ключ): '
+                f"{html.escape(', '.join(ignored_list))}</p>"
+            )
 
     html_page = f"""<!DOCTYPE html>
 <html lang="ru">
@@ -193,7 +218,7 @@ class ConfigEndpoint(webserver.Endpoint):
     """Эндпойнт "/config": runtime-переключение debug-записи и рубильников.
 
     GET → HTML-форма текущих значений RUNTIME_CONFIG_POOL
-    POST → применение валидных значений, редирект на GET с сообщением
+    POST → применение валидных значений; страница сообщает только об ошибках
     """
 
     prefix = "/config"
@@ -269,6 +294,11 @@ class ConfigEndpoint(webserver.Endpoint):
                         data[data_key] = False
                     else:
                         data[data_key] = val
+                elif expected is str:
+                    # str-поля (ADAPTER_MODELS_MAPPING): значение как есть —
+                    # без bool/int-эвристик ("0" остаётся строкой "0", не
+                    # False/0). Пустая строка валидна (маппинг отключён).
+                    data[data_key] = val
                 else:
                     # enum-select (TARGET) и посторонние ключи: select шлёт
                     # строку из домена — как есть. Прежняя эвристика
@@ -287,8 +317,9 @@ class ConfigEndpoint(webserver.Endpoint):
         # Применяем через set_runtime_config
         result = config.set_runtime_config(**data)
 
-        # Сверяем, что применилось
-        applied_ok = []
+        # Что НЕ применилось: неверный тип для известного ключа или ключ вне
+        # пула. Успех отдельно не собираем — страница сообщает ТОЛЬКО об
+        # ошибках (зелёный «Применено» убран как лишний шум).
         applied_ignored = []
         for key, value in data.items():
             if key in config.RUNTIME_CONFIG_POOL:
@@ -297,6 +328,9 @@ class ConfigEndpoint(webserver.Endpoint):
                 type_ok = (expected_type is bool and isinstance(value, bool)) or (
                     expected_type is int and isinstance(value, int) and not isinstance(value, bool)
                 )
+                # str-поле (ADAPTER_MODELS_MAPPING): любая строка валидна.
+                if expected_type is str and isinstance(value, str):
+                    type_ok = True
                 # enum-поле (TARGET): value — строка из допустимого набора.
                 if (
                     isinstance(expected_type, tuple)
@@ -305,16 +339,14 @@ class ConfigEndpoint(webserver.Endpoint):
                     and value in expected_type[1]
                 ):
                     type_ok = True
-                if type_ok and result.get(key) == value:
-                    applied_ok.append(key)
-                else:
+                if not (type_ok and result.get(key) == value):
                     applied_ignored.append(key)
             else:
                 applied_ignored.append(key)
 
-        # Редирект на GET с flash-сообщением
-        # (через HTTP 303 See Other + Location)
-        applied_data = {"ok": applied_ok, "ignored": applied_ignored}
+        # Ошибки (если есть) показываются на отрендеренной странице — без
+        # редиректа: форма остаётся на POST-ответе с актуальными значениями.
+        applied_data = {"ignored": applied_ignored}
         html_content = _render_config_page(result, applied=applied_data)
         handler._write(200, "text/html; charset=utf-8", html_content)
 

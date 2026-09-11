@@ -97,7 +97,10 @@ ADAPTER_DEBUG_PARTS = os.environ.get("ADAPTER_DEBUG_PARTS", "").lower() not in (
 # `from .config import ADAPTER_X` на уровне модуля — второе сделало бы
 # разовый снимок при импорте, и set_runtime_config() ниже не имел бы эффекта
 # нигде, кроме этого файла. Если добавляете сюда новую переменную — проверьте
-# ВСЕ её точки чтения на этот же паттерн.
+# ВСЕ её точки чтения на этот же паттерн. Исключение — ADAPTER_MODELS_MAPPING:
+# его читает не сам server.py, а словарь _MAP, который server.py импортирует
+# ПО ССЫЛКЕ; поэтому set_runtime_config мутирует _MAP на месте (см. ниже),
+# а не переприсваивает словарь.
 #
 # ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — это точка
 # хранения (корень WEBUI и лог-директория), а не «переключатель объёма»:
@@ -124,6 +127,12 @@ RUNTIME_CONFIG_POOL = (
     "ADAPTER_MESSAGES_TARGET",
     "ADAPTER_COMPLETIONS_TARGET",
     "ADAPTER_RESPONSES_TARGET",
+    # Маппинг моделей agent→backend (v0.9.3): строка формата
+    # ``agent:backend,agent2:backend2``. Меняется на лету через /config —
+    # set_runtime_config мутирует config._MAP НА МЕСТЕ (server.py держит
+    # ссылку на словарь через `from .config import _MAP`), поэтому следующий
+    # же запрос резолвит модель по новому маппингу без перезапуска.
+    "ADAPTER_MODELS_MAPPING",
 )
 
 # Допустимые значения TARGET-переменных (значение → целевой формат
@@ -148,6 +157,9 @@ _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_MESSAGES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
     "ADAPTER_COMPLETIONS_TARGET": ("enum", TARGET_ALLOWED_VALUES),
     "ADAPTER_RESPONSES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
+    # Строка маппинга моделей — свободный текст (домен не фиксирован;
+    # синтаксис разбирает _parse_models_mapping, лояльный как у env).
+    "ADAPTER_MODELS_MAPPING": str,
 }
 
 
@@ -182,6 +194,7 @@ def set_runtime_config(**kwargs) -> dict:
     global ADAPTER_STREAM_INCLUDE_USAGE, ADAPTER_STRICT_MODELS
     global ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
     global ADAPTER_MESSAGES_TARGET, ADAPTER_COMPLETIONS_TARGET, ADAPTER_RESPONSES_TARGET
+    global ADAPTER_MODELS_MAPPING
 
     for name, value in kwargs.items():
         if name not in RUNTIME_CONFIG_POOL:
@@ -193,6 +206,10 @@ def set_runtime_config(**kwargs) -> dict:
             continue
         if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
             continue
+        # str-поле (ADAPTER_MODELS_MAPPING): значение — строка как есть
+        # (синтаксис разбирает _parse_models_mapping, лояльный как у env).
+        if expected is str and not isinstance(value, str):
+            continue
         # enum-поле: значение — строка из допустимого набора (TARGET).
         # Невалидная строка (или не-строка) игнорируется, как неверный тип.
         if (
@@ -202,6 +219,15 @@ def set_runtime_config(**kwargs) -> dict:
         ):
             continue
         globals()[name] = value
+        # Маппинг моделей — особый случай: server.py держит ССЫЛКУ на словарь
+        # _MAP (`from .config import _MAP`), поэтому переприсваивание
+        # ADAPTER_MODELS_MAPPING в одиночку не обновило бы живой резолвер.
+        # Мутируем _MAP НА МЕСТЕ (clear+update), как _AVAILABLE_MODELS/
+        # _MODEL_TO_BACKEND в _init_multi_backends — новый маппинг виден
+        # следующему же запросу.
+        if name == "ADAPTER_MODELS_MAPPING":
+            _MAP.clear()
+            _MAP.update(_parse_models_mapping(value))
 
     return get_runtime_config()
 
@@ -272,6 +298,11 @@ ADAPTER_STREAM_INCLUDE_USAGE = os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1
 # ===================================================
 
 # ==================== МАППИНГ МОДЕЛЕЙ (agent -> backend) ====================
+# Строка формата ``agent_model:backend_model,agent2:backend2``. Входит в
+# RUNTIME_CONFIG_POOL (v0.9.3): правится на лету через /config — при
+# применении set_runtime_config перестраивает словарь _MAP НА МЕСТЕ
+# (см. ниже), поэтому server.py (`from .config import _MAP`) видит новый
+# маппинг без перезапуска адаптера.
 ADAPTER_MODELS_MAPPING = os.environ.get("ADAPTER_MODELS_MAPPING", "")
 # ===================================================
 

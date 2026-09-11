@@ -1062,16 +1062,19 @@ class TestRuntimeConfig:
 
         v0.9.1: пул расширен TARGET-переменными маршрутизации входов
         (ADAPTER_*_TARGET) — их значения (строки из фиксированного домена)
-        применяются на лету, как и bool/int. Состав пула — единый источник
+        применяются на лету, как и bool/int. v0.9.3: добавлена строка маппинга
+        моделей ADAPTER_MODELS_MAPPING (str). Состав пула — единый источник
         RUNTIME_CONFIG_POOL: тест фиксирует, что get/set возвращают ровно его.
         """
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
-        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
+        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 13
         # Три TARGET-переменные входят в пул со значениями-дефолтами env.
         assert result["ADAPTER_MESSAGES_TARGET"] == "completions"
         assert result["ADAPTER_COMPLETIONS_TARGET"] == "none"
         assert result["ADAPTER_RESPONSES_TARGET"] == "none"
+        # Строка маппинга — тоже в пуле (дефолт env: пусто).
+        assert result["ADAPTER_MODELS_MAPPING"] == ""
 
     # -- enum-поля пула: TARGET-маршрутизация входов (v0.9.1) -------------
 
@@ -1108,6 +1111,45 @@ class TestRuntimeConfig:
         )
         assert result["ADAPTER_RESPONSES_TARGET"] == before == "none"
         assert result["ADAPTER_MESSAGES_TARGET"] == "completions"  # дефолт не тронут
+
+    # -- str-поле пула: маппинг моделей (v0.9.3) --------------------------
+
+    def test_mapping_str_applied_live(self):
+        """ADAPTER_MODELS_MAPPING: строка применяется и перестраивает _MAP.
+
+        v0.9.3: строка маппинга входит в runtime-пул. set_runtime_config
+        перестраивает словарь config._MAP НА МЕСТЕ (clear+update), а не
+        переприсваивает — server.py держит ссылку на словарь. Проверяем, что
+        та же ссылка видит новый маппинг.
+        """
+        from backend_adapter.config import _MAP as ref
+        assert ref is self.config._MAP
+
+        result = self.config.set_runtime_config(ADAPTER_MODELS_MAPPING="a:b,c:d")
+        assert result["ADAPTER_MODELS_MAPPING"] == "a:b,c:d"
+        assert self.config.ADAPTER_MODELS_MAPPING == "a:b,c:d"
+        assert self.config.get_runtime_config()["ADAPTER_MODELS_MAPPING"] == "a:b,c:d"
+        assert dict(ref) == {"a": "b", "c": "d"}
+        assert dict(self.config._MAP) == {"a": "b", "c": "d"}
+
+    def test_mapping_empty_disables(self):
+        """Пустая строка маппинга валидна — _MAP очищается (маппинг отключён)."""
+        self.config.set_runtime_config(ADAPTER_MODELS_MAPPING="a:b")
+        assert dict(self.config._MAP) == {"a": "b"}
+        result = self.config.set_runtime_config(ADAPTER_MODELS_MAPPING="")
+        assert result["ADAPTER_MODELS_MAPPING"] == ""
+        assert dict(self.config._MAP) == {}
+
+    def test_mapping_rejects_non_string(self):
+        """Не-строка для маппинга игнорируется; соседний ключ применяется."""
+        before = self.config.ADAPTER_MODELS_MAPPING
+        result = self.config.set_runtime_config(
+            ADAPTER_MODELS_MAPPING=123,  # int
+            ADAPTER_DEBUG=True,
+        )
+        assert result["ADAPTER_MODELS_MAPPING"] == before  # не изменилось
+        assert self.config.ADAPTER_MODELS_MAPPING == before
+        assert result["ADAPTER_DEBUG"] is True
 
     def test_target_change_seen_by_routing(self):
         """Смена TARGET через set_runtime_config видна маршрутизатору сразу.
