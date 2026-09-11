@@ -1,18 +1,26 @@
 # Architecture — backend-adapter
 
-> Claude Code (Anthropic API) ↔ OpenAI-compatible backend reverse proxy.
+> Anthropic API ↔ [OI]-compatible backend reverse proxy
+> (clients: [CC], QwenCode, any Anthropic-API client).
 
 ---
 
 ## 1. Overview
 
-`backend-adapter` is a lightweight HTTP reverse proxy that bridges [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) (which speaks the Anthropic Messages API) to OpenAI-compatible LLM backends. It runs as a local HTTP server (default port **9999**) and performs three core functions:
+`backend-adapter` is a lightweight HTTP reverse proxy that bridges **Anthropic
+Messages API clients** ([CC], QwenCode and any other Anthropic-API client) to
+[OI]-compatible LLM backends. It runs as a local HTTP server (default port
+**9999**) and performs three core functions:
 
-1. **Format conversion** — Anthropic ↔ OpenAI messages, tools, tool_choice, system prompts
-2. **Streaming passthrough** — SSE (Server-Sent Events) conversion: OpenAI backend SSE → Anthropic client SSE
+1. **Format conversion** — Anthropic ↔ [OI] messages, tools, tool_choice, system prompts
+2. **Streaming passthrough** — SSE (Server-Sent Events) conversion: [OI] backend SSE → Anthropic client SSE
 3. **Observability** — per-session debug logs, structured JSONL trace, secret redaction
 
-Claude Code is configured to route its API traffic through the adapter via `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` environment variables pointing to `http://localhost:9999`.
+[CC] is configured to route its API traffic through the adapter via
+`ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` environment variables pointing to
+`http://localhost:9999`; QwenCode — via `modelProviders[].baseUrl` in its
+`settings.json` (see [`docs/claude_code.md`](claude_code.md) and
+[`docs/qwen-code.md`](qwen-code.md)).
 
 ---
 
@@ -87,7 +95,7 @@ module on one level, see ADR 2026-09-01).
 ## 3. Component diagram
 
 ```
-[CC] (Anthropic API client)        другие клиенты: [OI]-SDK, агенты, curl
+[CC] / QwenCode (Anthropic API clients)   другие клиенты: [OI]-SDK, агенты, curl
         │                                   │
         │                                   │
         │  POST /v1/messages                │  POST /v1/chat/completions
@@ -785,7 +793,7 @@ live-обновление — JS `sessions_poll` → `/api/sessions/snapshot` (�
 
 ## 7. Tool-use causality tracking
 
-Claude Code's agent loop can send **parallel requests** within a single session (e.g., main agent turn + structured_output sidebar). Reconstructing "which request produced tool_use X, which request returned its tool_result" from timestamps alone is unreliable.
+An agent's loop (e.g. [CC]'s) can send **parallel requests** within a single session (main agent turn + structured_output sidebar). Reconstructing "which request produced tool_use X, which request returned its tool_result" from timestamps alone is unreliable.
 
 Solution: `tool_use_id` is the natural unique key.
 

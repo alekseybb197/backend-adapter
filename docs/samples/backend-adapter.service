@@ -1,5 +1,5 @@
 [Unit]
-Description=Claude Code <-> OpenAI Backend Adapter
+Description=Anthropic <-> OpenAI Backend Adapter
 After=network.target
 
 [Service]

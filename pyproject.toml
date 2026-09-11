@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "backend-adapter"
 version = "0.9.3"
-description = "Claude Code ↔ OpenAI Backend Proxy Adapter"
+description = "Anthropic API ↔ OpenAI Backend Proxy Adapter"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ authors = [
     {name = "Aleksey Barabanov", email = "alekseybb@gmail.com"},
 ]
 keywords = [
-    "claude-code", "anthropic", "openai", "proxy", "adapter",
+    "claude-code", "qwen-code", "anthropic", "openai", "proxy", "adapter",
     "llm", "api", "streaming", "sse"
 ]
 classifiers = [

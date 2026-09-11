@@ -1,4 +1,4 @@
-# Claude Code <-> OpenAI-backend adapter — history / changelog
+# backend-adapter — history / changelog
 
 
 ## v0.9.4 (WIP — CI: path-гейты для всех job'ов; session id агентов не-[CC] (QwenCode); фикс двойного префикса ADAPTER_ в тексте 404; гайд по настройке QwenCode; клиент-агностичное описание)
@@ -172,6 +172,39 @@ QwenCode; настройка жила только в подразделе `docs
 запускаются на изменениях кода/сборки. Обратная сторона та же, что и у
 molecule-гейта: job без затронутых путей получает `skipped`, поэтому набор
 required-проверок в branch-protection нужно настраивать осознанно.
+
+
+### 2026-09-11 Документация: адаптер — не только для [CC]
+
+**Цель:** после добавления гайда по QwenCode описание адаптера в `README.md`
+и документации всё ещё подавало его как инструмент «строго для [CC]» —
+хотя он давно обслуживает любого клиента Anthropic Messages API и
+[OI]-совместимых клиентов через три входа.
+
+**Решение:**
+- `README.md`, `CLAUDE.md`, `docs/install.md` (таглайн + обзор) — формулировка
+  «позволяющий использовать [CC]» заменена на «позволяющий работать агентам с
+  Anthropic-совместимым API ([CC], QwenCode)»; диаграммы — `[CC] / QwenCode`;
+  в `README.md` добавлен раздел «Поддерживаемые клиенты» со ссылками на оба
+  гайда и `docs/routing.md`; в Quick start — обе команды запуска клиента;
+- `docs/architecture.md` — §1 (overview) и §3 (диаграмма компонентов)
+  переписаны клиент-агностично (упомянуты оба клиента + любой Anthropic-API
+  клиент; настройка через `ANTHROPIC_BASE_URL` для [CC] и
+  `modelProviders[].baseUrl` для QwenCode);
+- `pyproject.toml` — `description` → `Anthropic API ↔ [OI] Backend Proxy
+  Adapter`, в `keywords` добавлен `qwen-code`;
+- `install.sh` — `Description=` systemd-юнита и строка баннера установщика
+  приведены к `Anthropic <-> [OI]` / `[CC] / QwenCode`; строки «Point [CC] to
+  the proxy» — «Point [CC] (or QwenCode) to the proxy»;
+- `docs/samples/backend-adapter.service` — `Description` приведён к
+  `Anthropic <-> [OI] Backend Adapter`;
+- `changelog.md` — заголовок файла `# backend-adapter — history / changelog`
+  (вместо «[CC] <-> [OI]-backend adapter»).
+
+**Следствия:** адаптер позиционируется по протоколу (Anthropic ↔ [OI]), а не
+по одному клиенту; упоминания «Claude Code» в конкретных контекстах
+(настройка [CC], параллелизм его agent loop, Stainless SDK) оставлены — там
+речь именно о нём.
 
 
 ## v0.9.3 — install.sh: molecule-тест, системный systemd-сервис `--service`, режим `--delete`, повторная установка как корректное обновление; WEBUI — удаление строк Sessions и runtime-маппинг моделей

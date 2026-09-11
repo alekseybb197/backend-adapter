@@ -1,18 +1,29 @@
-# backend-adapter — [CC] ↔ [OI] Backend Proxy
+# backend-adapter — Anthropic API ↔ [OI] Backend Proxy
 
-> **v0.9.3** — HTTP-прокси-адаптер, позволяющий использовать **[CC]** (CLI)
-> с бэкендом LLM, который реализует **[OI]-совместимый API** (`/v1/chat/completions`),
-> но некорректно реализует протокол Anthropic Messages API.
+> **v0.9.3** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
+> который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
+> некорректно реализует протокол Anthropic Messages API.
 
 ```
-[CC]  ←--Anthropic API-->  adapter (localhost:9999)  ←--[OI] API-->  LLM Backend
+[CC] / QwenCode  ←--Anthropic API-->  adapter (localhost:9999)  ←--[OI] API-->  LLM Backend
 ```
+
+## Поддерживаемые клиенты
+
+- **[CC]** — [docs/claude_code.md](docs/claude_code.md): модель передаётся по имени
+  в запросе, объявлять её заранее не нужно.
+- **QwenCode** — [docs/qwen-code.md](docs/qwen-code.md): модели объявляются
+  заранее в `modelProviders`, зато у каждой может быть своё контекстное окно.
+- **Любой другой клиент** — Anthropic Messages API (`/v1/messages`) и
+  [OI]-совместимые клиенты (`/v1/chat/completions`, `/v1/responses`), см.
+  [docs/routing.md](docs/routing.md).
 
 ## Проблемы, которые решает адаптер
 
 1. **System messages**. Бэкенд кластеризует system messages в конец диалога — адаптер собирает их в одно сообщение в начале.
-2. **Format mismatch**. [CC] отправляет запросы в формате Anthropic Messages API, а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию (сообщения, инструменты, tool choice).
-3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`) через [CC].
+2. **Format mismatch**. Клиент отправляет запросы в формате Anthropic Messages API, а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию (сообщения, инструменты, tool choice).
+3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`) через [CC] и QwenCode.
 4. **Qwen tool_calls fallback**. Модели Qwen иногда возвращают вызовы инструментов в текстовом формате с JSON внутри XML-подобных тегов — адаптер автоматически парсит этот формат.
 
 ## Возможности
@@ -48,8 +59,9 @@ source adapter.env
 # 5. Запустить адаптер
 python3 backend-adapter.py
 
-# 6. В другом терминале запустить [CC]
-claude
+# 6. В другом терминале запустить клиент
+claude                 # Claude Code — см. docs/claude_code.md
+qwen                   # QwenCode   — см. docs/qwen-code.md
 ```
 
 Подробная инструкция: [docs/install.md](docs/install.md)
@@ -77,7 +89,6 @@ backend-adapter/
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
 │   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
 │   ├── routing.py              # Входные эндпоинты/TARGET: decide() по кэшу проб
-│   ├── convert.py              # Конвертация сообщений/инструментов
 │   ├── convert.py              # Конвертация сообщений/инструментов
 │   ├── streaming.py            # SSE streaming: конверсия + passthrough E→E relay
 │   ├── tracer.py               # JSONL trace-логирование

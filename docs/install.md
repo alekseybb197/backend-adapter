@@ -1,28 +1,33 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.3) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
-> с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
-> но некорректно обрабатывает протокол Anthropic Messages API.
+> **backend-adapter** (v0.9.3) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
+> реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
+> обрабатывает протокол Anthropic Messages API.
 
 ## Обзор
 
 Адаптер решает четыре проблемы:
 
 1. **System messages**. Бэкенд кластеризует system messages в конец диалога — адаптер собирает их
-   в одно сообщение в начале, как требует спецификация OpenAI.
-2. **Format mismatch**. Claude Code отправляет запросы в формате Anthropic Messages API,
-   а бэкенд ожидает OpenAI Chat Completions. Адаптер выполняет двунаправленную конвертацию
+   в одно сообщение в начале, как требует спецификация [OI].
+2. **Format mismatch**. Клиент отправляет запросы в формате Anthropic Messages API,
+   а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию
    (сообщения, инструменты, tool choice).
 3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`)
-   через Claude Code.
+   через [CC] и QwenCode.
 4. **Qwen tool_calls fallback**. Модели Qwen иногда возвращают вызовы инструментов в текстовом
    формате с JSON внутри XML-подобных тегов — адаптер автоматически парсит этот формат.
 
 Схема работы:
 
 ```
-Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LLM Backend
+[CC] / QwenCode  <--Anthropic API-->  adapter (localhost:9999)  <--[OI] API-->  LLM Backend
 ```
+
+Руководства по настройке клиентов: [docs/claude_code.md](claude_code.md) ([CC]) и
+[docs/qwen-code.md](qwen-code.md) (QwenCode); входные эндпоинты и маршрутизация —
+[docs/routing.md](routing.md).
 
 Единственная внешняя зависимость — **PyYAML** (используется в session-логировании);
 остальной код — стандартная библиотека Python. Установка зависимостей:

@@ -7,13 +7,13 @@ This file provides guidance to [CC] () when working with code in this repository
 
 ## Цели проекта
 
-**backend-adapter** — HTTP-прокси, позволяющий работать **[CC]** (CLI) с
-бэкендом LLM, который реализует **[OI]-совместимый API**
-(`/v1/chat/completions`), но некорректно обрабатывает протокол
-Anthropic Messages API.
+**backend-adapter** — HTTP-прокси, позволяющий работать агентам с
+**Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
+который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
+некорректно обрабатывает протокол Anthropic Messages API.
 
 ```
-[CC]  <--Anthropic API-->  adapter (localhost:9999)  <--[OI] API-->  LLM Backend
+[CC] / QwenCode  <--Anthropic API-->  adapter (localhost:9999)  <--[OI] API-->  LLM Backend
 ```
 
 Адаптер решает четыре проблемы:
@@ -21,7 +21,7 @@ Anthropic Messages API.
    собирает их в одно сообщение в начале, как требует спецификация [OI].
 2. **Format mismatch** — двунаправленная конвертация сообщений, инструментов
    и tool choice между Anthropic Messages API и [OI] Chat Completions.
-3. **Model compatibility** — использование моделей Qwen через [CC].
+3. **Model compatibility** — использование моделей Qwen через [CC] и QwenCode.
 4. **Qwen tool_calls fallback** — парсинг вызовов инструментов, которые
    модели Qwen иногда возвращают текстом в XML-подобных тегах.
 
@@ -61,7 +61,7 @@ Anthropic Messages API.
 
 ## Архитектура (большая картина)
 
-Запрос `[CC]` → адаптер: `server.py` резолвит `model` (strict/маппинг) и бэкенд
+Запрос клиента ([CC] / QwenCode) → адаптер: `server.py` резолвит `model` (strict/маппинг) и бэкенд
 (`config._resolve_backend`), решает **TARGET-маршрутизацию** (`routing.decide`) и
 ретранслирует в бэкенд; конверсия форматов — `convert.py` (не-стрим) /
 `streaming.py` (стрим: конверсия SSE → Anthropic или passthrough-релей
