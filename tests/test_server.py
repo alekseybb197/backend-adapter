@@ -1027,6 +1027,112 @@ class TestSessionAccounting(ServerSetupMixin):
             finally:
                 server.shutdown()
 
+    # ── Session id: список заголовков-кандидатов (v0.9.4) ──
+
+    def test_session_from_opencode_header(self, fake_backend):
+        """QwenCode шлёт id не в [CC]-заголовке: id берётся из второго
+        кандидата дефолтного списка, а не подменяется на «unknown»."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"x-opencode-session": "261d9bea-eefd-44f8-aa6d-d2d3b210ad90",
+                             "User-Agent": "QwenCode/0.23.2 (darwin; arm64)"},
+                )
+                assert resp["status"] == 200
+                row = self._sessions()[0]
+                assert row["session"] == "261d9bea-eefd-44f8-aa6d-d2d3b210ad90"
+                assert row["agent"] == "QwenCode/0.23.2"
+            finally:
+                server.shutdown()
+
+    def test_both_session_headers_first_wins(self, fake_backend):
+        """Оба заголовка заданы — побеждает ПЕРВЫЙ в списке
+        (X-Claude-Code-Session-Id), значение второго игнорируется."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"X-Claude-Code-Session-Id": "sess-first",
+                             "x-opencode-session": "sess-second"},
+                )
+                assert resp["status"] == 200
+                assert self._sessions()[0]["session"] == "sess-first"
+            finally:
+                server.shutdown()
+
+    def test_custom_session_header_list(self, fake_backend):
+        """ADAPTER_SESSION_HEADER=x-opencode-session: [CC]-заголовок больше не
+        читается, id берётся только из явно указанного."""
+        from backend_adapter import config as cfg
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        old = cfg.ADAPTER_SESSION_HEADER
+        cfg.ADAPTER_SESSION_HEADER = "x-opencode-session"
+        try:
+            with fake_backend:
+                server = self._setup_adapter(fake_backend)
+                try:
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": "test-model",
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-ignored",
+                                 "x-opencode-session": "sess-opencode"},
+                    )
+                    assert resp["status"] == 200
+                    assert self._sessions()[0]["session"] == "sess-opencode"
+                finally:
+                    server.shutdown()
+        finally:
+            cfg.ADAPTER_SESSION_HEADER = old
+
+    def test_no_session_header_is_unknown(self, fake_backend):
+        """Ни одного заголовка-кандидата → session == «unknown» (штатный
+        фолбэк, не падение)."""
+        from backend_adapter import session_log as session_log_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"User-Agent": "curl/8.0"},
+                )
+                assert resp["status"] == 200
+                assert self._sessions()[0]["session"] == session_log_mod.UNKNOWN_SESSION_ID
+            finally:
+                server.shutdown()
+
     def test_convert_route_recorded(self, fake_backend):
         """messages→completions (дефолт): route = convert messages→completions."""
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
@@ -1230,7 +1336,6 @@ class TestSessionAccounting(ServerSetupMixin):
             assert row["session"] == "sess-badjson"
             assert row["route"] == ""  # до routing.decide не дошли
             assert row["errors"] == 1
-
 
 class TestErrFileProtocol(ServerSetupMixin):
     """Протокол .err-инцидентов (v0.9.0): финальный 4xx/5xx реального

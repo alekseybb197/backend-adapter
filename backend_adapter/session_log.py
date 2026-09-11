@@ -93,6 +93,11 @@ def dump_yaml(payload) -> str:
     return s.getvalue()
 
 
+# Единый источник значения «сессия неизвестна»: используется и при разборе
+# входящих заголовков (server.py), и при гейте файловой записи (logger.py),
+# и при протоколировании. Литерал в этих модулях больше не дублируется.
+UNKNOWN_SESSION_ID = "unknown"
+
 _LOG_FILES_PER_SESSION = 5000
 _session_logs: OrderedDict[str, dict] = OrderedDict()  # session_id -> {abspath: file_handle}
 _session_file_ts: dict[str, str] = {}  # session_id -> stable timestamp (first-use)

@@ -417,6 +417,22 @@ ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE
 # лимитов.
 ADAPTER_SESSIONS_TABLE = int(os.environ.get("ADAPTER_SESSIONS_TABLE", "10"))
 
+# ADAPTER_SESSION_HEADER — список имён HTTP-заголовков (через запятую), из
+# которых адаптер берёт идентификатор сессии агента. Побеждает ПЕРВЫЙ непустой
+# из списка; если ни одного — сессия протоколируется как «unknown». Имена
+# сверяются без учёта регистра (штатное поведение email.message.Message).
+# Зачем список: разные агенты называют заголовок по-разному. [CC] CLI шлёт
+# X-Claude-Code-Session-Id; QwenCode id по умолчанию не шлёт вовсе и
+# настраивается через customHeaders — имя выбирает пользователь, штатно
+# указывают то же X-Claude-Code-Session-Id, второй кандидат (x-opencode-session)
+# — для клиентов с отдельным именем (см. docs/environment.md, раздел
+# «Настройка агента (QwenCode)»). Пустое значение переменной трактуется как
+# дефолт. В runtime-пул (/config) не входит — смена требует перезапуска.
+_DEFAULT_SESSION_HEADERS = "X-Claude-Code-Session-Id,x-opencode-session"
+ADAPTER_SESSION_HEADER = (
+    os.environ.get("ADAPTER_SESSION_HEADER", "").strip() or _DEFAULT_SESSION_HEADERS
+)
+
 # ADAPTER_MODELS_TARIFFS — путь к YAML-файлу с тарифами моделей (для колонки
 # Cost таблицы «Models in use» на статус-странице WEBUI). Формат (запятая —
 # десятичный разделитель цен):

@@ -32,6 +32,49 @@ molecule читают корневой `install.sh` (`molecule/install/prepare.y
 осознанно (предупреждение оставлено комментарием в `ci.yml`).
 
 
+### 2026-09-11 Session id: список заголовков-кандидатов `ADAPTER_SESSION_HEADER` + инструкция для QwenCode
+
+**Цель:** агенты, которые называют заголовок сессии иначе, чем [CC] CLI,
+протоколировались как `session=unknown` — все их обращения сливались в одну
+строку таблицы «Sessions» и один per-session лог. В логе эксплуатации:
+`[REQ] POST /v1/chat/completions session=unknown` при
+`user-agent: QwenCode/0.23.2 (darwin; arm64)`.
+
+**Причина:** QwenCode (проверено на 0.23.2) **не передаёт id сессии вообще** —
+ни заголовком, ни полем тела (в запросе только `user-agent` и
+`x-stainless-*`). Штатный механизм клиента — `customHeaders` провайдера с
+плейсхолдером `${session_id}` плюс глобальный флаг
+`outboundCorrelation.allowDynamicHeaderValues: true`; по умолчанию не
+настроен. Адаптер же читал единственное жёстко зашитое имя
+`X-Claude-Code-Session-Id`, а настраивать клиент на произвольный заголовок
+было нельзя.
+
+**Решение:**
+- `config.py` — `ADAPTER_SESSION_HEADER`: список имён заголовков через
+  запятую, дефолт `X-Claude-Code-Session-Id,x-opencode-session` (побеждает
+  первый непустой); пустое значение → дефолт; в runtime-пул `/config` не
+  входит;
+- `server.py` — хелперы `_extract_session_id()` / `_session_header_names()`
+  (module-level, рядом с `_register_session`); `do_POST` вместо прямого
+  `headers.get(...)` вызывает хелпер, остальной учёт (`_req_ctx`,
+  `_last_log_session_id`, `[REQ]`, `session_registry`) не меняется;
+- `session_log.py` — константа `UNKNOWN_SESSION_ID`; литерал `"unknown"`
+  в `server.py` и `logger.py` сведён к ней;
+- тесты — 4 кейса в `TestSessionAccounting` (id из `x-opencode-session`;
+  приоритет первого заголовка; кастомный список; ни одного → `unknown`);
+- документация — `docs/environment.md` §5 (строка переменной + подраздел
+  «Настройка агента (QwenCode)»: рекомендован `X-Claude-Code-Session-Id`,
+  как у [CC] CLI, `x-opencode-session` — пример своего имени),
+  `docs/webui.md`, `docs/logging.md`, `docs/architecture.md`,
+  `docs/samples/sample.adapter.env`.
+
+**Следствия:** сессии не-[CC] агентов протоколируются честным id при условии
+настройки клиента; список кандидатов расширяется одной env-переменной без
+правок кода. Ограничение: id ротируется на `/new` и `/resume` — после смены
+сессии в логах появляется новый идентификатор (это поведение клиента, не
+адаптера).
+
+
 ## v0.9.3 — install.sh: molecule-тест, системный systemd-сервис `--service`, режим `--delete`, повторная установка как корректное обновление; WEBUI — удаление строк Sessions и runtime-маппинг моделей
 
 ### 2026-09-11 Саммари ветки v0.9.3 (5 коммитов между merge PR #15 (v0.9.2) и снятием WIP)

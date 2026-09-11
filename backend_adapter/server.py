@@ -34,7 +34,12 @@ from .convert import (
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
-from .session_log import write_debug_json, write_error_file, write_warn_file
+from .session_log import (
+    UNKNOWN_SESSION_ID,
+    write_debug_json,
+    write_error_file,
+    write_warn_file,
+)
 from .streaming import (
     _sse_write,
     _write_sse_error_native,
@@ -65,6 +70,31 @@ class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
 
 
 _req_ctx = threading.local()
+
+
+def _session_header_names() -> list[str]:
+    """Имена заголовков-кандидатов из ``ADAPTER_SESSION_HEADER`` (список через
+    запятую). Пустые элементы отброшены; полностью пустой список → дефолт."""
+    names = [n.strip() for n in config.ADAPTER_SESSION_HEADER.split(",")]
+    return [n for n in names if n] or config._DEFAULT_SESSION_HEADERS.split(",")
+
+
+def _extract_session_id(headers) -> str:
+    """Идентификатор сессии агента из входящих заголовков.
+
+    Идёт по списку ``config.ADAPTER_SESSION_HEADER`` и возвращает первое
+    непустое значение; ни одного — ``session_log.UNKNOWN_SESSION_ID``.
+    Имена сверяются без учёта регистра (``email.message.Message.get``).
+
+    Список нужен потому, что агенты называют заголовок по-разному: [CC] CLI
+    шлёт ``X-Claude-Code-Session-Id``, а QwenCode по умолчанию id не шлёт
+    вовсе и настраивается на произвольное имя через ``customHeaders`` (см.
+    docs/environment.md, раздел «Настройка агента (QwenCode)»)."""
+    for name in _session_header_names():
+        value = headers.get(name)
+        if value:
+            return value
+    return UNKNOWN_SESSION_ID
 
 
 def _register_session(
@@ -215,7 +245,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         req_t0 = time.time()
-        session_id = self.headers.get("X-Claude-Code-Session-Id", "unknown")
+        session_id = _extract_session_id(self.headers)
         req_id = uuid.uuid4().hex[:12]
         # Имя агента для таблицы WEBUI «Sessions» (v0.9.2): User-Agent до
         # первого пробела — [CC] CLI шлёт «claude-cli/2.1.236 (external, cli)»,

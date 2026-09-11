@@ -76,6 +76,9 @@ def fresh_env(monkeypatch):
         "ADAPTER_MESSAGES_TARGET": "completions",
         "ADAPTER_COMPLETIONS_TARGET": "none",
         "ADAPTER_RESPONSES_TARGET": "none",
+        # Session-id header candidates (v0.9.4): default list matches config.py
+        # so tests exercising [CC] and QwenCode headers both work.
+        "ADAPTER_SESSION_HEADER": "X-Claude-Code-Session-Id,x-opencode-session",
     }
 
     for k, v in defaults.items():
@@ -129,6 +132,7 @@ def _default_config():
         "ADAPTER_MESSAGES_TARGET": "completions",
         "ADAPTER_COMPLETIONS_TARGET": "none",
         "ADAPTER_RESPONSES_TARGET": "none",
+        "ADAPTER_SESSION_HEADER": "X-Claude-Code-Session-Id,x-opencode-session",
     }
     for k, v in defaults.items():
         os.environ[k] = v

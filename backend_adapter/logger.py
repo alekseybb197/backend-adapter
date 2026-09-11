@@ -42,8 +42,8 @@ def _write(msg: str) -> None:
     print(console)
     # Файловая запись — только при мастер-флаге файловой записи
     if config.ADAPTER_DEBUG and session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
-        sid = session_log._last_log_session_id or "unknown"
-        if sid == "unknown":
+        sid = session_log._last_log_session_id or session_log.UNKNOWN_SESSION_ID
+        if sid == session_log.UNKNOWN_SESSION_ID:
             return  # сессия ещё не установлена — не создаём пустой файл
         fd = session_log._open_session_file("debug", sid)
         if fd:
