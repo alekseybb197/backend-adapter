@@ -254,7 +254,7 @@ class TestManualAdapterProcess:
                 assert _wait_http(exp_port, "/metrics") == 200, \
                     f"экспортёр не поднялся на :{exp_port}"
                 out = ap.output
-                assert "Backend-Adapter v0.9.2" in out, out[:400]
+                assert "Backend-Adapter v0.9.3" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
                 # v0.9.0: старт пишет БЕЗУСЛОВНЫЕ JSON-файлы результатов
