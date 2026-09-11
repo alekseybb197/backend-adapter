@@ -71,8 +71,10 @@ _ENV_NAMES: dict[Format, str] = {
     "responses": "ADAPTER_RESPONSES_TARGET",
 }
 
-# Тексты ошибок маршрутизации (уходят клиенту как {"error": …}).
-ERROR_DISABLED = "endpoint is disabled (ADAPTER_{env}=none)"
+# Тексты ошибок маршрутизации (уходят клиенту как {"error": …}). В
+# ERROR_DISABLED подставляется ПОЛНОЕ имя переменной из _ENV_NAMES
+# (ADAPTER_<INP>_TARGET) — префикс ADAPTER_ в шаблоне не дублируется.
+ERROR_DISABLED = "endpoint is disabled ({env}=none)"
 ERROR_UNIMPLEMENTED = "conversion '{inp}' -> '{out}' is not implemented by this adapter"
 ERROR_UNSUPPORTED = "backend '{backend}' does not support {fmt} (probe: endpoint not found)"
 ERROR_NO_ROUTE = (

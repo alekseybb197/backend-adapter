@@ -75,6 +75,34 @@ molecule читают корневой `install.sh` (`molecule/install/prepare.y
 адаптера).
 
 
+### 2026-09-11 Routing: убран двойной префикс `ADAPTER_` в тексте 404 выключенного входа
+
+**Цель:** сообщение о выключенном входном эндпоинте показывало имя
+env-переменной с удвоенным префиксом — `endpoint is disabled
+(ADAPTER_ADAPTER_COMPLETIONS_TARGET=none)` (видно в ошибке агента:
+`API Error: 404 "endpoint is disabled (ADAPTER_ADAPTER_COMPLETIONS_TARGET=none)"`).
+
+**Причина:** `routing.ERROR_DISABLED` содержал литеральный префикс
+`ADAPTER_{env}`, а подставляемое значение `_ENV_NAMES[inp]` — уже ПОЛНОЕ имя
+переменной (`ADAPTER_COMPLETIONS_TARGET`); префикс удваивался. Баг не ловился
+тестами: ассерты были substring-проверкой (`"ADAPTER_COMPLETIONS_TARGET=none"
+in msg`) — строка с удвоенным префиксом такую подстроку содержит.
+
+**Решение:**
+- `routing.py` — шаблон без литерального префикса: `endpoint is disabled
+  ({env}=none)` (подстановка полного имени из `_ENV_NAMES` не изменилась);
+- `tests/test_routing.py` — в `TestDecideDisabled` substring-ассерты заменены
+  на ТОЧНОЕ равенство (`msg == "endpoint is disabled
+  (ADAPTER_COMPLETIONS_TARGET=none)"`) для всех трёх входов — теперь
+  дублирование префикса такой тест не пройдёт;
+- `tests/test_server.py` — в `test_new_inputs_disabled_by_default` проверка
+  ответа уточнена до точного текста ошибки по каждому входу.
+
+**Следствия:** текст 404 снова называет реальное имя переменной; регресс
+дублирования префикса закрыт точным ассертом. `docs/routing.md` использует
+wildcard `ADAPTER_*_TARGET=none` и правок не потребовал.
+
+
 ## v0.9.3 — install.sh: molecule-тест, системный systemd-сервис `--service`, режим `--delete`, повторная установка как корректное обновление; WEBUI — удаление строк Sessions и runtime-маппинг моделей
 
 ### 2026-09-11 Саммари ветки v0.9.3 (5 коммитов между merge PR #15 (v0.9.2) и снятием WIP)

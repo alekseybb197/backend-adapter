@@ -176,16 +176,18 @@ class TestDecideDisabled(_RouteCase):
     def test_input_disabled_by_default(self):
         # Дефолты conftest: completions и responses выключены → disabled с
         # именем своей env-переменной в тексте и HTTP-статусом 404.
+        # Сравнение — ТОЧНОЕ равенство: substring-ассерт пропускал бы
+        # дублирование префикса («ADAPTER_ADAPTER_…» содержит «ADAPTER_…»).
         action, out, msg, status = self.routing.decide("completions", "test")
         assert action == "disabled"
         assert out is None
         assert status == 404
-        assert "ADAPTER_COMPLETIONS_TARGET=none" in msg
+        assert msg == "endpoint is disabled (ADAPTER_COMPLETIONS_TARGET=none)"
 
         action, out, msg, status = self.routing.decide("responses", "test")
         assert action == "disabled"
         assert status == 404
-        assert "ADAPTER_RESPONSES_TARGET=none" in msg
+        assert msg == "endpoint is disabled (ADAPTER_RESPONSES_TARGET=none)"
 
     def test_input_explicitly_disabled(self):
         self._set_target(messages="none")
@@ -193,7 +195,7 @@ class TestDecideDisabled(_RouteCase):
         assert action == "disabled"
         assert out is None
         assert status == 404
-        assert "ADAPTER_MESSAGES_TARGET=none" in msg
+        assert msg == "endpoint is disabled (ADAPTER_MESSAGES_TARGET=none)"
         # disabled не зависит от кэша проб.
         self._support("test", "messages", True)
         action, _out, _msg, _status = self.routing.decide("messages", "test")

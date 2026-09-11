@@ -541,14 +541,18 @@ class TestInputEndpoints(ServerSetupMixin):
         with fake_backend:
             server = self._setup_adapter(fake_backend)
             try:
-                for path in ("/v1/chat/completions", "/v1/responses"):
+                for path, env in (("/v1/chat/completions", "ADAPTER_COMPLETIONS_TARGET"),
+                                  ("/v1/responses", "ADAPTER_RESPONSES_TARGET")):
                     resp = _send_http(
                         "127.0.0.1", server.port, "POST", path,
                         body={"model": "test-model", "messages": []},
                     )
                     assert resp["status"] == 404
-                    assert "ADAPTER_COMPLETIONS_TARGET=none" in resp["body"] or \
-                           "ADAPTER_RESPONSES_TARGET=none" in resp["body"]
+                    # Точное равенство текста ошибки (v0.9.4): substring
+                    # пропускал дублирование префикса ADAPTER_.
+                    assert json.loads(resp["body"])["error"] == (
+                        f"endpoint is disabled ({env}=none)"
+                    )
                 # messages-дефолт жив: конвертация работает
                 fake_backend.completions_response = {
                     "id": "chat1", "model": "test-model",
