@@ -27,6 +27,15 @@
 #          sudo when it is not already root.
 #   macOS  a launchd agent (current user, ~/Library/LaunchAgents).
 #
+# Re-running it over an existing installation performs an UPDATE instead of a
+# blind overwrite: it detects the previous install, compares the installed and
+# the freshly downloaded versions (both print "Backend-Adapter vX.Y.Z" and exit
+# 1 with an empty ADAPTER_BACKEND_CONFIG), and — only when the downloaded one is
+# newer — stops the service, backs up the old configs (adapter.yaml.<ts>.bak,
+# adapter.env.<ts>.bak, unit.<ts>.bak), replaces the binary, regenerates the
+# configs (keeping the backend URL and token read from the old files) and starts
+# the service again. When the installed version is already current it is a no-op.
+#
 # With --delete it does the opposite: removes the installed binary and, when
 # present, the systemd service — the unit, the state directory (which holds
 # the token), the service user and the binary. Asks for confirmation on the
@@ -44,6 +53,46 @@ BINARY_NAME="backend-adapter"
 SERVICE_INSTALL="${SERVICE_INSTALL:-0}"
 DELETE_INSTALL="${DELETE_INSTALL:-0}"
 DELETE_YES="${ADAPTER_DELETE_YES:-0}"
+
+# Set by detect_existing_install() when a previous install is found; switches
+# main() from the fresh-install path to update_install().
+EXISTING_INSTALL=0
+
+# Scratch dir for the downloaded binary (kept until EXIT so download_binary and
+# place_binary — possibly across a service stop — can share it).
+WORKDIR=""
+NEW_BINARY=""
+cleanup_workdir() {
+  if [[ -n "$WORKDIR" && -d "$WORKDIR" ]]; then
+    rm -rf "$WORKDIR"
+  fi
+}
+trap cleanup_workdir EXIT
+
+# ── Scratch directory that can execute the downloaded binary ───────────
+# The version probe runs the freshly downloaded file, so the scratch
+# filesystem must allow exec. /tmp is mounted noexec on hardened hosts (CIS)
+# and in the systemd molecule container; there the probe would report
+# "unknown" and the no-op detection would silently break. Prefer the first
+# candidate that can actually run a file; if none can, fall back to a plain
+# temp dir — the probe then degrades to "unknown" and the installer updates
+# anyway instead of failing.
+make_workdir() {
+  local base dir
+  for base in "${TMPDIR:-/tmp}" /var/tmp; do
+    [[ -d "$base" ]] || continue
+    dir=$(mktemp -d "${base%/}/backend-adapter.XXXXXX" 2>/dev/null) || continue
+    if printf '#!/bin/sh\nexit 0\n' >"${dir}/.exec-probe" 2>/dev/null \
+      && chmod +x "${dir}/.exec-probe" 2>/dev/null \
+      && "${dir}/.exec-probe" 2>/dev/null; then
+      rm -f "${dir}/.exec-probe"
+      printf '%s' "$dir"
+      return 0
+    fi
+    rm -rf "$dir"
+  done
+  mktemp -d
+}
 
 # Colors
 RED='\033[0;31m'
@@ -84,6 +133,13 @@ Release and installs it to a fixed path:
 
 Windows is not supported by this bash installer — use the PowerShell
 installer (install.ps1, added separately) or run inside WSL.
+
+Re-running over an existing installation UPDATES it: the previous install is
+detected, the installed and downloaded versions are compared, and — only when
+the downloaded one is newer — the service is stopped, the old configs are backed
+up (adapter.yaml.<timestamp>.bak), the binary is replaced, the configs are
+regenerated (keeping the backend URL and token) and the service is restarted.
+An already-current install is a no-op.
 
 Options:
   --service       Install a persistent service for the binary.
@@ -194,6 +250,12 @@ SERVICE_ENV="${SERVICE_ROOT}/adapter.env"
 SERVICE_YAML="${SERVICE_ROOT}/adapter.yaml"
 SERVICE_LOGS="${SERVICE_ROOT}/logs"
 
+# macOS launchd agent layout (per-user). Kept here so both install_launchd and
+# update_install (which backs up and regenerates them) agree on the paths.
+LAUNCHD_PLIST="$HOME/Library/LaunchAgents/com.user.backend-adapter.plist"
+LAUNCHD_ENV="$HOME/.config/backend-adapter/backend-adapter.env"
+LAUNCHD_LOG_DIR="$HOME/Library/Logs/backend-adapter"
+
 # Backend base URL / token for the generated config. When empty, --service
 # asks for them interactively (see collect_service_config).
 SERVICE_BASE="${ADAPTER_SERVICE_BACKEND_BASE:-}"
@@ -242,31 +304,38 @@ if [[ "$DELETE_INSTALL" != 1 ]]; then
 fi
 
 # ── Install binary ─────────────────────────────────────────────────────
-install_binary() {
+# Download into the scratch WORKDIR (no install side effect yet), so update can
+# compare the new version against the installed one before touching anything.
+download_binary() {
   local asset="backend-adapter-${PLATFORM}"
   local url="https://github.com/${REPO}/releases/latest/download/${asset}"
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  trap "rm -rf $tmpdir" EXIT
+
+  [[ -n "$WORKDIR" ]] || WORKDIR=$(make_workdir)
+  NEW_BINARY="${WORKDIR}/${BINARY_NAME}"
 
   info "Downloading ${asset} from GitHub Releases ..."
   info "URL: ${url}"
 
   if command -v curl &>/dev/null; then
-    curl -fsSL --progress-bar "$url" -o "${tmpdir}/${BINARY_NAME}"
+    curl -fsSL --progress-bar "$url" -o "$NEW_BINARY"
   elif command -v wget &>/dev/null; then
-    wget -q --show-progress "$url" -O "${tmpdir}/${BINARY_NAME}"
+    wget -q --show-progress "$url" -O "$NEW_BINARY"
   else
     err "Neither curl nor wget found. Please install one of them."
     exit 1
   fi
 
-  chmod +x "${tmpdir}/${BINARY_NAME}"
+  chmod +x "$NEW_BINARY"
+}
+
+# Move the downloaded binary into place (overwriting a previous copy).
+place_binary() {
   if [[ "$USE_SUDO" == 1 ]]; then
-    sudo mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+    sudo mv "$NEW_BINARY" "${INSTALL_DIR}/${BINARY_NAME}"
   else
-    mv "${tmpdir}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+    mv "$NEW_BINARY" "${INSTALL_DIR}/${BINARY_NAME}"
   fi
+  NEW_BINARY=""
   ok "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
 
   # macOS Gatekeeper: files downloaded via curl get the
@@ -279,6 +348,12 @@ install_binary() {
       ok "Removed com.apple.quarantine from ${INSTALL_DIR}/${BINARY_NAME}"
     fi
   fi
+}
+
+# Fresh install: download and put in place in one go.
+install_binary() {
+  download_binary
+  place_binary
 }
 
 # ── Verify installation ────────────────────────────────────────────────
@@ -309,6 +384,90 @@ verify() {
     fi
   else
     warn "$bin_path is not executable"
+  fi
+}
+
+# ── Detect a previous install ──────────────────────────────────────────
+# A re-run over an existing installation must update it, not blindly overwrite
+# it. Any of the three artifacts counts as "installed": the binary, the systemd
+# unit or the state directory. Sets the global EXISTING_INSTALL.
+detect_existing_install() {
+  if [[ -e "${INSTALL_DIR}/${BINARY_NAME}" || -e "$SERVICE_UNIT" || -e "$SERVICE_ROOT" ]]; then
+    EXISTING_INSTALL=1
+  fi
+}
+
+# ── Read the version from a binary banner ──────────────────────────────
+# The binary has no --version flag: with an empty ADAPTER_BACKEND_CONFIG it
+# prints "Backend-Adapter vX.Y.Z" and exits 1 (the same healthy early-exit
+# verify() greps for). `|| true` keeps set -e happy on that rc 1; an empty
+# result means the version could not be determined.
+extract_version() {
+  local bin="$1" out
+  out=$(env -u ADAPTER_BACKEND_CONFIG "$bin" 2>&1 || true)
+  printf '%s\n' "$out" | sed -n 's/^Backend-Adapter v\([^[:space:]]*\).*/\1/p' | head -1
+}
+
+# version_gt A B — true (0) when A is strictly newer than B. Pure awk (no
+# `sort -V`, absent on older macOS); numeric per dotted component so 0.9.10
+# sorts above 0.9.2.
+version_gt() {
+  awk -v a="$1" -v b="$2" 'BEGIN {
+    na = split(a, A, "."); nb = split(b, B, ".")
+    n = (na > nb) ? na : nb
+    for (i = 1; i <= n; i++) {
+      x = (i <= na) ? A[i] + 0 : 0
+      y = (i <= nb) ? B[i] + 0 : 0
+      if (x > y) exit 0
+      if (x < y) exit 1
+    }
+    exit 1
+  }'
+}
+
+# ── Recover the backend URL and token from the previous configs ────────
+# On update we must NOT ask again: read what the old generated files hold and
+# fill the globals only when they are still empty (explicit env values
+# ADAPTER_SERVICE_BACKEND_BASE/_KEY keep priority).
+read_old_config() {
+  if [[ -z "$SERVICE_BASE" && -f "$SERVICE_YAML" ]]; then
+    SERVICE_BASE=$(sed -n 's/^[[:space:]]*base:[[:space:]]*//p' "$SERVICE_YAML" | head -1)
+  fi
+  if [[ -z "$SERVICE_KEY" && -f "$SERVICE_ENV" ]]; then
+    SERVICE_KEY=$(sed -n 's/^ADAPTER_BACKEND_KEY_MAIN=//p' "$SERVICE_ENV" | head -1)
+  fi
+}
+
+# ── Back up the generated configs before overwriting them ──────────────
+# Timestamped copies so successive updates never clobber an earlier backup.
+# The env copy holds the token, so keep it root-only (0600) like the original.
+backup_configs() {
+  local ts files
+  ts=$(date +%Y%m%d-%H%M%S)
+  if [[ "$PLATFORM" == macos-* ]]; then
+    # Per-user launchd files: no root involved (install_launchd writes them
+    # without sudo), so plain cp — as_root would needlessly ask for sudo.
+    files=("$LAUNCHD_PLIST" "$LAUNCHD_ENV")
+    local f
+    for f in "${files[@]}"; do
+      if [[ -f "$f" ]]; then
+        cp -p "$f" "${f}.${ts}.bak"
+        ok "Backed up ${f} -> ${f}.${ts}.bak"
+      fi
+    done
+  else
+    files=("$SERVICE_YAML" "$SERVICE_ENV" "$SERVICE_UNIT")
+    local f
+    for f in "${files[@]}"; do
+      if [[ -f "$f" ]]; then
+        as_root cp -p "$f" "${f}.${ts}.bak"
+        ok "Backed up ${f} -> ${f}.${ts}.bak"
+      fi
+    done
+    # The env copy holds the token — keep it root-only like the original.
+    if [[ -f "${SERVICE_ENV}.${ts}.bak" ]]; then
+      as_root chmod 0600 "${SERVICE_ENV}.${ts}.bak"
+    fi
   fi
 }
 
@@ -367,6 +526,23 @@ install_systemd() {
   collect_service_config
 
   info "Installing systemd system service (user '${SERVICE_USER}', root '${SERVICE_ROOT}') ..."
+  write_service_files
+
+  as_root systemctl daemon-reload
+  # enable --now: autostart on boot AND start right away — the config is
+  # complete, so the service can come up immediately.
+  as_root systemctl enable --now backend-adapter.service
+  ok "systemd system unit installed and started: ${SERVICE_UNIT}"
+  info "Config:  ${SERVICE_YAML} (provider 'main', base ${SERVICE_BASE})"
+  info "Env:     ${SERVICE_ENV} (token, mode 0600)"
+  info "Logs:    ${SERVICE_LOGS} (journal: journalctl -u backend-adapter -f)"
+  info "Status:  systemctl status backend-adapter"
+}
+
+# ── Generate the state dir, configs and unit (shared install/update) ───
+# Expects SERVICE_BASE / SERVICE_KEY to be set (fresh: collect_service_config;
+# update: read_old_config). Idempotent: safe to run over an existing layout.
+write_service_files() {
   as_root mkdir -p "$SERVICE_ROOT" "$SERVICE_LOGS"
 
   if ! id -u "$SERVICE_USER" &>/dev/null; then
@@ -430,16 +606,6 @@ SyslogIdentifier=backend-adapter
 [Install]
 WantedBy=multi-user.target
 EOF
-
-  as_root systemctl daemon-reload
-  # enable --now: autostart on boot AND start right away — the config is
-  # complete, so the service can come up immediately.
-  as_root systemctl enable --now backend-adapter.service
-  ok "systemd system unit installed and started: ${SERVICE_UNIT}"
-  info "Config:  ${SERVICE_YAML} (provider 'main', base ${SERVICE_BASE})"
-  info "Env:     ${SERVICE_ENV} (token, mode 0600)"
-  info "Logs:    ${SERVICE_LOGS} (journal: journalctl -u backend-adapter -f)"
-  info "Status:  systemctl status backend-adapter"
 }
 
 # ── Delete the installed binary and service (Linux) ────────────────────
@@ -540,19 +706,16 @@ install_launchd() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     return
   fi
-  local plist="$HOME/Library/LaunchAgents/com.user.backend-adapter.plist"
-  local env_file="$HOME/.config/backend-adapter/backend-adapter.env"
-  local log_dir="$HOME/Library/Logs/backend-adapter"
 
   info "Installing launchd agent ..."
-  mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$env_file")" "$log_dir"
+  mkdir -p "$HOME/Library/LaunchAgents" "$(dirname "$LAUNCHD_ENV")" "$LAUNCHD_LOG_DIR"
 
-  cat > "$env_file" <<EOF
+  cat > "$LAUNCHD_ENV" <<EOF
 # backend-adapter env (generated by install.sh --service)
 # launchd does not read env files: edit the variables directly inside
-# $plist (ADAPTER_BACKEND_CONFIG is required, the rest are the
+# $LAUNCHD_PLIST (ADAPTER_BACKEND_CONFIG is required, the rest are the
 # documented defaults), then reload:
-#   launchctl unload $plist && launchctl load $plist
+#   launchctl unload $LAUNCHD_PLIST && launchctl load $LAUNCHD_PLIST
 ADAPTER_BACKEND_CONFIG=
 ADAPTER_PROXY_PORT=9999
 ADAPTER_ENDPOINT_HOST=127.0.0.1
@@ -563,7 +726,7 @@ EOF
   # Variables are inlined because launchd ignores EnvironmentFile.
   # ADAPTER_BACKEND_CONFIG is intentionally empty until the user edits the
   # plist after install (it is the path to their backend YAML).
-  cat > "$plist" <<EOF
+  cat > "$LAUNCHD_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -601,10 +764,10 @@ EOF
     <false/>
 
     <key>StandardOutPath</key>
-    <string>$log_dir/adapter.log</string>
+    <string>$LAUNCHD_LOG_DIR/adapter.log</string>
 
     <key>StandardErrorPath</key>
-    <string>$log_dir/adapter.log</string>
+    <string>$LAUNCHD_LOG_DIR/adapter.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>
@@ -612,11 +775,89 @@ EOF
 </plist>
 EOF
 
-  ok "launchd agent installed: ${plist}"
-  info "Edit ${plist}: set ADAPTER_BACKEND_CONFIG to your backend YAML path"
-  info "Then load: launchctl load ${plist}"
-  info "Logs: ${log_dir}/adapter.log"
+  ok "launchd agent installed: ${LAUNCHD_PLIST}"
+  info "Edit ${LAUNCHD_PLIST}: set ADAPTER_BACKEND_CONFIG to your backend YAML path"
+  info "Then load: launchctl load ${LAUNCHD_PLIST}"
+  info "Logs: ${LAUNCHD_LOG_DIR}/adapter.log"
   info "Check status: launchctl list | grep backend-adapter"
+}
+
+# ── Update an existing installation ────────────────────────────────────
+# Detected automatically by detect_existing_install(). Compares the freshly
+# downloaded version against the installed one and, when the former is newer,
+# walks the update lifecycle: stop → back up configs → replace binary →
+# regenerate configs (URL/token recovered from the old files) → start again.
+# If the installed version is already current, it is a no-op (nothing touched).
+update_install() {
+  local old_bin="${INSTALL_DIR}/${BINARY_NAME}"
+
+  download_binary
+  local new_ver old_ver
+  new_ver=$(extract_version "$NEW_BINARY")
+  old_ver=$(extract_version "$old_bin")
+
+  info "Installed version: ${old_ver:-unknown}"
+  info "Downloaded version: ${new_ver:-unknown}"
+
+  if [[ -n "$old_ver" && -n "$new_ver" ]] && ! version_gt "$new_ver" "$old_ver"; then
+    ok "Already up to date (v${old_ver}). Nothing to do."
+    return 0
+  fi
+  if [[ -z "$old_ver" ]]; then
+    warn "Could not determine the installed version — updating anyway."
+  fi
+  if [[ -n "$new_ver" ]]; then
+    ok "Updating v${old_ver:-?} -> v${new_ver}"
+  else
+    warn "Could not determine the downloaded version — updating anyway."
+  fi
+
+  # Whether to touch the service: --service was given, or a unit from a
+  # previous --service run is present (then it must be restarted on the new
+  # binary even without the flag).
+  local with_service=0
+  if [[ "$SERVICE_INSTALL" == 1 || -f "$SERVICE_UNIT" ]]; then
+    with_service=1
+  fi
+
+  if [[ "$with_service" == 1 && "$PLATFORM" == linux-* ]]; then
+    # 3. Stop the service before replacing its binary/configs.
+    if [[ -f "$SERVICE_UNIT" ]]; then
+      as_root systemctl stop backend-adapter.service 2>/dev/null || true
+      ok "Stopped backend-adapter.service"
+    fi
+    # 5a. Back up the old configs (adapter.yaml/adapter.env/unit) with a
+    #     timestamp, so successive updates never clobber earlier backups.
+    backup_configs
+    # 5b. Recover the backend URL and token from the old files so the update
+    #     needs no interaction; collect_service_config then finds them set.
+    read_old_config
+    collect_service_config
+  fi
+
+  # 4. Replace the binary.
+  place_binary
+
+  if [[ "$with_service" == 1 && "$PLATFORM" == linux-* ]]; then
+    # 5c. Regenerate the configs/unit from the new version's templates.
+    write_service_files
+    # 6. Start the service again.
+    as_root systemctl daemon-reload
+    as_root systemctl enable --now backend-adapter.service
+    ok "systemd service updated and restarted: ${SERVICE_UNIT}"
+    info "Config:  ${SERVICE_YAML} (provider 'main', base ${SERVICE_BASE})"
+    info "Env:     ${SERVICE_ENV} (token, mode 0600)"
+    info "Status:  systemctl status backend-adapter"
+  fi
+
+  # macOS: refresh the launchd agent files too (the agent is not auto-started
+  # by the installer, so there is nothing to stop/start here).
+  if [[ "$PLATFORM" == macos-* && ( "$SERVICE_INSTALL" == 1 || -f "$LAUNCHD_PLIST" ) ]]; then
+    backup_configs
+    install_launchd
+  fi
+
+  ok "Update complete (v${old_ver:-?} -> v${new_ver:-?})."
 }
 
 # ── Main ───────────────────────────────────────────────────────────────
@@ -639,6 +880,14 @@ fi
 
 info "Install:   $INSTALL_DIR"
 info "Service:   $([[ $SERVICE_INSTALL == 1 ]] && echo yes || echo no)"
+
+# A re-run over an existing installation updates it instead of overwriting.
+detect_existing_install
+if [[ "$EXISTING_INSTALL" == 1 ]]; then
+  info "Mode:      update"
+  update_install
+  exit 0
+fi
 
 install_binary
 

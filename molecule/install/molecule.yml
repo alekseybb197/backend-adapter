@@ -38,6 +38,11 @@ scenario:
   # and installs over the previous copy, so a second converge would append a
   # second URL line and make "exactly one download" meaningless.
   #
+  # side_effect runs the update lifecycle on the same container: converge
+  # installs the OLD fixture (v0.9.2), then side_effect re-runs install.sh with
+  # the NEW fixture (v0.9.3) and asserts the binary was updated, plus that a
+  # third run on the same version is a no-op.
+  #
   # dependency MUST stay: it is the only step that installs the docker driver's
   # required collections (community.docker / ansible.posix, see
   # molecule/dependency/base.py). Without it a clean environment cannot run
@@ -51,4 +56,5 @@ scenario:
     - prepare
     - converge
     - verify
+    - side_effect
     - destroy

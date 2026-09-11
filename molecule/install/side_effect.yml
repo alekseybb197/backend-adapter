@@ -1,0 +1,168 @@
+---
+# Lifecycle step: after verify.yml has asserted the OLD fixture (v0.9.2) is
+# installed, re-run install.sh with the NEW fixture (v0.9.3) and assert the
+# binary-only update, then a third run on the same version as a no-op.
+#
+# No service in this scenario (no --service, no systemd), so update_install
+# takes its binary-only branch: download -> compare -> replace binary.
+- name: Update the binary-only installation and assert it
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    stub_bin_dir: /opt/molecule/stub-bin
+    calls_log: /opt/molecule/curl-calls.log
+    new_fixture: /opt/molecule/fixtures/backend-adapter-new
+    update_log: /opt/molecule/update.log
+    update_rc: /opt/molecule/update.rc
+    noop_log: /opt/molecule/noop.log
+    noop_rc: /opt/molecule/noop.rc
+    repo: alekseybb197/backend-adapter
+    installed_bin: /usr/local/bin/backend-adapter
+    arch_to_platform:
+      x86_64: linux-x64
+      amd64: linux-x64
+      aarch64: linux-arm64
+      arm64: linux-arm64
+
+  tasks:
+    - name: Determine the container architecture (same source as install.sh)
+      ansible.builtin.command: uname -m
+      register: uname_m
+      changed_when: false
+
+    - name: Compute the expected platform tag
+      ansible.builtin.set_fact:
+        expected_platform: "{{ arch_to_platform[uname_m.stdout] | default('unsupported') }}"
+
+    - name: Compute the expected release URL
+      ansible.builtin.set_fact:
+        expected_url: "https://github.com/{{ repo }}/releases/latest/download/backend-adapter-{{ expected_platform }}"
+
+    - name: Truncate the stub call log before the update run
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ calls_log }}"
+        mode: "0644"
+
+    - name: Run install.sh again with the NEW fixture (update path)
+      # STUB_FIXTURE makes the curl stub hand back the newer v0.9.3 asset; the
+      # installer must detect the existing install and update it. No service
+      # flags/env: this scenario exercises the binary-only update.
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          env -u ADAPTER_BACKEND_CONFIG \
+              STUB_FIXTURE="{{ new_fixture }}" \
+              PATH="{{ stub_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              bash {{ stage_dir }}/install.sh > {{ update_log }} 2>&1
+          printf '%s' "$?" > {{ update_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Run the installed binary to read its version
+      ansible.builtin.command:
+        cmd: "{{ installed_bin }}"
+      environment:
+        ADAPTER_BACKEND_CONFIG: ""
+      register: updated_binary
+      failed_when: false
+      changed_when: false
+
+    - name: Read the update log, rc and curl calls
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ update_rc }}"
+        - "{{ update_log }}"
+        - "{{ calls_log }}"
+      register: captured
+
+    - name: Decode the captured files
+      ansible.builtin.set_fact:
+        update_rc_text: "{{ captured.results[0].content | b64decode }}"
+        update_log_text: "{{ captured.results[1].content | b64decode }}"
+        calls_log_text: "{{ captured.results[2].content | b64decode }}"
+        curl_calls: >-
+          {{ (captured.results[2].content | b64decode).splitlines()
+             | reject('equalto', '') | list }}
+
+    - name: Assert the binary-only update contract
+      ansible.builtin.assert:
+        that:
+          # 1. installer detected the previous install and switched to update
+          - update_rc_text | trim == "0"
+          - "'Mode:      update' in update_log_text"
+          # 2. it saw the newer version and reported the transition
+          - "'Updating v0.9.2 -> v0.9.3' in update_log_text"
+          # 3. the binary now reports the NEW version
+          - "'Backend-Adapter v0.9.3' in updated_binary.stdout"
+          # 4. exactly one download, same release URL
+          - curl_calls | length == 1
+          - curl_calls[0] == expected_url
+        fail_msg: |
+          install.sh binary-only update contract violated.
+          update rc   = {{ update_rc_text | trim }}
+          expected    = [{{ expected_url }}]
+          call0       = [{{ curl_calls[0] | default('') }}]
+          uname       = [{{ uname_m.stdout }}] platform=[{{ expected_platform }}]
+          curl calls  = {{ curl_calls | join(' | ') }}
+          binary out  = {{ updated_binary.stdout }}
+          --- update.log ---
+          {{ update_log_text }}
+
+    - name: Truncate the stub call log before the no-op run
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ calls_log }}"
+        mode: "0644"
+
+    - name: Run install.sh again with the SAME version (no-op)
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          env -u ADAPTER_BACKEND_CONFIG \
+              STUB_FIXTURE="{{ new_fixture }}" \
+              PATH="{{ stub_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              bash {{ stage_dir }}/install.sh > {{ noop_log }} 2>&1
+          printf '%s' "$?" > {{ noop_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Run the installed binary again to confirm it is unchanged
+      ansible.builtin.command:
+        cmd: "{{ installed_bin }}"
+      environment:
+        ADAPTER_BACKEND_CONFIG: ""
+      register: noop_binary
+      failed_when: false
+      changed_when: false
+
+    - name: Read the no-op log and rc
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ noop_rc }}"
+        - "{{ noop_log }}"
+      register: captured2
+
+    - name: Decode the no-op result
+      ansible.builtin.set_fact:
+        noop_rc_text: "{{ captured2.results[0].content | b64decode }}"
+        noop_log_text: "{{ captured2.results[1].content | b64decode }}"
+
+    - name: Assert an already-current install is a no-op
+      ansible.builtin.assert:
+        that:
+          - noop_rc_text | trim == "0"
+          - "'Already up to date (v0.9.3)' in noop_log_text"
+          # the binary was NOT touched
+          - "'Backend-Adapter v0.9.3' in noop_binary.stdout"
+        fail_msg: |
+          install.sh no-op contract violated.
+          noop rc   = {{ noop_rc_text | trim }}
+          binary out = {{ noop_binary.stdout }}
+          --- noop.log ---
+          {{ noop_log_text }}

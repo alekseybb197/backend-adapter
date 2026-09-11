@@ -24,6 +24,10 @@ platforms:
     cgroupns_mode: host
     volumes:
       - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    # /tmp is a tmpfs and therefore noexec (Docker's default tmpfs options):
+    # the installer's version probe must not be run from /tmp here — it falls
+    # back to /var/tmp (make_workdir in install.sh). Keep /tmp noexec: it
+    # mirrors hardened hosts and guards that fallback.
     tmpfs:
       - /run
       - /tmp

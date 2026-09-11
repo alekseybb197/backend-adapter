@@ -37,6 +37,17 @@
         dest: "{{ fixture_dir }}/backend-adapter"
         mode: "0755"
 
+    - name: Lay out the update fixtures (old v0.9.2 / new v0.9.3)
+      # The curl stub selects the asset via STUB_FIXTURE, so the same scenario
+      # can "download" a different version on the update run.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/fixtures/{{ item }}"
+        dest: "{{ fixture_dir }}/{{ item }}"
+        mode: "0755"
+      loop:
+        - backend-adapter-old
+        - backend-adapter-new
+
     - name: Lay out the curl stub as the first entry of the test PATH
       ansible.builtin.copy:
         src: "{{ playbook_dir }}/fixtures/curl"

@@ -100,7 +100,8 @@ backend-adapter/
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
 │   └── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
 ├── molecule/                   # molecule-тесты install.sh (Linux, ubuntu 24.04):
-│                               #   install — установка бинарника; service — системный systemd
+│                               #   install — установка/обновление бинарника;
+│                               #   service — системный systemd, обновление и --delete
 └── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 

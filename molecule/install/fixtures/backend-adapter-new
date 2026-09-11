@@ -1,0 +1,17 @@
+#!/bin/sh
+# Fixture stand-in for the NEWER release binary `backend-adapter` (v0.9.3).
+#
+# The update counterpart of `backend-adapter-old` (v0.9.2): install.sh re-run
+# downloads this one and must treat it as an update. Same contract as the
+# generic fixture — see the comment in `backend-adapter` — only the banner
+# version differs.
+echo "Backend-Adapter v0.9.3"
+echo "======================================================================"
+
+if [ -z "${ADAPTER_BACKEND_CONFIG:-}" ]; then
+  echo "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
+  exit 1
+fi
+
+echo "fixture: config present, running (sleep infinity)"
+exec sleep infinity

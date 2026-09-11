@@ -91,6 +91,8 @@
           - "'early-exit (healthy)' in install_log_text"
           - "'did not produce the expected startup output' not in install_log_text"
           - "'Installed binary to /usr/local/bin/backend-adapter' in install_log_text"
+          # 6. the OLD fixture (v0.9.2) was installed — side_effect then updates
+          - "'Backend-Adapter v0.9.2' in binary_run.stdout"
         fail_msg: |
           install.sh contract violated.
           expected_url = {{ expected_url }}

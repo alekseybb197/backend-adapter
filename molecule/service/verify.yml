@@ -104,6 +104,17 @@
         unit_enabled: "{{ unit_state.results[0].stdout | default('') | trim }}"
         unit_active: "{{ unit_state.results[1].stdout | default('') | trim }}"
 
+    - name: Run the installed binary with an empty ADAPTER_BACKEND_CONFIG
+      # Reads the banner version; the OLD fixture (v0.9.2) must be installed so
+      # side_effect can exercise the update to v0.9.3.
+      ansible.builtin.command:
+        cmd: "{{ installed_bin }}"
+      environment:
+        ADAPTER_BACKEND_CONFIG: ""
+      register: binary_run
+      failed_when: false
+      changed_when: false
+
     - name: Assert the service install contract
       ansible.builtin.assert:
         that:
@@ -138,6 +149,8 @@
           - unit_active == 'active'
           # 8. install.sh reported no WARN about the startup output
           - "'did not produce the expected startup output' not in install_log_text"
+          # 9. the OLD fixture (v0.9.2) was installed — side_effect updates it
+          - "'Backend-Adapter v0.9.2' in binary_run.stdout"
         fail_msg: |
           install.sh --service contract violated.
           expected_url  = {{ expected_url }}
