@@ -1,0 +1,21 @@
+# Minimal test image: ubuntu:24.04 + python3 so Ansible can drive the container.
+#
+# No curl, no wget, no sudo on purpose:
+#   * the installer must resolve `curl` to the PATH stub, not to a real
+#     downloader (there is nothing to download from anyway);
+#   * the container runs as root and /usr/local/bin exists and is writable, so
+#     ensure_install_dir takes the no-sudo branch — the sudo path is not tested
+#     by this scenario.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Irrelevant when platforms[].command overrides it; kept so the image is usable
+# standalone (`docker run -it <tag> bash`).
+CMD ["sleep", "infinity"]

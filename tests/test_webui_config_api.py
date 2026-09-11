@@ -3,8 +3,11 @@
 
 Tests cover:
   - Unit: _render_config_page returns HTML with current values
-  - HTTP GET /config → 200, HTML with form (12 fields: 6 bool + 3 int + 3 TARGET select)
-  - HTTP POST /config → applies valid, ignores invalid, redirects with message
+  - HTTP GET /config → 200, HTML with form (13 fields: 6 bool + 3 int +
+    1 text (ADAPTER_MODELS_MAPPING) + 3 TARGET select)
+  - HTTP POST /config → applies valid, ignores invalid; страница сообщает
+    только об ошибках (плашки «Применено» нет)
+  - ADAPTER_MODELS_MAPPING правится на лету: config._MAP перестраивается
 """
 import os
 import sys
@@ -129,18 +132,34 @@ class TestRenderConfigPage:
         assert '<option value="completions" selected>completions</option>' in html
         assert html.count('<option value="none" selected>none</option>') == 2
 
-    def test_renders_with_applied_message(self):
-        """HTML contains flash message when applied dict provided."""
+    def test_renders_only_errors_no_applied_flash(self):
+        """Flash показывает ТОЛЬКО ошибки; плашка «Применено» убрана (v0.9.3).
+
+        Успешное применение не сообщается — обновлённые значения видны в
+        колонке «текущее». Если ошибок нет — flash пуст."""
         from backend_adapter import config
         current = config.get_runtime_config()
-        applied = {"ok": ["ADAPTER_DEBUG"], "ignored": ["UNKNOWN_KEY"]}
-        html_bytes = self.render(current, applied=applied)
-        html = html_bytes.decode("utf-8")
-
-        assert "Применено:" in html
-        assert "ADAPTER_DEBUG" in html
+        applied = {"ignored": ["UNKNOWN_KEY"]}
+        html = self.render(current, applied=applied).decode("utf-8")
+        assert "Применено" not in html
         assert "Игнорировано" in html
         assert "UNKNOWN_KEY" in html
+
+        # Пустой ignored (всё применилось) — никакого flash вовсе.
+        html_ok = self.render(current, applied={"ignored": []}).decode("utf-8")
+        assert "Применено" not in html_ok
+        assert "Игнорировано" not in html_ok
+
+    def test_renders_mapping_text_field(self):
+        """ADAPTER_MODELS_MAPPING рендерится текстовым полем с текущим значением."""
+        from backend_adapter import config
+        config.ADAPTER_MODELS_MAPPING = "a:b,c:d"
+        current = config.get_runtime_config()
+        html = self.render(current).decode("utf-8")
+        assert (
+            '<input type="text" id="ADAPTER_MODELS_MAPPING" '
+            'name="ADAPTER_MODELS_MAPPING" value="a:b,c:d"' in html
+        )
 
     def test_head_has_favicon_link(self):
         """В <head> страницы /config есть <link rel="icon" ...> — иконка
@@ -165,9 +184,8 @@ class TestConfigHTTPGet:
             status, body = _http_get(port, "/config")
             assert status == 200
             assert "<!DOCTYPE html>" in body or "<html" in body.lower()
-            # Form with 12 fields (6 bool + 3 int + 3 select для TARGET;
-            # строковых text-полей нет — селекторы подробности удалены
-            # реформой логирования v0.8.6)
+            # Form with 13 fields (6 bool + 3 int + 1 text (маппинг моделей)
+            # + 3 select для TARGET)
             assert "ADAPTER_DEBUG" in body
             assert "ADAPTER_DEBUG_PARTS" in body
             assert "ADAPTER_SENSITIVE_LOGGING_ENABLE" in body
@@ -177,8 +195,10 @@ class TestConfigHTTPGet:
             assert "ADAPTER_TRACE_REASONING_MAX_CHARS" in body
             assert "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS" in body
             assert "ADAPTER_DEBUG_TRIM" in body
-            # Строковых text-полей в форме больше нет
-            assert 'type="text"' not in body
+            # Ровно одно text-поле — маппинг моделей (v0.9.3)
+            assert 'type="text"' in body
+            assert body.count('type="text"') == 1
+            assert "ADAPTER_MODELS_MAPPING" in body
             # TARGET-маршрутизация входов (v0.9.1): 3 выпадающих списка
             assert "ADAPTER_MESSAGES_TARGET" in body
             assert "ADAPTER_COMPLETIONS_TARGET" in body
@@ -212,8 +232,8 @@ class TestConfigHTTPPost:
                 port, "/config", "application/x-www-form-urlencoded", body
             )
             assert status == 200
-            # Should contain success message
-            assert "Применено:" in response_body or "ADAPTER_DEBUG" in response_body
+            # Плашки «Применено» больше нет (v0.9.3); значения видны в форме.
+            assert "Применено" not in response_body
 
             # Check values actually changed
             current = config.get_runtime_config()
@@ -442,6 +462,97 @@ class TestConfigHTTPPost:
             httpd.shutdown()
             httpd.server_close()
 
+    def test_post_mapping_applied_live(self, tmp_path):
+        """/config POST (form): ADAPTER_MODELS_MAPPING правится на лету.
+
+        v0.9.3: строка маппинга входит в runtime-пул; set_runtime_config
+        перестраивает config._MAP НА МЕСТЕ (server.py держит ссылку на
+        словарь через `from .config import _MAP`) — новый маппинг виден
+        следующему же запросу без перезапуска."""
+        _reload_config()
+        from backend_adapter import config
+        # Ссылка, как её держит server.py: должна обновиться на месте.
+        from backend_adapter.config import _MAP as ref
+        assert ref is config._MAP
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = "ADAPTER_MODELS_MAPPING=a:b,c:d".encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            assert "Применено" not in response_body
+            assert config.ADAPTER_MODELS_MAPPING == "a:b,c:d"
+            assert config.get_runtime_config()["ADAPTER_MODELS_MAPPING"] == "a:b,c:d"
+            # Словарь _MAP перестроен на месте — та же ссылка видит новый маппинг.
+            assert dict(ref) == {"a": "b", "c": "d"}
+            assert dict(config._MAP) == {"a": "b", "c": "d"}
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_mapping_empty_disables(self, tmp_path):
+        """/config POST: пустая строка маппинга валидна — _MAP очищается."""
+        _reload_config()
+        from backend_adapter import config
+        config.ADAPTER_MODELS_MAPPING = "a:b"
+        config._MAP.clear()
+        config._MAP.update({"a": "b"})
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = "ADAPTER_MODELS_MAPPING=".encode()
+            status, _ = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            assert config.ADAPTER_MODELS_MAPPING == ""
+            assert dict(config._MAP) == {}
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_mapping_json_applies(self, tmp_path):
+        """/config POST (JSON): строка маппинга применяется как есть."""
+        _reload_config()
+        from backend_adapter import config
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = json.dumps({"ADAPTER_MODELS_MAPPING": "x:y"}).encode()
+            status, _ = _http_post(port, "/config", "application/json", body)
+            assert status == 200
+            assert config.ADAPTER_MODELS_MAPPING == "x:y"
+            assert dict(config._MAP) == {"x": "y"}
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_mapping_wrong_type_ignored(self, tmp_path):
+        """/config POST (JSON): не-строка для маппинга игнорируется, сосед — нет."""
+        _reload_config()
+        from backend_adapter import config
+        before = config.ADAPTER_MODELS_MAPPING
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = json.dumps({
+                "ADAPTER_MODELS_MAPPING": 123,  # не строка
+                "ADAPTER_DEBUG": True,
+            }).encode()
+            status, response_body = _http_post(
+                port, "/config", "application/json", body
+            )
+            assert status == 200
+            assert config.ADAPTER_MODELS_MAPPING == before  # не изменился
+            assert "ADAPTER_MODELS_MAPPING" in response_body  # в «Игнорировано»
+            assert "Игнорировано" in response_body
+            assert config.ADAPTER_DEBUG is True  # соседний ключ применился
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
     def test_post_form_zero_int_applied(self, tmp_path):
         """/config POST (form): int-поле со значением «0» применяется (регресс v0.9.1).
 
@@ -474,8 +585,9 @@ class TestConfigHTTPPost:
             assert config.ADAPTER_TRACE_REASONING_MAX_CHARS == 0
             assert config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS == 0
             assert config.ADAPTER_DEBUG_TRIM == 0
+            # Ошибок нет → flash пуст (и плашки «Применено» тоже нет).
             assert "Игнорировано" not in response_body
-            assert "Применено:" in response_body
+            assert "Применено" not in response_body
         finally:
             httpd.shutdown()
             httpd.server_close()

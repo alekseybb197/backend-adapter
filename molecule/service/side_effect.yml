@@ -1,0 +1,313 @@
+---
+# Lifecycle step: after verify.yml has asserted the service is installed AND
+# running, first exercise the UPDATE path (re-run install.sh --service with the
+# NEW fixture, no env URL/token — they must be recovered from the old files),
+# then run `install.sh --delete` and assert the whole installation is gone.
+#
+# This lives in side_effect (not verify) because it mutates the container: the
+# install→verify pair must observe the service still present, and only then may
+# the update/teardown run. `--yes` skips the interactive confirmation (there is
+# no TTY in CI/molecule); the container is root, so the installer's sudo branch
+# is not exercised here.
+- name: Update the service installation and assert it
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    stub_bin_dir: /opt/molecule/stub-bin
+    calls_log: /opt/molecule/curl-calls.log
+    new_fixture: /opt/molecule/fixtures/backend-adapter-new
+    update_log: /opt/molecule/update.log
+    update_rc: /opt/molecule/update.rc
+    installed_bin: /usr/local/bin/backend-adapter
+    service_root: /var/lib/backend-adapter
+    service_unit: /etc/systemd/system/backend-adapter.service
+    backend_base: https://llm.example.test
+    backend_key: molecule-test-token
+
+  tasks:
+    - name: Read the running service PID (pre-update)
+      # --value prints just the number (systemd 230+; ubuntu 24.04 has it).
+      ansible.builtin.command: systemctl show -p MainPID --value backend-adapter.service
+      register: pid_before
+      changed_when: false
+      retries: 15
+      delay: 2
+      until: pid_before.stdout | trim is match('^[1-9][0-9]*$')
+
+    - name: Remember the pre-update PID
+      ansible.builtin.set_fact:
+        old_main_pid: "{{ pid_before.stdout | trim }}"
+
+    - name: Truncate the stub call log before the update run
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ calls_log }}"
+        mode: "0644"
+
+    - name: Run install.sh --service again with the NEW fixture (update path)
+      # No ADAPTER_SERVICE_BACKEND_BASE/KEY on purpose: the installer must
+      # recover the URL (from adapter.yaml) and token (from adapter.env) of the
+      # existing install. STUB_FIXTURE hands back the newer v0.9.3 asset.
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          env -u ADAPTER_BACKEND_CONFIG \
+              STUB_FIXTURE="{{ new_fixture }}" \
+              PATH="{{ stub_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              bash {{ stage_dir }}/install.sh --service > {{ update_log }} 2>&1
+          printf '%s' "$?" > {{ update_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Wait for the updated service to come back active
+      ansible.builtin.command: "systemctl {{ item }} backend-adapter.service"
+      loop:
+        - is-enabled
+        - is-active
+      register: unit_after_state
+      changed_when: false
+      failed_when: false
+      retries: 15
+      delay: 2
+      until: unit_after_state is not failed
+
+    - name: Read the updated service PID (post-update)
+      ansible.builtin.command: systemctl show -p MainPID --value backend-adapter.service
+      register: pid_after
+      changed_when: false
+      failed_when: false
+
+    - name: Run the installed binary to read its version
+      ansible.builtin.command:
+        cmd: "{{ installed_bin }}"
+      environment:
+        ADAPTER_BACKEND_CONFIG: ""
+      register: updated_binary
+      failed_when: false
+      changed_when: false
+
+    - name: Find the timestamped config backups
+      ansible.builtin.find:
+        paths: "{{ service_root }}"
+        patterns:
+          - "adapter.yaml.*.bak"
+          - "adapter.env.*.bak"
+      register: backups
+
+    - name: Read the update log, rc, curl calls and the regenerated configs
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ update_rc }}"
+        - "{{ update_log }}"
+        - "{{ calls_log }}"
+        - "{{ service_root }}/adapter.env"
+        - "{{ service_root }}/adapter.yaml"
+      register: captured
+
+    - name: Decode the captured files
+      ansible.builtin.set_fact:
+        update_rc_text: "{{ captured.results[0].content | b64decode }}"
+        update_log_text: "{{ captured.results[1].content | b64decode }}"
+        curl_calls: >-
+          {{ (captured.results[2].content | b64decode).splitlines()
+             | reject('equalto', '') | list }}
+        new_env_text: "{{ captured.results[3].content | b64decode }}"
+        new_yaml_text: "{{ captured.results[4].content | b64decode }}"
+        unit_after_enabled: "{{ unit_after_state.results[0].stdout | default('') | trim }}"
+        unit_after_active: "{{ unit_after_state.results[1].stdout | default('') | trim }}"
+        new_main_pid: "{{ pid_after.stdout | default('') | trim }}"
+
+    - name: Read the newest env backup to compare the token
+      ansible.builtin.slurp:
+        src: "{{ backups.files | map(attribute='path') | select('search', 'adapter.env.*\\.bak$') | sort | last }}"
+      register: env_backup
+      when: backups.matched > 0
+
+    - name: Assert the service update contract
+      ansible.builtin.assert:
+        that:
+          # 1. detection: the installer found the previous install
+          - update_rc_text | trim == "0"
+          - "'Mode:      update' in update_log_text"
+          # 2. newer version recognised and reported
+          - "'Updating v0.9.2 -> v0.9.3' in update_log_text"
+          # 3. stop + 6. restart: a NEW process is running the service
+          - unit_after_active == 'active'
+          - unit_after_enabled == 'enabled'
+          - new_main_pid | length > 0
+          - new_main_pid != old_main_pid
+          # 4. the binary was replaced (new version)
+          - "'Backend-Adapter v0.9.3' in updated_binary.stdout"
+          # 5. timestamped backups exist
+          - backups.matched >= 2
+          # 5. configs regenerated, keeping the previous URL and token
+          - "'base: ' ~ backend_base in new_yaml_text"
+          - "'ADAPTER_BACKEND_KEY_MAIN=' ~ backend_key in new_env_text"
+          # ...and the token is preserved in the env backup too
+          - "'ADAPTER_BACKEND_KEY_MAIN=' ~ backend_key in (env_backup.content | default('') | b64decode)"
+          # same release URL, exactly one download
+          - curl_calls | length == 1
+        fail_msg: |
+          install.sh --service update contract violated.
+          update rc    = {{ update_rc_text | trim }}
+          old pid      = {{ old_main_pid }}
+          new pid      = {{ new_main_pid }}
+          unit active  = {{ unit_after_active }} ({{ unit_after_enabled }})
+          backups      = {{ backups.files | map(attribute='path') | list }}
+          binary out   = {{ updated_binary.stdout }}
+          --- new adapter.yaml ---
+          {{ new_yaml_text }}
+          --- new adapter.env ---
+          {{ new_env_text }}
+          --- update.log ---
+          {{ update_log_text }}
+
+- name: Delete the installation and assert it is gone
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    install_log: /opt/molecule/install.log
+    install_rc: /opt/molecule/install.rc
+    delete_log: /opt/molecule/delete.log
+    delete_rc: /opt/molecule/delete.rc
+    delete_log2: /opt/molecule/delete2.log
+    delete_rc2: /opt/molecule/delete2.rc
+    conflict_rc: /opt/molecule/conflict.rc
+    installed_bin: /usr/local/bin/backend-adapter
+    service_root: /var/lib/backend-adapter
+    service_unit: /etc/systemd/system/backend-adapter.service
+    service_user: backend-adapter
+
+  tasks:
+    - name: Run install.sh --delete --yes (stdout+stderr captured)
+      # set +e: a non-zero exit is asserted below, not here.
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          bash {{ stage_dir }}/install.sh --delete --yes > {{ delete_log }} 2>&1
+          printf '%s' "$?" > {{ delete_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the delete log and rc
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ delete_rc }}"
+        - "{{ delete_log }}"
+      register: captured
+
+    - name: Decode the delete result
+      ansible.builtin.set_fact:
+        delete_rc_text: "{{ captured.results[0].content | b64decode }}"
+        delete_log_text: "{{ captured.results[1].content | b64decode }}"
+
+    - name: Stat the artifacts the installer created
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ installed_bin }}"
+        - "{{ service_root }}"
+        - "{{ service_unit }}"
+      register: removed
+
+    - name: Look up the service user
+      # `getent passwd <user>` exits 2 when the key is absent. The getent module
+      # cannot express this: with failed_when: false it is still reported as
+      # succeeded, which would make the assertion below vacuous. Use a raw
+      # command and assert on rc instead.
+      ansible.builtin.command: getent passwd {{ service_user }}
+      register: service_passwd
+      changed_when: false
+      failed_when: false
+
+    - name: Query the unit state
+      ansible.builtin.command: "systemctl {{ item }} backend-adapter.service"
+      loop:
+        - is-enabled
+        - is-active
+      register: unit_state
+      changed_when: false
+      failed_when: false
+
+    - name: Read the unit state
+      ansible.builtin.set_fact:
+        unit_enabled: "{{ unit_state.results[0].stdout | default('') | trim }}"
+        unit_active: "{{ unit_state.results[1].stdout | default('') | trim }}"
+
+    - name: Assert the uninstall contract
+      ansible.builtin.assert:
+        that:
+          # 1. the installer itself succeeded
+          - delete_rc_text | trim == "0"
+          - "'Uninstall complete.' in delete_log_text"
+          # 2. every artifact is gone
+          - not removed.results[0].stat.exists          # binary
+          - not removed.results[1].stat.exists          # state dir (token)
+          - not removed.results[2].stat.exists          # unit
+          # 3. the dedicated service user is gone too (getent rc 2 = not found)
+          - service_passwd.rc != 0
+          # 4. systemd no longer knows the unit as enabled/active
+          - unit_enabled != 'enabled'
+          - unit_active != 'active'
+        fail_msg: |
+          install.sh --delete contract violated.
+          delete rc     = {{ delete_rc_text | trim }}
+          binary exists = {{ removed.results[0].stat.exists }}
+          root  exists  = {{ removed.results[1].stat.exists }}
+          unit  exists  = {{ removed.results[2].stat.exists }}
+          user  found   = {{ service_passwd.rc == 0 }}
+          unit enabled  = {{ unit_enabled }}
+          unit active   = {{ unit_active }}
+          --- delete.log ---
+          {{ delete_log_text }}
+
+    - name: Run install.sh --delete --yes a second time (idempotence)
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          bash {{ stage_dir }}/install.sh --delete --yes > {{ delete_log2 }} 2>&1
+          printf '%s' "$?" > {{ delete_rc2 }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the second delete rc
+      ansible.builtin.slurp:
+        src: "{{ delete_rc2 }}"
+      register: captured2
+
+    - name: Assert --delete is idempotent
+      ansible.builtin.assert:
+        that:
+          - (captured2.content | b64decode | trim) == "0"
+        fail_msg: >-
+          A second `install.sh --delete --yes` must succeed as a no-op, but it
+          exited {{ captured2.content | b64decode | trim }}.
+
+    - name: Run install.sh with conflicting --service --delete
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          bash {{ stage_dir }}/install.sh --service --delete > /dev/null 2>&1
+          printf '%s' "$?" > {{ conflict_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Read the conflict rc
+      ansible.builtin.slurp:
+        src: "{{ conflict_rc }}"
+      register: captured3
+
+    - name: Assert --service and --delete are rejected together
+      ansible.builtin.assert:
+        that:
+          - (captured3.content | b64decode | trim) != "0"
+        fail_msg: >-
+          Combining --service and --delete must fail, but install.sh exited 0.

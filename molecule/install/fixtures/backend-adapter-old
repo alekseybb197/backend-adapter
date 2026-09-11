@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fixture stand-in for the PREVIOUS release binary `backend-adapter` (v0.9.2).
+#
+# Used by the update tests: converge installs this version, then a re-run of
+# install.sh must detect it, see the newer fixture (backend-adapter-new,
+# v0.9.3) and update. Same contract as the generic fixture — see the comment in
+# `backend-adapter` (empty config -> banner + [FATAL] + exit 1; non-empty ->
+# keep running) — only the banner version differs.
+echo "Backend-Adapter v0.9.2"
+echo "======================================================================"
+
+if [ -z "${ADAPTER_BACKEND_CONFIG:-}" ]; then
+  echo "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
+  exit 1
+fi
+
+echo "fixture: config present, running (sleep infinity)"
+exec sleep infinity

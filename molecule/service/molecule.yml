@@ -1,0 +1,59 @@
+---
+# Scenario: offline, container-only verification of `install.sh --service`
+# on Linux — the SYSTEM systemd unit path.
+#
+# Unlike the `install` scenario this one runs a real systemd as PID 1, so the
+# container needs privileged mode, the host cgroup namespace and a /run tmpfs;
+# that is the only reason the two scenarios are not one.
+#
+# Still offline: the same PATH stub for `curl` fabricates the release asset
+# (fixtures are shared with the `install` scenario) and no traffic reaches
+# github.com. Backend URL and token are supplied through the installer's
+# non-interactive env vars, so no TTY is required.
+driver:
+  name: docker
+
+platforms:
+  - name: backend-adapter-service
+    image: ubuntu:24.04
+    dockerfile: Dockerfile.j2
+    pre_build_image: false
+    # systemd as PID 1 needs all of these; see Dockerfile.j2 for the image side.
+    command: /sbin/init
+    privileged: true
+    cgroupns_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    # /tmp is a tmpfs and therefore noexec (Docker's default tmpfs options):
+    # the installer's version probe must not be run from /tmp here — it falls
+    # back to /var/tmp (make_workdir in install.sh). Keep /tmp noexec: it
+    # mirrors hardened hosts and guards that fallback.
+    tmpfs:
+      - /run
+      - /tmp
+
+provisioner:
+  name: ansible
+  log: true
+
+verifier:
+  name: ansible
+
+scenario:
+  name: service
+  # idempotence is intentionally absent: converge truncates the stub call log
+  # and reinstalls, so a second converge would append a second URL line.
+  #
+  # side_effect runs the full lifecycle on one container: converge installs the
+  # service, verify asserts it is up, side_effect then runs `install.sh --delete`
+  # and asserts everything is gone (unit, state dir, binary, service user).
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - verify
+    - side_effect
+    - destroy

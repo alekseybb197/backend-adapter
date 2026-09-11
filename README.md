@@ -1,6 +1,6 @@
 # backend-adapter — [CC] ↔ [OI] Backend Proxy
 
-> **v0.9.2** — HTTP-прокси-адаптер, позволяющий использовать **[CC]** (CLI)
+> **v0.9.3** — HTTP-прокси-адаптер, позволяющий использовать **[CC]** (CLI)
 > с бэкендом LLM, который реализует **[OI]-совместимый API** (`/v1/chat/completions`),
 > но некорректно реализует протокол Anthropic Messages API.
 
@@ -99,6 +99,9 @@ backend-adapter/
 │   │                           #   backend-adapter.service + com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
 │   └── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
+├── molecule/                   # molecule-тесты install.sh (Linux, ubuntu 24.04):
+│                               #   install — установка/обновление бинарника;
+│                               #   service — системный systemd, обновление и --delete
 └── requirements.txt            # Зависимости (единственная — PyYAML)
 ```
 

@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.2) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
+> **backend-adapter** (v0.9.3) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
 > с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
 > но некорректно обрабатывает протокол Anthropic Messages API.
 
@@ -69,6 +69,68 @@ venv/bin/pytest -v         # подробно, по одному тесту на
 - интеграционные тесты поднимают фейковый бэкенд на случайном порту
   (`ADAPTER_PROXY_PORT` в тестах — **9998**, порт 9999 не используется).
 
+### 2.1 Тест установщика (molecule)
+
+`install.sh` — bash-скрипт, поэтому `pytest` его не покрывает. Для него
+заведён отдельный **molecule**-сценарий `molecule/install/`: он поднимает
+контейнер **ubuntu 24.04**, прогоняет `install.sh` и проверяет контракт
+установки — бинарник скачивается, кладётся в `/usr/local/bin`, исполняем и
+работоспособен.
+
+Область первой итерации: только **Linux** и только **установка latest-бинарника**
+(без `--service`). Сети нет: `curl` подменяется PATH-стабом
+(`molecule/install/fixtures/curl`), который отдаёт фикстурный бинарник и
+записывает запрошенный URL — тест ассертит, что URL в точности равен
+`https://github.com/alekseybb197/backend-adapter/releases/latest/download/backend-adapter-<platform>`.
+
+Оба сценария покрывают и **обновление** (раздел [4.2](#42-установка-одной-строкой-curl--bash)):
+`converge` ставит «старую» фикстуру (`backend-adapter-old`, `v0.9.2`), а шаг
+`side_effect` повторно запускает установщик с «новой»
+(`backend-adapter-new`, `v0.9.3`) и ассертит обнаружение прежней установки
+(`Mode: update`), сообщение `Updating v0.9.2 -> v0.9.3`, подмену бинарника и
+ровно одну загрузку по тому же URL. В сценарии `service` дополнительно
+проверяются шаги сервисного обновления: смена `MainPID`, свежие
+timestamped-бэкапы `adapter.yaml`/`adapter.env`, сохранение прежнего адреса и
+токена в регенерированных конфигах и активный юнит после перезапуска;
+третий прогон с той же версией — успешный no-op (`Already up to date`).
+
+Второй сценарий, **`molecule/service/`**, проверяет `install.sh --service` на
+Linux с **настоящим systemd**: контейнер запускается с `systemd` как PID 1
+(privileged + host cgroup namespace, `molecule/service/molecule.yml`),
+установщик вызывается с `ADAPTER_SERVICE_BACKEND_BASE`/`ADAPTER_SERVICE_BACKEND_KEY`
+(диалог в CI невозможен), а `verify.yml` ассертит контракт сервиса —
+сервисный пользователь, конфиги в `/var/lib/backend-adapter` (в т.ч. права
+`0600` на env-файл с токеном), системный юнит и, главное,
+`systemctl is-enabled == enabled` **и** `is-active == active` (реальный
+запуск). На том же контейнере шаг `side_effect` (`side_effect.yml`) проверяет
+и **удаление**: запускает `install.sh --delete --yes` и ассертит, что юнит,
+каталог состояния, бинарник и сервисный пользователь исчезли, повторное
+удаление — успешный no-op, а `--service --delete` вместе — ошибка. Запуск:
+
+```bash
+PATH="$PWD/tmp/molecule-venv/bin:$PATH" tmp/molecule-venv/bin/molecule test -s service
+```
+
+molecule в `requirements-dev.txt` не входит (нужен только для этого
+сценария) — ставьте его в **отдельный** venv:
+
+```bash
+python3.12 -m venv tmp/molecule-venv
+tmp/molecule-venv/bin/pip install -r molecule/requirements-molecule.txt
+
+cd <repo>
+PATH="$PWD/tmp/molecule-venv/bin:$PATH" tmp/molecule-venv/bin/molecule test -s install
+```
+
+`PATH=` с venv-каталогом впереди обязателен: иначе molecule может подхватить
+системный `ansible-galaxy` другой версии. Сценарий называется `install`
+(не `default`) — всегда указывайте `-s install`. Требуется запущенный
+Docker. Быстрый цикл: `molecule converge -s install` / `verify` / `login` /
+`destroy`.
+
+В CI этот сценарий гоняется отдельным job `install-molecule`
+(`.github/workflows/ci.yml`).
+
 ---
 
 ## 3. Клонирование
@@ -124,6 +186,9 @@ backend-adapter/
 ├── scripts/
 │   ├── build-binaries.sh        # Сборка standalone-бинарников (PyInstaller)
 │   └── dev-run.sh               # Запуск из исходников (venv + конфиг)
+├── molecule/                    # molecule-сценарий установщика (см. раздел 2):
+│   ├── requirements-molecule.txt   #   зависимости molecule (отдельный venv)
+│   └── install/                    #   сценарий "install" (Linux, latest, ubuntu 24.04)
 ├── docs/
 │   ├── install.md               # Установка (этот файл)
 │   ├── environment.md           # Полный список env-переменных
@@ -166,8 +231,9 @@ backend-adapter/
 
 Быстрая установка бинарника с GitHub Releases — однострочным установщиком
 `install.sh` из корня репозитория. Скрипт сам определяет ОС/архитектуру,
-скачивает готовый бинарник и кладёт его в `/usr/local/bin` (или
-`~/.local/bin`, если нет прав на запись):
+скачивает бинарник последнего релиза и кладёт его в **фиксированный для
+платформы** путь: Linux → `/usr/local/bin` (при отсутствии прав — через
+`sudo`), macOS → `~/.local/bin` (per-user, без `sudo`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash
@@ -187,42 +253,135 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 Установка бинарника **и** сервиса автозапуска одной командой:
 
 ```bash
-# Linux: user-юнит systemd (systemctl --user); macOS: launchd-агент
+# Linux: системный юнит systemd (/etc/systemd/system), нужен root;
+# macOS: launchd-агент текущего пользователя
 curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash -s -- --service
 ```
 
-`--service` **не запускает** сервис сразу: он пишет свежий user-level юнит
-(указывающий на установленный бинарник), env-файл со значениями по
-умолчанию и пустым `ADAPTER_BACKEND_CONFIG` и включает автозапуск. После
-установки заполните `ADAPTER_BACKEND_CONFIG` (в env-файле на Linux / в
-`EnvironmentVariables` plist на macOS — launchd не читает env-файлы) и
-запустите сервис вручную. Системные шаблоны репозитория
-(`docs/samples/backend-adapter.service`,
+**Linux (`--service`).** Установщик ставит **системный** systemd-юнит
+(`/etc/systemd/system/backend-adapter.service`, `WantedBy=multi-user.target`)
+и **сразу запускает** его (`systemctl enable --now`). Сервис работает от
+выделенного непривилегированного пользователя `backend-adapter`
+(`useradd --system --no-create-home`) с корневым каталогом состояния
+**`/var/lib/backend-adapter`**, где установщик генерирует **готовый к работе**
+конфиг:
+
+- `/var/lib/backend-adapter/adapter.yaml` — один провайдер `main`
+  (`base` — адрес бэкенда, `key: ADAPTER_BACKEND_KEY_MAIN` — *имя* переменной
+  с токеном), права `0640`, владелец `backend-adapter`;
+- `/var/lib/backend-adapter/adapter.env` — минимально достаточный набор
+  (`ADAPTER_BACKEND_CONFIG`, `ADAPTER_BACKEND_KEY_MAIN`, `ADAPTER_PROXY_PORT`,
+  `ADAPTER_ENDPOINT_HOST`, `ADAPTER_DEBUG_ENABLE`,
+  `ADAPTER_DEBUG_LOGPATH`, `ADAPTER_DETACH_ENABLE=0`), права `0600`,
+  владелец `root` (токен; systemd читает `EnvironmentFile` от root).
+
+Адрес бэкенда и токен установщик **запрашивает в диалоге** (URL — обычным
+вводом, токен — без эха). При запуске не от root установщик повышает права
+через `sudo` (проверьте, что он доступен). Для неинтерактивных прогонов
+(CI, скрипты) значения передаются переменными окружения
+`ADAPTER_SERVICE_BACKEND_BASE` и `ADAPTER_SERVICE_BACKEND_KEY` — тогда диалог
+не вызывается. Каталог состояния и имя сервисного пользователя
+переопределяются через `ADAPTER_SERVICE_ROOT` / `ADAPTER_SERVICE_USER`.
+
+Управление сервисом (пути/команды печатает установщик в конце):
+
+```bash
+systemctl status backend-adapter
+systemctl restart backend-adapter
+journalctl -u backend-adapter -f
+```
+
+**macOS (`--service`).** Ставится launchd-агент текущего пользователя
+(`~/Library/LaunchAgents`); launchd не читает env-файлы, поэтому переменные
+вписаны прямо в plist, а рядом лежит env-файл-образец для копирования.
+В отличие от Linux, агент **не запускается** сразу: заполните
+`ADAPTER_BACKEND_CONFIG` в plist и загрузите его вручную. Системные шаблоны
+репозитория (`docs/samples/backend-adapter.service`,
 `docs/samples/com.user.backend-adapter.plist`) рассчитаны на запуск из
 исходников; для бинарника юнит генерируется установщиком.
+
+Удаление установленного бинарника и сервиса (**только Linux**):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | bash -s -- --delete
+```
+
+`--delete` снимает всё, что поставил установщик: останавливает и удаляет
+systemd-юнит (`systemctl disable --now`), каталог состояния
+`/var/lib/backend-adapter` (в нём `adapter.yaml`, логи и **токен** в
+`adapter.env`), бинарник `/usr/local/bin/backend-adapter` и сервисного
+пользователя `backend-adapter`. Операция идемпотентна: отсутствующие объекты
+пропускаются, повторный запуск — успешный no-op. Требует root (при запуске не
+от root используется `sudo`). Для неинтерактивного удаления (CI, скрипты)
+добавьте `--yes` или `ADAPTER_DELETE_YES=1`. На macOS режим пока **не
+поддерживается** — установщик завершится с явной ошибкой и подсказкой, как
+снять launchd-агент вручную (раздел [9.2](#92-macos--launchd)). Ключи
+`--delete` и `--service` взаимоисключающие.
+
+**Обновление.** Повторный запуск установщика **автоматически** переходит в
+режим обновления — отдельного флага не нужно: обнаружив прежнюю установку
+(бинарник, systemd-юнит или каталог состояния), скрипт печатает
+`Mode: update` и действует по шагам:
+
+1. **скачивает** бинарник последнего релиза во временный каталог, **не
+   трогая** установленный;
+2. **сравнивает версии** по баннеру: и скачанный, и установленный бинарник
+   запускаются с пустым `ADAPTER_BACKEND_CONFIG` и печатают
+   `Backend-Adapter vX.Y.Z` (сравнение покомпонентное, поэтому `0.9.10`
+   старше `1.0.0`, но новее `0.9.2`; GitHub API не используется);
+3. если скачанная версия **не новее** установленной — сообщает
+   `Already up to date (vX.Y.Z)` и завершается успешно, **ничего не меняя**
+   (no-op; бинарник, конфиги и сервис не трогаются);
+4. если версия новее — **останавливает** сервис (при `--service` или
+   обнаруженном юните);
+5. **бэкапит** прежние настройки с отметкой времени:
+   `/var/lib/backend-adapter/adapter.yaml.<YYYYmmdd-HHMMSS>.bak`,
+   `adapter.env.<…>.bak` (права `0600` — в нём токен) и
+   `backend-adapter.service.<…>.bak`;
+6. **обновляет бинарник** и **перегенерирует** конфиги/юнит по шаблонам
+   новой версии, **сохраняя** прежние адрес бэкенда (`base:`) и токен: они
+   восстанавливаются из старых `adapter.yaml`/`adapter.env`, если не заданы
+   переменными `ADAPTER_SERVICE_BACKEND_BASE`/`ADAPTER_SERVICE_BACKEND_KEY`;
+7. **запускает сервис заново** (`daemon-reload` + `systemctl enable --now`).
+
+При обновлении без сервиса (бинарник-only) выполняются шаги 1–3 и 6. На
+macOS обновляется бинарник и (при `--service` или найденном plist)
+перегенерируется launchd-агент с бэкапом файлов; агент, как и при первичной
+установке, **не запускается** автоматически. Если версию установленного
+бинарника определить не удалось (нестандартный файл), установщик
+предупреждает и продолжает обновление.
 
 Опции:
 
 | Опция | Действие |
 |---|---|
-| `--prefix DIR` | Каталог установки (по умолчанию `/usr/local/bin`) |
-| `--service` | Дополнительно сгенерировать и включить сервис автозапуска: user-юнит systemd (Linux) / launchd-агент (macOS) |
-| `--pip` | Установить из исходников (git clone + venv), а не бинарник |
+| `--service` | Дополнительно установить сервис автозапуска для бинарника. **Linux:** системный systemd-юнит с сервисным пользователем и готовым конфигом в `/var/lib/backend-adapter`, включается и **запускается сразу** (нужен root/`sudo`). **macOS:** launchd-агент пользователя (не запускается сразу — заполните `ADAPTER_BACKEND_CONFIG`) |
+| `--delete` | Удалить установленный бинарник и сервис (Linux): юнит, каталог `/var/lib/backend-adapter`, бинарник и сервисного пользователя. Нужен root; macOS пока не поддерживается; взаимоисключающий с `--service` |
+| `--yes`, `-y` | Пропустить подтверждение `--delete` (для скриптов/CI) |
 | `--help` | Показать справку |
 
-Те же значения задаются переменными окружения `INSTALL_DIR`,
-`SERVICE_INSTALL`, `USE_PIP` (1/0).
+Каталог установки фиксирован per-platform и **не переопределяется**: Linux →
+`/usr/local/bin`, macOS → `~/.local/bin`. Установка — только бинарник
+последнего релиза; сценарии `--pip` (из исходников) и `--prefix` (свой
+каталог) удалены — для установки из исходников используйте `git clone` +
+venv (раздел [3](#3-клонирование)). Включить сервис можно и переменной
+окружения `SERVICE_INSTALL=1` (эквивалент `--service`), удаление —
+`DELETE_INSTALL=1` (эквивалент `--delete`), пропуск подтверждения —
+`ADAPTER_DELETE_YES=1` (эквивалент `--yes`).
 
-> **--pip — установка из исходников.** `pip install .` (wheel) не
-> поддерживается: в wheel входит только пакет `backend_adapter/`, а
-> консольная команда `backend-adapter` (`backend_adapter/cli.py`) исполняет
-> соседний `backend-adapter.py` через runpy — в wheel его нет. Поэтому
-> `--pip` клонирует репозиторий в `<prefix>/src` и ставит его в venv
-> в editable-режиме (`backend-adapter.py` остаётся рядом с пакетом).
+> **Windows.** Bash-установщик Windows не поддерживает: он завершится с
+> явной ошибкой и ссылкой на будущий PowerShell-установщик (`install.ps1`)
+> или WSL. В WSL платформа определяется как Linux.
 
 > **Security note.** Установщик общается только с github.com (официальные
-> релизы и файлы этого репозитория); установка и сервис — в пределах
-> текущего пользователя (user-level systemd/launchd, без root).
+> релизы и файлы этого репозитория). Установка бинарника — в пределах
+> текущего пользователя (Linux — `/usr/local/bin`; при отсутствии прав
+> `sudo`). Режимы `--service` и `--delete` на Linux работают с **системным**
+> юнитом и требуют root: `--service` создаёт сервисного пользователя, каталог
+> `/var/lib/backend-adapter` и запускает сервис; `--delete` удаляет их
+> безвозвратно (включая каталог с токеном), поэтому спрашивает подтверждение
+> `y/N` (обход — `--yes`). Токен хранится в
+> `/var/lib/backend-adapter/adapter.env` с правами `0600` (владелец root).
 > Перед выполнением просмотрите скрипт:
 > `curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/install.sh | less`
 
@@ -623,7 +782,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.9.2 (...
+Claude Code Adapter v0.9.3 (...
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -784,6 +943,12 @@ Adapter cannot start. Exiting.
 отладочный detach-режим (раздел 6.2).
 
 ### 9.1 Linux — systemd
+
+> **Бинарник из установщика.** Если адаптер установлен через `install.sh`
+> (раздел [4.2](#42-установка-одной-строкой-curl--bash)), режим `--service`
+> уже ставит **системный** systemd-юнит автоматически: сервисный пользователь
+> `backend-adapter`, конфиг в `/var/lib/backend-adapter`, `enable --now`.
+> Раздел ниже описывает ручную установку **из исходников** (user-level юнит).
 
 Юнит `backend-adapter.service` (шаблон для запуска из исходников — в
 `docs/samples/`) рассчитан на установку исходников в `~/backend-adapter`

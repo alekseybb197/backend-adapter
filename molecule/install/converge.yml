@@ -1,0 +1,44 @@
+---
+# Run the installer with a PATH whose first entry is the curl stub, so the
+# "download" happens offline and the requested URL is recorded.
+- name: Run install.sh against the offline curl stub
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    stub_bin_dir: /opt/molecule/stub-bin
+    install_log: /opt/molecule/install.log
+    install_rc: /opt/molecule/install.rc
+    # First install uses the OLD release (v0.9.2); side_effect re-runs the
+    # installer with the NEW one (v0.9.3) to exercise the update path.
+    old_fixture: /opt/molecule/fixtures/backend-adapter-old
+
+  tasks:
+    - name: Truncate the stub call log before the single installer run
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ stage_dir }}/curl-calls.log"
+        mode: "0644"
+
+    - name: Run install.sh (stdout+stderr captured for verify.yml)
+      # set +e: a non-zero exit is asserted in verify.yml, not here.
+      # ADAPTER_BACKEND_CONFIG is removed from the environment so the installed
+      # fixture takes its [FATAL] early-exit branch, exactly like the real
+      # binary would with an empty config.
+      # STUB_FIXTURE selects the asset the curl stub hands back.
+      ansible.builtin.shell:
+        cmd: |
+          set +e
+          env -u ADAPTER_BACKEND_CONFIG \
+              STUB_FIXTURE="{{ old_fixture }}" \
+              PATH="{{ stub_bin_dir }}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+              bash {{ stage_dir }}/install.sh > {{ install_log }} 2>&1
+          printf '%s' "$?" > {{ install_rc }}
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Show the installer output in the molecule log
+      ansible.builtin.command: cat {{ install_log }}
+      changed_when: false

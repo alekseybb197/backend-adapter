@@ -1,0 +1,60 @@
+---
+# Scenario: offline, container-only verification of the release-binary installer.
+#
+# Deliberately NOT covered here:
+#   * no traffic to github.com — a PATH stub for `curl` fabricates the release
+#     asset and records the requested URL (fixtures/curl + verify.yml);
+#   * no --service — install_systemd/install_launchd are out of scope, which is
+#     exactly why the container needs neither systemd, nor privileged mode, nor
+#     a cgroup namespace override.
+#
+# Syntax note: this is the classic (pre "ansible-native") molecule.yml. It is
+# still the documented, working form for molecule 25.x/26.x with
+# molecule-plugins[docker]; the platform keys below are validated against
+# molecule_plugins/docker/schema/driver.json (additionalProperties: false).
+driver:
+  name: docker
+
+platforms:
+  - name: backend-adapter-install
+    image: ubuntu:24.04          # build tag; combined with dockerfile -> molecule_local/ubuntu:24.04
+    dockerfile: Dockerfile.j2    # resolved relative to this scenario directory
+    pre_build_image: false       # explicit: build from Dockerfile.j2
+    command: sleep infinity      # override_command defaults true, so this wins
+    # privileged / cgroupns_mode / tmpfs / cgroup mounts are NOT needed:
+    # no systemd is started (converge runs install.sh without --service).
+    # Add them only if a future scenario exercises `install.sh --service`.
+
+provisioner:
+  name: ansible
+  log: true
+
+verifier:
+  name: ansible                  # runs this scenario's verify.yml
+
+scenario:
+  name: install
+  # idempotence is intentionally absent: converge truncates the stub call log
+  # and installs over the previous copy, so a second converge would append a
+  # second URL line and make "exactly one download" meaningless.
+  #
+  # side_effect runs the update lifecycle on the same container: converge
+  # installs the OLD fixture (v0.9.2), then side_effect re-runs install.sh with
+  # the NEW fixture (v0.9.3) and asserts the binary was updated, plus that a
+  # third run on the same version is a no-op.
+  #
+  # dependency MUST stay: it is the only step that installs the docker driver's
+  # required collections (community.docker / ansible.posix, see
+  # molecule/dependency/base.py). Without it a clean environment cannot run
+  # create. collections.yml pins those two explicitly; requirements.yml is an
+  # empty roles list (this scenario uses no Galaxy roles).
+  test_sequence:
+    - dependency
+    - destroy
+    - syntax
+    - create
+    - prepare
+    - converge
+    - verify
+    - side_effect
+    - destroy

@@ -60,6 +60,10 @@ webui_status._sessions_rows_html).
 Модуль — лист DAG: на верхнем уровне импортирует только ``backend_adapter.
 config`` (корень DAG). Потребители — server.py (пишет) и webui_status.py
 (читает/рендерит + JSON-эндпойнт).
+
+Удаление строки вручную — ``delete_key`` (кнопка 🗑 в конце строки таблицы
+Sessions): строка убирается из памяти процесса. Таблица не персистентна,
+поэтому повторное обращение тем же кортежем создаст строку заново.
 """
 
 from __future__ import annotations
@@ -84,6 +88,7 @@ __all__ = [
     "key_json",
     "register",
     "record_error",
+    "delete_key",
     "sessions_snapshot",
 ]
 
@@ -180,6 +185,25 @@ def record_error(key: SessionKey | None) -> None:
             row["errors"] += 1
     except Exception:
         pass
+
+
+def delete_key(key: SessionKey) -> bool:
+    """Удалить строку-кортеж из реестра (кнопка 🗑 в таблице Sessions WEBUI).
+
+    Возвращает True, если строка была и удалена; False — строки нет (второй
+    клик по кнопке, кортеж уже вытеснен по лимиту или пересоздан заново).
+    Таблица НЕ персистентна — удаление только из памяти процесса; повторное
+    обращение тем же кортежем создаст строку заново (см. register). Не бросает
+    исключений наружу — вызывающий (эндпойнт) решает, что ответить. Точка
+    вызова — SessionDeleteEndpoint (POST /api/sessions/delete)."""
+    try:
+        with _TABLE_LOCK:
+            existed = key in _TABLE
+            if existed:
+                del _TABLE[key]
+        return existed
+    except Exception:
+        return False
 
 
 def sessions_snapshot() -> list[dict[str, Any]]:

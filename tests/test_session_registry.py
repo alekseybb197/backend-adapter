@@ -17,6 +17,8 @@ Tests cover:
   - sessions_snapshot: копии строк, порядок по _ts desc (новые сверху),
     всплытие строки при новом обращении, без служебного _ts, поле "key"
   - снимок — копия: мутация выдачи не меняет реестр
+  - delete_key: удаляет существующую строку (True), отсутствующую — False,
+    не трогает соседние строки; повторное удаление — False
 
 Модуль берётся фикстурой (не импортом на уровне файла): autouse fresh_env
 удаляет backend_adapter* из sys.modules и переимпортирует config перед каждым
@@ -169,6 +171,40 @@ class TestRecordError:
         rows = {r["model"]: r for r in reg.sessions_snapshot()}
         assert rows["m1"]["errors"] == 1
         assert rows["m2"]["errors"] == 0
+
+
+class TestDeleteKey:
+    def test_deletes_existing_row(self, reg):
+        key = _reg(reg, session="s-del")
+        assert reg.sessions_snapshot()
+        assert reg.delete_key(key) is True
+        assert reg.sessions_snapshot() == []
+
+    def test_missing_key_returns_false(self, reg):
+        # Строки нет (или уже удалена) — False, исключений нет.
+        assert reg.delete_key(("ghost", "a", "m", "b", "r")) is False
+
+    def test_delete_is_not_idempotent(self, reg):
+        # Повторное удаление той же строки — False (она уже исчезла).
+        key = _reg(reg)
+        assert reg.delete_key(key) is True
+        assert reg.delete_key(key) is False
+
+    def test_deletes_only_target_row(self, reg):
+        # Удаляется ровно одна строка-кортеж, соседние (в т.ч. той же
+        # сессии, но с другой моделью) остаются.
+        keep = _reg(reg, session="s", model="m1")
+        drop = _reg(reg, session="s", model="m2")
+        assert reg.delete_key(drop) is True
+        rows = reg.sessions_snapshot()
+        assert [r["model"] for r in rows] == ["m1"]
+        assert keep is not None and reg.delete_key(keep) is True
+        assert reg.sessions_snapshot() == []
+
+    def test_no_exceptions_escape(self, reg):
+        # Удаление не должно ронять запрос: исключение внутри глушится → False.
+        with mock.patch.object(reg, "_TABLE", None):
+            assert reg.delete_key(("s", "a", "m", "b", "r")) is False
 
 
 class TestSnapshot:

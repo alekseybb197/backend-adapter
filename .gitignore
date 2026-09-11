@@ -2,6 +2,8 @@
 .claude/
 local-adapter.env
 local-adapter.yaml
+# molecule ephemeral directory (created in the repo root by `molecule test`)
+.molecule/
 # Рабочие копии конфигов (копируются из docs/samples/, содержат токены)
 adapter.env
 adapter.yaml

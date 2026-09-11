@@ -97,6 +97,49 @@ jobs:
           python -c "import importlib; m = importlib.import_module('backend_adapter.cli'); assert callable(m.main); print('CLI entry point OK')"
           python -c "from backend_adapter.config import PROXY_PORT; print('Config import OK')"
 
+  install-molecule:
+    name: Install Script (molecule, docker)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install molecule
+        # molecule is not part of requirements-dev.txt — it is needed only for
+        # this scenario (see molecule/requirements-molecule.txt).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r molecule/requirements-molecule.txt
+
+      - name: Show docker info
+        run: docker version
+
+      - name: Run molecule scenario
+        # The scenario never reaches github.com: a PATH stub for curl
+        # fabricates the release asset and records the requested URL.
+        # -s install is required — the scenario is not named "default".
+        run: molecule test -s install
+        env:
+          ANSIBLE_FORCE_COLOR: '1'
+          PY_COLORS: '1'
+
+      - name: Run molecule service scenario
+        # `install.sh --service` installs a SYSTEM systemd unit and asserts it
+        # actually starts (is-active=active), so the scenario needs a container
+        # running systemd as PID 1 — hence a privileged container with the host
+        # cgroup namespace (see molecule/service/molecule.yml). The GitHub
+        # runner is a systemd host with cgroup v2, so this works there.
+        run: molecule test -s service
+        env:
+          ANSIBLE_FORCE_COLOR: '1'
+          PY_COLORS: '1'
+
   webui-smoke:
     name: WEBUI Smoke Test
     runs-on: ubuntu-latest

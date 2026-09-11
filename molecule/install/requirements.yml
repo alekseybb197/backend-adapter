@@ -1,0 +1,4 @@
+---
+# No Galaxy roles are used by this scenario; the empty list keeps the
+# dependency step warning-free.
+roles: []

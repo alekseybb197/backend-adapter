@@ -478,18 +478,24 @@ def _sessions_rows_html(rows: list[dict]) -> str:
 
     ``rows`` — session_registry.sessions_snapshot() (уже отсортирован: новые
     сверху). Колонки: Сессия | Агент | Модель | Бэкенд | Маршрут | Последнее
-    обращение | Вызовов | Ошибок. Одна сессия может занимать НЕСКОЛЬКО строк
-    (сменила модель/обработчик) — поэтому ``session`` не уникален: строка
-    несёт data-key с JSON-строкой всего кортежа, и JS sessions_poll
-    сопоставляет строки по нему (порядок меняется при всплытии строки вверх,
-    в отличие от позиционного сопоставления Models in use). data-session
-    (полный session_id) остаётся для наглядности/отладки. Сессия —
+    обращение | Вызовов | Ошибок | Actions. Одна сессия может занимать
+    НЕСКОЛЬКО строк (сменила модель/обработчик) — поэтому ``session`` не
+    уникален: строка несёт data-key с JSON-строкой всего кортежа, и JS
+    sessions_poll сопоставляет строки по нему (порядок меняется при всплытии
+    строки вверх, в отличие от позиционного сопоставления Models in use).
+    data-session (полный session_id) остаётся для наглядности/отладки. Сессия —
     UUID-подобный id: показываем первые 8 символов в <code>, полный id — в
-    title (36 символов не влезают в колонку). Все значения — html.escape."""
+    title (36 символов не влезают в колонку). Все значения — html.escape.
+    Последняя ячейка — форма-кнопка 🗑 (удаление строки из памяти,
+    POST /api/sessions/delete?key=<JSON-строка кортежа>): как у строк Models
+    in use, без JS — PRG через 303. Имя сессии/агента в query не попадают —
+    только key (компактная JSON-строка кортежа), поэтому URL не разрастается
+    и не требует отдельных параметров на каждую колонку."""
     body = []
     for r in rows:
         session = str(r.get("session", ""))
         key = str(r.get("key", ""))
+        q = quote(key, safe="")
         body.append(
             f'<tr data-session="{html.escape(session)}" data-key="{html.escape(key)}">'
             f'<td><code title="{html.escape(session)}">{html.escape(session[:8])}</code></td>'
@@ -500,11 +506,16 @@ def _sessions_rows_html(rows: list[dict]) -> str:
             f"<td>{html.escape(str(r.get('last_seen', '')))}</td>"
             f"<td>{r.get('calls', 0)}</td>"
             f"<td>{r.get('errors', 0)}</td>"
+            f'<td><form method="post" action="/api/sessions/delete?key={html.escape(q)}">'
+            '<button type="submit" aria-label="Удалить строку сессии" '
+            'title="Удалить строку сессии" '
+            'style="color:#c0392b;background:none;border:none;padding:0;'
+            'font:inherit;cursor:pointer">🗑</button></form></td>'
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="8" style="color:#888">пока нет данных — '
+            '<tr><td colspan="9" style="color:#888">пока нет данных — '
             "таблица заполняется при обращениях агентов</td></tr>"
         )
     return "".join(body)
@@ -807,7 +818,8 @@ def _render_status_page(
           if (!row) { location.reload(); return; }
           var cells = trs[j].getElementsByTagName("td");
           // Колонки: 0 Сессия, 1 Агент, 2 Модель, 3 Бэкенд, 4 Маршрут,
-          // 5 Последнее обращение, 6 Вызовов, 7 Ошибок.
+          // 5 Последнее обращение, 6 Вызовов, 7 Ошибок, 8 Actions (🗑 —
+          // удаление строки; поллинг её не трогает, удаление = PRG-форма).
           var set = function (idx, val) {
             if (cells[idx] && String(cells[idx].textContent) !== String(val)) {
               cells[idx].textContent = val;
@@ -887,7 +899,7 @@ def _render_status_page(
 </table>
 <h3 style="margin-top:24px">Sessions</h3>
 <table>
-  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Маршрут</th><th>Последнее обращение</th><th>Вызовов</th><th>Ошибок</th></tr>
+  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Маршрут</th><th>Последнее обращение</th><th>Вызовов</th><th>Ошибок</th><th>Actions</th></tr>
   {_sessions_rows_html(session_registry.sessions_snapshot())}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
@@ -1192,6 +1204,71 @@ class SessionsSnapshotEndpoint(webserver.Endpoint):
         handler._write(200, "application/json; charset=utf-8", body)
 
 
+def _parse_session_key(raw: str) -> tuple[str, str, str, str, str] | None:
+    """Разобрать query-параметр ``key`` в кортеж-ключ строки Sessions.
+
+    ``key`` — компактная JSON-строка кортежа (session_registry.key_json,
+    ровно она стоит в атрибуте ``data-key`` и в поле ``"key"`` снимка).
+    Возвращает кортеж из 5 строк либо None, если это не JSON-список из 5
+    строк (битый key, подделка, неверная арность) — эндпойнт отвечает 400."""
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, list) and len(parsed) == 5 and all(isinstance(x, str) for x in parsed):
+        return (parsed[0], parsed[1], parsed[2], parsed[3], parsed[4])
+    return None
+
+
+@webserver.register
+class SessionDeleteEndpoint(webserver.Endpoint):
+    """POST /api/sessions/delete?key=<json> — удаление строки таблицы Sessions.
+
+    Кнопка 🗑 в конце строки таблицы Sessions (form method=post) работает по
+    PRG-паттерну: удаление строки из реестра (session_registry.delete_key) +
+    303 See Other на GET "/" — страница показывается GET-навигацией, обновление
+    не повторяет POST (как у кнопок Models in use). ``key`` — компактная
+    JSON-строка кортежа (session+agent+model+backend+route): одна сессия может
+    занимать несколько строк, поэтому удаляем именно строку-кортеж, а не все
+    строки сессии. JSON-клиент (Content-Type: application/json) получает 200
+    {"ok": true, "key": ...} при успехе, 404 {"error": ...} — строки нет
+    (повторное удаление; строка уже вытеснена по лимиту), 400 {"error": ...} —
+    нет параметра key или key не является JSON-списком из 5 строк (единый
+    формат ошибки, как в server.py). GET на префикс — 404 дефолтом Endpoint."""
+
+    prefix = "/api/sessions/delete"
+
+    def __init__(self, context):
+        self.context = context
+
+    def POST(self, handler, remainder: str):
+        parsed = urlparse(handler.path)
+        raw_key = parse_qs(parsed.query).get("key", [""])[0]
+        ct = handler.headers.get("Content-Type", "")
+        if "application/json" not in ct:
+            # HTML-форма кнопки (application/x-www-form-urlencoded): PRG.
+            key = _parse_session_key(raw_key)
+            if key is not None:
+                session_registry.delete_key(key)  # нет строки — no-op
+            handler._redirect("/")  # 303 → GET "/" (PRG)
+            return
+        if not raw_key:
+            body = b'{"error": "missing \'key\' query parameter"}'
+            handler._write(400, "application/json; charset=utf-8", body)
+            return
+        key = _parse_session_key(raw_key)
+        if key is None:
+            body = b'{"error": "\'key\' must be a JSON array of 5 strings"}'
+            handler._write(400, "application/json; charset=utf-8", body)
+            return
+        if not session_registry.delete_key(key):
+            body = json.dumps({"error": "session row not found"}).encode()
+            handler._write(404, "application/json; charset=utf-8", body)
+            return
+        body = json.dumps({"ok": True, "key": raw_key}).encode("utf-8")
+        handler._write(200, "application/json; charset=utf-8", body)
+
+
 def _last_result(state: dict) -> dict | None:
     """refresh-срез состояния для _render_status_page (или None).
 
@@ -1257,6 +1334,8 @@ __all__ = [
     "ReprobeStateEndpoint",
     "UsageSnapshotEndpoint",
     "SessionsSnapshotEndpoint",
+    "SessionDeleteEndpoint",
+    "_parse_session_key",
     "_last_result",
     "_autostart_first_check",
 ]

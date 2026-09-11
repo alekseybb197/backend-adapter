@@ -1,0 +1,104 @@
+---
+# Stage the installer and the shared fixtures inside the container, then make
+# sure the container really booted with systemd (otherwise `systemctl` would
+# fail later and the failure would look like an installer bug).
+- name: Prepare the service-scenario fixture
+  hosts: all
+  gather_facts: false
+  become: false
+
+  vars:
+    stage_dir: /opt/molecule
+    stub_bin_dir: /opt/molecule/stub-bin
+    fixture_dir: /opt/molecule/fixtures
+    service_root: /var/lib/backend-adapter
+    service_unit: /etc/systemd/system/backend-adapter.service
+
+  tasks:
+    - name: Create staging directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ stage_dir }}"
+        - "{{ stub_bin_dir }}"
+        - "{{ fixture_dir }}"
+
+    - name: Copy install.sh into the container
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../../install.sh"
+        dest: "{{ stage_dir }}/install.sh"
+        mode: "0755"
+
+    - name: Lay out the fixture binary (shared with the install scenario)
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../install/fixtures/backend-adapter"
+        dest: "{{ fixture_dir }}/backend-adapter"
+        mode: "0755"
+
+    - name: Lay out the update fixtures (old v0.9.2 / new v0.9.3)
+      # The curl stub selects the asset via STUB_FIXTURE, so the same scenario
+      # can "download" a different version on the update run.
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../install/fixtures/{{ item }}"
+        dest: "{{ fixture_dir }}/{{ item }}"
+        mode: "0755"
+      loop:
+        - backend-adapter-old
+        - backend-adapter-new
+
+    - name: Lay out the curl stub as the first entry of the test PATH
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../install/fixtures/curl"
+        dest: "{{ stub_bin_dir }}/curl"
+        mode: "0755"
+
+    - name: Reset the stub call log
+      ansible.builtin.copy:
+        content: ""
+        dest: "{{ stage_dir }}/curl-calls.log"
+        mode: "0644"
+
+    - name: Remove leftovers from a previous run
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /usr/local/bin/backend-adapter
+        - "{{ service_root }}"
+        - "{{ service_unit }}"
+
+    - name: Check whether the image ships a real curl
+      # The stub still wins by PATH order, but the test would stop proving that
+      # install.sh used the stub, so fail loudly if the image changes.
+      ansible.builtin.stat:
+        path: /usr/bin/curl
+      register: real_curl
+
+    - name: Fail early if the image ships a real curl
+      ansible.builtin.assert:
+        that:
+          - not real_curl.stat.exists
+        fail_msg: >-
+          The test image now contains /usr/bin/curl. Revisit the offline-stub
+          assumption before trusting this scenario.
+
+    - name: Wait for systemd to finish booting
+      ansible.builtin.command: systemctl is-system-running --wait
+      register: systemd_state
+      changed_when: false
+      failed_when: false
+      retries: 30
+      delay: 2
+      until: systemd_state.stdout in ['running', 'degraded']
+
+    - name: Fail early unless the container booted with systemd
+      # `degraded` is tolerated: a container boot commonly leaves a unit or two
+      # failed, and that does not affect installing our own service.
+      ansible.builtin.assert:
+        that:
+          - systemd_state.stdout in ['running', 'degraded']
+        fail_msg: >-
+          systemd did not come up (state: {{ systemd_state.stdout | default('n/a') }}).
+          The privileged/cgroupns_mode/cgroup-mount setup is wrong.
