@@ -235,21 +235,20 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     ``data`` — dict, str, list или bytearray/bytes. При bytes/bytearray
     декодируется как UTF-8.
 
-    Файл пишется только если включён мастер-выключатель
-    ``config.ADAPTER_DEBUG`` (ADAPTER_DEBUG_ENABLE=1) и флаг
-    ``config.ADAPTER_DEBUG_PARTS`` (лог-путь задан всегда — директория
+    Файл пишется только если включён мастер-выключатель ADAPTER_DEBUG и флаг
+    ADAPTER_DEBUG_PARTS (лог-путь задан всегда — директория
     ADAPTER_DEBUG_LOGPATH с дефолтом ./tmp/logs; папка создаётся при
     необходимости). Для каждого тега пишутся парные файлы —
     ``.json`` и ``.yaml``.
-    """
-    # Быстрая проверка — мастер-выключатель / флаг выключен или лог-путь
-    # не директория. Локальный импорт читает config на момент вызова, чтобы
-    # тесты могли переключать флаги без перезагрузки модуля.
-    from .config import ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS
 
-    if not ADAPTER_DEBUG:
+    v0.9.5: оба флага читаются ПЕР-СЕССИОННО (``logging_enabled``/
+    ``parts_enabled`` поверх session_settings) — сессия может включить
+    подробности, не включая их для остальных. Мастер-выключатель проверяется
+    здесь (быстрый выход), действующий parts-флаг — через parts_enabled.
+    """
+    if not logging_enabled(session_id):
         return
-    if not ADAPTER_DEBUG_PARTS:
+    if not parts_enabled(session_id):
         return
     if not _DEBUG_IS_DIR or not _DEBUG_PATH:
         return
@@ -309,11 +308,13 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 
 
 # ==================== .err-файлы инцидентов и WARN-событий ====================
-# Безусловный канал сессии (v0.9.0 — инциденты, v0.9.1 — WARN-события):
-# файл session-<ts>-<safe8>.err рядом с .log/.jsonl сессии (общий
-# _session_file_ts). Инцидент: любой реальный прокси-запрос агента, чей
-# финальный ответ клиенту — ошибка 4xx/5xx (после ретраев/таймаутов), пишет
-# ERROR-блок. WARN-событие: диагностическое предупреждение адаптера на
+# Безусловный канал сессии (v0.9.0 — инциденты бэкенда, v0.9.1 —
+# WARN-события, v0.9.5 — ЛЮБАЯ учтённая ошибка): файл session-<ts>-<safe8>.err
+# рядом с .log/.jsonl сессии (общий _session_file_ts). ERROR-блок пишется на
+# любой финальный ответ клиенту 4xx/5xx: инцидент взаимодействия с бэкендом
+# (write_error_file — с телом исходящего запроса) и ошибка уровня адаптера,
+# до бэкенда не дошедшая (write_session_error — 400 валидации, 404/502
+# маршрута). WARN-событие: диагностическое предупреждение адаптера на
 # запросе (в т.ч. успешном) — [WARN] First message is NOT system и
 # [USAGE_WARN] стрима без usage — пишет WARNING-блок.
 # Файл принципиально НЕ гейтится флагами подробности:
@@ -402,6 +403,98 @@ def write_error_file(
         # Наблюдательный канал: любая ошибка записи молча глотается — запрос
         # (и его ответ клиенту) уже сформирован к моменту вызова.
         pass
+
+
+def write_session_error(
+    session_id: str,
+    req_id: str,
+    *,
+    final_status: int,
+    message: str,
+    model: str = "",
+    in_body: bytes | str = "",
+) -> None:
+    """Записать ошибку УРОВНЯ АДАПТЕРА в .err-файл сессии (v0.9.5, задача 7).
+
+    Тот же безусловный канал, что write_error_file/write_warn_file, но для
+    ошибок, до бэкенда не дошедших: 400 валидации тела (Invalid JSON /
+    Missing model / strict-модель), 404 disabled-входа, 400/502 reject
+    маршрута, 501 списка моделей. Пишется для ЛЮБОЙ ошибки, учтённой в
+    таблице Sessions (server._note_session_error) — так .err покрывает весь
+    ошибочный трафик сессии, а не только инциденты бэкенда.
+
+    Отличие от write_error_file: нет backend_url (запрос к бэкенду не
+    уходил) и тело помечено [ADAPTER_ERROR], а [REQUEST] несёт ВХОДЯЩЕЕ тело
+    запроса агента (in_body). Блоки самоделимитированы, поэтому в одном .err
+    спокойно соседствуют ERROR-блоки обоих видов. Исключений не бросает."""
+    try:
+        if not _DEBUG_IS_DIR or not _DEBUG_PATH:
+            return
+        fd = _open_session_file("err", session_id)
+        if fd is None:
+            return
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        lines = [
+            "==================== ERROR ====================",
+            f"[{ts}] [{req_id}] session_id={session_id} final_status={final_status} model={model}",
+            f"[{ts}] [{req_id}] [REQUEST] {_err_body_text(in_body)}",
+            f"[{ts}] [{req_id}] [ADAPTER_ERROR] {message}",
+            "==================== END ERROR ====================",
+        ]
+        _write_err_lines(fd, lines)
+    except Exception:
+        # Наблюдательный канал: провал записи не должен ронять запрос.
+        pass
+
+
+def error_file_name(session_id: str) -> str | None:
+    """Имя (basename) .err-файла сессии или None, если файла ещё нет.
+
+    v0.9.5 (задача 7): счётчик «Ошибок» строки таблицы Sessions — ссылка на
+    .err-файл сессии; чтобы построить URL, WEBUI нужен basename, а не путь.
+    Имя детерминировано (``session-<ts>-<safe8>.err`` — тот же
+    ``_make_session_file``, что и при записи) и НЕ создаёт файлов на диске.
+    None означает «сессия ещё не фиксировала ts», т.е. .err точно нет: до
+    первого обращения строки-кортежа ts сессии не назначается.
+
+    Пустой/неизвестный session_id и отсутствие лог-директории → None."""
+    if not _DEBUG_IS_DIR or not _DEBUG_PATH or not session_id:
+        return None
+    if session_id not in _session_file_ts:
+        return None
+    return os.path.basename(_make_session_file(_DEBUG_PATH, session_id, "err"))
+
+
+def logging_enabled(session_id: str) -> bool:
+    """Действующий флаг файловой записи debug-логов для сессии (v0.9.5).
+
+    Пер-сессионное переопределение ADAPTER_DEBUG поверх общей настройки
+    приложения (session_settings.effective) — живое чтение, как и раньше
+    у ``config.ADAPTER_DEBUG``. Пустой session_id → общая настройка."""
+    try:
+        from . import session_settings
+
+        return bool(session_settings.effective(session_id, "ADAPTER_DEBUG"))
+    except Exception:
+        from .config import ADAPTER_DEBUG
+
+        return bool(ADAPTER_DEBUG)
+
+
+def parts_enabled(session_id: str) -> bool:
+    """Действующий флаг ADAPTER_DEBUG_PARTS для сессии (v0.9.5).
+
+    Смысл — как у ``logging_enabled``: пер-сессионное переопределение поверх
+    общей настройки. Вызывающий (write_debug_json) отдельно проверяет
+    мастер-выключатель ADAPTER_DEBUG."""
+    try:
+        from . import session_settings
+
+        return bool(session_settings.effective(session_id, "ADAPTER_DEBUG_PARTS"))
+    except Exception:
+        from .config import ADAPTER_DEBUG_PARTS
+
+        return bool(ADAPTER_DEBUG_PARTS)
 
 
 def write_warn_file(

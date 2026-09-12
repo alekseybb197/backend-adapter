@@ -25,11 +25,16 @@ def _write(msg: str) -> None:
     и ключи выводятся в открытом виде. По умолчанию санитайзер активен,
     секреты маскируются.
 
-    ВАЖНО: config.ADAPTER_DEBUG / config.ADAPTER_SENSITIVE_LOGGING_ENABLE /
-    trim_limit() читаются через МОДУЛЬНЫЙ атрибут (config.X), а не через
-    `from .config import X` на уровне модуля — второе сделало бы разовый
-    снимок значения при импорте, и переключение через /config API (см.
-    webui_config_api.py) ничего бы не меняло здесь до перезапуска процесса."""
+    v0.9.5: гейт файловой записи — ПЕР-СЕССИОННЫЙ (session_log.logging_enabled
+    поверх session_settings.effective): сессия может держать свой
+    ADAPTER_DEBUG, не трогая общий. Консоль пер-сессионными настройками не
+    управляется — она безусловна, как и раньше.
+
+    ВАЖНО: config.ADAPTER_SENSITIVE_LOGGING_ENABLE / trim_limit() читаются
+    через МОДУЛЬНЫЙ атрибут (config.X), а не через `from .config import X` на
+    уровне модуля — второе сделало бы разовый снимок значения при импорте, и
+    переключение через /config API (см. webui_config_api.py) ничего бы не
+    меняло здесь до перезапуска процесса."""
     ts = time.strftime("%Y-%m-%dT%H:%M:%S")
     lim = config.trim_limit()
     body = msg[:lim] if lim else msg  # консольная обрезка (0/None — выкл.)
@@ -40,15 +45,18 @@ def _write(msg: str) -> None:
         console = redact(f"[{ts}] {body}")
         full = redact(f"[{ts}] {msg}")
     print(console)
-    # Файловая запись — только при мастер-флаге файловой записи
-    if config.ADAPTER_DEBUG and session_log._DEBUG_IS_DIR and session_log._DEBUG_PATH:
-        sid = session_log._last_log_session_id or session_log.UNKNOWN_SESSION_ID
-        if sid == session_log.UNKNOWN_SESSION_ID:
-            return  # сессия ещё не установлена — не создаём пустой файл
-        fd = session_log._open_session_file("debug", sid)
-        if fd:
-            fd.write((full + "\n").encode())
-            fd.flush()
+    # Файловая запись — только при мастер-флаге файловой записи сессии
+    if not session_log._DEBUG_IS_DIR or not session_log._DEBUG_PATH:
+        return
+    sid = session_log._last_log_session_id or session_log.UNKNOWN_SESSION_ID
+    if sid == session_log.UNKNOWN_SESSION_ID:
+        return  # сессия ещё не установлена — не создаём пустой файл
+    if not session_log.logging_enabled(sid):
+        return
+    fd = session_log._open_session_file("debug", sid)
+    if fd:
+        fd.write((full + "\n").encode())
+        fd.flush()
 
 
 def _d(msg: str) -> None:

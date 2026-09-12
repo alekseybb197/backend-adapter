@@ -82,10 +82,12 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     # гейтится только этим флагом). Путь — всегда директория логов сессий
     # (ADAPTER_DEBUG_LOGPATH, дефолт ./tmp/logs); запись — в per-session
     # JSONL-файл, single-file режим удалён.
-    # config.ADAPTER_DEBUG читается ЖИВЫМ атрибутом модуля (а не разовым
-    # снимком при импорте) — иначе переключение через /config API (см.
-    # webui_config_api.py) не подействовало бы здесь до перезапуска.
-    if not config.ADAPTER_DEBUG:
+    # Гейт файловой записи — ПЕР-СЕССИОННЫЙ (v0.9.5, session_log.logging_enabled
+    # поверх session_settings.effective): сессия может вести свой trace, не
+    # трогая общий ADAPTER_DEBUG. Живое чтение (а не разовый снимок при
+    # импорте) — переключение через /config API (см. webui_config_api.py)
+    # действует здесь сразу.
+    if not session_log.logging_enabled(session_id):
         return
     if not (session_log._TRACE_IS_DIR and session_log._TRACE_PATH):
         return

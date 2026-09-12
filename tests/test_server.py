@@ -1605,9 +1605,14 @@ class TestErrFileProtocol(ServerSetupMixin):
         assert "[WARN]" in content
         assert "First message is NOT system" in content
 
-    def test_local_400_no_backend_no_err_file(self, fake_backend, tmp_path):
-        """400 ДО бэкенда (нет /v1/messages, strict-модель) → .err не создан:
-        бэкенд не участвовал, инцидента взаимодействия нет."""
+    def test_local_400_writes_err_file(self, fake_backend, tmp_path):
+        """400 ДО бэкенда (strict-модель) → .err СОЗДАН (v0.9.5, задача 7):
+        любая ошибка, учтённая в таблице Sessions, пишет блок, даже если
+        запрос до бэкенда не дошёл. Блок помечен [ADAPTER_ERROR] и несёт
+        ВХОДЯЩЕЕ тело запроса агента; backend_url у него нет.
+
+        Не-входной GET /unknown 404 строки в таблице не создаёт — .err от него
+        не появляется (проверяем по единственному файлу и его содержимому)."""
         fake_backend.models_response = {"data": [{"id": "known-model"}]}
         fake_backend.completions_response = {}
         with fake_backend:
@@ -1622,7 +1627,15 @@ class TestErrFileProtocol(ServerSetupMixin):
                 assert resp["status"] == 400
             finally:
                 server.shutdown()
-        assert self._err_files(tmp_path) == []
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        assert "final_status=400" in content
+        assert "[ADAPTER_ERROR]" in content
+        assert "is not available" in content
+        # [REQUEST] — входящее тело запроса агента (не исходящее к бэкенду)
+        assert '"model": "unknown-model"' in content
+        assert "backend_url" not in content
 
     def test_err_file_redacts_by_default(self, fake_backend, tmp_path):
         """Санитайзер .err по умолчанию (SENSITIVE=0): секреты маскируются."""
