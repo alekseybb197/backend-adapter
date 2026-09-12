@@ -1,6 +1,6 @@
 # backend-adapter — Anthropic API ↔ [OI] Backend Proxy
 
-> **v0.9.3** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v0.9.4** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
