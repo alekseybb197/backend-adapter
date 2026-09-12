@@ -213,12 +213,10 @@ SHELL_TEMPLATE = """<!DOCTYPE html>
   #tabs button.active {{ background: #fff; color: #111; font-weight: bold; }}
   #tabs button:hover {{ background: #444; }}
   #tabs button.active:hover {{ background: #fff; }}
-  #status-link {{ background: #222; color: #8ab4f8; border: none; padding: 10px 16px; cursor: pointer;
-                 font-size: 13px; text-decoration: none; border-right: 1px solid #444; }}
-  #status-link:hover {{ background: #444; }}
-  #config-link {{ background: #222; color: #8ab4f8; border: none; padding: 10px 16px; cursor: pointer;
-                 font-size: 13px; text-decoration: none; border-right: 1px solid #444; }}
-  #config-link:hover {{ background: #444; }}
+  #status-link, #sessions-link, #config-link {{ background: #222; color: #8ab4f8; border: none;
+                 padding: 10px 16px; cursor: pointer; font-size: 13px; text-decoration: none;
+                 border-right: 1px solid #444; }}
+  #status-link:hover, #sessions-link:hover, #config-link:hover {{ background: #444; }}
   #frame-wrap {{ position: absolute; top: 42px; left: 0; right: 0; bottom: 0; }}
   iframe {{ width: 100%; height: 100%; border: none; }}
   #empty {{ padding: 24px; color: #555; }}
@@ -257,14 +255,21 @@ def render_shell(sessions, root_dir):
             f"<code>{TREE_RELATIVE_PATH.replace(os.sep, '/')}</code>, он будет сгенерирован автоматически. "
             f"Перезапускать сервер не нужно.</div>"
         )
-        tabs = '<a id="status-link" href="/">Статус 📊</a><a id="config-link" href="/config">Runtime config 🔧</a>'
+        tabs = (
+            '<a id="status-link" href="/">Статус 📊</a>'
+            '<a id="sessions-link" href="/sessions">Сессии 🗂</a>'
+            '<a id="config-link" href="/config">Runtime config 🔧</a>'
+        )
         body = f'<div id="tabs">{tabs}</div>' + body
         return SHELL_TEMPLATE.format(body=body)
 
-    # Ссылка на статус-страницу "/" — первой в панели (как и на пустой
-    # странице), затем вкладки сессий, справа (margin-left:auto) — reload.
+    # Ссылки на остальные верхнеуровневые страницы — в начале панели (как и на
+    # пустой странице): статус, таблица сессий, runtime config. Ведут в ТЕКУЩЕМ
+    # окне (задача 2: новое окно — только для ссылок СО статус-страницы). Затем
+    # вкладки сессий, справа (margin-left:auto) — reload.
     tabs_html = [
         '<a id="status-link" href="/">Статус 📊</a>',
+        '<a id="sessions-link" href="/sessions">Сессии 🗂</a>',
         '<a id="config-link" href="/config">Runtime config 🔧</a>',
     ]
     frames_html = []

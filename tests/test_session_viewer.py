@@ -261,8 +261,14 @@ class TestRenderShell:
         html = self.render_shell([], str(tmp_path))
         assert "Не найдено ни одной директории" in html
         assert ".parts" in html
-        # Ссылка на статус-страницу есть и на пустой странице
+        # Ссылки на остальные верхнеуровневые страницы есть и на пустой
+        # странице (v0.9.5: добавлена ссылка на таблицу сессий)
         assert '<a id="status-link" href="/">Статус 📊</a>' in html
+        assert '<a id="sessions-link" href="/sessions">Сессии 🗂</a>' in html
+        assert '<a id="config-link" href="/config">Runtime config 🔧</a>' in html
+        # Навигация страницы сессий — ТЕКУЩЕЕ окно: target не ставится
+        # (новое окно — только у ссылок СО статус-страницы, задача 2).
+        assert 'target="_blank"' not in html
 
     def test_shell_lists_session_names(self, tmp_path):
         d = _make_parts_dir(tmp_path, "session-A.parts", {
@@ -288,8 +294,13 @@ class TestRenderShell:
         })
         sessions = self.find(str(tmp_path), verbose=True)
         html = self.render_shell(sessions, str(tmp_path))
-        # Ссылка на корень (статус-страницу) — первой в панели вкладок
-        assert '<div id="tabs"><a id="status-link" href="/">Статус 📊</a>' in html
+        # Ссылка на корень (статус-страницу) — первой в панели вкладок,
+        # затем таблица сессий и runtime config (все — в текущем окне).
+        assert (
+            '<div id="tabs"><a id="status-link" href="/">Статус 📊</a>'
+            '<a id="sessions-link" href="/sessions">Сессии 🗂</a>'
+            '<a id="config-link" href="/config">Runtime config 🔧</a>' in html
+        )
         # Идентификаторы вкладок — транслитерация имени сессии: НЕ-alnum
         # символы (точка ".parts", дефис) заменяются на "_".
         assert 'id="tab-session_A_parts" class="tab active"' in html
