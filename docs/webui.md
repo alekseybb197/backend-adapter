@@ -76,7 +76,7 @@ WEBUI — локальный веб-интерфейс адаптера: общ�
 
 ```bash
 curl -s http://127.0.0.1:8765/healthz
-# → 200 {"status": "ok", "version": "0.9.3", "uptime": 1234.5, "pid": 4242}
+# → 200 {"status": "ok", "version": "0.9.4", "uptime": 1234.5, "pid": 4242}
 curl -s http://127.0.0.1:8765/ready
 # → 200 {"status": "ready", ...}  — бэкенды настроены и прогреты
 # → 503 {"status": "not_ready", ...} — конфиг пуст / кэш моделей пуст
@@ -237,15 +237,19 @@ GitHub-репозиторий проекта.
 | Сессия | Агент | Модель | Бэкенд | Маршрут | Последнее обращение | Вызовов | Ошибок | Actions |
 |---|---|---|---|---|---|---|---|---|
 
-- **Сессия** — идентификатор клиентской сессии (заголовок
-  `X-Claude-Code-Session-Id`): первые 8 символов в `<code>`, полный id — в
-  подсказке (`title`) и в атрибуте `data-session` строки.
+- **Сессия** — идентификатор клиентской сессии (первый непустой кандидат из
+  списка `ADAPTER_SESSION_HEADER`, дефолт
+  `X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id`;
+  ни одного — `unknown`): первые
+  8 символов в `<code>`, полный id — в подсказке (`title`) и в атрибуте
+  `data-session` строки.
 - **Агент** — заголовок `User-Agent` до первого пробела ([CC] CLI шлёт
   `claude-cli/2.1.236 (external, cli)` → в колонке `claude-cli/2.1.236`).
 - **Модель / Бэкенд / Маршрут** — клиентское имя модели (до маппинга, как в
   «Models in use»), имя бэкенда и выбранное правило TARGET-маршрутизации
-  (`passthrough messages→messages`, `convert messages→completions`,
-  `reject`, `disabled` — см. `docs/routing.md`). Фиксируются в момент
+  (`passthrough messages→messages`, `convert messages→completions` (или
+  `convert messages→messages`), `reject`, `disabled` — см. `docs/routing.md`).
+  Фиксируются в момент
   запроса; показываются и при `reject`/`disabled` — видно, куда агент
   пытался попасть. Запрос, отвергнутый **до** `routing.decide` (400
   валидации тела), даёт строку с пустыми этими тремя полями.
@@ -338,10 +342,10 @@ JS `sessions_poll` каждые ~5 с опрашивает `/api/sessions/snapsh
   `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
 - **enum (3)** — TARGET-маршрутизация входов (v0.9.1): `ADAPTER_MESSAGES_TARGET`,
   `ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET` — выпадающие списки
-  из домена `messages | completions | responses | auto | none` (какой формат
-  отдавать бэкенду для запросов соответствующего входа; полная семантика
-  значений — [`docs/routing.md`](routing.md)). Текущее значение подсвечено
-  в списке;
+  из домена `messages | completions | responses | passthrough | none`
+  (конкретный формат — прямое преобразование входа в него; `passthrough` —
+  дословная передача; `none` — вход выключен; полная семантика значений —
+  [`docs/routing.md`](routing.md)). Текущее значение подсвечено в списке;
 - **str (1)** — `ADAPTER_MODELS_MAPPING` (v0.9.3): текстовое поле строки
   маппинга моделей agent→backend в том же формате, что env-переменная
   (`agent:backend,agent2:backend2`; пусто — маппинг отключён). Применяется на

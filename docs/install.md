@@ -1,28 +1,33 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.3) — HTTP-прокси-адаптер, позволяющий использовать **Claude Code** (CLI)
-> с бэкендом LLM, который реализует **OpenAI-совместимый API** (`/v1/chat/completions`),
-> но некорректно обрабатывает протокол Anthropic Messages API.
+> **backend-adapter** (v0.9.4) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
+> реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
+> обрабатывает протокол Anthropic Messages API.
 
 ## Обзор
 
 Адаптер решает четыре проблемы:
 
 1. **System messages**. Бэкенд кластеризует system messages в конец диалога — адаптер собирает их
-   в одно сообщение в начале, как требует спецификация OpenAI.
-2. **Format mismatch**. Claude Code отправляет запросы в формате Anthropic Messages API,
-   а бэкенд ожидает OpenAI Chat Completions. Адаптер выполняет двунаправленную конвертацию
+   в одно сообщение в начале, как требует спецификация [OI].
+2. **Format mismatch**. Клиент отправляет запросы в формате Anthropic Messages API,
+   а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию
    (сообщения, инструменты, tool choice).
 3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`)
-   через Claude Code.
+   через [CC] и QwenCode.
 4. **Qwen tool_calls fallback**. Модели Qwen иногда возвращают вызовы инструментов в текстовом
    формате с JSON внутри XML-подобных тегов — адаптер автоматически парсит этот формат.
 
 Схема работы:
 
 ```
-Claude Code  <--Anthropic API-->  adapter (localhost:9999)  <--OpenAI API-->  LLM Backend
+[CC] / QwenCode  <--Anthropic API-->  adapter (localhost:9999)  <--[OI] API-->  LLM Backend
 ```
+
+Руководства по настройке клиентов: [docs/claude_code.md](claude_code.md) ([CC]) и
+[docs/qwen-code.md](qwen-code.md) (QwenCode); входные эндпоинты и маршрутизация —
+[docs/routing.md](routing.md).
 
 Единственная внешняя зависимость — **PyYAML** (используется в session-логировании);
 остальной код — стандартная библиотека Python. Установка зависимостей:
@@ -128,8 +133,38 @@ PATH="$PWD/tmp/molecule-venv/bin:$PATH" tmp/molecule-venv/bin/molecule test -s i
 Docker. Быстрый цикл: `molecule converge -s install` / `verify` / `login` /
 `destroy`.
 
-В CI этот сценарий гоняется отдельным job `install-molecule`
-(`.github/workflows/ci.yml`).
+В CI эти сценарии гоняет отдельный job `install-molecule`
+(`.github/workflows/ci.yml`) — но только когда изменения затрагивают сам
+установщик: job включается фильтром `dorny/paths-filter` по путям `install.sh`
+и `molecule/**` (сценарии читают корневой `install.sh` —
+`molecule/install/prepare.yml`). На правках кода, тестов или документации job
+пропускается (`skipped`), чтобы не занимать раннер.
+
+Так же по путям гейтятся и остальные job'ы — каждый запускается только на
+правках «своей» части репозитория. Фильтры считает лёгкий job `changes`
+(он выполняется всегда), а гейт-джобы ссылаются на его output через
+`needs` + `if`:
+
+| Фильтр | Пути | Job'ы |
+|---|---|---|
+| `install` | `install.sh`, `molecule/**` | `install-molecule` |
+| `code` | `backend_adapter/**`, `backend-adapter.py`, `tests/**`, `pyproject.toml`, `pytest.ini`, `requirements*.txt` | `lint-and-typecheck`, `test` |
+| `runtime` | `backend_adapter/**`, `backend-adapter.py`, `pyproject.toml`, `requirements*.txt` | `install-smoke-test`, `webui-smoke` |
+
+Фильтр `runtime` — это «то, что попадает в сборку пакета»: `tests/**` и
+`pytest.ini` на smoke-проверки не влияют, поэтому в него не входят. А
+`webui-smoke` намеренно делит гейт с `install-smoke-test`, а не имеет своего
+узкого списка webui-модулей: WEBUI-ядро импортирует почти весь базовый пакет
+(`config`, `logger`, `redact`, `session_log`, `model_usage`,
+`artifact_tree*`, `probe_json`), и узкий список давал бы ложные пропуски при
+правке базового модуля.
+
+Практическое следствие: PR, который правит только документацию, прогоняет
+лишь job `changes`; правка только `tests/**` запускает `lint-and-typecheck` и
+`test`, но не smoke-джобы. Обратная сторона — job без затронутых путей
+получает статус `skipped`, поэтому если он объявлен required в
+branch-protection, merge заблокируется; набор обязательных проверок нужно
+настраивать осознанно.
 
 ---
 
@@ -196,12 +231,15 @@ backend-adapter/
 │   ├── sanitizing.md            # Sanitization секретов
 │   ├── webui.md                 # Руководство по WEBUI и API
 │   ├── architecture.md          # Архитектура
+│   ├── claude_code.md           # Настройка клиента [CC]
+│   ├── qwen-code.md             # Настройка клиента QwenCode
 │   ├── samples/                 # Примеры конфигов (см. раздел 3):
 │   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
 │   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
 │   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
 │   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
-│   └── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
+│   ├── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
+│   └── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
 └── changelog.md                 # История версий
 ```
 
@@ -683,22 +721,26 @@ TARGET-переменная (**префикс имени = входной энд
 формат `none`, не принимается вовсе (404):
 
 ```bash
-# /v1/messages → конвертация в chat.completions (ДЕФОЛТ — нулевая настройка,
-# прежнее поведение 100%). Прочие значения: messages (passthrough E→E),
-# responses, auto (выбор по кэшу проб), none (вход выключен).
+# /v1/messages → ПРЕОБРАЗОВАНИЕ в chat.completions (ДЕФОЛТ — нулевая настройка,
+# прежнее поведение 100%). Прочие значения: messages (преобразование
+# messages→messages — сортировка system), passthrough (дословно, без
+# преобразования), responses (не реализовано → 400), none (вход выключен).
 export ADAPTER_MESSAGES_TARGET=completions
 
 # /v1/chat/completions: default none — вход закрыт (404).
-# completions → passthrough E→E на бэкенд, поддерживающий /v1/chat/completions.
-# export ADAPTER_COMPLETIONS_TARGET=completions
+# passthrough → дословная передача на /v1/chat/completions бэкенда.
+# export ADAPTER_COMPLETIONS_TARGET=passthrough
 
 # /v1/responses: default none — вход закрыт (404).
-# responses → passthrough E→E на бэкенд, поддерживающий /v1/responses.
-# export ADAPTER_RESPONSES_TARGET=responses
+# passthrough → дословная передача на /v1/responses бэкенда.
+# export ADAPTER_RESPONSES_TARGET=passthrough
 ```
 
-Допустимые значения всех трёх — `completions | messages | responses | auto | none`
-(`none` — вход закрыт, 404; `auto` — выбор по кэшу проб, **без сети в запросе**).
+Допустимые значения всех трёх — `messages | completions | responses | passthrough | none`
+(конкретный формат — **прямое преобразование** входа в него; `passthrough` —
+дословная передача без преобразования; `none` — вход закрыт, 404). Значение
+`auto` прежних версий удалено в v0.9.4: в env оно невалидно (консоль `[WARN]`,
+вход трактуется как `none`).
 Принципы настройки, матрица «вход × значение», реализованные маршруты и
 варианты будущих версий — в [`docs/routing.md`](routing.md). Справочник
 переменных — [`docs/environment.md`](environment.md), раздел «Входные
@@ -736,9 +778,8 @@ export ADAPTER_STRICT_MODELS=1
 # Дефолты = нулевая настройка: принимается только /v1/messages и конвертируется
 # в chat.completions; /v1/chat/completions и /v1/responses закрыты (404).
 export ADAPTER_MESSAGES_TARGET=completions
-# export ADAPTER_COMPLETIONS_TARGET=completions   # passthrough E→E (вход закрыт при none)
-# export ADAPTER_RESPONSES_TARGET=responses       # passthrough E→E (вход закрыт при none)
-# export ADAPTER_COMPLETIONS_TARGET=auto          # выбор маршрута по кэшу проб (без сети)
+# export ADAPTER_COMPLETIONS_TARGET=passthrough   # дословно (вход закрыт при none)
+# export ADAPTER_RESPONSES_TARGET=passthrough     # дословно (вход закрыт при none)
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
@@ -782,7 +823,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.9.3 (...
+Claude Code Adapter v0.9.4 (...
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -879,8 +920,8 @@ curl -X POST http://localhost:9999/v1/messages \
   -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
 
 # Новые входы (v0.9.0) — работают только при ненулевом TARGET:
-# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=completions (passthrough),
-# /v1/responses при ADAPTER_RESPONSES_TARGET=responses (passthrough),
+# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=passthrough,
+# /v1/responses при ADAPTER_RESPONSES_TARGET=passthrough,
 # при TARGET=none (дефолт) оба отвечают 404.
 curl -X POST http://localhost:9999/v1/chat/completions \
   -H "Content-Type: application/json" \

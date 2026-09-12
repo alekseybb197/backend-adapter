@@ -1082,12 +1082,12 @@ class TestRuntimeConfig:
         """TARGET-значение из домена применяется и видно в get_runtime_config()."""
         result = self.config.set_runtime_config(
             ADAPTER_MESSAGES_TARGET="responses",
-            ADAPTER_COMPLETIONS_TARGET="auto",
+            ADAPTER_COMPLETIONS_TARGET="passthrough",
         )
         assert result["ADAPTER_MESSAGES_TARGET"] == "responses"
-        assert result["ADAPTER_COMPLETIONS_TARGET"] == "auto"
+        assert result["ADAPTER_COMPLETIONS_TARGET"] == "passthrough"
         assert self.config.ADAPTER_MESSAGES_TARGET == "responses"
-        assert self.config.ADAPTER_COMPLETIONS_TARGET == "auto"
+        assert self.config.ADAPTER_COMPLETIONS_TARGET == "passthrough"
         current = self.config.get_runtime_config()
         assert current["ADAPTER_MESSAGES_TARGET"] == "responses"
 
@@ -1165,13 +1165,13 @@ class TestRuntimeConfig:
         assert routing.target_for_input("messages") == "completions"
         assert routing.target_for_input("completions") == "none"
 
-        # Меняем на лету: messages → passthrough messages→messages.
+        # Меняем на лету: messages → convert messages→messages (сортировка system).
         self.config.set_runtime_config(ADAPTER_MESSAGES_TARGET="messages")
         assert routing.target_for_input("messages") == "messages"
 
         # Меняем на лету: вход /v1/chat/completions открыт (passthrough E→E).
-        self.config.set_runtime_config(ADAPTER_COMPLETIONS_TARGET="completions")
-        assert routing.target_for_input("completions") == "completions"
+        self.config.set_runtime_config(ADAPTER_COMPLETIONS_TARGET="passthrough")
+        assert routing.target_for_input("completions") == "passthrough"
 
 
 class TestEndpointProbe:

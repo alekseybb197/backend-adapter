@@ -1,23 +1,34 @@
-# backend-adapter — [CC] ↔ [OI] Backend Proxy
+# backend-adapter — Anthropic API ↔ [OI] Backend Proxy
 
-> **v0.9.3** — HTTP-прокси-адаптер, позволяющий использовать **[CC]** (CLI)
-> с бэкендом LLM, который реализует **[OI]-совместимый API** (`/v1/chat/completions`),
-> но некорректно реализует протокол Anthropic Messages API.
+> **v0.9.4** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
+> который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
+> некорректно реализует протокол Anthropic Messages API.
 
 ```
-[CC]  ←--Anthropic API-->  adapter (localhost:9999)  ←--[OI] API-->  LLM Backend
+[CC] / QwenCode  ←--Anthropic API-->  adapter (localhost:9999)  ←--[OI] API-->  LLM Backend
 ```
+
+## Поддерживаемые клиенты
+
+- **[CC]** — [docs/claude_code.md](docs/claude_code.md): модель передаётся по имени
+  в запросе, объявлять её заранее не нужно.
+- **QwenCode** — [docs/qwen-code.md](docs/qwen-code.md): модели объявляются
+  заранее в `modelProviders`, зато у каждой может быть своё контекстное окно.
+- **Любой другой клиент** — Anthropic Messages API (`/v1/messages`) и
+  [OI]-совместимые клиенты (`/v1/chat/completions`, `/v1/responses`), см.
+  [docs/routing.md](docs/routing.md).
 
 ## Проблемы, которые решает адаптер
 
 1. **System messages**. Бэкенд кластеризует system messages в конец диалога — адаптер собирает их в одно сообщение в начале.
-2. **Format mismatch**. [CC] отправляет запросы в формате Anthropic Messages API, а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию (сообщения, инструменты, tool choice).
-3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`) через [CC].
+2. **Format mismatch**. Клиент отправляет запросы в формате Anthropic Messages API, а бэкенд ожидает [OI] Chat Completions. Адаптер выполняет двунаправленную конвертацию (сообщения, инструменты, tool choice).
+3. **Model compatibility**. Позволяет использовать модели Qwen (например `qwen3.6-35b-a3b`) через [CC] и QwenCode.
 4. **Qwen tool_calls fallback**. Модели Qwen иногда возвращают вызовы инструментов в текстовом формате с JSON внутри XML-подобных тегов — адаптер автоматически парсит этот формат.
 
 ## Возможности
 
-- **Прозрачное проксирование**: ретраи/таймауты, конвертация Anthropic ↔ [OI] (в т.ч. стриминг SSE), маскирование секретов в логах. **Входные эндпоинты** (v0.9.0): наряду с `/v1/messages` адаптер принимает `/v1/chat/completions` и `/v1/responses`; TARGET-переменные (`ADAPTER_*_TARGET`) задают целевой формат для каждого входа — конверсия `messages→completions`, **passthrough E→E** (тело и SSE-поток возвращаются дословно), `auto` (выбор по кэшу проб, без сети) или выключение входа.
+- **Прозрачное проксирование**: ретраи/таймауты, конвертация Anthropic ↔ [OI] (в т.ч. стриминг SSE), маскирование секретов в логах. **Входные эндпоинты** (v0.9.0): наряду с `/v1/messages` адаптер принимает `/v1/chat/completions` и `/v1/responses`; TARGET-переменные (`ADAPTER_*_TARGET`) задают режим обработки для каждого входа — **прямое преобразование** в указанный формат (конверсия `messages→completions`, `messages→messages` — сортировка system), **`passthrough`** (дословная передача: тело и SSE-поток возвращаются как есть) или выключение входа (`none`).
 - **Логирование и наблюдаемость**: консольные debug-блоки `[...]` печатаются **всегда** (с обрезкой до `ADAPTER_DEBUG_TRIM`; `0` — без обрезки); файловая запись per-session логов (`session-*.log`/`*.jsonl`, `*.parts` дампы) — по `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH` (дефолт `./tmp/logs`), файлы несут **полные** строки без обрезки; per-session JSON/YAML-дампы всех логгируемых частей — `ADAPTER_DEBUG_PARTS=1`; **`.err`-файлы инцидентов** (v0.9.0) — при финальном ответе клиенту 4xx/5xx реального прокси-запроса пишутся в ту же директорию **безусловно** (полные запрос и ошибка, без обрезки по TRIM, вне `ADAPTER_DEBUG_ENABLE`; redact по умолчанию).
 - **WEBUI** (поднимается всегда, флага отключения нет):
   - `/` — статус-страница: шапка «Backend-Adapter Version <x.x.x>» с иконками-навигацией 🔃 (перепроверить бэкенды, POST `/`) / 📋 (`/session`) / 🔧 (`/config`), LLM-эндпоинты, таблица «Models in use» с live-счётчиками вызовов/токенов и колонкой **Cost** (по тарифам `ADAPTER_MODELS_TARIFFS`; ставится live-поллингом через innerHTML — `cost_html` с сервера); действия строки — иконки-кнопки ⟳ (перепроверить эндпоинты) / ↺ (сбросить счётчики) / ✕ (удалить строку); проверка бэкендов по кнопке-иконке 🔃 (перечитывает `ADAPTER_BACKEND_CONFIG` без рестарта);
@@ -48,8 +59,9 @@ source adapter.env
 # 5. Запустить адаптер
 python3 backend-adapter.py
 
-# 6. В другом терминале запустить [CC]
-claude
+# 6. В другом терминале запустить клиент
+claude                 # Claude Code — см. docs/claude_code.md
+qwen                   # QwenCode   — см. docs/qwen-code.md
 ```
 
 Подробная инструкция: [docs/install.md](docs/install.md)
@@ -59,6 +71,8 @@ claude
 | Файл | Описание |
 |---|---|
 | [docs/install.md](docs/install.md) | Установка, конфигурация, systemd/launchd, troubleshooting |
+| [docs/claude_code.md](docs/claude_code.md) | Настройка клиента [CC]: профиль, проектные настройки, статус-строка, модели и контекст |
+| [docs/qwen-code.md](docs/qwen-code.md) | Настройка клиента QwenCode: `modelProviders`, модели с разным контекстным окном, id сессии |
 | [docs/routing.md](docs/routing.md) | Настройка входных эндпоинтов и маршрутизации (TARGET): принципы, реализованное, перспективы |
 | [docs/environment.md](docs/environment.md) | Полный справочник всех env-переменных |
 | [docs/logging.md](docs/logging.md) | Конфигурация логирования и trace |
@@ -75,7 +89,6 @@ backend-adapter/
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
 │   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
 │   ├── routing.py              # Входные эндпоинты/TARGET: decide() по кэшу проб
-│   ├── convert.py              # Конвертация сообщений/инструментов
 │   ├── convert.py              # Конвертация сообщений/инструментов
 │   ├── streaming.py            # SSE streaming: конверсия + passthrough E→E relay
 │   ├── tracer.py               # JSONL trace-логирование
@@ -98,7 +111,8 @@ backend-adapter/
 │   │                           #   sample.adapter.yaml (YAML бэкендов),
 │   │                           #   backend-adapter.service + com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
-│   └── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
+│   ├── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
+│   └── qwen-code/              # Локальные настройки клиента QwenCode (settings)
 ├── molecule/                   # molecule-тесты install.sh (Linux, ubuntu 24.04):
 │                               #   install — установка/обновление бинарника;
 │                               #   service — системный systemd, обновление и --delete

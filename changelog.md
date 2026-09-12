@@ -1,4 +1,331 @@
-# Claude Code <-> OpenAI-backend adapter — history / changelog
+# backend-adapter — history / changelog
+
+
+## v0.9.4 — TARGET: `passthrough` и прямое преобразование, `auto` удалён; session id агентов не-[CC] (QwenCode, Codex — JSON-заголовки); CI: path-гейты job'ов; гайд по настройке QwenCode; клиент-агностичное описание
+
+### 2026-09-12 Саммари ветки v0.9.4 (8 коммитов между merge PR #16 (v0.9.3) и снятием WIP)
+
+**Цель:** финальная публикация группы работ v0.9.4 — единая запись о том,
+что вошло в ветку между v0.9.3 и снятием WIP (детали каждой работы — в
+подзаписях ниже).
+
+**Решение:**
+- **TARGET-маршрутизация** — новая семантика значений (главная работа ветки):
+  значение-формат (`messages|completions|responses`) = **прямое
+  преобразование** входа в него, новое значение `passthrough` = дословная
+  передача без преобразования, `auto` удалён (невалиден → `[WARN]` + `none`);
+  self-пары `completions→completions`/`responses→responses` → 400 «not
+  implemented»;
+- **session id агентов** — настраиваемый список заголовков-кандидатов
+  `ADAPTER_SESSION_HEADER` и извлечение id из JSON-значения заголовка
+  (синтаксис `Имя:ключ`, напр. `x-codex-turn-metadata:session_id`) для Codex
+  CLI и QwenCode;
+- **CI** — path-гейты: каждый job запускается только при изменениях своих
+  путей (`dorny/paths-filter`), molecule-джоб — только при правках
+  `install.sh`/`molecule/**`;
+- **фикс** двойного префикса `ADAPTER_` в тексте 404 выключенного входа
+  (`ADAPTER_ADAPTER_…` → `ADAPTER_…`), ассерты переведены на точное равенство;
+- **документация** — гайд по настройке QwenCode, дополнения к гайду [CC],
+  клиент-агностичные формулировки (адаптер — не только для [CC]);
+  `docs/routing.md` переписан под новую семантику TARGET.
+
+**Следствия:** версия v0.9.4 публикуется (снятие WIP). **Миграция конфигов:**
+прежние `ADAPTER_COMPLETIONS_TARGET=completions` и
+`ADAPTER_RESPONSES_TARGET=responses` (означавшие passthrough E→E) теперь дают
+400 — замените на `passthrough`; `auto` — на конкретное значение. Дефолт
+`/v1/messages=completions` не менялся — нулевая настройка сохраняет прежнее
+поведение 100%. Рабочее дерево чистое — ветка готова к проверке и отправке в
+удалённый репозиторий.
+
+### 2026-09-12 TARGET: `passthrough` и прямое преобразование, значение `auto` удалено
+
+**Цель:** развести в TARGET-переменных маршрутизации входов
+(`ADAPTER_{MESSAGES,COMPLETIONS,RESPONSES}_TARGET`) два смешанных смысла —
+«целевой формат» и «режим передачи». Прежде значение-формат, совпадающее с
+входом (`ADAPTER_COMPLETIONS_TARGET=completions`), означало passthrough E→E,
+т.е. «передать дословно», а отдельного слова для дословной передачи не было;
+значение `auto` (автовыбор по кэшу проб) приемлемой логики не имело и
+путало.
+
+**Решение:**
+- **Значение-формат = прямое преобразование.** `messages | completions |
+  responses` задают целевой формат: вход **преобразуется** в него и уходит на
+  соответствующий эндпойнт бэкенда. Это преобразование и когда цель совпадает
+  с входом: `ADAPTER_MESSAGES_TARGET=messages` — конверсия `messages→messages`
+  (сортировка system, `normalize_messages_system_first`), а не дословная
+  передача;
+- **`passthrough` — новое значение:** дословная передача на эндпойнт
+  **входного** формата, тело и SSE-поток как пришли (адаптер подставляет
+  только резолвнутую модель). Для `/v1/messages` это единственный способ
+  передать тело без сортировки system;
+- **реестр `IMPLEMENTED_CONVERSIONS`** (`routing.py`): реализованы
+  `messages→completions` (полный конвертер) и `messages→messages` (сортировка
+  system); прочие пары, включая self-пары `completions→completions` и
+  `responses→responses`, дают HTTP **400** «conversion … is not implemented» —
+  дословная передача таких входов достигается только `passthrough`;
+- **`auto` удалён:** в env (как и любое невалидное значение) → консольный
+  `[WARN]` + трактовка `none` (вход выключен), старт не падает. Мёртвые
+  константы (`ERROR_NO_ROUTE`, `_TARGET_FORMATS`) удалены;
+- `config.TARGET_ALLOWED_VALUES` = `("messages","completions","responses",
+  "passthrough","none")` — единый домен для парсера и WEBUI-селектов
+  (`/config` подхватывает новые значения автоматически);
+- `server.py`: дословная ветка выбирается признаком «цель == вход»
+  (`out_fmt_val == inp_fmt`), сортировка system — только при
+  `convert messages→messages`, так что `TARGET=passthrough` остаётся
+  действительно дословным; trace-поле `passthrough` отличает значение
+  `passthrough` от `convert messages→messages`.
+
+**Следствия:** **миграция конфигов.** Прежние `ADAPTER_COMPLETIONS_TARGET=completions`
+и `ADAPTER_RESPONSES_TARGET=responses` (означавшие passthrough E→E) теперь
+дают 400 «not implemented» — замените их на `passthrough`; `auto` — на
+конкретное значение. Дефолт `/v1/messages=completions` не менялся — нулевая
+настройка сохраняет прежнее поведение 100%. Документация (`docs/routing.md`
+переписан, `environment.md`, `install.md`, `architecture.md`, `webui.md`,
+`qwen-code.md`, `samples/sample.adapter.env`, `README.md`) и тесты
+(`test_routing.py`, `test_server.py`, `test_config.py`,
+`test_webui_config_api.py`) синхронизированы.
+
+
+### 2026-09-11 CI: molecule-джоб запускается только при изменениях install.sh/molecule
+
+**Цель:** job `install-molecule` (`.github/workflows/ci.yml`) гонялся на
+каждый push/PR в `main`, хотя проверяет исключительно установщик: сценарии
+molecule читают корневой `install.sh` (`molecule/install/prepare.yml`) и сами
+себя. На правках кода, тестов и документации два docker-сценария с systemd
+занимали раннер и удлиняли CI без пользы.
+
+**Решение:**
+- новый лёгкий job `changes` (`dorny/paths-filter@v3`) вычисляет флаг по
+  путям `install.sh` и `molecule/**`; job объявляет output `install` и права
+  `contents: read` + `pull-requests: read` (на `pull_request` action читает
+  список файлов через REST API), checkout — с `fetch-depth: 0` (на `push`
+  сравнение идёт git-командами);
+- `install-molecule` получает `needs: changes` и
+  `if: needs.changes.outputs.install == 'true'` — остальные четыре job
+  (`lint-and-typecheck`, `test`, `install-smoke-test`, `webui-smoke`) не
+  затронуты;
+- `docs/install.md` §2.1 — описано условие запуска job.
+
+**Следствия:** molecule прогоняется только там, где может что-то поймать;
+правки вне установщика больше не ждут docker-сценариев. Обратная сторона —
+при правках вне `install.sh`/`molecule` job получает статус `skipped`, поэтому
+если он объявлен required в branch-protection, правило нужно настраивать
+осознанно (предупреждение оставлено комментарием в `ci.yml`).
+
+
+### 2026-09-11 Session id: список заголовков-кандидатов `ADAPTER_SESSION_HEADER` + инструкция для QwenCode
+
+**Цель:** агенты, которые называют заголовок сессии иначе, чем [CC] CLI,
+протоколировались как `session=unknown` — все их обращения сливались в одну
+строку таблицы «Sessions» и один per-session лог. В логе эксплуатации:
+`[REQ] POST /v1/chat/completions session=unknown` при
+`user-agent: QwenCode/0.23.2 (darwin; arm64)`.
+
+**Причина:** QwenCode (проверено на 0.23.2) **не передаёт id сессии вообще** —
+ни заголовком, ни полем тела (в запросе только `user-agent` и
+`x-stainless-*`). Штатный механизм клиента — `customHeaders` провайдера с
+плейсхолдером `${session_id}` плюс глобальный флаг
+`outboundCorrelation.allowDynamicHeaderValues: true`; по умолчанию не
+настроен. Адаптер же читал единственное жёстко зашитое имя
+`X-Claude-Code-Session-Id`, а настраивать клиент на произвольный заголовок
+было нельзя.
+
+**Решение:**
+- `config.py` — `ADAPTER_SESSION_HEADER`: список имён заголовков через
+  запятую, дефолт `X-Claude-Code-Session-Id,x-opencode-session` (побеждает
+  первый непустой); пустое значение → дефолт; в runtime-пул `/config` не
+  входит;
+- `server.py` — хелперы `_extract_session_id()` / `_session_header_names()`
+  (module-level, рядом с `_register_session`); `do_POST` вместо прямого
+  `headers.get(...)` вызывает хелпер, остальной учёт (`_req_ctx`,
+  `_last_log_session_id`, `[REQ]`, `session_registry`) не меняется;
+- `session_log.py` — константа `UNKNOWN_SESSION_ID`; литерал `"unknown"`
+  в `server.py` и `logger.py` сведён к ней;
+- тесты — 4 кейса в `TestSessionAccounting` (id из `x-opencode-session`;
+  приоритет первого заголовка; кастомный список; ни одного → `unknown`);
+- документация — `docs/environment.md` §5 (строка переменной + подраздел
+  «Настройка агента (QwenCode)»: рекомендован `X-Claude-Code-Session-Id`,
+  как у [CC] CLI, `x-opencode-session` — пример своего имени),
+  `docs/webui.md`, `docs/logging.md`, `docs/architecture.md`,
+  `docs/samples/sample.adapter.env`.
+
+**Следствия:** сессии не-[CC] агентов протоколируются честным id при условии
+настройки клиента; список кандидатов расширяется одной env-переменной без
+правок кода. Ограничение: id ротируется на `/new` и `/resume` — после смены
+сессии в логах появляется новый идентификатор (это поведение клиента, не
+адаптера).
+
+
+### 2026-09-11 Session id из заголовков сложного строения (Codex CLI) — синтаксис `Имя:ключ`
+
+**Цель:** Codex CLI шлёт id сессии не плоским заголовком, а внутри
+JSON-значения `x-codex-turn-metadata` (`{"session_id":"01a09245-…",…}`; тот же
+uuid дублируется в `x-client-request-id`). Адаптер читал только значение
+заголовка целиком, поэтому такие сессии протоколировались как
+`session=unknown` — их обращения сливались в одну строку таблицы «Sessions» и
+один per-session лог (та же проблема, что была с QwenCode до v0.9.4).
+
+**Решение:**
+- `ADAPTER_SESSION_HEADER` — новый синтаксис элемента: `Имя-заголовка` —
+  плоский заголовок (как раньше), `Имя-заголовка:ключ` — значение разбирается
+  как JSON-объект и берётся его строковое поле `ключ` верхнего уровня; битый
+  JSON, отсутствие ключа или нестроковое значение — кандидат молча
+  пропускается. Двоеточие в имени HTTP-заголовка невозможно, поэтому старые
+  значения без `:` работают как прежде (обратная совместимость);
+- дефолт расширен третьим кандидатом —
+  `X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id`
+  (Codex работает из коробки). `x-client-request-id` в дефолт **не входит**:
+  имя generic (у части клиентов — per-request id), добавление его в список по
+  умолчанию дробило бы таблицу «Sessions» множеством строк; документирован как
+  opt-in;
+- `server.py` — `_session_header_names()` возвращает пары `(имя, ключ|None)`
+  (разбор — новый `_parse_session_header_specs()`), новое чтение кандидата —
+  `_header_session_value()`; `_extract_session_id()` без изменений в
+  приоритетной логике;
+- тесты — 4 новых кейса в `TestSessionAccounting` (id из JSON-заголовка
+  Codex; битый JSON/нет ключа/нестрока → `unknown`; кастомный JSON-кандидат;
+  `x-client-request-id` вне дефолта → `unknown`; приоритет JSON-кандидата над
+  `x-client-request-id`);
+- документация — `docs/environment.md` §5 (синтаксис `Имя:ключ`, пример Codex,
+  opt-in `x-client-request-id`), `docs/logging.md`, `docs/webui.md`,
+  `docs/architecture.md`, `docs/samples/sample.adapter.env`.
+
+**Следствия:** сессии Codex протоколируются честным id без настройки клиента;
+механизм расширяется на любой JSON-заголовок указанием `Имя:ключ`. Ограничение:
+читается только ключ верхнего уровня (вложенные пути и массивы не
+поддерживаются).
+
+
+### 2026-09-11 Routing: убран двойной префикс `ADAPTER_` в тексте 404 выключенного входа
+
+**Цель:** сообщение о выключенном входном эндпоинте показывало имя
+env-переменной с удвоенным префиксом — `endpoint is disabled
+(ADAPTER_ADAPTER_COMPLETIONS_TARGET=none)` (видно в ошибке агента:
+`API Error: 404 "endpoint is disabled (ADAPTER_ADAPTER_COMPLETIONS_TARGET=none)"`).
+
+**Причина:** `routing.ERROR_DISABLED` содержал литеральный префикс
+`ADAPTER_{env}`, а подставляемое значение `_ENV_NAMES[inp]` — уже ПОЛНОЕ имя
+переменной (`ADAPTER_COMPLETIONS_TARGET`); префикс удваивался. Баг не ловился
+тестами: ассерты были substring-проверкой (`"ADAPTER_COMPLETIONS_TARGET=none"
+in msg`) — строка с удвоенным префиксом такую подстроку содержит.
+
+**Решение:**
+- `routing.py` — шаблон без литерального префикса: `endpoint is disabled
+  ({env}=none)` (подстановка полного имени из `_ENV_NAMES` не изменилась);
+- `tests/test_routing.py` — в `TestDecideDisabled` substring-ассерты заменены
+  на ТОЧНОЕ равенство (`msg == "endpoint is disabled
+  (ADAPTER_COMPLETIONS_TARGET=none)"`) для всех трёх входов — теперь
+  дублирование префикса такой тест не пройдёт;
+- `tests/test_server.py` — в `test_new_inputs_disabled_by_default` проверка
+  ответа уточнена до точного текста ошибки по каждому входу.
+
+**Следствия:** текст 404 снова называет реальное имя переменной; регресс
+дублирования префикса закрыт точным ассертом. `docs/routing.md` использует
+wildcard `ADAPTER_*_TARGET=none` и правок не потребовал.
+
+
+### 2026-09-11 Документация: гайд по настройке QwenCode + дополнения к гайду [CC]
+
+**Цель:** у проекта не было руководства по второму поддерживаемому клиенту —
+QwenCode; настройка жила только в подразделе `docs/environment.md` §5,
+посвящённом передаче id сессии. Кроме того, в гайде по [CC] не были
+сформулированы две вещи: зачем `ANTHROPIC_API_KEY` держат пустым и в чём
+обратная сторона «любые модели без объявления».
+
+**Решение:**
+- новый `docs/qwen-code.md` — полное руководство: два протокола клиента
+  (`openai` → `/v1/chat/completions`, `anthropic` → `/v1/messages`) и
+  разница в `baseUrl` между ними; требование включить вход
+  `ADAPTER_COMPLETIONS_TARGET=completions` для `openai`-провайдера (иначе
+  404 — дефолт закрывает этот вход); файлы настроек и их приоритет;
+  разбор всех ключей типового профиля (`outboundCorrelation`,
+  `modelProviders`, `env`, `security.auth`, `model`, `tools`, `$version`,
+  `generationConfig`); **модели с разным контекстным окном** как главное
+  отличие от [CC]; передача id сессии; сравнительная таблица с [CC];
+  установка и проверка;
+- типовой файл `docs/qwen-code/global.settings.json` (профиль пользователя:
+  модели `local` через `openai` и `remote` через `anthropic`, окна 128000 и
+  262144) — зафиксирован в репозитории рядом с гайдом;
+- `docs/claude_code.md` — раздел 1: развёрнутое пояснение, что
+  `ANTHROPIC_API_KEY` оставляют **пустым**, чтобы не регистрировать агента в
+  службе Anthropic; новый раздел 3.2 «Выбор моделей и размер контекста» —
+  обратная сторона гибкости [CC]: можно брать любые модели без объявления, но
+  окно контекста (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) **одно на все модели**, и
+  при смене модели нужно **не забыть ролевые переменные и модель субагентов**
+  (`ANTHROPIC_DEFAULT_*_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`);
+- `README.md`, `docs/install.md` — гайды клиентов в таблице документации и в
+  дереве проекта.
+
+**Следствия:** у обоих поддерживаемых клиентов есть собственное руководство,
+а разница подходов к моделям (гибкость против предварительного объявления)
+описана явно и с двух сторон.
+
+
+### 2026-09-11 CI: path-гейты для остальных job'ов (линт, тесты, smoke-проверки)
+
+**Цель:** после гейта `install-molecule` (запись выше) остальные четыре job'а
+всё ещё гонялись на **любой** push/PR в `main` — включая правки только
+документации. Матричный `test` (Python 3.10–3.13) и smoke-проверки занимали
+раннеры там, где ничего проверить не могли.
+
+**Решение** (`.github/workflows/ci.yml`):
+- job `changes` расширен до трёх фильтров и трёх output'ов:
+  `install` (`install.sh`, `molecule/**`), `code` (`backend_adapter/**`,
+  `backend-adapter.py`, `tests/**`, `pyproject.toml`, `pytest.ini`,
+  `requirements*.txt`) и `runtime` (`backend_adapter/**`,
+  `backend-adapter.py`, `pyproject.toml`, `requirements*.txt`);
+- `lint-and-typecheck` и `test` получают `needs: changes` +
+  `if: needs.changes.outputs.code == 'true'`;
+- `install-smoke-test` и `webui-smoke` — `if: needs.changes.outputs.runtime
+  == 'true'`;
+- `webui-smoke` намеренно делит гейт `runtime` с `install-smoke-test`, а не
+  имеет узкого списка webui-модулей: WEBUI-ядро импортирует почти весь
+  базовый пакет, и узкий список давал бы ложные пропуски (опасная сторона —
+  не поймать поломку) ради экономии ~30 с;
+- шапка `ci.yml` переписана под общую схему, предупреждение о
+  `skipped`/branch-protection усилено (теперь `skipped` может получить любой
+  job);
+- `docs/install.md` §2.1 — таблица «фильтр → пути → job'ы» и практические
+  следствия.
+
+**Следствия:** правка только документации прогоняет лишь job `changes`;
+правка только `tests/**` — `lint-and-typecheck` и `test`; smoke-джобы
+запускаются на изменениях кода/сборки. Обратная сторона та же, что и у
+molecule-гейта: job без затронутых путей получает `skipped`, поэтому набор
+required-проверок в branch-protection нужно настраивать осознанно.
+
+
+### 2026-09-11 Документация: адаптер — не только для [CC]
+
+**Цель:** после добавления гайда по QwenCode описание адаптера в `README.md`
+и документации всё ещё подавало его как инструмент «строго для [CC]» —
+хотя он давно обслуживает любого клиента Anthropic Messages API и
+[OI]-совместимых клиентов через три входа.
+
+**Решение:**
+- `README.md`, `CLAUDE.md`, `docs/install.md` (таглайн + обзор) — формулировка
+  «позволяющий использовать [CC]» заменена на «позволяющий работать агентам с
+  Anthropic-совместимым API ([CC], QwenCode)»; диаграммы — `[CC] / QwenCode`;
+  в `README.md` добавлен раздел «Поддерживаемые клиенты» со ссылками на оба
+  гайда и `docs/routing.md`; в Quick start — обе команды запуска клиента;
+- `docs/architecture.md` — §1 (overview) и §3 (диаграмма компонентов)
+  переписаны клиент-агностично (упомянуты оба клиента + любой Anthropic-API
+  клиент; настройка через `ANTHROPIC_BASE_URL` для [CC] и
+  `modelProviders[].baseUrl` для QwenCode);
+- `pyproject.toml` — `description` → `Anthropic API ↔ [OI] Backend Proxy
+  Adapter`, в `keywords` добавлен `qwen-code`;
+- `install.sh` — `Description=` systemd-юнита и строка баннера установщика
+  приведены к `Anthropic <-> [OI]` / `[CC] / QwenCode`; строки «Point [CC] to
+  the proxy» — «Point [CC] (or QwenCode) to the proxy»;
+- `docs/samples/backend-adapter.service` — `Description` приведён к
+  `Anthropic <-> [OI] Backend Adapter`;
+- `changelog.md` — заголовок файла `# backend-adapter — history / changelog`
+  (вместо «[CC] <-> [OI]-backend adapter»).
+
+**Следствия:** адаптер позиционируется по протоколу (Anthropic ↔ [OI]), а не
+по одному клиенту; упоминания «Claude Code» в конкретных контекстах
+(настройка [CC], параллелизм его agent loop, Stainless SDK) оставлены — там
+речь именно о нём.
 
 
 ## v0.9.3 — install.sh: molecule-тест, системный systemd-сервис `--service`, режим `--delete`, повторная установка как корректное обновление; WEBUI — удаление строк Sessions и runtime-маппинг моделей

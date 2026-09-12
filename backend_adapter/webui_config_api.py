@@ -83,11 +83,12 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "Макс. символов reasoning в трейсе (0=без ограничений)",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "Макс. символов tool-полей в трейсе (0=без ограничений)",
         # TARGET-маршрутизация входов (см. docs/routing.md): значение задаёт,
-        # что делать с запросом на входе. Цель = сам вход → passthrough E→E;
-        # auto — по кэшу проб, без сети; none — вход закрыт (404).
-        "ADAPTER_MESSAGES_TARGET": "Куда направлять /v1/messages (Anthropic): формат-цель (messages → passthrough E→E), auto, none — вход закрыт (404)",
-        "ADAPTER_COMPLETIONS_TARGET": "Куда направлять /v1/chat/completions ([OI]): completions → passthrough E→E, auto, none — вход закрыт (404)",
-        "ADAPTER_RESPONSES_TARGET": "Куда направлять /v1/responses: responses → passthrough E→E, auto, none — вход закрыт (404)",
+        # что делать с запросом на входе. Конкретный формат → прямое
+        # преобразование входа в него; passthrough → дословная передача без
+        # преобразования; none — вход закрыт (404).
+        "ADAPTER_MESSAGES_TARGET": "Куда направлять /v1/messages (Anthropic): формат-цель (преобразование), passthrough — без преобразования, none — вход закрыт (404)",
+        "ADAPTER_COMPLETIONS_TARGET": "Куда направлять /v1/chat/completions ([OI]): формат-цель (преобразование), passthrough — без преобразования, none — вход закрыт (404)",
+        "ADAPTER_RESPONSES_TARGET": "Куда направлять /v1/responses: формат-цель (преобразование), passthrough — без преобразования, none — вход закрыт (404)",
         # Маппинг моделей agent→backend: тот же формат, что у env
         # ADAPTER_MODELS_MAPPING (docs/environment.md §4). Применяется на
         # лету — config._MAP перестраивается на месте, следующий запрос

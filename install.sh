@@ -586,7 +586,7 @@ EOF
 
   as_root tee "$SERVICE_UNIT" >/dev/null <<EOF
 [Unit]
-Description=backend-adapter proxy ([CC] <-> [OI])
+Description=backend-adapter proxy (Anthropic <-> [OI])
 After=network-online.target
 Wants=network-online.target
 
@@ -864,7 +864,7 @@ update_install() {
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
 echo "║     backend-adapter installer                                ║"
-echo "║     [CC] <-> [OI] backend proxy adapter                     ║"
+echo "║     [CC] / QwenCode <-> [OI] backend proxy adapter           ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -904,7 +904,7 @@ echo ""
 ok "Installation complete!"
 echo ""
 if [[ "$SERVICE_INSTALL" == 1 && "$PLATFORM" == linux-* ]]; then
-  echo "The service is enabled and already running. Point [CC] to the proxy:"
+  echo "The service is enabled and already running. Point [CC] (or QwenCode) to the proxy:"
   echo "  export ANTHROPIC_BASE_URL=http://localhost:9999"
   echo "  claude"
   echo ""
@@ -922,7 +922,7 @@ else
   echo "  2. Run the adapter:"
   echo "     backend-adapter"
   echo ""
-  echo "  3. Point [CC] to the proxy:"
+  echo "  3. Point [CC] (or QwenCode) to the proxy:"
   echo "     export ANTHROPIC_BASE_URL=http://localhost:9999"
   echo "     claude"
   echo ""

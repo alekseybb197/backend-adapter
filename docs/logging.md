@@ -45,6 +45,10 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **одн
 полностью (v0.8.6-реформа). Заданный путь — директория; создаётся при
 необходимости. Формат имени сессионного файла —
 `session-<YYYYMMDD-HHMMSS>-<session_id>.<ext>` (`.log` — debug, `.jsonl` — trace).
+`session_id` — первый непустой кандидат из списка `ADAPTER_SESSION_HEADER`
+(дефолт `X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id`;
+элемент `Имя:ключ` — JSON-заголовок), иначе `unknown` —
+см. `docs/environment.md` §5 и подраздел «Настройка агента (QwenCode)».
 
 ### ← CLIENT — Данные от клиента
 
@@ -293,7 +297,7 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 
 | Block | Описание |
 |---|---|
-| `[REQ]` | HTTP metadata: метод, путь, session_id |
+| `[REQ]` | HTTP metadata: метод, путь, session_id (первый непустой кандидат из списка `ADAPTER_SESSION_HEADER`; элемент `Имя:ключ` — JSON-заголовок; иначе `unknown`) |
 | `[BODY]` | Исходное Anthropic-тело запроса клиента |
 | `[TOOL_RESULT]` (summary) | `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` (всегда) |
 | `[TOOL_RESULT]` (content) | Полный JSON content tool result — безусловно, единым блоком для всех результатов (в консоли с обрезкой `ADAPTER_DEBUG_TRIM`, в файл при `ADAPTER_DEBUG_ENABLE=1` полный) |
