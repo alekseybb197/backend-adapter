@@ -135,11 +135,13 @@ RUNTIME_CONFIG_POOL = (
     "ADAPTER_MODELS_MAPPING",
 )
 
-# Допустимые значения TARGET-переменных (значение → целевой формат
-# messages|completions|responses, автовыбор auto или запрет none).
+# Допустимые значения TARGET-переменных (конкретный формат-цель
+# messages|completions|responses → прямое преобразование, passthrough →
+# дословная передача без преобразования, none → вход выключен).
 # Единый источник: объявления выше и _parse_target читают этот кортеж,
-# routing.decide валидирует значение assert-ом по нему (routing.py).
-TARGET_ALLOWED_VALUES = ("messages", "completions", "responses", "auto", "none")
+# routing.decide валидирует значение assert-ом по нему (routing.py),
+# WEBUI /config рендерит выпадающий список из него.
+TARGET_ALLOWED_VALUES = ("messages", "completions", "responses", "passthrough", "none")
 
 # Типы для валидации входа /config (POST): bool, int или enum-домен — кортеж
 # (str, допустимые_значения) для строковых полей с фиксированным набором
@@ -344,14 +346,13 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
 # управляет приёмом на /v1/messages, ADAPTER_COMPLETIONS_TARGET — на
 # /v1/chat/completions, ADAPTER_RESPONSES_TARGET — на /v1/responses.
 # Значение задаёт, ЧТО делать с запросом на этом входе:
-#   messages|completions|responses — целевой формат (куда конвертировать/
-#       передавать); разрешена только реализованная пара (реестр
-#       routing.IMPLEMENTED_CONVERSIONS) или passthrough (цель = сам вход,
-#       бэкенд поддерживает формат);
-#   auto — автовыбор: passthrough E→E, если бэкенд/модель поддерживает
-#       входной формат (по кэшу проб), иначе реализованная конверсия,
-#       иначе ошибка агенту. Сети во время запроса НЕТ — только кэш
-#       _ENDPOINT_STATE (endpoint_support ниже);
+#   messages|completions|responses — конкретный формат-цель: ПРЯМОЕ
+#       преобразование запроса входа в указанный формат (реестр
+#       routing.IMPLEMENTED_CONVERSIONS; сейчас messages→completions и
+#       messages→messages — сортировка system в начало). Нереализованная
+#       пара даёт ошибку агенту (400 «conversion … is not implemented»);
+#   passthrough — передать на соответствующий входу эндпойнт бэкенда БЕЗ
+#       преобразования: тело и SSE уходят дословно (E→E);
 #   none — входной эндпоинт выключен (404) — безопасный дефолт.
 # Zero-config дефолты описывают текущие возможности конвертера:
 # MESSAGES=completions (принимается только /v1/messages, конвертация в chat
@@ -362,9 +363,8 @@ ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").l
 # Допустимый набор значений — единая константа TARGET_ALLOWED_VALUES в блоке
 # пула (тип ("enum", …) в _RUNTIME_CONFIG_TYPES). Невалидное/пустое значение
 # env при импорте НЕ роняет старт: консольный [WARN] + трактовка как 'none'
-# (безопасное выключение входа).
-
-_TARGET_FORMATS = ("messages", "completions", "responses")
+# (безопасное выключение входа). Это же покрывает значение 'auto' прежних
+# версий (удалено в v0.9.4): [WARN] + 'none'.
 
 
 def _parse_target(value: str, var_name: str) -> str:
@@ -373,14 +373,14 @@ def _parse_target(value: str, var_name: str) -> str:
     Невалидное/пустое значение не роняет старт (это рубильник поведения,
     а не жёсткое требование как ADAPTER_BACKEND_CONFIG): печатается
     консольный [WARN], значение трактуется как 'none' — вход выключен
-    (безопасный дефолт)."""
+    (безопасный дефолт). Значение 'auto' прежних версий попадает сюда же."""
     raw = (value or "").strip().lower()
     if raw in TARGET_ALLOWED_VALUES:
         return raw
     if value and value.strip():
         print(
             f"[WARN] {var_name}: invalid value {value!r} (expected "
-            f"messages|completions|responses|auto|none) — treating as 'none'"
+            f"messages|completions|responses|passthrough|none) — treating as 'none'"
         )
     return "none"
 
@@ -1086,16 +1086,15 @@ def endpoint_support(backend_name: str, pname: str) -> bool | None:
     Источник — _ENDPOINT_STATE (фоновая probe_endpoints + пер-модельные пробы
     usage-таблицы через upsert_endpoint_state): ``found=True`` (HTTP 200) ⇔
     поддержка. Сети здесь НЕТ — это чистый геттер кэша для роутинга
-    (routing.decide), который в режиме ``auto`` не может делать синхронных
-    проб во время запроса (решение пользователя).
+    (routing.decide), который не делает синхронных проб во время запроса.
 
     Возвращает:
     - True — бэкенд подтверждённо поддерживает формат (found=True);
     - False — пробовался, но не поддерживает (не-200);
     - None — неизвестно: не пробовался / пробы выключены (ADAPTER_ENDPOINT_
       PROBE=0 и пер-модельные пробы не наполняли кэш) / ``pname`` вне
-      ENDPOINT_PROBES. Зовущий (routing.decide) трактует None как False —
-      «нет подтверждения поддержки → passthrough не выбирается»."""
+      ENDPOINT_PROBES. Зовущий (routing.decide) трактует None оптимистично —
+      «нет данных → маршрут выбирается, отказ только при found=False»."""
     path = next((p for n, p, _t in ENDPOINT_PROBES if n == pname), None)
     if path is None:
         return None

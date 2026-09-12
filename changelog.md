@@ -3,6 +3,54 @@
 
 ## v0.9.4 (WIP — CI: path-гейты для всех job'ов; session id агентов не-[CC] (QwenCode, Codex — JSON-заголовки); фикс двойного префикса ADAPTER_ в тексте 404; гайд по настройке QwenCode; клиент-агностичное описание)
 
+### 2026-09-12 TARGET: `passthrough` и прямое преобразование, значение `auto` удалено
+
+**Цель:** развести в TARGET-переменных маршрутизации входов
+(`ADAPTER_{MESSAGES,COMPLETIONS,RESPONSES}_TARGET`) два смешанных смысла —
+«целевой формат» и «режим передачи». Прежде значение-формат, совпадающее с
+входом (`ADAPTER_COMPLETIONS_TARGET=completions`), означало passthrough E→E,
+т.е. «передать дословно», а отдельного слова для дословной передачи не было;
+значение `auto` (автовыбор по кэшу проб) приемлемой логики не имело и
+путало.
+
+**Решение:**
+- **Значение-формат = прямое преобразование.** `messages | completions |
+  responses` задают целевой формат: вход **преобразуется** в него и уходит на
+  соответствующий эндпойнт бэкенда. Это преобразование и когда цель совпадает
+  с входом: `ADAPTER_MESSAGES_TARGET=messages` — конверсия `messages→messages`
+  (сортировка system, `normalize_messages_system_first`), а не дословная
+  передача;
+- **`passthrough` — новое значение:** дословная передача на эндпойнт
+  **входного** формата, тело и SSE-поток как пришли (адаптер подставляет
+  только резолвнутую модель). Для `/v1/messages` это единственный способ
+  передать тело без сортировки system;
+- **реестр `IMPLEMENTED_CONVERSIONS`** (`routing.py`): реализованы
+  `messages→completions` (полный конвертер) и `messages→messages` (сортировка
+  system); прочие пары, включая self-пары `completions→completions` и
+  `responses→responses`, дают HTTP **400** «conversion … is not implemented» —
+  дословная передача таких входов достигается только `passthrough`;
+- **`auto` удалён:** в env (как и любое невалидное значение) → консольный
+  `[WARN]` + трактовка `none` (вход выключен), старт не падает. Мёртвые
+  константы (`ERROR_NO_ROUTE`, `_TARGET_FORMATS`) удалены;
+- `config.TARGET_ALLOWED_VALUES` = `("messages","completions","responses",
+  "passthrough","none")` — единый домен для парсера и WEBUI-селектов
+  (`/config` подхватывает новые значения автоматически);
+- `server.py`: дословная ветка выбирается признаком «цель == вход»
+  (`out_fmt_val == inp_fmt`), сортировка system — только при
+  `convert messages→messages`, так что `TARGET=passthrough` остаётся
+  действительно дословным; trace-поле `passthrough` отличает значение
+  `passthrough` от `convert messages→messages`.
+
+**Следствия:** **миграция конфигов.** Прежние `ADAPTER_COMPLETIONS_TARGET=completions`
+и `ADAPTER_RESPONSES_TARGET=responses` (означавшие passthrough E→E) теперь
+дают 400 «not implemented» — замените их на `passthrough`; `auto` — на
+конкретное значение. Дефолт `/v1/messages=completions` не менялся — нулевая
+настройка сохраняет прежнее поведение 100%. Документация (`docs/routing.md`
+переписан, `environment.md`, `install.md`, `architecture.md`, `webui.md`,
+`qwen-code.md`, `samples/sample.adapter.env`, `README.md`) и тесты
+(`test_routing.py`, `test_server.py`, `test_config.py`,
+`test_webui_config_api.py`) синхронизированы.
+
 <!-- WIP: записи по мере согласованных коммитов группы v0.9.4. -->
 
 ### 2026-09-11 CI: molecule-джоб запускается только при изменениях install.sh/molecule

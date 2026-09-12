@@ -571,12 +571,12 @@ class TestInputEndpoints(ServerSetupMixin):
     # -- /v1/chat/completions (passthrough E→E) ---------------------------
 
     def test_completions_passthrough_non_stream(self, fake_backend):
-        """ADAPTER_COMPLETIONS_TARGET=completions + поддержка бэкендом
+        """ADAPTER_COMPLETIONS_TARGET=passthrough + поддержка бэкендом
         /v1/chat/completions: тело уходит дословно (только model → resolved),
         ответ бэкенда отдаётся дословно, usage — prompt/completion."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
-        self._enable(completions="completions")
+        self._enable(completions="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "chat123",
@@ -613,11 +613,11 @@ class TestInputEndpoints(ServerSetupMixin):
     # -- /v1/responses (passthrough E→E) ---------------------------------
 
     def test_responses_passthrough_non_stream(self, fake_backend):
-        """ADAPTER_RESPONSES_TARGET=responses + поддержка бэкендом
+        """ADAPTER_RESPONSES_TARGET=passthrough + поддержка бэкендом
         /v1/responses: дословный passthrough, usage — input/output."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
-        self._enable(responses="responses")
+        self._enable(responses="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.responses_response = {
             "id": "resp_1",
@@ -649,12 +649,13 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
-    # -- passthrough messages→messages (TARGET=messages) ------------------
+    # -- convert messages→messages (TARGET=messages) ----------------------
 
     def test_messages_passthrough_when_target_messages(self, fake_backend):
-        """ADAPTER_MESSAGES_TARGET=messages + поддержка /v1/messages: на
-        антропик-совместимом бэкенде запрос уходит дословно (не
-        конвертируется в completions), ответ — дословно."""
+        """ADAPTER_MESSAGES_TARGET=messages + поддержка /v1/messages: прямое
+        преобразование messages→messages (сортировка system) — запрос уходит
+        на /v1/messages, а не конвертируется в completions; антропик-поля
+        сохраняются, ответ — дословно."""
         self._enable(messages="messages")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         # /v1/messages на fake-бэкенде отвечает 200 без тела (extra_post_paths);
@@ -683,13 +684,14 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
-    # -- passthrough messages→messages: system переносится в начало (v0.9.2) --
+    # -- convert messages→messages: system переносится в начало (v0.9.2) --
 
     def test_messages_passthrough_system_reordered(self, fake_backend):
-        """ADAPTER_MESSAGES_TARGET=messages (passthrough E→E): system-сообщения,
-        разбросанные по диалогу, переносятся в начало (без склейки), чтобы
-        бэкенд с Jinja-шаблоном (raise_exception 'System message must be at
-        the beginning') не упал 400. Тело иначе — как пришло (не конвертация)."""
+        """ADAPTER_MESSAGES_TARGET=messages (convert messages→messages):
+        system-сообщения, разбросанные по диалогу, переносятся в начало (без
+        склейки), чтобы бэкенд с Jinja-шаблоном (raise_exception 'System
+        message must be at the beginning') не упал 400. Остальное тело — как
+        пришло (единственное преобразование — сортировка)."""
         self._enable(messages="messages")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
@@ -783,12 +785,13 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
-    # -- авто: passthrough>convert / нет маршрута -------------------------
+    # -- passthrough messages (TARGET=passthrough): дословно, без сортировки --
 
-    def test_messages_auto_passthrough_priority(self, fake_backend):
-        """messages auto: passthrough messages→messages приоритетнее
-        конверсии, когда бэкенд поддерживает /v1/messages."""
-        self._enable(messages="auto")
+    def test_messages_passthrough_value_is_verbatim(self, fake_backend):
+        """ADAPTER_MESSAGES_TARGET=passthrough (в отличие от TARGET=messages —
+        convert): тело уходит на /v1/messages ДОСЛОВНО, включая порядок
+        messages — system НЕ переставляется (никакого преобразования)."""
+        self._enable(messages="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
@@ -798,71 +801,34 @@ class TestInputEndpoints(ServerSetupMixin):
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/messages",
                     body={"model": "test-model",
-                          "messages": [{"role": "user", "content": "Hi"}],
-                          "max_tokens": 100},
+                          "max_tokens": 100,
+                          "messages": [
+                              {"role": "user", "content": "Хелло"},
+                              {"role": "system", "content": "Правила"},
+                              {"role": "user", "content": "Пока"},
+                          ]},
                 )
                 assert resp["status"] == 200
                 assert len(fake_backend.requests) == 1
-                assert fake_backend.requests[0][0] == "/v1/messages"
-            finally:
-                server.shutdown()
-
-    def test_messages_auto_falls_back_to_convert(self, fake_backend):
-        """messages auto без /v1/messages у бэкенда: convert в completions."""
-        self._enable(messages="auto")
-        fake_backend.models_response = {"data": [{"id": "test-model"}]}
-        fake_backend.completions_response = {
-            "id": "chat1", "model": "test-model",
-            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-        }
-        with fake_backend:
-            server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", False)
-            self._support("/v1/chat/completions", True)
-            try:
-                resp = _send_http(
-                    "127.0.0.1", server.port, "POST", "/v1/messages",
-                    body={"model": "test-model",
-                          "messages": [{"role": "user", "content": "Hi"}],
-                          "max_tokens": 100},
-                )
-                assert resp["status"] == 200
-                # ушло в /v1/chat/completions (конвертация)
-                assert len(fake_backend.requests) == 1
-                assert fake_backend.requests[0][0] == "/v1/chat/completions"
-                data = json.loads(resp["body"])
-                assert data["role"] == "assistant"  # антропик-ответ
-            finally:
-                server.shutdown()
-
-    def test_messages_auto_no_route(self, fake_backend):
-        """messages auto: ни /v1/messages, ни реализованной конверсии —
-        нет found=True → 400 «no route»."""
-        self._enable(messages="auto")
-        fake_backend.models_response = {"data": [{"id": "test-model"}]}
-        with fake_backend:
-            server = self._setup_adapter(fake_backend)
-            # кэш проб пуст (None) — auto строг: passthrough не выбирается
-            try:
-                resp = _send_http(
-                    "127.0.0.1", server.port, "POST", "/v1/messages",
-                    body={"model": "test-model",
-                          "messages": [{"role": "user", "content": "Hi"}],
-                          "max_tokens": 100},
-                )
-                assert resp["status"] == 400
-                assert "no route" in resp["body"]
-                # запрос до бэкенда не дошёл
-                assert fake_backend.requests == []
+                path, _method, body = fake_backend.requests[0]
+                assert path == "/v1/messages"
+                sent = json.loads(body)
+                # порядок ролей НЕ изменён (system остался в середине)
+                assert [m["role"] for m in sent["messages"]] == [
+                    "user", "system", "user"
+                ]
+                assert sent["messages"][1]["content"] == "Правила"
+                # антропик-поля не вычищены (не конвертация)
+                assert "max_tokens" in sent
             finally:
                 server.shutdown()
 
     # -- 502 при подтверждённом отказе бэкенда ----------------------------
 
     def test_completions_passthrough_rejected_502(self, fake_backend):
-        """Явный TARGET=completions, но бэкенд подтверждённо (found=False)
+        """Явный TARGET=passthrough, но бэкенд подтверждённо (found=False)
         не поддерживает /v1/chat/completions → 502, запрос не уходит."""
-        self._enable(completions="completions")
+        self._enable(completions="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
@@ -883,7 +849,7 @@ class TestInputEndpoints(ServerSetupMixin):
     def test_strict_models_on_completions_input(self, fake_backend):
         """strict-проверка модели работает и на новом входе: неизвестная
         модель → 400 ДО роутинга/бэкенда."""
-        self._enable(completions="completions")
+        self._enable(completions="passthrough")
         fake_backend.models_response = {"data": [{"id": "known-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
@@ -902,12 +868,12 @@ class TestInputEndpoints(ServerSetupMixin):
     # -- SSE-релей (passthrough-стрим) ------------------------------------
 
     def test_completions_passthrough_stream_relay(self, fake_backend):
-        """ADAPTER_COMPLETIONS_TARGET=completions + stream=true: поток
+        """ADAPTER_COMPLETIONS_TARGET=passthrough + stream=true: поток
         бэкенда передаётся клиенту ДОСЛОВНО (SSE-релей E→E, без
         конвертации в антропик-события), usage — из финального чанка."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
-        self._enable(completions="completions")
+        self._enable(completions="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.sse_lines = [
             'data: {"choices": [{"delta": {"content": "Hello"}}]}\n\n',
@@ -943,7 +909,7 @@ class TestInputEndpoints(ServerSetupMixin):
         события response.completed (не верхнеуровневого usage)."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = True
-        self._enable(responses="responses")
+        self._enable(responses="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.sse_lines = [
             b'data: {"type": "response.output_text.delta", "delta": "Hi"}\n\n',
@@ -1000,7 +966,8 @@ class TestSessionAccounting(ServerSetupMixin):
         return session_registry.sessions_snapshot()
 
     def test_session_registered_with_route(self, fake_backend):
-        """Запрос messages→messages: строка сессии с agent/model/backend/route."""
+        """Запрос convert messages→messages: строка сессии с
+        agent/model/backend/route."""
         self._enable(messages="messages")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.extra_post_paths = {"/v1/messages": 200}
@@ -1025,7 +992,7 @@ class TestSessionAccounting(ServerSetupMixin):
                 assert row["agent"] == "claude-cli/2.1.236"
                 assert row["model"] == "test-model"
                 assert row["backend"] == "test"
-                assert row["route"] == "passthrough messages→messages"
+                assert row["route"] == "convert messages→messages"
                 assert row["calls"] == 1
                 assert row["errors"] == 0
             finally:

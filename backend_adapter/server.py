@@ -411,11 +411,14 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # action:
             #   disabled — вход выключен (TARGET=none) → 404 (ДО учёта usage,
             #              как 400-пути: запрос до бэкенда не дошёл);
-            #   reject   — маршрута нет (нереализованная пара / auto без
-            #              пути / бэкенд подтверждённо не поддерживает
-            #              целевой формат) → 400|502, тоже до учёта;
-            #   passthrough — тело запроса уходит бэкенду КАК ЕСТЬ (E→E);
-            #   convert  — реализованная конверсия (messages→completions).
+            #   reject   — маршрута нет (нереализованная пара / бэкенд
+            #              подтверждённо не поддерживает целевой формат) →
+            #              400|502, тоже до учёта;
+            #   passthrough — TARGET=passthrough: тело уходит бэкенду КАК ЕСТЬ
+            #              на эндпойнт входного формата (E→E);
+            #   convert  — прямое преобразование входа в формат-цель:
+            #              messages→completions (полный конвертер) или
+            #              messages→messages (сортировка system в начало).
             route = routing.decide(inp_fmt, backend_name)
             route_action, out_fmt, route_msg, route_status = route
             _dr(
@@ -442,10 +445,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # (session, agent, model, backend, route). Ставится ДО ветки
             # disabled/reject — таблица показывает, куда агент пытался (в т.ч.
             # «reject»/«disabled»); client_model — клиентское имя до маппинга,
-            # как в таблице «Models in use». Для passthrough out_fmt=None →
-            # выходной формат равен входному (E→E). Смена модели или
-            # обработчика даёт НОВУЮ строку; повторный запрос тем же кортежем —
-            # ту же (calls+1).
+            # как в таблице «Models in use». Для passthrough out_fmt == вход →
+            # «passthrough X→X»; для convert — «convert X→Y» (в т.ч.
+            # «convert messages→messages»). Смена модели или обработчика даёт
+            # НОВУЮ строку; повторный запрос тем же кортежем — ту же (calls+1).
             if route_action == "passthrough":
                 route_str = f"passthrough {inp_fmt}→{inp_fmt}"
             elif route_action == "convert":
@@ -461,14 +464,20 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 return
 
             # Маршрут определён: format'ы исходящего запроса (convert → out,
-            # passthrough E→E → сам вход) и признак passthrough (тело не
-            # пересобирается — см. ветку ниже).
-            passthrough = route_action == "passthrough"
+            # passthrough → сам вход) и признак «цель == вход» (verbatim):
+            # тело НЕ пересобирается в [OI]-формат, а уходит на эндпойнт
+            # выходного формата как есть — см. ветку ниже. Верно и для
+            # TARGET=passthrough, и для convert messages→messages (там лишь
+            # дополнительно сортируются system-сообщения).
             if route_action == "convert":
                 assert out_fmt is not None
                 out_fmt_val = out_fmt
             else:
                 out_fmt_val = inp_fmt
+            verbatim = out_fmt_val == inp_fmt
+            # Признак «именно TARGET=passthrough» (для trace/логов): convert
+            # messages→messages тоже идёт дословной веткой, но это конверсия.
+            is_passthrough = route_action == "passthrough"
 
             # Учёт использованной модели (таблица WEBUI «Использованные
             # модели»): клиентское имя ДО маппинга; при первом обращении —
@@ -482,17 +491,18 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # resolved_model — имя модели, которое пойдёт на бэкенд (без префикса)
             model = resolved_model
 
-            # === Passthrough E→E (v0.9.0) ===
+            # === Дословная передача (E→E): TARGET=passthrough или convert
+            #     messages→messages (сортировка system) ===
             # Тело запроса уходит бэкенду КАК ПРИШЛО — единственные мутации:
             # ``model`` заменяется на resolved_model (маппинг/префикс бэкенда
-            # применяются и к passthrough) и, при аварийном рубильнике
+            # применяются и здесь) и, при аварийном рубильнике
             # ADAPTER_STREAMING_ENABLE=0, ``stream`` принудительно гасится.
             # Конвертация, strict-поля messages (max_tokens/system/tools/…) и
             # антропик-трассировка сюда не входят: контракт формата E→E
             # определяет бэкенд (он сам ответит 400 на невалидное тело), а
             # не адаптер. Ответ бэкенда отдаётся клиенту ДОСЛОВНО (см.
             # passthrough-хвост ниже) — usage читается по формату ``out_fmt``.
-            if passthrough:
+            if verbatim:
                 _dr(
                     req_id,
                     f"[PASSTHROUGH] input={inp_fmt} target={routing.target_for_input(inp_fmt)} "
@@ -506,18 +516,25 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     stream_requested = False
                     _dr(req_id, "[STREAM_DISABLED] (passthrough) forcing stream=false")
                 anthropic_req["model"] = model
-                # passthrough messages→messages (v0.9.2): бэкенд (vLLM-шаблон
+                # convert messages→messages (v0.9.2): бэкенд (vLLM-шаблон
                 # чата) требует system первым (Jinja raise_exception 'System
                 # message must be at the beginning'), а [CC]-сессии несут
                 # system-сообщения по ходу диалога и <system-reminder> внутри
                 # user. Переносим все role=system в начало (в исходном
-                # порядке, БЕЗ склейки) — сообщения не пересобираются,
-                # контракт E→E сохраняется (та же идея, что в convert-ветке,
-                # где system собираются в начало; там — склейкой). Другие
-                # passthrough-пути (completions→completions, responses→
-                # responses) уходят дословно: там нет инварианта «system
-                # первым».
-                if inp_fmt == "messages" and out_fmt_val == "messages":
+                # порядке, БЕЗ склейки) — сообщения не пересобираются
+                # (та же идея, что в convert-ветке, где system собираются в
+                # начало; там — склейкой). Это ЕДИНСТВЕННОЕ отличие от
+                # TARGET=passthrough, который уходит дословно, без
+                # перестановки: passthrough — «передать без преобразования»,
+                # а TARGET=messages — «преобразование messages→messages»
+                # (сортировка полей). Прочие дословные пути
+                # (completions→completions, responses→responses) уходят как
+                # есть: там нет инварианта «system первым».
+                if (
+                    route_action == "convert"
+                    and inp_fmt == "messages"
+                    and out_fmt_val == "messages"
+                ):
                     original_msgs = anthropic_req.get("messages", [])
                     reordered = normalize_messages_system_first(original_msgs)
                     if reordered != original_msgs:
@@ -530,7 +547,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     path=self.path,
                     model=model,
                     input_format=inp_fmt,
-                    passthrough=True,
+                    passthrough=is_passthrough,
                     stream_requested=stream_requested,
                 )
                 _dr(
@@ -586,7 +603,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 attempt=attempt,
                                 timeout=ADAPTER_TIMEOUT,
                                 streaming=True,
-                                passthrough=True,
+                                passthrough=is_passthrough,
                             )
                             t0 = time.time()
                             resp = urllib.request.urlopen(
@@ -605,7 +622,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 ok=True,
                                 status=resp.status,
                                 elapsed_ms=int((time.time() - t0) * 1000),
-                                passthrough=True,
+                                passthrough=is_passthrough,
                             )
 
                             self._start_sse(200)
@@ -629,7 +646,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 retries_used=attempt - 1,
                                 total_elapsed_ms=int((time.time() - req_t0) * 1000),
                                 streamed=True,
-                                passthrough=True,
+                                passthrough=is_passthrough,
                             )
                             return  # Успех -- выходим
 
@@ -703,7 +720,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 total_elapsed_ms=int((time.time() - req_t0) * 1000),
                                 streamed=True,
                                 client_gone=True,
-                                passthrough=True,
+                                passthrough=is_passthrough,
                             )
                             return
 
@@ -742,7 +759,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                     total_elapsed_ms=int((time.time() - req_t0) * 1000),
                                     streamed=True,
                                     failed_mid_stream=True,
-                                    passthrough=True,
+                                    passthrough=is_passthrough,
                                 )
                                 return
                             if attempt < ADAPTER_RETRY:
@@ -791,7 +808,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             total_elapsed_ms=int((time.time() - req_t0) * 1000),
                             failed=True,
                             streamed=True,
-                            passthrough=True,
+                            passthrough=is_passthrough,
                         )
                         # Протокол .err-инцидентов: финальный ответ — ошибка
                         # 4xx/5xx, запрос дошёл до бэкенда (out_body
@@ -829,7 +846,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             "backend_attempt",
                             attempt=attempt,
                             timeout=ADAPTER_TIMEOUT,
-                            passthrough=True,
+                            passthrough=is_passthrough,
                         )
                         t0 = time.time()
                         resp = urllib.request.urlopen(req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT)
@@ -851,7 +868,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             ok=True,
                             status=resp.status,
                             elapsed_ms=int(elapsed * 1000),
-                            passthrough=True,
+                            passthrough=is_passthrough,
                         )
 
                         # Usage по формату исходящего ответа (out_fmt_val):
@@ -888,7 +905,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             http_status=resp.status,
                             retries_used=attempt - 1,
                             total_elapsed_ms=int((time.time() - req_t0) * 1000),
-                            passthrough=True,
+                            passthrough=is_passthrough,
                         )
                         return  # Успех -- выходим
 
@@ -992,7 +1009,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         retries_used=ADAPTER_RETRY,
                         total_elapsed_ms=int((time.time() - req_t0) * 1000),
                         failed=True,
-                        passthrough=True,
+                        passthrough=is_passthrough,
                     )
                     write_error_file(
                         session_id,

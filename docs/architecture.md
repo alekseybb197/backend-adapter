@@ -123,12 +123,13 @@ module on one level, see ADR 2026-09-01).
 │   ├─ disabled (TARGET=none) / reject                            │
 │   │    404 / 400 / 502 JSON  (usage и .err не пишутся —         │
 │   │    запрос до бэкенда не дошёл)                              │
-│   ├─ passthrough E→E (вход == выход, TARGET/auto)               │
+│   ├─ passthrough E→E (TARGET=passthrough, или convert           │
+│   │    messages→messages — сортировка system)                   │
 │   │    body["model"] = resolved_model;                          │
 │   │    backend_url = base + INPUT_PATHS[out_fmt]                │
 │   │    ├─ non-stream → _send_raw (тело бэкенда дословно)        │
 │   │    └─ stream     → relay_sse (байты + usage-скан)           │
-│   └─ convert (messages→completions — единств. пара)             │
+│   └─ convert (messages→completions)                             │
 │        ├─ stream     → stream_openai_to_anthropic               │
 │        └─ non-stream → convert_openai_to_anthropic              │
 │   record_model_usage + usage_tokens — только принятые           │
@@ -141,8 +142,8 @@ module on one level, see ADR 2026-09-01).
 │   session_log → per-session files, parts-дампы                  │
 └─────────────────────────────────────────────────────────────────┘
         │
-        │  POST /v1/chat/completions ([OI] format) — convert / passthrough
-        │  POST /v1/messages | /v1/responses    — passthrough E→E
+        │  POST <target endpoint> (messages | completions | responses):
+        │  convert (преобразование) или passthrough (дословно)
         │  Bearer <key>
         ▼
   [OI]-compatible LLM backend
@@ -210,20 +211,21 @@ API) — пути зеркалят `config.ENDPOINT_PROBES`. Что делать
 env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 `ADAPTER_COMPLETIONS_TARGET` и `ADAPTER_RESPONSES_TARGET` (дефолт `none`) —
 префикс = входной эндпоинт, значение ∈
-`completions|messages|responses|auto|none`. **Принципы настройки, матрица
-«вход × значение» и перспективы — [`docs/routing.md`](routing.md).**
+`completions|messages|responses|passthrough|none` (значение-формат —
+**прямое преобразование** входа в него; `passthrough` — дословная передача;
+`none` — вход выключен; `auto` удалён в v0.9.4 → невалидное значение →
+`[WARN]` + `none`). **Принципы настройки, матрица «вход × значение» и
+перспективы — [`docs/routing.md`](routing.md).**
 
 `routing.decide(inp, backend_name)` возвращает `(action, out_fmt, msg, status)`
 по **кэшу проб** `config.endpoint_support(backend_name, pname)` (геттер
-`_ENDPOINT_STATE`; сети в запросе нет — None трактуется как False):
-action ∈ {passthrough (E→E: входной формат == целевому и бэкенд его
-поддерживает), convert (только реализованные пары — сегодня
-`messages→completions`), reject (нереализованная конверсия → 400 «conversion …
-is not implemented»; `auto` без маршрута → 400 «no route»; явный passthrough/
-convert при не поддерживающем бэкенде → 502), disabled (TARGET=none → 404)}.
-В `auto` приоритет: passthrough E→E (для messages в т.ч. `messages→messages`)
-> реализованная конверсия > 400. Реестр реализованных пар —
-`IMPLEMENTED_CONVERSIONS` в routing.py.
+`_ENDPOINT_STATE`; сети в запросе нет — None трактуется как «нет данных»,
+оптимистично): action ∈ {passthrough (TARGET=passthrough: тело на эндпойнт
+входного формата дословно, бэкенд его поддерживает), convert (реализованные
+пары — сегодня `messages→completions` и `messages→messages`), reject
+(нереализованная конверсия → 400 «conversion … is not implemented»; маршрут
+при подтверждённо не поддерживающем бэкенде → 502), disabled (TARGET=none →
+404)}. Реестр реализованных пар — `IMPLEMENTED_CONVERSIONS` в routing.py.
 
 Общий конвейер (для всех трёх входов; disabled/reject уходят ответом ДО
 обращения к бэкенду — usage-учёт и `.err` не пишутся):
@@ -256,17 +258,20 @@ convert при не поддерживающем бэкенде → 502), disabl
 9. Only messages→completions conversion: trace tool_results from incoming messages
    (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
    tools, tool_choice, system)
-   Passthrough E→E: тело как пришло — мутация body["model"] = resolved_model
+   Дословная ветка (out_fmt == inp_fmt): TARGET=passthrough ИЛИ convert
+   messages→messages. Тело как пришло — мутация body["model"] = resolved_model
    (и stream:false при ADAPTER_STREAMING_ENABLE=0); конвертеры не участвуют,
-   поля запроса не валидируются (бэкенд ответит 400 сам). Исключение v0.9.2:
-   только для messages→messages все role=system переносятся в начало
+   поля запроса не валидируются (бэкенд ответит 400 сам). Исключение v0.9.2 —
+   только convert messages→messages: все role=system переносятся в начало
    (normalize_messages_system_first, convert.py — перенос без склейки,
    порядок остальных ролей сохраняется; system уже первым / нет system —
-   без изменений). Прочие passthrough-пути (completions→completions,
-   responses→responses) уходят дословно — там нет инварианта «system первым»
+   без изменений). TARGET=passthrough сортировку НЕ применяет (дословно);
+   прочие пары (completions→completions, responses→responses) — тоже дословно,
+   там нет инварианта «system первым»
 10. Determine stream mode (client stream flag × ADAPTER_STREAMING_ENABLE)
 11. Backend URL: base + путь формата выхода (INPUT_PATHS[out_fmt]; конверсия
-    messages→completions — по-прежнему /v1/chat/completions)
+    messages→completions — по-прежнему /v1/chat/completions; convert
+    messages→messages и passthrough — эндпойнт входного формата)
 12. Retry loop (ADAPTER_RETRY times, exponential backoff):
    ├─ Stream branch:
    │  ├─ conversion: urllib urlopen → _start_sse() → stream_openai_to_anthropic()
@@ -345,8 +350,9 @@ Accumulates text, reasoning_content, and tool_calls buffers across chunks, then 
 
 ### 5.4 SSE passthrough-релей E→E (`streaming.py:relay_sse`, v0.9.0)
 
-Для passthrough-маршрутов (входной формат == целевому, см. §4.2) потоковый
-ответ бэкенда **не конвертируется**, а релеится клиенту **дословно**:
+Для дословных маршрутов (TARGET=passthrough; а также convert messages→messages —
+входной формат == целевому, см. §4.2) потоковый ответ бэкенда **не
+конвертируется**, а релеится клиенту **дословно**:
 `relay_sse(resp, wfile, req_id, inp_fmt)` читает ответ построчно и пишет
 байты в wfile как есть + flush — без пере-фрейминга и пере-сериализации
 (клиент получает ровно тот поток, что прислал бэкенд, в родном формате
@@ -753,7 +759,8 @@ live-обновление — JS `sessions_poll` → `/api/sessions/snapshot` (�
 - **после `routing.decide`** — `register(session, agent, model=client_model,
   backend=backend_name, route=route_str)`, ДО ветки disabled/reject (таблица
   показывает, куда агент пытался: `route` = `passthrough messages→messages` /
-  `convert messages→completions` / `reject` / `disabled`);
+  `convert messages→completions` (или `convert messages→messages`) /
+  `reject` / `disabled`);
 - 404 на не-входной путь строку **не** создаёт — учёт стоит после `return`
   (исключение между распознаванием пути и `register` тоже строки не создаёт);
 - `record_error(key)` — из общих `_send_json`/`_send_raw` по финальному

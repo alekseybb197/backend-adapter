@@ -113,7 +113,9 @@ class TestRenderConfigPage:
         """TARGET-переменные рендерятся выпадающими списками с текущим значением.
 
         v0.9.1: три ADAPTER_*_TARGET в форме /config — <select> с доменом
-        config.TARGET_ALLOWED_VALUES; текущее значение отмечено selected."""
+        config.TARGET_ALLOWED_VALUES; текущее значение отмечено selected.
+        v0.9.4: домен — messages|completions|responses|passthrough|none
+        (auto удалён), новый passthrough обязан быть опцией."""
         from backend_adapter import config
         current = config.get_runtime_config()
         html = self.render(current).decode("utf-8")
@@ -128,6 +130,9 @@ class TestRenderConfigPage:
             # все допустимые значения — опциями
             for val in config.TARGET_ALLOWED_VALUES:
                 assert f'value="{val}"' in html
+        # Новое значение домена присутствует, удалённое auto — нет.
+        assert 'value="passthrough"' in html
+        assert 'value="auto"' not in html
         # Дефолты: MESSAGES=completions, COMPLETIONS/RESPONSES=none — selected.
         assert '<option value="completions" selected>completions</option>' in html
         assert html.count('<option value="none" selected>none</option>') == 2

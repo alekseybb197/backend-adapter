@@ -122,9 +122,11 @@ backend:
 | `ADAPTER_RESPONSES_TARGET` | `none` | Куда направлять запросы с **`/v1/responses`** (Responses-формат). |
 
 Допустимые значения всех трёх — одно из: **`completions`**, **`messages`**,
-**`responses`** (целевой формат), **`auto`** (адаптер сам выбирает целевой
-формат **только по кэшу результатов проб** — без сети в запросе; детали и
-примеры — `docs/routing.md`), **`none`** (вход выключен: HTTP 404).
+**`responses`** (целевой формат: **прямое преобразование** входа в него),
+**`passthrough`** (передать на эндпойнт входного формата **без
+преобразования** — тело и SSE дословно), **`none`** (вход выключен: HTTP 404).
+Значение `auto` прежних версий удалено в v0.9.4: в env оно невалидно — консоль
+`[WARN]`, вход трактуется как `none`. Детали и примеры — `docs/routing.md`.
 
 > **Дефолты — это нулевая настройка (100% прежнее поведение):** принимается
 > только `/v1/messages`, который конвертируется в `chat.completions`
@@ -408,6 +410,6 @@ QwenCode (проверено на 0.23.2) **не передаёт id сесси�
 | Prometheus-метрики (текст text exposition 0.0.4, `GET /metrics`) | `ADAPTER_EXPORTER_ENABLE` | `1` (дефолт) → `0` для отключения |
 | Порт Prometheus-экспортёра | `ADAPTER_EXPORTER_PORT` | `9100` (дефолт) |
 | Принимать только `/v1/messages` (нулевая настройка; вход конвертируется в chat completions) | `ADAPTER_MESSAGES_TARGET` | `completions` (дефолт) |
-| Включить вход `/v1/chat/completions` ([OI]-клиент) | `ADAPTER_COMPLETIONS_TARGET` | `completions` (passthrough E→E на [OI]-бэкенд) — дефолт `none` (вход закрыт) |
-| Включить вход `/v1/responses` | `ADAPTER_RESPONSES_TARGET` | `responses` (passthrough E→E) — дефолт `none` (вход закрыт) |
-| Автомаршрут входа (по кэшу проб, без сети в запросе) | `ADAPTER_*_TARGET` | `auto` — passthrough E→E при поддержке бэкендом; иначе конверсия; иначе 400 «no route» (см. §1а) |
+| Включить вход `/v1/chat/completions` ([OI]-клиент) | `ADAPTER_COMPLETIONS_TARGET` | `passthrough` (дословно на [OI]-бэкенд, без преобразования) — дефолт `none` (вход закрыт) |
+| Включить вход `/v1/responses` | `ADAPTER_RESPONSES_TARGET` | `passthrough` (дословно, без преобразования) — дефолт `none` (вход закрыт) |
+| Преобразовать вход в указанный формат (напр. `messages→completions`) | `ADAPTER_*_TARGET` | формат-цель: `messages` \| `completions` \| `responses`; нереализованная пара → 400 «not implemented» (см. §1а) |

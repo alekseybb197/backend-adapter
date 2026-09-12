@@ -721,22 +721,26 @@ TARGET-переменная (**префикс имени = входной энд
 формат `none`, не принимается вовсе (404):
 
 ```bash
-# /v1/messages → конвертация в chat.completions (ДЕФОЛТ — нулевая настройка,
-# прежнее поведение 100%). Прочие значения: messages (passthrough E→E),
-# responses, auto (выбор по кэшу проб), none (вход выключен).
+# /v1/messages → ПРЕОБРАЗОВАНИЕ в chat.completions (ДЕФОЛТ — нулевая настройка,
+# прежнее поведение 100%). Прочие значения: messages (преобразование
+# messages→messages — сортировка system), passthrough (дословно, без
+# преобразования), responses (не реализовано → 400), none (вход выключен).
 export ADAPTER_MESSAGES_TARGET=completions
 
 # /v1/chat/completions: default none — вход закрыт (404).
-# completions → passthrough E→E на бэкенд, поддерживающий /v1/chat/completions.
-# export ADAPTER_COMPLETIONS_TARGET=completions
+# passthrough → дословная передача на /v1/chat/completions бэкенда.
+# export ADAPTER_COMPLETIONS_TARGET=passthrough
 
 # /v1/responses: default none — вход закрыт (404).
-# responses → passthrough E→E на бэкенд, поддерживающий /v1/responses.
-# export ADAPTER_RESPONSES_TARGET=responses
+# passthrough → дословная передача на /v1/responses бэкенда.
+# export ADAPTER_RESPONSES_TARGET=passthrough
 ```
 
-Допустимые значения всех трёх — `completions | messages | responses | auto | none`
-(`none` — вход закрыт, 404; `auto` — выбор по кэшу проб, **без сети в запросе**).
+Допустимые значения всех трёх — `messages | completions | responses | passthrough | none`
+(конкретный формат — **прямое преобразование** входа в него; `passthrough` —
+дословная передача без преобразования; `none` — вход закрыт, 404). Значение
+`auto` прежних версий удалено в v0.9.4: в env оно невалидно (консоль `[WARN]`,
+вход трактуется как `none`).
 Принципы настройки, матрица «вход × значение», реализованные маршруты и
 варианты будущих версий — в [`docs/routing.md`](routing.md). Справочник
 переменных — [`docs/environment.md`](environment.md), раздел «Входные
@@ -774,9 +778,8 @@ export ADAPTER_STRICT_MODELS=1
 # Дефолты = нулевая настройка: принимается только /v1/messages и конвертируется
 # в chat.completions; /v1/chat/completions и /v1/responses закрыты (404).
 export ADAPTER_MESSAGES_TARGET=completions
-# export ADAPTER_COMPLETIONS_TARGET=completions   # passthrough E→E (вход закрыт при none)
-# export ADAPTER_RESPONSES_TARGET=responses       # passthrough E→E (вход закрыт при none)
-# export ADAPTER_COMPLETIONS_TARGET=auto          # выбор маршрута по кэшу проб (без сети)
+# export ADAPTER_COMPLETIONS_TARGET=passthrough   # дословно (вход закрыт при none)
+# export ADAPTER_RESPONSES_TARGET=passthrough     # дословно (вход закрыт при none)
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
@@ -917,8 +920,8 @@ curl -X POST http://localhost:9999/v1/messages \
   -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
 
 # Новые входы (v0.9.0) — работают только при ненулевом TARGET:
-# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=completions (passthrough),
-# /v1/responses при ADAPTER_RESPONSES_TARGET=responses (passthrough),
+# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=passthrough,
+# /v1/responses при ADAPTER_RESPONSES_TARGET=passthrough,
 # при TARGET=none (дефолт) оба отвечают 404.
 curl -X POST http://localhost:9999/v1/chat/completions \
   -H "Content-Type: application/json" \

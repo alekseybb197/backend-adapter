@@ -57,7 +57,7 @@
 например, режимом **passthrough E→E** (тело уходит бэкенду как есть):
 
 ```bash
-export ADAPTER_COMPLETIONS_TARGET=completions
+export ADAPTER_COMPLETIONS_TARGET=passthrough
 ```
 
 Без этого на запрос через `openai`-провайдер придёт
@@ -329,7 +329,7 @@ cp docs/qwen-code/global.settings.json ~/.qwen/settings.json
 #    поправьте baseUrl, имена моделей и contextWindowSize (раздел 6)
 
 # И не забудьте разрешить вход, которым пользуется выбранный протокол
-# (раздел 2): для провайдера openai — ADAPTER_COMPLETIONS_TARGET=completions
+# (раздел 2): для провайдера openai — ADAPTER_COMPLETIONS_TARGET=passthrough
 # в окружении адаптера; для anthropic правок не требуется.
 ```
 

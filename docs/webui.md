@@ -247,8 +247,9 @@ GitHub-репозиторий проекта.
   `claude-cli/2.1.236 (external, cli)` → в колонке `claude-cli/2.1.236`).
 - **Модель / Бэкенд / Маршрут** — клиентское имя модели (до маппинга, как в
   «Models in use»), имя бэкенда и выбранное правило TARGET-маршрутизации
-  (`passthrough messages→messages`, `convert messages→completions`,
-  `reject`, `disabled` — см. `docs/routing.md`). Фиксируются в момент
+  (`passthrough messages→messages`, `convert messages→completions` (или
+  `convert messages→messages`), `reject`, `disabled` — см. `docs/routing.md`).
+  Фиксируются в момент
   запроса; показываются и при `reject`/`disabled` — видно, куда агент
   пытался попасть. Запрос, отвергнутый **до** `routing.decide` (400
   валидации тела), даёт строку с пустыми этими тремя полями.
@@ -341,10 +342,10 @@ JS `sessions_poll` каждые ~5 с опрашивает `/api/sessions/snapsh
   `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
 - **enum (3)** — TARGET-маршрутизация входов (v0.9.1): `ADAPTER_MESSAGES_TARGET`,
   `ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET` — выпадающие списки
-  из домена `messages | completions | responses | auto | none` (какой формат
-  отдавать бэкенду для запросов соответствующего входа; полная семантика
-  значений — [`docs/routing.md`](routing.md)). Текущее значение подсвечено
-  в списке;
+  из домена `messages | completions | responses | passthrough | none`
+  (конкретный формат — прямое преобразование входа в него; `passthrough` —
+  дословная передача; `none` — вход выключен; полная семантика значений —
+  [`docs/routing.md`](routing.md)). Текущее значение подсвечено в списке;
 - **str (1)** — `ADAPTER_MODELS_MAPPING` (v0.9.3): текстовое поле строки
   маппинга моделей agent→backend в том же формате, что env-переменная
   (`agent:backend,agent2:backend2`; пусто — маппинг отключён). Применяется на
