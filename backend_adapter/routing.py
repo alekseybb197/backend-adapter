@@ -8,18 +8,18 @@ happens to each request (convert / passthrough / reject). v0.9.0.
 (messages|completions|responses), дословную передачу на бэкенд без
 преобразования (passthrough) или запрет обработки входа (none).
 
-Модуль — лист DAG: на верхнем уровне импортирует только ``backend_adapter.
-config`` (корень DAG); его импортирует только ``server.py``. Чистая логика
-без сети и HTTP — решение о маршруте принимается по кэшу проб
-(``config.endpoint_support``), синхронных запросов к бэкенду во время
-выбора НЕТ.
+Модуль импортирует ``backend_adapter.config`` (корень DAG) и
+``session_settings`` (лист DAG, пер-сессионные переопределения, v0.9.5);
+его импортирует только ``server.py``. Чистая логика без сети и HTTP —
+решение о маршруте принимается по кэшу проб (``config.endpoint_support``),
+синхронных запросов к бэкенду во время выбора НЕТ.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-from . import config
+from . import config, session_settings
 
 # Канонические форматы = входные эндпоинты = короткие имена ENDPOINT_PROBES
 # (completions|messages|responses). Значение TARGET-переменной поверх них —
@@ -89,6 +89,16 @@ ERROR_UNIMPLEMENTED = "conversion '{inp}' -> '{out}' is not implemented by this 
 ERROR_UNSUPPORTED = "backend '{backend}' does not support {fmt} (probe: endpoint not found)"
 
 
+def target_env_name(inp: Format) -> str:
+    """Имя TARGET-переменной входного эндпойнта (messages →
+    'ADAPTER_MESSAGES_TARGET').
+
+    Публичный доступ к ``_ENV_NAMES`` для WEBUI (webui_sessions): селект
+    строки таблицы Sessions адресует пер-сессионное переопределение ИМЕННО
+    той переменной, которая управляет входом строки."""
+    return _ENV_NAMES[inp]
+
+
 def input_path_to_format(path: str) -> Format | None:
     """Формат входного эндпоинта по пути запроса ('/v1/messages' → 'messages').
 
@@ -100,21 +110,36 @@ def input_path_to_format(path: str) -> Format | None:
     return None
 
 
-def target_for_input(inp: Format) -> TargetValue:
+def target_for_input(inp: Format, session_id: str = "") -> TargetValue:
     """Живое значение TARGET-переменной для входного эндпоинта.
 
     Читает ``config.ADAPTER_<INP>_TARGET`` (атрибут модуля config, не
     снимок импорта): значение выставляется из env на импорте и входит в
     runtime-пул — ``/config`` переприсваивает тот же атрибут, поэтому
     чтение через ``getattr`` видит смену на лету и переживает reload
-    конфига в тестах."""
-    value = getattr(config, _ENV_NAMES[inp], _TARGET_DEFAULTS[inp])
+    конфига в тестах.
+
+    v0.9.5: при непустом ``session_id`` значение берётся ПЕР-СЕССИОННО
+    (``session_settings.effective`` поверх общей настройки). Переопределения
+    нет или стоит ``"inherit"`` — действует общая настройка приложения, т.е.
+    поведение прежних версий без изменений."""
+    name = _ENV_NAMES[inp]
+    if session_id:
+        value = session_settings.effective(session_id, name)
+    else:
+        value = getattr(config, name, _TARGET_DEFAULTS[inp])
     assert value in config.TARGET_ALLOWED_VALUES, value
     return value  # type: ignore[return-value]
 
 
-def decide(inp: Format, backend_name: str) -> tuple[str, Format | None, str, int]:
+def decide(
+    inp: Format, backend_name: str, session_id: str = ""
+) -> tuple[str, Format | None, str, int]:
     """Решение о маршруте одного запроса на входе ``inp`` к бэкенду.
+
+    ``session_id`` (v0.9.5) — пер-сессионный TARGET: при непустом значении
+    действующая цель берётся с учётом переопределений сессии (см.
+    ``target_for_input``). Пустая строка — общие настройки приложения.
 
     Возвращает ``(action, output_fmt, error_msg, http_status)``:
     - ``("passthrough", inp, "", 200)`` — TARGET=passthrough: тело запроса
@@ -135,8 +160,11 @@ def decide(inp: Format, backend_name: str) -> tuple[str, Format | None, str, int
     НЕ блокирует — маршрут выбирается оптимистично (passthrough / convert),
     как вёл бы себя адаптер без роутинга. Отказ (502) — только при
     подтверждённом found=False (проба была, не-HTTP-200).
-    """
-    target = target_for_input(inp)
+
+    v0.9.5: непустой ``session_id`` включает пер-сессионный TARGET (см.
+    ``target_for_input``) — сессия может уйти на другой маршрут, чем общая
+    настройка приложения, не меняя её для остальных."""
+    target = target_for_input(inp, session_id)
     if target == "none":
         return ("disabled", None, ERROR_DISABLED.format(env=_ENV_NAMES[inp]), 404)
 
