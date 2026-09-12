@@ -1,6 +1,6 @@
 # backend-adapter — Anthropic API ↔ [OI] Backend Proxy
 
-> **v0.9.4** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v0.9.5** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
@@ -29,9 +29,10 @@
 ## Возможности
 
 - **Прозрачное проксирование**: ретраи/таймауты, конвертация Anthropic ↔ [OI] (в т.ч. стриминг SSE), маскирование секретов в логах. **Входные эндпоинты** (v0.9.0): наряду с `/v1/messages` адаптер принимает `/v1/chat/completions` и `/v1/responses`; TARGET-переменные (`ADAPTER_*_TARGET`) задают режим обработки для каждого входа — **прямое преобразование** в указанный формат (конверсия `messages→completions`, `messages→messages` — сортировка system), **`passthrough`** (дословная передача: тело и SSE-поток возвращаются как есть) или выключение входа (`none`).
-- **Логирование и наблюдаемость**: консольные debug-блоки `[...]` печатаются **всегда** (с обрезкой до `ADAPTER_DEBUG_TRIM`; `0` — без обрезки); файловая запись per-session логов (`session-*.log`/`*.jsonl`, `*.parts` дампы) — по `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH` (дефолт `./tmp/logs`), файлы несут **полные** строки без обрезки; per-session JSON/YAML-дампы всех логгируемых частей — `ADAPTER_DEBUG_PARTS=1`; **`.err`-файлы инцидентов** (v0.9.0) — при финальном ответе клиенту 4xx/5xx реального прокси-запроса пишутся в ту же директорию **безусловно** (полные запрос и ошибка, без обрезки по TRIM, вне `ADAPTER_DEBUG_ENABLE`; redact по умолчанию).
+- **Логирование и наблюдаемость**: консольные debug-блоки `[...]` печатаются **всегда** (с обрезкой до `ADAPTER_DEBUG_TRIM`; `0` — без обрезки); файловая запись per-session логов (`session-*.log`/`*.jsonl`, `*.parts` дампы) — по `ADAPTER_DEBUG_ENABLE=1` в директорию `ADAPTER_DEBUG_LOGPATH` (дефолт `./tmp/logs`), файлы несут **полные** строки без обрезки; per-session JSON/YAML-дампы всех логгируемых частей — `ADAPTER_DEBUG_PARTS=1`; **`.err`-файлы инцидентов** (v0.9.0) — при финальном ответе клиенту 4xx/5xx реального прокси-запроса пишутся в ту же директорию **безусловно** (полные запрос и ошибка, без обрезки по TRIM, вне `ADAPTER_DEBUG_ENABLE`; redact по умолчанию). С v0.9.5 `.err` фиксирует **любую** ошибку, учтённую в таблице сессий, — включая отказы маршрутизации (disabled/reject), 400 валидации модели и 501, не доходящие до бэкенда; счётчик «Ошибок» в таблице `/sessions` — ссылка на этот файл.
 - **WEBUI** (поднимается всегда, флага отключения нет):
-  - `/` — статус-страница: шапка «Backend-Adapter Version <x.x.x>» с иконками-навигацией 🔃 (перепроверить бэкенды, POST `/`) / 📋 (`/session`) / 🔧 (`/config`), LLM-эндпоинты, таблица «Models in use» с live-счётчиками вызовов/токенов и колонкой **Cost** (по тарифам `ADAPTER_MODELS_TARIFFS`; ставится live-поллингом через innerHTML — `cost_html` с сервера); действия строки — иконки-кнопки ⟳ (перепроверить эндпоинты) / ↺ (сбросить счётчики) / ✕ (удалить строку); проверка бэкендов по кнопке-иконке 🔃 (перечитывает `ADAPTER_BACKEND_CONFIG` без рестарта);
+  - `/` — статус-страница: шапка «Backend-Adapter Version <x.x.x>» с иконками-навигацией 🔃 (перепроверить бэкенды, POST `/`) / 🗂 (`/sessions`) / 📋 (`/session`) / 🔧 (`/config`), LLM-эндпоинты, таблица «Models in use» с live-счётчиками вызовов/токенов и колонкой **Cost** (по тарифам `ADAPTER_MODELS_TARIFFS`; ставится live-поллингом через innerHTML — `cost_html` с сервера); действия строки — иконки-кнопки ⟳ (перепроверить эндпоинты) / ↺ (сбросить счётчики) / ✕ (удалить строку); проверка бэкендов по кнопке-иконке 🔃 (перечитывает `ADAPTER_BACKEND_CONFIG` без рестарта);
+  - `/sessions` — таблица сессий агентов (v0.9.5): строки-кортежи `(session, agent, model, backend, route)` с колонкой входного эндпойнта, счётчиком ошибок-ссылкой на `.err`-файл (открывается в новом окне) и пер-сессионными выпадающими списками Log / Parts / TARGET (наследуют общие настройки, пока не заданы явно); действия строки — ⏪ (сбросить счётчики только этой строки) / 🗑 (удалить строку); ссылка 🗂 со статус-страницы открывается в новом окне, обратная ссылка «Статус 📊» — в текущем;
   - `/session` — просмотр сессий (`*.parts`, дерево артефактов, hash8-алиасы; обратная ссылка «Статус 📊»);
   - `/config` — переключение объёма debug-записи на лету (runtime-пул; обратная ссылка «Статус 📊»);
   - `/healthz`, `/health`, `/live`, `/ready` — health-check для оркестрации;
@@ -78,14 +79,14 @@ qwen                   # QwenCode   — см. docs/qwen-code.md
 | [docs/logging.md](docs/logging.md) | Конфигурация логирования и trace |
 | [docs/sanitizing.md](docs/sanitizing.md) | Санитизация и маскирование секретов |
 | [docs/architecture.md](docs/architecture.md) | Архитектура, диаграмма компонентов, lifecycle запросов |
-| [docs/webui.md](docs/webui.md) | WEBUI и API: страницы `/`, `/session`, `/config`, `/api/*`, секция «Models in use» (live-счётчики) |
+| [docs/webui.md](docs/webui.md) | WEBUI и API: страницы `/`, `/sessions`, `/session`, `/config`, `/api/*`, секция «Models in use» (live-счётчики) и таблица сессий с пер-сессионными настройками |
 
 ## Структура проекта
 
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа (__version__)
-├── backend_adapter/            # Доменный пакет (28 модулей, включая __init__.py)
+├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
 │   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
 │   ├── routing.py              # Входные эндпоинты/TARGET: decide() по кэшу проб
@@ -93,17 +94,22 @@ backend-adapter/
 │   ├── streaming.py            # SSE streaming: конверсия + passthrough E→E relay
 │   ├── tracer.py               # JSONL trace-логирование
 │   ├── session_log.py          # Per-session логи с FIFO eviction
+│   ├── session_registry.py     # Таблица сессий (страница /sessions): строка-кортеж
+│   ├── session_settings.py     # Пер-сессионные переопределения Log/Parts/TARGET
 │   ├── daemon.py               # Detach (double fork)
+│   ├── shutdown.py             # Обработка Ctrl-C/SIGTERM
 │   ├── logger.py               # Консольные debug-логи (безусловны)
 │   ├── redact.py               # Маскирование секретов
 │   ├── webserver.py            # WEBUI-ядро (роутинг эндпойнтов, serve(), CLI)
 │   ├── webui_status.py         # WEBUI "/": статус-страница, usage-таблица, /api/*
+│   ├── webui_sessions.py       # WEBUI "/sessions": таблица сессий + /api/sessions/*
 │   ├── webui_ops.py            # WEBUI health: /healthz /health /live /ready
 │   ├── webui_config_api.py     # WEBUI "/config": runtime-конфиг
 │   ├── prometheus_exporter.py  # Метрики /metrics (отдельный слушатель)
 │   ├── session_viewer.py       # WEBUI "/session": просмотр *.parts сессий
 │   ├── model_usage.py          # Персистентный учёт использованных моделей, тарифы
 │   ├── probe_json.py           # JSON-результаты проверок бэкендов в LOGPATH
+│   ├── cli.py                  # CLI-утилиты
 │   ├── artifact_tree*.py       # Генерация дерева артефактов (8 модулей)
 │   └── __init__.py             # Lazy-прокси глобалов config/logger/tracer на старте
 ├── docs/                       # Документация

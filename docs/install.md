@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.4) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v0.9.5) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -190,23 +190,30 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (27 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
-│   ├── server.py              # HTTP-сервер, Handler
+│   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
+│   ├── routing.py             # Входные эндпоинты/TARGET: decide() по кэшу проб
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
-│   ├── session_log.py         # Per-session логи с FIFO eviction
+│   ├── session_log.py         # Per-session логи с FIFO eviction + .err-канал
+│   ├── session_registry.py    # Таблица сессий (страница /sessions): строка-кортеж
+│   ├── session_settings.py    # Пер-сессионные переопределения Log/Parts/TARGET
 │   ├── daemon.py              # Detach (double fork)
+│   ├── shutdown.py            # Обработка Ctrl-C/SIGTERM
 │   ├── logger.py              # Debug-логирование с redaction
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
 │   ├── webserver.py           # WEBUI-ядро: общий веб-сервер, роутинг эндпойнтов, CLI
 │   ├── webui_status.py        # WEBUI-эндпойнт "/": статус (версия, LLM, модели)
+│   ├── webui_sessions.py      # WEBUI "/sessions": таблица сессий + /api/sessions/*
 │   ├── webui_ops.py           # WEBUI health-эндпоинты "/healthz" "/health" "/live" "/ready"
 │   ├── webui_config_api.py    # WEBUI-эндпойнт "/config": runtime-пул debug-переменных
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
+│   ├── model_usage.py         # Персистентный учёт использованных моделей, тарифы
 │   ├── probe_json.py          # JSON-результаты проверок бэкендов в LOGPATH
+│   ├── cli.py                 # Консольный entry point пакета
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
@@ -823,7 +830,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.9.4 (...
+Backend-Adapter v0.9.5
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
