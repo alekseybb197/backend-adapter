@@ -143,6 +143,39 @@ RUNTIME_CONFIG_POOL = (
 # WEBUI /config рендерит выпадающий список из него.
 TARGET_ALLOWED_VALUES = ("messages", "completions", "responses", "passthrough", "none")
 
+# Значения TARGET-переменной в ПЕР-СЕССИОННОМ переопределении (v0.9.5):
+# тот же домен, что у глобальной настройки, плюс "inherit" — «взять общую
+# настройку приложения». Отдельный домен нужен потому, что у сессии «не
+# задано» — это не «none» (выключено), а именно «наследовать»; см.
+# session_settings и docs/routing.md §2.4.
+SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)
+
+# Пул настроек, которые можно переопределить ДЛЯ ОТДЕЛЬНОЙ СЕССИИ (v0.9.5,
+# session_settings.py): дефолт каждого — соответствующая общая настройка
+# приложения (config.X), а переопределение живёт в памяти процесса и
+# адресуется session_id. Логгирование — объём записи на диск для трафика
+# этой сессии; роутинг — три TARGET-переменные входов (см. §«РОУТИНГ
+# ВХОДНЫХ ЭНДПОИНТОВ» ниже: те же имена, что в RUNTIME_CONFIG_POOL, но
+# здесь значение может быть "inherit"). Точка хранения/порты/лимиты в пул
+# не входят — они не «объём на сессию».
+SESSION_CONFIG_POOL = (
+    "ADAPTER_DEBUG",
+    "ADAPTER_DEBUG_PARTS",
+    "ADAPTER_MESSAGES_TARGET",
+    "ADAPTER_COMPLETIONS_TARGET",
+    "ADAPTER_RESPONSES_TARGET",
+)
+
+# Типы пер-сессионных переопределений (валидация в session_settings).
+# TARGET-поля — enum-домен с "inherit" (SESSION_TARGET_VALUES).
+_SESSION_CONFIG_TYPES = {
+    "ADAPTER_DEBUG": bool,
+    "ADAPTER_DEBUG_PARTS": bool,
+    "ADAPTER_MESSAGES_TARGET": ("enum", SESSION_TARGET_VALUES),
+    "ADAPTER_COMPLETIONS_TARGET": ("enum", SESSION_TARGET_VALUES),
+    "ADAPTER_RESPONSES_TARGET": ("enum", SESSION_TARGET_VALUES),
+}
+
 # Типы для валидации входа /config (POST): bool, int или enum-домен — кортеж
 # (str, допустимые_значения) для строковых полей с фиксированным набором
 # значений (в пуле это три TARGET-переменные). Остальное отклоняем.
@@ -163,6 +196,27 @@ _RUNTIME_CONFIG_TYPES = {
     # синтаксис разбирает _parse_models_mapping, лояльный как у env).
     "ADAPTER_MODELS_MAPPING": str,
 }
+
+
+def accepts_value(expected, value) -> bool:
+    """Соответствует ли ``value`` объявленному типу пула.
+
+    ``expected`` — значение из ``_RUNTIME_CONFIG_TYPES`` (или домена
+    пер-сессионных переопределений, см. session_settings): ``bool``, ``int``,
+    ``str`` либо ``("enum", допустимые_значения)``. bool — подкласс int в
+    Python, поэтому для int-поля он отклоняется ЯВНО: иначе int-настройка
+    молча приняла бы True/False как 1/0. Общий валидатор: set_runtime_config
+    (общий пул) и session_settings (переопределения сессии) проверяют значения
+    одним правилом — домены у пулов разные, а правило одно."""
+    if expected is bool:
+        return isinstance(value, bool)
+    if expected is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected is str:
+        return isinstance(value, str)
+    if isinstance(expected, tuple) and expected[0] == "enum":
+        return isinstance(value, str) and value in expected[1]
+    return False
 
 
 def get_runtime_config() -> dict:
@@ -202,23 +256,9 @@ def set_runtime_config(**kwargs) -> dict:
         if name not in RUNTIME_CONFIG_POOL:
             continue
         expected = _RUNTIME_CONFIG_TYPES[name]
-        # bool — подкласс int в Python: проверяем bool ДО int, иначе
-        # int-поле молча приняло бы True/False как 1/0.
-        if expected is bool and not isinstance(value, bool):
-            continue
-        if expected is int and (isinstance(value, bool) or not isinstance(value, int)):
-            continue
-        # str-поле (ADAPTER_MODELS_MAPPING): значение — строка как есть
-        # (синтаксис разбирает _parse_models_mapping, лояльный как у env).
-        if expected is str and not isinstance(value, str):
-            continue
-        # enum-поле: значение — строка из допустимого набора (TARGET).
-        # Невалидная строка (или не-строка) игнорируется, как неверный тип.
-        if (
-            isinstance(expected, tuple)
-            and expected[0] == "enum"
-            and (not isinstance(value, str) or value not in expected[1])
-        ):
+        # Тип/домен — общим валидатором (bool/int/str/enum; bool не проходит
+        # в int-поле). Несоответствие — ключ игнорируется, остальные — нет.
+        if not accepts_value(expected, value):
             continue
         globals()[name] = value
         # Маппинг моделей — особый случай: server.py держит ССЫЛКУ на словарь
@@ -406,8 +446,9 @@ ADAPTER_RESPONSES_TARGET = _parse_target(
 # при штатном завершении таблица сохраняется всегда.
 ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
 
-# Глубина таблицы активных сессий агентов на статус-странице WEBUI (секция
-# «Sessions», v0.9.2): сколько последних СТРОК держать в памяти. Строка —
+# Глубина таблицы активных сессий агентов на странице WEBUI "/sessions"
+# (v0.9.5; v0.9.2 — секция «Sessions» статус-страницы): сколько последних
+# СТРОК держать в памяти. Строка —
 # кортеж (session, agent, model, backend, route), поэтому одна сессия может
 # занимать несколько строк (смена модели/обработчика); лимит считает строки,
 # а не сессии. Таблица НЕ персистится — при каждом запуске адаптера пуста.

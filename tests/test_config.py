@@ -1174,6 +1174,115 @@ class TestRuntimeConfig:
         assert routing.target_for_input("completions") == "passthrough"
 
 
+class TestSessionConfigPool:
+    """Домены пер-сессионных переопределений (v0.9.5, session_settings).
+
+    Пул переопределяемого — SESSION_CONFIG_POOL (логирование + TARGET), типы —
+    _SESSION_CONFIG_TYPES. TARGET-поля у сессии шире общего пула: домен
+    SESSION_TARGET_VALUES добавляет "inherit" («взять общую настройку»)."""
+
+    def setup_method(self):
+        _reload_config()
+        from backend_adapter import config
+        self.config = config
+
+    def test_target_values_adds_inherit(self):
+        # SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES): тот же
+        # домен плюс "inherit" — и ровно он.
+        assert self.config.SESSION_TARGET_VALUES == (
+            "inherit",
+            *self.config.TARGET_ALLOWED_VALUES,
+        )
+        assert "inherit" not in self.config.TARGET_ALLOWED_VALUES
+
+    def test_pool_contents(self):
+        # Пул — логирование (2 флага) + три TARGET-переменные входов.
+        assert set(self.config.SESSION_CONFIG_POOL) == {
+            "ADAPTER_DEBUG",
+            "ADAPTER_DEBUG_PARTS",
+            "ADAPTER_MESSAGES_TARGET",
+            "ADAPTER_COMPLETIONS_TARGET",
+            "ADAPTER_RESPONSES_TARGET",
+        }
+
+    def test_pool_types_cover_pool(self):
+        # У каждого имени пула объявлен тип — иначе set_config молча
+        # проигнорировал бы настройку по KeyError-ветке.
+        for name in self.config.SESSION_CONFIG_POOL:
+            assert name in self.config._SESSION_CONFIG_TYPES
+
+    def test_target_domain_has_inherit(self):
+        # TARGET-поля сессии валидируются по домену с "inherit"...
+        for name in (
+            "ADAPTER_MESSAGES_TARGET",
+            "ADAPTER_COMPLETIONS_TARGET",
+            "ADAPTER_RESPONSES_TARGET",
+        ):
+            assert self.config._SESSION_CONFIG_TYPES[name] == (
+                "enum",
+                self.config.SESSION_TARGET_VALUES,
+            )
+            # ...а те же имена в ОБЩЕМ пуле — по домену БЕЗ "inherit".
+            assert self.config._RUNTIME_CONFIG_TYPES[name] == (
+                "enum",
+                self.config.TARGET_ALLOWED_VALUES,
+            )
+
+    def test_bool_fields_are_bool(self):
+        assert self.config._SESSION_CONFIG_TYPES["ADAPTER_DEBUG"] is bool
+        assert self.config._SESSION_CONFIG_TYPES["ADAPTER_DEBUG_PARTS"] is bool
+
+    def test_pool_is_subset_of_runtime_pool(self):
+        # Имена сессии — из общего пула (сессия переопределяет то, что вообще
+        # переключаемо на лету), но БЕЗ строки маппинга моделей: она не «объём
+        # на сессию».
+        assert set(self.config.SESSION_CONFIG_POOL) <= set(self.config.RUNTIME_CONFIG_POOL)
+        assert "ADAPTER_MODELS_MAPPING" not in self.config.SESSION_CONFIG_POOL
+
+
+class TestAcceptsValue:
+    """accepts_value — общий валидатор значений пулов (set_runtime_config и
+    session_settings проверяют одним правилом)."""
+
+    def setup_method(self):
+        _reload_config()
+        from backend_adapter import config
+        self.config = config
+
+    def test_bool(self):
+        assert self.config.accepts_value(bool, True) is True
+        assert self.config.accepts_value(bool, False) is True
+        # int/bool не взаимозаменяемы: 1 — не bool.
+        assert self.config.accepts_value(bool, 1) is False
+        assert self.config.accepts_value(bool, "yes") is False
+
+    def test_int(self):
+        assert self.config.accepts_value(int, 500) is True
+        assert self.config.accepts_value(int, 0) is True
+        # bool — подкласс int, но для int-поля отклоняется ЯВНО (иначе
+        # True молча стал бы 1).
+        assert self.config.accepts_value(int, True) is False
+        assert self.config.accepts_value(int, "500") is False
+
+    def test_str(self):
+        assert self.config.accepts_value(str, "a:b") is True
+        assert self.config.accepts_value(str, "") is True
+        assert self.config.accepts_value(str, 123) is False
+
+    def test_enum(self):
+        domain = ("enum", ("messages", "none"))
+        assert self.config.accepts_value(domain, "messages") is True
+        assert self.config.accepts_value(domain, "none") is True
+        assert self.config.accepts_value(domain, "bogus") is False
+        # Не-строка (в т.ч. bool) в enum-поле не проходит.
+        assert self.config.accepts_value(domain, True) is False
+        assert self.config.accepts_value(domain, 1) is False
+
+    def test_unknown_expected_false(self):
+        assert self.config.accepts_value(float, 1.5) is False
+        assert self.config.accepts_value(None, "x") is False
+
+
 class TestEndpointProbe:
     """Tests for the «smoke» API-endpoint probe (v0.8.2, policy v0.8.5).
 

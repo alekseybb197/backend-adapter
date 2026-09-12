@@ -205,6 +205,12 @@ def isolate_logs(fresh_env):
 
     session_registry._TABLE.clear()
 
+    # Reset per-session setting overrides (v0.9.5, session_settings keeps its
+    # own module global — keyed by session_id, not by the tuple row).
+    from backend_adapter import session_settings
+
+    session_settings.reset()
+
     # Reset used-models table (model_usage keeps its own module global).
     # Persistence is OFF by default in all tests ("" — no file I/O); tests of
     # persistence enable it themselves on tmp_path.
