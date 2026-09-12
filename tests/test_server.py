@@ -1137,6 +1137,152 @@ class TestSessionAccounting(ServerSetupMixin):
             finally:
                 server.shutdown()
 
+    # ── Session id: JSON-заголовки (Codex CLI, v0.9.4) ──
+
+    _CODEX_METADATA = (
+        '{"installation_id":"4b895ef6-f5d3-4694-bc42-9a4df0fe23a9",'
+        '"session_id":"01a09245-ca32-7343-a9a7-3a4c879ede7b",'
+        '"thread_id":"01a09245-ca32-7343-a9a7-3a4c879ede7b",'
+        '"request_kind":"turn"}'
+    )
+
+    def test_session_from_codex_json_header(self, fake_backend):
+        """Codex CLI шлёт id внутри JSON-заголовка x-codex-turn-metadata:
+        кандидат «Имя:ключ» разбирает значение и берёт session_id."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"x-codex-turn-metadata": self._CODEX_METADATA,
+                             "User-Agent": "codex_cli_rs/0.20.0"},
+                )
+                assert resp["status"] == 200
+                assert self._sessions()[0]["session"] == \
+                    "01a09245-ca32-7343-a9a7-3a4c879ede7b"
+            finally:
+                server.shutdown()
+
+    def test_codex_json_header_bad_value_is_unknown(self, fake_backend):
+        """Битый JSON / отсутствие ключа / нестроковое значение → кандидат
+        пропускается, сессия остаётся «unknown» (не падение)."""
+        from backend_adapter import session_log as session_log_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        bad_values = [
+            "not-json-at-all",
+            '{"thread_id":"01a09245-ca32-7343-a9a7-3a4c879ede7b"}',
+            '{"session_id":12345}',
+        ]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                for value in bad_values:
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": "test-model",
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"x-codex-turn-metadata": value},
+                    )
+                    assert resp["status"] == 200
+                assert self._sessions()[0]["session"] == \
+                    session_log_mod.UNKNOWN_SESSION_ID
+            finally:
+                server.shutdown()
+
+    def test_codex_json_header_custom_list(self, fake_backend):
+        """ADAPTER_SESSION_HEADER=x-codex-turn-metadata:session_id: читается
+        только JSON-кандидат, штатный X-Claude-Code-Session-Id игнорируется."""
+        from backend_adapter import config as cfg
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        old = cfg.ADAPTER_SESSION_HEADER
+        cfg.ADAPTER_SESSION_HEADER = "x-codex-turn-metadata:session_id"
+        try:
+            with fake_backend:
+                server = self._setup_adapter(fake_backend)
+                try:
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": "test-model",
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                        headers={"X-Claude-Code-Session-Id": "sess-ignored",
+                                 "x-codex-turn-metadata": self._CODEX_METADATA},
+                    )
+                    assert resp["status"] == 200
+                    assert self._sessions()[0]["session"] == \
+                        "01a09245-ca32-7343-a9a7-3a4c879ede7b"
+                finally:
+                    server.shutdown()
+        finally:
+            cfg.ADAPTER_SESSION_HEADER = old
+
+    def test_client_request_id_not_in_default_list(self, fake_backend):
+        """x-client-request-id — opt-in (generic per-request заголовок): без
+        явного указания в списке он не подменяет сессию, фолбэк «unknown»."""
+        from backend_adapter import session_log as session_log_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"x-client-request-id": "01a09245-ca32-7343-a9a7-3a4c879ede7b"},
+                )
+                assert resp["status"] == 200
+                assert self._sessions()[0]["session"] == \
+                    session_log_mod.UNKNOWN_SESSION_ID
+            finally:
+                server.shutdown()
+
+    def test_codex_json_beats_client_request_id(self, fake_backend):
+        """Оба codex-заголовка заданы с разными uuid: побеждает JSON-кандидат
+        (он раньше в дефолтном списке), x-client-request-id игнорируется."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                    headers={"x-codex-turn-metadata": self._CODEX_METADATA,
+                             "x-client-request-id": "other-request-uuid"},
+                )
+                assert resp["status"] == 200
+                assert self._sessions()[0]["session"] == \
+                    "01a09245-ca32-7343-a9a7-3a4c879ede7b"
+            finally:
+                server.shutdown()
+
     def test_convert_route_recorded(self, fake_backend):
         """messages→completions (дефолт): route = convert messages→completions."""
         fake_backend.models_response = {"data": [{"id": "test-model"}]}

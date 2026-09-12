@@ -428,7 +428,19 @@ ADAPTER_SESSIONS_TABLE = int(os.environ.get("ADAPTER_SESSIONS_TABLE", "10"))
 # — для клиентов с отдельным именем (см. docs/environment.md, раздел
 # «Настройка агента (QwenCode)»). Пустое значение переменной трактуется как
 # дефолт. В runtime-пул (/config) не входит — смена требует перезапуска.
-_DEFAULT_SESSION_HEADERS = "X-Claude-Code-Session-Id,x-opencode-session"
+#
+# Синтаксис элемента списка: «Имя-заголовка» — плоский заголовок (как раньше),
+# либо «Имя-заголовка:ключ» — значение разбирается как JSON-объект и берётся
+# строковое поле «ключ» верхнего уровня (Codex CLI шлёт id внутри
+# x-codex-turn-metadata как {"session_id": "...", ...}). Битый JSON, отсутствие
+# ключа или нестроковое значение — кандидат молча пропускается. Двоеточие в
+# имени HTTP-заголовка невозможно, поэтому старые значения без «:» трактуются
+# ровно как прежде. x-client-request-id — пример opt-in: Codex дублирует в нём
+# тот же uuid, но имя generic (у части клиентов это per-request id), поэтому в
+# дефолт не входит.
+_DEFAULT_SESSION_HEADERS = (
+    "X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id"
+)
 ADAPTER_SESSION_HEADER = (
     os.environ.get("ADAPTER_SESSION_HEADER", "").strip() or _DEFAULT_SESSION_HEADERS
 )

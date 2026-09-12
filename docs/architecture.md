@@ -730,9 +730,10 @@ tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не 
 In-memory реестр (`_TABLE: dict[SessionKey → строка]` + lock), где
 **`SessionKey = tuple[str, str, str, str, str]` = `(session, agent, model,
 backend, route)`**, а строка — «закреплённое соответствие» агента, модели,
-бэкенда и обработчика в рамках клиентской сессии (первый непустой заголовок
+бэкенда и обработчика в рамках клиентской сессии (первый непустой кандидат
 из списка `ADAPTER_SESSION_HEADER`, дефолт
-`X-Claude-Code-Session-Id,x-opencode-session`; ни одного — `unknown`), плюс
+`X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id`;
+ни одного — `unknown`), плюс
 сопровождающие поля: время последнего
 обращения, счётчики обращений и ошибок. Смена модели агентом или смена
 обработчика (правило TARGET) — **новое событие → новая строка**; возврат к

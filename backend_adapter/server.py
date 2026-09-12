@@ -72,11 +72,52 @@ class QuietThreadingHTTPServer(http.server.ThreadingHTTPServer):
 _req_ctx = threading.local()
 
 
-def _session_header_names() -> list[str]:
-    """Имена заголовков-кандидатов из ``ADAPTER_SESSION_HEADER`` (список через
-    запятую). Пустые элементы отброшены; полностью пустой список → дефолт."""
-    names = [n.strip() for n in config.ADAPTER_SESSION_HEADER.split(",")]
-    return [n for n in names if n] or config._DEFAULT_SESSION_HEADERS.split(",")
+def _parse_session_header_specs(raw: str) -> list[tuple[str, str | None]]:
+    """Разбирает строку ``ADAPTER_SESSION_HEADER`` в пары (имя, JSON-ключ|None).
+
+    Элемент списка — либо «Имя-заголовка» (плоский заголовок, ключ ``None``),
+    либо «Имя-заголовка:ключ» (значение — JSON-объект, берётся строковое поле
+    ``ключ``). Пустые элементы отброшены."""
+    specs: list[tuple[str, str | None]] = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, _, key = item.partition(":")
+        name = name.strip()
+        if name:
+            specs.append((name, key.strip() or None))
+    return specs
+
+
+def _session_header_names() -> list[tuple[str, str | None]]:
+    """Кандидаты session id: пары (имя заголовка, JSON-ключ|None).
+
+    Источник — ``ADAPTER_SESSION_HEADER``; полностью пустой список → дефолт."""
+    specs = _parse_session_header_specs(config.ADAPTER_SESSION_HEADER)
+    return specs or _parse_session_header_specs(config._DEFAULT_SESSION_HEADERS)
+
+
+def _header_session_value(headers, name: str, key: str | None) -> str:
+    """Значение одного кандидата: плоский заголовок либо поле JSON-заголовка.
+
+    ``key is None`` — обычный заголовок. Иначе значение разбирается как
+    JSON-объект и возвращается его строковое поле ``key``; битый JSON, не-объект,
+    отсутствие ключа или нестроковое значение → ``""`` (кандидат пропускается)."""
+    value = headers.get(name)
+    if not value:
+        return ""
+    if key is None:
+        return value
+    try:
+        data = json.loads(value)
+    except (ValueError, TypeError):
+        return ""
+    if isinstance(data, dict):
+        field = data.get(key)
+        if isinstance(field, str) and field:
+            return field
+    return ""
 
 
 def _extract_session_id(headers) -> str:
@@ -85,13 +126,18 @@ def _extract_session_id(headers) -> str:
     Идёт по списку ``config.ADAPTER_SESSION_HEADER`` и возвращает первое
     непустое значение; ни одного — ``session_log.UNKNOWN_SESSION_ID``.
     Имена сверяются без учёта регистра (``email.message.Message.get``).
+    Кандидат вида «Имя:ключ» трактуется как JSON-заголовок: значение
+    разбирается как объект и берётся его строковое поле ``ключ`` (Codex CLI
+    шлёт ``x-codex-turn-metadata: {"session_id": "...", ...}``).
 
     Список нужен потому, что агенты называют заголовок по-разному: [CC] CLI
     шлёт ``X-Claude-Code-Session-Id``, а QwenCode по умолчанию id не шлёт
     вовсе и настраивается на произвольное имя через ``customHeaders`` (см.
-    docs/environment.md, раздел «Настройка агента (QwenCode)»)."""
-    for name in _session_header_names():
-        value = headers.get(name)
+    docs/environment.md, раздел «Настройка агента (QwenCode)»). Codex CLI шлёт
+    id внутри JSON-заголовка ``x-codex-turn-metadata`` — для него кандидат
+    задаётся как «Имя:ключ» и читается ``_header_session_value``."""
+    for name, key in _session_header_names():
+        value = _header_session_value(headers, name, key)
         if value:
             return value
     return UNKNOWN_SESSION_ID
