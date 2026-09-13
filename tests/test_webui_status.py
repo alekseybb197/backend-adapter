@@ -936,6 +936,27 @@ class TestCostCell:
         row = self._row("m", input_tokens=12345, output_tokens=0)
         assert "12k3 USD" in ws._cost_cell_html(row)
 
+    def test_cost_cell_fractional_tariff(self, tmp_path):
+        # Дробная цена за токен (0.022, v0.9.6): 10000×0.022 = 220,00 USD —
+        # без int-трункации цены в 0 (иначе Cost был бы «--»).
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "frac", "input_price": 0.022, "output_price": 0.044,
+             "currency": "USD", "price_per": 1},
+        ])
+        row = self._row("frac", input_tokens=10000, output_tokens=0)
+        assert "220,00 USD" in ws._cost_cell_html(row)
+
+    def test_cost_cell_fractional_tariff_small(self, tmp_path):
+        # 1000×0.022 = 22,00 USD — точное дробное значение, не «0,00».
+        config, ws = _fresh_modules()
+        _seed_tariffs(config, ws, tmp_path / "t.yaml", [
+            {"name": "frac", "input_price": "0,022", "output_price": "0,044",
+             "currency": "USD", "price_per": 1},
+        ])
+        row = self._row("frac", input_tokens=1000, output_tokens=0)
+        assert "22,00 USD" in ws._cost_cell_html(row)
+
     def _row(self, model, backend="AAA", calls=1, endpoints=None,
              input_tokens=0, output_tokens=0):
         return {

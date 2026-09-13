@@ -83,6 +83,12 @@ backend_adapter/
 ├── routing.py              ← входные эндпоинты и TARGET-маршрутизация (см. §4.2):
 │                             INPUT_PATHS, IMPLEMENTED_CONVERSIONS,
 │                             decide() по кэшу проб (лист DAG — импортирует config)
+├── state_store.py          ← перманентное состояние runtime-пула (v0.9.6, §6.13):
+│                             state.yaml (env ADAPTER_STATE) — load/save/apply_on_startup;
+│                             лист DAG — импортирует config + stdlib (yaml)
+├── env_validate.py         ← строгая валидация env при старте (v0.9.6, §6.14):
+│                             невалидный int/bool → [FATAL] + sys.exit(1);
+│                             лист DAG — stdlib only, вызывается ДО импорта config
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
     artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
     artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
@@ -878,6 +884,51 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 задачи 1–2). Пер-сессионные значения — `session_settings` (§6.11); строки —
 `session_registry` (§6.10). Поведение страницы и API — `docs/webui.md` §4/§7.
 
+**v0.9.6 (задачи 5–6):** форма **🗑** переехала из «Actions» в **первую
+ячейку**, перед `<code>`-id сессии (в «Actions» остался только ⏪); заголовки
+счётчиков укорочены до **`C`** / **`E`**. Селект **Parts** при выключенном Log
+сессии отрендерен как `off` и `disabled` (`_parts_cell_html` — источник
+истины серверный каскад, см. §6.11 и `docs/webui.md` §4).
+
+### 6.13 Перманентное состояние runtime-пула (`state_store.py`, v0.9.6)
+
+Модуль-лист DAG (импортирует `config` + stdlib `yaml`), хранит значения
+`config.RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, дефолт
+`state.yaml`; путь — `ADAPTER_DEBUG_LOGPATH`, `state_path()` читает атрибуты
+config живьём):
+
+- `load()` — `yaml.safe_load` + валидация каждого ключа через
+  `config.accepts_value` (битый файл / не-словарь / невалидная запись →
+  `[WARN]` и пропуск, старт не падает);
+- `save(values)` — атомарно (tmp в той же директории + `os.replace`), только
+  ключи пула; повторная запись идентичного снимка пропускается (`_LAST_SAVED`);
+- `apply_on_startup()` — файла нет → `save(get_runtime_config())` (фиксация
+  env); файл есть → `config.set_runtime_config(**data)` (**файл поверх env**);
+  в обоих случаях регистрирует колбек `config.set_on_change(_on_config_change)`.
+
+**Разрыв цикла:** `config.py` — корень DAG и не должен импортировать
+`state_store`. Поэтому персистентность инициирует сам `state_store` через
+`config.set_on_change` — `set_runtime_config` после применения дёргает
+колбеки (`_ON_CHANGE` под `_ON_CHANGE_LOCK`), для config это непрозрачная
+функция. Пер-сессионные настройки (`session_settings._OVERRIDES`) в файл не
+попадают. Вызов `apply_on_startup` — из `backend-adapter.py` после
+`os.makedirs(log_path)` и до `_init_multi_backends`, чтобы `_MAP`/TARGET были
+выставлены до старта бэкендов.
+
+### 6.14 Строгая валидация env при старте (`env_validate.py`, v0.9.6)
+
+Модуль-лист DAG (stdlib only), вызывается из `backend-adapter.py` **до**
+импорта `config` (иначе `int()` в config успел бы упасть голым `ValueError`).
+Таблица `_ENV_SPECS` (имя → `int`/`bool`/`str`): `int` обязан парситься в
+целое, `bool` — входить в `_BOOL_TRUE`/`_BOOL_FALSE`
+(`1/0/true/false/yes/no/on/off` и пусто). Невалидное значение →
+`[FATAL] <имя>=<знач>: ожидается <тип>` + `sys.exit(1)`.
+
+`config.py` при импорте продолжает читать env сам (обратная совместимость
+тестов), но парсит bool/int через `parse_bool`/`parse_int` этого модуля
+(единый домен значений); на невалидном входе эти функции возвращают
+безопасный дефолт — строгость за `validate_env`.
+
 ### 6.2 Разрешение коллизий имён моделей
 
 Когда одна и та же модель встречается на нескольких бэкендах, генерируется префиксный ID:
@@ -1115,8 +1166,14 @@ backend-adapter.py
   │                       — строка = кортеж session+agent+model+backend+route,
   │                       страница "/sessions" — v0.9.2/v0.9.5)
   ├── session_settings.py → config (лист DAG: пер-сессионные переопределения
-  │                       ADAPTER_DEBUG/PARTS/TARGET — v0.9.5; потребители —
-  │                       session_log, routing, webui_sessions)
+  │                       ADAPTER_DEBUG/PARTS/TARGET — v0.9.5; служебный
+  │                       оверрайд модели сессии — v0.9.6; потребители —
+  │                       session_log, routing, webui_sessions, server)
+  ├── state_store.py     → config, yaml (лист DAG: перманентный state.yaml
+  │                       RUNTIME_CONFIG_POOL — v0.9.6; колбек через
+  │                       config.set_on_change, обратной зависимости нет)
+  ├── env_validate.py    (no internal deps — stdlib only; вызывается
+  │                       backend-adapter.py ДО импорта config — v0.9.6)
   ├── probe_json.py      (no internal deps on the top level — stdlib only;
   │                       config/redact читаются локально внутри записи)
   ├── routing.py         → config, session_settings (лист DAG по config: входные
@@ -1176,5 +1233,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.5** (see `backend-adapter.py`).
+Current: **v0.9.6** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

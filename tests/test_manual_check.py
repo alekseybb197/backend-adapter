@@ -254,7 +254,7 @@ class TestManualAdapterProcess:
                 assert _wait_http(exp_port, "/metrics") == 200, \
                     f"экспортёр не поднялся на :{exp_port}"
                 out = ap.output
-                assert "Backend-Adapter v0.9.5" in out, out[:400]
+                assert "Backend-Adapter v0.9.6" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
                 # v0.9.0: старт пишет БЕЗУСЛОВНЫЕ JSON-файлы результатов
@@ -335,6 +335,16 @@ class TestManualAdapterProcess:
                     ap.proc.kill()
 
             # --- п.3: файловая запись при ENABLE=1 ---
+            # Первая фаза (ENABLE=0) создала перманентный state.yaml со
+            # снимком env (v0.9.6): файл побеждает env при следующем старте,
+            # поэтому без удаления он погасил бы ENABLE=1. Удаляем, чтобы
+            # проверить именно env-путь включения файловой записи (сама
+            # персистентность покрыта tests/test_state_store.py).
+            state_file = os.path.join(logs_dir, "state.yaml")
+            assert os.path.isfile(state_file), \
+                "state.yaml не создан при старте (v0.9.6)"
+            os.remove(state_file)
+
             env = _adapter_env(yaml_path, tariffs_path, proxy_port,
                                web_port, exp_port, logs_dir,
                                debug_enable="1")

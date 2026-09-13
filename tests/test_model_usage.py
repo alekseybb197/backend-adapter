@@ -1253,6 +1253,32 @@ class TestTariffs:
         assert t["input_price"] == 0.02
         assert t["output_price"] == 0.04
 
+    def test_fractional_price_not_truncated(self, tmp_path):
+        """Дробные цены (0.022 за токен) сохраняются как float — без
+        int-трункации в 0 (v0.9.6: тарифы за дробное число токенов)."""
+        config, mu = _fresh()
+        self._point_tariffs(config, mu, tmp_path, [
+            {"name": "frac", "input_price": 0.022, "output_price": 0.044,
+             "currency": "USD", "price_per": 1},
+        ])
+        mu.ensure_tariffs_loaded()
+        t = mu.lookup_tariff("frac", "AAA")
+        assert t["input_price"] == 0.022
+        assert t["output_price"] == 0.044
+        assert isinstance(t["input_price"], float)
+
+    def test_fractional_price_comma_string(self, tmp_path):
+        """«0,022» (строка с запятой) тоже дробное — не обрезается в 0."""
+        config, mu = _fresh()
+        self._point_tariffs(config, mu, tmp_path, [
+            {"name": "frac", "input_price": "0,022", "output_price": "0,044",
+             "currency": "USD", "price_per": 1},
+        ])
+        mu.ensure_tariffs_loaded()
+        t = mu.lookup_tariff("frac", "AAA")
+        assert t["input_price"] == 0.022
+        assert t["output_price"] == 0.044
+
     def test_broken_and_missing_files_empty(self, tmp_path):
         """Пустой путь/битый файл/не-«tariffs»-структура → пусто, без
         исключений (колонка Cost — «--»)."""

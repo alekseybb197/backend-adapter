@@ -39,6 +39,10 @@ def fresh_env(monkeypatch):
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
         "ADAPTER_DEBUG_LOGPATH": "",
+        # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
+        # Сам файл в тестах не создаётся — apply_on_startup вызывает только
+        # backend-adapter.py, а тесты state_store задают путь через tmp_path.
+        "ADAPTER_STATE": "state.yaml",
         "ADAPTER_PROXY_PORT": "9998",
         "ADAPTER_ENDPOINT_HOST": "127.0.0.1",
         "ADAPTER_WEBUI_HOST": "127.0.0.1",
@@ -107,6 +111,10 @@ def _default_config():
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
         "ADAPTER_DEBUG_LOGPATH": "",
+        # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
+        # Сам файл в тестах не создаётся — apply_on_startup вызывает только
+        # backend-adapter.py, а тесты state_store задают путь через tmp_path.
+        "ADAPTER_STATE": "state.yaml",
         "ADAPTER_PROXY_PORT": "9998",
         "ADAPTER_ENDPOINT_HOST": "127.0.0.1",
         "ADAPTER_WEBUI_HOST": "127.0.0.1",
@@ -210,6 +218,14 @@ def isolate_logs(fresh_env):
     from backend_adapter import session_settings
 
     session_settings.reset()
+
+    # Reset state_store (v0.9.6): снимок последней записи и колбеки, которые
+    # тесты могли зарегистрировать в config._ON_CHANGE (иначе колбек одного
+    # теста сработал бы на set_runtime_config в следующем).
+    from backend_adapter import state_store
+
+    state_store._LAST_SAVED = None
+    config._ON_CHANGE.clear()
 
     # Reset used-models table (model_usage keeps its own module global).
     # Persistence is OFF by default in all tests ("" — no file I/O); tests of

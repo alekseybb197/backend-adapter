@@ -246,16 +246,34 @@ class TestSessionSelectHelpers:
         assert 'target="_blank"' in html
         assert ">2</a>" in html
 
-    def test_actions_cell_has_reset_and_delete(self):
+    def test_actions_cell_has_reset_only(self):
+        # v0.9.6 (задача 5): 🗑 переехала в первую ячейку (к id сессии),
+        # в Actions осталась только ⏪.
         config, ws = _fresh_modules()
         row = _row("sess-1")
         from urllib.parse import quote
         q = quote(row["key"], safe="")
         html = ws._actions_cell_html(row)
         assert f'action="/api/sessions/reset?key={q}"' in html
-        assert f'action="/api/sessions/delete?key={q}"' in html
-        assert "⏪" in html and "🗑" in html
+        assert "/api/sessions/delete" not in html
+        assert "⏪" in html and "🗑" not in html
         assert 'title="Сбросить счётчики строки сессии"' in html
+
+    def test_session_cell_has_delete_before_id(self):
+        # Первая ячейка: 🗑 ПЕРЕД коротким id сессии, форма удаления адресует
+        # строку-кортеж (key).
+        config, ws = _fresh_modules()
+        sid = "1ad13437-1111-2222-3333-444455556666"
+        row = _row(sid)
+        from urllib.parse import quote
+        q = quote(row["key"], safe="")
+        html = ws._session_cell_html(row)
+        assert f'action="/api/sessions/delete?key={q}"' in html
+        assert "🗑" in html
+        assert f'<code title="{sid}">{sid[:8]}</code>' in html
+        # Корзина идёт РАНЬШЕ кода сессии.
+        assert html.index("🗑") < html.index("<code")
+        assert 'title="Удалить строку сессии"' in html
         assert "color:#c0392b" in html  # удаление — красное
 
     def test_target_cell_known_and_unknown_input(self):
@@ -306,6 +324,38 @@ class TestSessionsRowsHtml:
         assert "name=ADAPTER_MESSAGES_TARGET" in html
         assert "this.form.submit()" in html
 
+    def test_parts_cell_disabled_when_log_off(self):
+        # v0.9.6 (задача 6): при Log=off селект Parts выключен и показывает
+        # «off» — Parts не может быть активен без Log.
+        config, ws = _fresh_modules()
+        config.ADAPTER_DEBUG = False
+        html = ws._parts_cell_html("sess-1")
+        assert "name=ADAPTER_DEBUG_PARTS" in html
+        assert "disabled" in html
+        assert '<option value="0" selected>' in html
+
+    def test_parts_cell_enabled_when_log_on(self):
+        config, ws = _fresh_modules()
+        config.ADAPTER_DEBUG = True
+        html = ws._parts_cell_html("sess-1")
+        assert "name=ADAPTER_DEBUG_PARTS" in html
+        assert "disabled" not in html
+        # Хранимое переопределение Parts отражено как выбранное.
+        from backend_adapter import session_settings
+        session_settings.set_config("sess-2", {"ADAPTER_DEBUG_PARTS": True})
+        html2 = ws._parts_cell_html("sess-2")
+        assert '<option value="1" selected>' in html2
+
+    def test_parts_cell_disabled_when_session_log_off(self):
+        # Пер-сессионный Log=off (переопределение) тоже блокирует Parts, даже
+        # если общая настройка Log=on.
+        config, ws = _fresh_modules()
+        config.ADAPTER_DEBUG = True
+        from backend_adapter import session_settings
+        session_settings.set_config("sess-3", {"ADAPTER_DEBUG": False})
+        html = ws._parts_cell_html("sess-3")
+        assert "disabled" in html
+
     def test_escapes_session_and_agent(self):
         config, ws = _fresh_modules()
         html = ws._sessions_rows_html([
@@ -346,9 +396,11 @@ class TestSessionsPage:
             assert status == 200
             for header in ("Сессия", "Агент", "Модель", "Бэкенд",
                            "Входной эндпойнт", "Маршрут", "Последнее обращение",
-                           "Вызовов", "Ошибок", "Log", "Parts", "TARGET",
-                           "Actions"):
+                           "C", "E", "Log", "Parts", "TARGET", "Actions"):
                 assert f"<th>{header}</th>" in body
+            # Заголовки укорочены (v0.9.6, задача 5).
+            assert "<th>Вызовов</th>" not in body
+            assert "<th>Ошибок</th>" not in body
             assert "s-1" in body
         finally:
             httpd.shutdown()

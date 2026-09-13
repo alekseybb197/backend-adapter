@@ -831,7 +831,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v0.9.5
+Backend-Adapter v0.9.6
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation

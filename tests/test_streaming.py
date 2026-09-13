@@ -1,7 +1,5 @@
 """Tests for backend_adapter.streaming — SSE streaming converter."""
-import io
 import json
-from unittest import mock
 
 from tests.conftest import FakeRespStream, FakeWfile
 
@@ -415,3 +413,93 @@ class TestUsageWarnErrFile:
             approx_prompt_chars=200, out_body=b"{}", backend_url="http://b",
         )
         assert list(tmp_path.glob("session-*.err")) == []
+
+
+class TestResponsesControlMessage:
+    """Tests for emit_responses_control_message() — синтетический SSE-ответ
+    Responses API (v0.9.6)."""
+
+    def _events(self, wfile):
+        """Парсит буфер FakeWfile обратно в список (event, data)."""
+        text = wfile.data.decode("utf-8")
+        events = []
+        for block in text.strip().split("\n\n"):
+            if not block.strip():
+                continue
+            lines = block.split("\n")
+            evt = None
+            data = None
+            for line in lines:
+                if line.startswith("event: "):
+                    evt = line[7:].strip()
+                elif line.startswith("data: "):
+                    data = json.loads(line[6:])
+            if evt and data is not None:
+                events.append((evt, data))
+        return events
+
+    def test_sse_sequence(self):
+        from backend_adapter.streaming import emit_responses_control_message
+        wfile = FakeWfile()
+        emit_responses_control_message(wfile, "Model switched to `qwen3-coder`.", "qwen3-coder")
+        events = self._events(wfile)
+        # Ожидаемая последовательность событий (см. streaming.py)
+        expected_types = [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+        assert [e[0] for e in events] == expected_types
+
+    def test_delta_contains_text(self):
+        from backend_adapter.streaming import emit_responses_control_message
+        wfile = FakeWfile()
+        emit_responses_control_message(wfile, "hello world", "m1")
+        events = self._events(wfile)
+        delta = next(e for e in events if e[0] == "response.output_text.delta")[1]
+        assert delta["delta"] == "hello world"
+
+    def test_completed_status(self):
+        from backend_adapter.streaming import emit_responses_control_message
+        wfile = FakeWfile()
+        emit_responses_control_message(wfile, "ack", "model-x")
+        events = self._events(wfile)
+        completed = next(e for e in events if e[0] == "response.completed")[1]
+        assert completed["response"]["status"] == "completed"
+        assert completed["response"]["output"][0]["content"][0]["text"] == "ack"
+
+    def test_usage_is_none(self):
+        from backend_adapter.streaming import emit_responses_control_message
+        wfile = FakeWfile()
+        emit_responses_control_message(wfile, "ack", "model-x")
+        events = self._events(wfile)
+        created = next(e for e in events if e[0] == "response.created")[1]
+        assert created["response"].get("usage") is None
+
+
+class TestBuildResponsesControlResponse:
+    """Tests for build_responses_control_response() — non-stream синтетический
+    ответ (v0.9.6)."""
+
+    def test_structure(self):
+        from backend_adapter.streaming import build_responses_control_response
+        resp = build_responses_control_response("switched to q", "qwen3-coder")
+        assert resp["object"] == "response"
+        assert resp["status"] == "completed"
+        assert resp["model"] == "qwen3-coder"
+        assert len(resp["output"]) == 1
+        assert resp["output"][0]["type"] == "message"
+        assert resp["output"][0]["role"] == "assistant"
+        assert resp["output"][0]["content"][0]["type"] == "output_text"
+        assert resp["output"][0]["content"][0]["text"] == "switched to q"
+        assert resp["usage"] is None
+
+    def test_created_at_is_int(self):
+        from backend_adapter.streaming import build_responses_control_response
+        resp = build_responses_control_response("ack", "m")
+        assert isinstance(resp["created_at"], int)

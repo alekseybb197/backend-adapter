@@ -49,10 +49,23 @@ INPUT_PATHS: dict[Format, str] = {
 #   messages → messages — сортировка полей: все role=system переносятся в
 #       начало диалога (normalize_messages_system_first, convert.py), т.к.
 #       часть бэкендов (vLLM-шаблон чата) падает 400 'System message must be
-#       at the beginning'.
+#       at the beginning';
+#   responses → responses (v0.9.6) — «внутренний конвертор» ответов, в
+#       отличие от TARGET=passthrough тело НЕ уходит бэкенду дословно:
+#       (1) force_store_false (convert.py) принудительно выставляет
+#       store=false — сторонний бэкенд за адаптером не может резолвить
+#       previous_response_id чужого response, поэтому серверный стейт
+#       Responses API здесь не используется в принципе; (2)
+#       detect_model_switch_command (convert.py) перехватывает служебное
+#       сообщение "/model <имя>" ДО похода к бэкенду и переключает модель
+#       сессии через session_settings.set_model_override — обходит известную
+#       ненадёжность нативного /model у Codex CLI на кастомных
+#       model_provider (см. документацию проекта). В отличие от
+#       messages→messages здесь нет сортировки полей — сама структура
+#       input не меняется, кроме этих двух точечных вмешательств.
 # Прочие пары (completions→messages, messages→responses, …, а также
-# self-пары completions→completions и responses→responses) не реализованы:
-# для дословной передачи таких входов используйте TARGET=passthrough.
+# self-пара completions→completions) не реализованы: для дословной передачи
+# таких входов используйте TARGET=passthrough.
 IMPLEMENTED_CONVERSIONS: dict[tuple[Format, Format], bool] = {
     ("messages", "completions"): True,
     ("messages", "messages"): True,
@@ -62,7 +75,7 @@ IMPLEMENTED_CONVERSIONS: dict[tuple[Format, Format], bool] = {
     ("completions", "responses"): False,
     ("responses", "completions"): False,
     ("completions", "completions"): False,
-    ("responses", "responses"): False,
+    ("responses", "responses"): True,
 }
 
 # Zero-config дефолты TARGET-переменных (если env не задана): описывают

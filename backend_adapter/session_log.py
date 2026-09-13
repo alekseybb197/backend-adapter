@@ -245,6 +245,8 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     ``parts_enabled`` поверх session_settings) — сессия может включить
     подробности, не включая их для остальных. Мастер-выключатель проверяется
     здесь (быстрый выход), действующий parts-флаг — через parts_enabled.
+    v0.9.6: parts_enabled сам гейтится на logging_enabled — Parts без Log
+    невозможен (проверка logging_enabled ниже остаётся как быстрый выход).
     """
     if not logging_enabled(session_id):
         return
@@ -485,8 +487,14 @@ def parts_enabled(session_id: str) -> bool:
     """Действующий флаг ADAPTER_DEBUG_PARTS для сессии (v0.9.5).
 
     Смысл — как у ``logging_enabled``: пер-сессионное переопределение поверх
-    общей настройки. Вызывающий (write_debug_json) отдельно проверяет
-    мастер-выключатель ADAPTER_DEBUG."""
+    общей настройки.
+
+    v0.9.6 (задача 6): Parts — подробная запись ПОВЕРХ обычных логов, без
+    активного Log он не работает. Гейт ``logging_enabled`` встроен сюда, а не
+    оставлен вызывающему (write_debug_json), чтобы инвариант «Parts ⊆ Log»
+    соблюдался у ЛЮБОГО потребителя (в т.ч. прямых вызовов в тестах)."""
+    if not logging_enabled(session_id):
+        return False
     try:
         from . import session_settings
 

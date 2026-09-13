@@ -3,17 +3,18 @@
 This is the most important test file — core logic that bridges two protocols.
 """
 import json
-from unittest import mock
 
 from backend_adapter.convert import (
-    extract_text,
-    convert_tools_anthropic_to_openai,
-    convert_tool_choice_anthropic_to_openai,
-    extract_tool_results,
     convert_messages_anthropic_to_openai,
+    convert_openai_to_anthropic,
+    convert_tool_choice_anthropic_to_openai,
+    convert_tools_anthropic_to_openai,
+    detect_model_switch_command,
+    extract_text,
+    extract_tool_results,
+    force_store_false,
     normalize_messages_system_first,
     parse_tool_calls_from_text,
-    convert_openai_to_anthropic,
 )
 
 
@@ -345,6 +346,125 @@ class TestNormalizeMessagesSystemFirst:
         assert result[1] is messages[0]
         assert result[2] is messages[2]
         assert result[0]["content"] == [{"type": "text", "text": "rules"}]
+
+
+class TestForceStoreFalse:
+    """Tests for force_store_false() — routing responses→responses (v0.9.6):
+    принудительный store=false в теле Responses API."""
+
+    def test_sets_false_when_missing(self):
+        body = {"model": "x", "input": []}
+        changed = force_store_false(body)
+        assert changed is True
+        assert body["store"] is False
+
+    def test_sets_false_when_true(self):
+        body = {"model": "x", "store": True}
+        changed = force_store_false(body)
+        assert changed is True
+        assert body["store"] is False
+
+    def test_no_change_when_already_false(self):
+        body = {"model": "x", "store": False}
+        changed = force_store_false(body)
+        assert changed is False
+        assert body["store"] is False
+
+    def test_sets_false_when_null(self):
+        body = {"model": "x", "store": None}
+        changed = force_store_false(body)
+        assert changed is True
+        assert body["store"] is False
+
+
+class TestDetectModelSwitchCommand:
+    """Tests for detect_model_switch_command() — routing responses→responses
+    (v0.9.6): перехват "/model <имя>" в последнем user input-сообщении."""
+
+    def _user(self, content):
+        """Responses API input-сообщение: role=user, content — строка или блоки."""
+        return {"role": "user", "content": content}
+
+    def test_plain_string_command(self):
+        items = [self._user("hello"), self._user("/model qwen3-coder")]
+        assert detect_model_switch_command(items) == "qwen3-coder"
+
+    def test_command_is_only_message(self):
+        items = [self._user("/model gpt-5")]
+        assert detect_model_switch_command(items) == "gpt-5"
+
+    def test_case_insensitive(self):
+        items = [self._user("/MODEL qwen3-coder")]
+        assert detect_model_switch_command(items) == "qwen3-coder"
+
+    def test_trailing_whitespace_ok(self):
+        items = [self._user("  /model qwen3-coder   ")]
+        assert detect_model_switch_command(items) == "qwen3-coder"
+
+    def test_input_text_block(self):
+        items = [self._user([{"type": "input_text", "text": "/model qwen3-coder"}])]
+        assert detect_model_switch_command(items) == "qwen3-coder"
+
+    def test_text_block(self):
+        items = [self._user([{"type": "text", "text": "/model qwen3-coder"}])]
+        assert detect_model_switch_command(items) == "qwen3-coder"
+
+    def test_no_command_returns_none(self):
+        items = [self._user("hello, model"), self._user("how are you")]
+        assert detect_model_switch_command(items) is None
+
+    def test_command_in_non_last_message_ignored(self):
+        # Только ПОСЛЕДНЕЕ user-сообщение рассматривается — чтобы не
+        # перехватить "/model" из истории диалога.
+        items = [self._user("/model qwen3-coder"), self._user("hello")]
+        assert detect_model_switch_command(items) is None
+
+    def test_last_message_not_user_returns_none(self):
+        items = [{"role": "assistant", "content": "/model qwen3-coder"}]
+        assert detect_model_switch_command(items) is None
+
+    def test_command_must_be_alone_in_text(self):
+        # "/model" упоминается, но есть и другой текст — НЕ команда
+        # (перехват настоящего запроса с упоминанием "/model" исключён).
+        items = [self._user("please use /model qwen3-coder now")]
+        assert detect_model_switch_command(items) is None
+
+    def test_no_model_arg_returns_none(self):
+        items = [self._user("/model")]
+        assert detect_model_switch_command(items) is None
+
+    def test_empty_input_returns_none(self):
+        assert detect_model_switch_command([]) is None
+
+    def test_multi_block_message_ignored(self):
+        # Несколько блоков — сообщение «сложное», команду не ищем.
+        items = [
+            self._user(
+                [
+                    {"type": "input_text", "text": "context"},
+                    {"type": "input_text", "text": "/model qwen3-coder"},
+                ]
+            )
+        ]
+        assert detect_model_switch_command(items) is None
+
+    def test_non_text_content_ignored(self):
+        items = [self._user([{"type": "image", "url": "..."}])]
+        assert detect_model_switch_command(items) is None
+
+    def test_type_message_ok(self):
+        # type == "message" — допустимо (как и отсутствие type).
+        items = [
+            {"role": "user", "type": "message", "content": "/model qwen3-coder"}
+        ]
+        assert detect_model_switch_command(items) == "qwen3-coder"
+
+    def test_type_other_ignored(self):
+        # type == "function_call"/"file" и пр. — не сообщение-текст.
+        items = [
+            {"role": "user", "type": "function_call", "content": "/model qwen3-coder"}
+        ]
+        assert detect_model_switch_command(items) is None
 
 
 class TestParseToolCallsFromText:

@@ -517,8 +517,12 @@ def _as_float(v: object) -> float | None:
     return None
 
 
-def _normalize_tariff(raw: object) -> dict | None:
-    """Привести запись тарифа из YAML к внутренней схеме; None — битая запись.
+def _normalize_tariff(raw: object) -> tuple[dict | None, str]:
+    """Привести запись тарифа из YAML к внутренней схеме.
+
+    Возвращает ``(тариф, "")`` для валидной записи и ``(None, причина)`` для
+    битой — причина идёт в консольный ``[WARN]`` (v0.9.6: раньше битая запись
+    пропускалась молча, и было непонятно, почему модель не имеет Cost).
 
     Схема: {"name": str, "backend": str ("" — wildcard: любой бэкенд),
     "input_price": float, "output_price": float, "currency": str,
@@ -529,22 +533,22 @@ def _normalize_tariff(raw: object) -> dict | None:
     без валюты в колонке Cost показывать нечего. name обязателен; backend
     опционален (отсутствие → wildcard)."""
     if not isinstance(raw, dict):
-        return None
+        return None, f"запись не является словарём ({type(raw).__name__})"
     name = raw.get("name")
     if not isinstance(name, str) or not name:
-        return None
+        return None, "не задано имя (name)"
     backend = raw.get("backend")
     if backend is None:
         backend = ""
     elif not isinstance(backend, str):
-        return None
+        return None, f"backend должен быть строкой (у {name!r})"
     currency = raw.get("currency")
     if not isinstance(currency, str) or not currency.strip():
-        return None
+        return None, f"не задана валюта (currency) у {name!r}"
     in_price = _as_float(raw.get("input_price"))
     out_price = _as_float(raw.get("output_price"))
     if in_price is None or out_price is None:
-        return None  # цена-мусор — битая запись
+        return None, f"цена не число у {name!r} (input_price/output_price)"
     price_per = _as_float(raw.get("price_per"))
     if price_per is None or price_per <= 0:
         price_per = 1.0
@@ -555,7 +559,7 @@ def _normalize_tariff(raw: object) -> dict | None:
         "output_price": max(out_price, 0.0),
         "currency": currency.strip(),
         "price_per": price_per,
-    }
+    }, ""
 
 
 def _load_tariffs_locked() -> None:
@@ -580,11 +584,15 @@ def _load_tariffs_locked() -> None:
             raw_list = data.get("tariffs") if isinstance(data, dict) else None
             if isinstance(raw_list, list):
                 for raw in raw_list:
-                    t = _normalize_tariff(raw)
-                    if t is not None:
-                        # Ключ — (name, backend); последняя запись с тем же
-                        # ключом перезаписывает предыдущую (порядок файла).
-                        tariffs[(t["name"], t["backend"])] = t
+                    t, reason = _normalize_tariff(raw)
+                    if t is None:
+                        # v0.9.6: битая запись — [WARN] с причиной (раньше
+                        # молча пропускалась, и Cost модели был необъясним).
+                        _log("tariffs", f"{path}: запись пропущена — {reason}")
+                        continue
+                    # Ключ — (name, backend); последняя запись с тем же
+                    # ключом перезаписывает предыдущую (порядок файла).
+                    tariffs[(t["name"], t["backend"])] = t
         except Exception as e:  # noqa: BLE001 — тарифы не должны ронять учёт
             _log("tariffs", f"ignoring unreadable file {path}: {e}")
     _TARIFFS = tariffs

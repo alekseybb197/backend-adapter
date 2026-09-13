@@ -46,6 +46,87 @@ def normalize_messages_system_first(messages: list) -> list:
     return systems + others
 
 
+def force_store_false(body: dict) -> bool:
+    """Принудительно выставляет ``store: false`` в теле запроса Responses
+    API (routing: responses→responses и TARGET=passthrough для входа
+    responses, v0.9.6). Мутирует ``body`` на месте, возвращает True, если
+    значение пришлось поменять (для лога вызывающей стороны).
+
+    Зачем: серверный стейт Responses API (``previous_response_id``)
+    физически может резолвить только тот бэкенд, который сам создал
+    предыдущий ``response`` — сторонний бэкенд за этим адаптером чужих
+    ответов не хранит, а при отсутствии поля Responses API трактует
+    ``store`` как true по умолчанию. Пер-сессионный разбор реального
+    трафика Codex CLI показал, что сам клиент уже шлёт ``store: false`` и
+    пересобирает контекст целиком на своей стороне (см. разбор лога сессии
+    в документации проекта) — но полагаться на добросовестность
+    конкретного клиента адаптер не должен: это инвариант эндпоинта, а не
+    факт одного наблюдённого запроса."""
+    if body.get("store") is not False:
+        body["store"] = False
+        return True
+    return False
+
+
+# Команда переключения модели внутри сессии — см. detect_model_switch_command.
+# Разрешён произвольный "непробельный" идентификатор модели без ограничения
+# на алфавит (маппинг/валидация имени — уже существующая логика server.py:
+# _MAP и ADAPTER_STRICT_MODELS/_AVAILABLE_MODELS, здесь заново не дублируется).
+_MODEL_SWITCH_RE = re.compile(r"^/model\s+(\S+)\s*$", re.IGNORECASE)
+
+
+def _extract_responses_input_text(item: dict) -> str | None:
+    """Извлекает текст ОДНОГО input-сообщения Responses API, если оно
+    целиком состоит из одного текстового content-блока (``input_text``
+    или ``text``). None — сообщение сложнее (несколько блоков, изображение
+    и т.п.) либо текстового содержимого нет.
+
+    Используется ТОЛЬКО для detect_model_switch_command: команда
+    распознаётся исключительно в «чистом» однородном сообщении, чтобы не
+    перехватить настоящий запрос пользователя, который лишь упоминает
+    "/model" где-то по ходу более длинного текста."""
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and len(content) == 1:
+        block = content[0]
+        if isinstance(block, dict) and block.get("type") in ("input_text", "text"):
+            return block.get("text")
+    return None
+
+
+def detect_model_switch_command(input_items: list) -> str | None:
+    """Ищет служебную команду ``/model <имя>`` в ПОСЛЕДНЕМ input-сообщении
+    с ``role="user"`` (routing: responses→responses, v0.9.6). Возвращает
+    запрошенное имя модели либо None, если команды нет.
+
+    Назначение: нативное ``/model`` Codex CLI на кастомном
+    model_provider ненадёжно — известны баги пикера моделей (перезаписывает
+    профиль моделью [OI] при выборе из списка) и клонирования контекста
+    предыдущего провайдера при смене модели без рестарта сессии (см.
+    документацию проекта). Адаптер держит СОБСТВЕННЫЙ, полностью
+    предсказуемый канал переключения: пользователь пишет "/model <имя>"
+    обычным сообщением, сервер (server.py) перехватывает его этой функцией
+    ДО пересылки бэкенду, сохраняет выбор в session_settings
+    (set_model_override — переживает все последующие запросы сессии, пока
+    не будет переключён снова или сессия не завершится) и отвечает
+    синтетическим подтверждением (streaming.emit_responses_control_message /
+    build_responses_control_response) — реальная модель на это сообщение
+    не вызывается."""
+    if not input_items:
+        return None
+    last = input_items[-1]
+    if not isinstance(last, dict) or last.get("role") != "user":
+        return None
+    if last.get("type") not in (None, "message"):
+        return None
+    text = _extract_responses_input_text(last)
+    if not text:
+        return None
+    m = _MODEL_SWITCH_RE.match(text.strip())
+    return m.group(1) if m else None
+
+
 def convert_tools_anthropic_to_openai(tools):
     """Anthropic tool -> OpenAI tool."""
     openai_tools = []
