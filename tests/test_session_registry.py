@@ -146,6 +146,105 @@ class TestRegister:
         assert [r["model"] for r in rows] == ["m2", "m1"]  # m0 вытеснена
 
 
+class TestInputField:
+    """Поле ``input`` (v0.9.5) — входной эндпоинт: сопровождение строки, НЕ
+    часть ключа-кортежа (в отличие от model/backend/route)."""
+
+    def test_input_stored_in_row(self, reg):
+        reg.register(
+            "s-1", "agent", model="m", backend="be", route="r", input="messages"
+        )
+        assert reg.sessions_snapshot()[0]["input"] == "messages"
+
+    def test_input_defaults_empty(self, reg):
+        # Старые вызовы (без input) дают пустую строку — колонка «Входной
+        # эндпойнт» покажет серую «—».
+        _reg(reg)
+        assert reg.sessions_snapshot()[0]["input"] == ""
+
+    def test_input_not_part_of_key(self, reg):
+        # Смена input у того же кортежа НЕ создаёт новую строку: input — не
+        # ключ, а сопровождение (в отличие от route). Значение остаётся от
+        # ПЕРВОГО обращения — update ветки его не переписывает.
+        key = reg.register(
+            "s-1", "agent", model="m", backend="be", route="r", input="messages"
+        )
+        assert key == ("s-1", "agent", "m", "be", "r")  # input вне ключа
+        reg.register("s-1", "agent", model="m", backend="be", route="r", input="completions")
+        rows = reg.sessions_snapshot()
+        assert len(rows) == 1
+        assert rows[0]["calls"] == 2
+        assert rows[0]["input"] == "messages"
+
+    def test_key_json_has_no_input(self, reg):
+        # Дискриминатор строки — кортеж из 5 полей БЕЗ input: одна сессия с
+        # разными входами, но тем же (agent,model,backend,route) — одна строка.
+        reg.register("s-1", "a", model="m", backend="b", route="r", input="messages")
+        row = reg.sessions_snapshot()[0]
+        assert row["key"] == '["s-1","a","m","b","r"]'
+
+
+class TestResetCounters:
+    """Обнуление счётчиков ОДНОЙ строки-кортежа (v0.9.5, кнопка ⏪)."""
+
+    def test_resets_calls_and_errors(self, reg):
+        key = _reg(reg)
+        _reg(reg)  # calls=2
+        reg.record_error(key)
+        reg.record_error(key)
+        assert reg.reset_counters(key) is True
+        row = reg.sessions_snapshot()[0]
+        assert row["calls"] == 0
+        assert row["errors"] == 0
+
+    def test_keeps_row_and_last_seen(self, reg):
+        # Строка остаётся (в отличие от delete_key); last_seen/_ts не трогаются,
+        # поэтому позиция в сортировке сохраняется.
+        key = _reg(reg, session="s-1")
+        before = reg.sessions_snapshot()[0]["last_seen"]
+        reg.reset_counters(key)
+        rows = reg.sessions_snapshot()
+        assert len(rows) == 1
+        assert rows[0]["last_seen"] == before
+
+    def test_keeps_sort_order(self, reg):
+        # Строка не «омолаживается»: обнуление не поднимает её наверх.
+        _reg(reg, session="old")
+        time.sleep(0.01)
+        _reg(reg, session="new")
+        reg.reset_counters(("old", "agent", "m", "be", "r"))
+        assert [r["session"] for r in reg.sessions_snapshot()] == ["new", "old"]
+
+    def test_continues_counting_after_reset(self, reg):
+        key = _reg(reg)
+        reg.reset_counters(key)
+        _reg(reg)  # новое обращение тем же кортежем
+        assert reg.sessions_snapshot()[0]["calls"] == 1
+
+    def test_only_target_row(self, reg):
+        # Сессия занимает ДВЕ строки (сменила модель) — обнуляется только
+        # запрошенная строка, соседняя не трогается (задача 3: «обнулять
+        # только у строки кортежа»).
+        key1 = _reg(reg, session="s", model="m1")
+        key2 = _reg(reg, session="s", model="m2")
+        _reg(reg, session="s", model="m1")  # m1: calls=2
+        reg.record_error(key2)
+        assert reg.reset_counters(key1) is True
+        rows = {r["model"]: r for r in reg.sessions_snapshot()}
+        assert rows["m1"]["calls"] == 0 and rows["m1"]["errors"] == 0
+        assert rows["m2"]["calls"] == 1  # соседняя строка не тронута
+        assert rows["m2"]["errors"] == 1
+
+    def test_missing_key_false(self, reg):
+        # Строки нет (второй клик, кортеж вытеснен) — False, исключений нет.
+        assert reg.reset_counters(("ghost", "a", "m", "b", "r")) is False
+
+    def test_no_exceptions_escape(self, reg):
+        _reg(reg)
+        with mock.patch.object(reg, "_TABLE", None):
+            assert reg.reset_counters(("sess-1", "agent", "m", "be", "r")) is False
+
+
 class TestRecordError:
     def test_increments_by_key(self, reg):
         key = _reg(reg)

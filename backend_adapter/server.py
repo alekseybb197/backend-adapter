@@ -38,6 +38,7 @@ from .session_log import (
     UNKNOWN_SESSION_ID,
     write_debug_json,
     write_error_file,
+    write_session_error,
     write_warn_file,
 )
 from .streaming import (
@@ -150,8 +151,10 @@ def _register_session(
     model: str = "",
     backend: str = "",
     route: str = "",
+    input: str = "",
 ) -> None:
-    """Учёт обращения в таблице WEBUI «Sessions» (v0.9.2): upsert строки по
+    """Учёт обращения в таблице сессий WEBUI (страница "/sessions", v0.9.5;
+    v0.9.2 — секция «Sessions» статус-страницы): upsert строки по
     кортежу (session, agent, model, backend, route), calls+1. Ключ строки
     кладётся в thread-local ``_req_ctx.session_key`` — его читает
     ``_note_session_error``, чтобы инкрементить errors именно этой строки.
@@ -161,9 +164,58 @@ def _register_session(
     ``routing.decide`` — с реальными (включая reject/disabled: видно, куда
     агент пытался). Смена модели или обработчика даёт НОВУЮ строку (кортеж
     изменился), возврат к прежнему кортежу — ту же (calls+1). Исключений не
-    бросает: register сам возвращает None при выключенном учёте."""
+    бросает: register сам возвращает None при выключенном учёте.
+
+    ``input`` (v0.9.5) — входной эндпоинт обращения (messages|completions|
+    responses): НЕ часть ключа, а сопровождение строки — колонка «Входной
+    эндпоинт» и выбор TARGET-селекта строки в таблице Sessions. 400-ветки
+    валидации тела передают его, хотя до ``routing.decide`` не дошли: путь
+    уже распознан (``routing.input_path_to_format``)."""
     _req_ctx.session_key = session_registry.register(
-        session_id, agent, model=model, backend=backend, route=route
+        session_id, agent, model=model, backend=backend, route=route, input=input
+    )
+
+
+def _write_backend_error(session_id, req_id, **kwargs):
+    """Записать .err-блок инцидента БЭКЕНДА и пометить запрос как «.err уже
+    написан» (v0.9.5, задача 7).
+
+    Обёртка над session_log.write_error_file: подробные ветки do_POST
+    (исчерпание ретраев, запрос дошёл до бэкенда) несут ПОЛНОЕ тело запроса к
+    бэкенду, поэтому их блок информативнее обобщённого. Флаг
+    ``_req_ctx.err_written`` гасит обобщённый блок, который иначе напишет
+    ``_flush_pending_error`` в finally, — один запрос = один ERROR-блок."""
+    _req_ctx.err_written = True
+    write_error_file(session_id, req_id, **kwargs)
+
+
+def _flush_pending_error() -> None:
+    """Дописать .err-блок «ранней» ошибки запроса (v0.9.5, задача 7).
+
+    Точка вызова — ``finally`` в do_POST: к этому моменту известен финальный
+    исход запроса. Если ответ клиенту был ошибкой (>= 400), учтённой в
+    таблице Sessions, но подробного блока инцидента бэкенда не писалось
+    (``_write_backend_error``), — пишем обобщённый ERROR-блок
+    (``write_session_error``). Так .err покрывает ВЕСЬ ошибочный трафик
+    сессии, а не только инциденты бэкенда: 400 валидации тела (Invalid JSON /
+    Missing model / strict-модель), 404 disabled-входа, 400/502 reject
+    маршрута.
+
+    Запись отложена именно в finally, а не сделана сразу в
+    ``_note_session_error``: подробные ветки пишут свой блок ПОСЛЕ отправки
+    ответа, и при немедленной записи на один запрос вышло бы два блока.
+    Исключений не бросает — наблюдательный канал."""
+    pending = getattr(_req_ctx, "error_status", None)
+    if not pending or getattr(_req_ctx, "err_written", False):
+        return
+    status, message = pending
+    write_session_error(
+        getattr(_req_ctx, "session_id", "") or UNKNOWN_SESSION_ID,
+        getattr(_req_ctx, "req_id", "-"),
+        final_status=status,
+        message=message,
+        model=getattr(_req_ctx, "model", ""),
+        in_body=getattr(_req_ctx, "in_body", ""),
     )
 
 
@@ -172,19 +224,35 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         rid = getattr(_req_ctx, "req_id", "-")
         _d(f"[{rid}] [HTTP] {fmt % args}")
 
-    def _note_session_error(self, status):
-        """Учёт ошибки строки-кортежа таблицы «Sessions» (v0.9.2): любой
+    def _note_session_error(self, status, message=""):
+        """Учёт ошибки строки-кортежа таблицы сессий (страница "/sessions"): любой
         финальный HTTP-ответ >= 400. Вызывается из общих методов отправки
         (_send_json/_send_raw), поэтому покрывает все пути ошибок. Ключ берётся
         из ``_req_ctx.session_key`` (ставится ``_register_session``) — ошибка
         ложится в ту же строку, что и обращение. Для запросов без учёта (404
         не-входного пути, GET /api/*, health) ключа нет → record_error(None) —
-        no-op."""
-        if status >= 400:
-            session_registry.record_error(getattr(_req_ctx, "session_key", None))
+        no-op.
+
+        v0.9.5 (задача 7): здесь же запоминается ПЕРВАЯ ошибка запроса
+        (``_req_ctx.error_status``) — .err-блок по ней допишет
+        ``_flush_pending_error`` в finally. Отложенность нужна, чтобы
+        подробный блок инцидента бэкенда (пишется после отправки ответа) не
+        дублировался обобщённым. Запросы без учёта (ключ None) .err не
+        трогают, как и счётчик."""
+        if status < 400:
+            return
+        key = getattr(_req_ctx, "session_key", None)
+        session_registry.record_error(key)
+        if key is not None and getattr(_req_ctx, "error_status", None) is None:
+            _req_ctx.error_status = (status, message)
 
     def _send_json(self, status, data):
-        self._note_session_error(status)
+        # message — текст ошибки для .err-блока (v0.9.5): у всех ошибок
+        # адаптера ответ имеет вид {"error": "..."} — берём его оттуда.
+        message = ""
+        if isinstance(data, dict):
+            message = str(data.get("error", "") or "")
+        self._note_session_error(status, message)
         body = json.dumps(data, ensure_ascii=False).encode()
         try:
             self.send_response(status)
@@ -293,7 +361,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         req_t0 = time.time()
         session_id = _extract_session_id(self.headers)
         req_id = uuid.uuid4().hex[:12]
-        # Имя агента для таблицы WEBUI «Sessions» (v0.9.2): User-Agent до
+        # Имя агента для таблицы сессий WEBUI (страница "/sessions", v0.9.5):
+        # User-Agent до
         # первого пробела — [CC] CLI шлёт «claude-cli/2.1.236 (external, cli)»,
         # в колонку «Агент» идёт «claude-cli/2.1.236». Заголовка может не быть
         # (иные клиенты) — тогда пустая строка.
@@ -310,10 +379,24 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
         _req_ctx.req_id = req_id
         _req_ctx.session_id = session_id
-        # Ключ строки таблицы «Sessions» (v0.9.2) ставится _register_session —
+        # Ключ строки таблицы сессий (страница "/sessions") ставится
+        # _register_session —
         # на входном пути (после распознавания пути / после routing.decide).
         # None здесь — «учёта нет»: _note_session_error тогда no-op.
         _req_ctx.session_key = None
+        # Состояние .err-канала запроса (v0.9.5, задача 7): error_status —
+        # первая ошибка ответа (status, message) для обобщённого блока,
+        # err_written — «подробный блок инцидента бэкенда уже написан».
+        # Сброс на КАЖДОМ запросе обязателен: thread-local переживает запрос
+        # в пределах потока, и «залипшие» значения исказили бы следующий
+        # запрос (пропущенный или лишний .err-блок).
+        _req_ctx.error_status = None
+        _req_ctx.err_written = False
+        # Тело и модель запроса — для .err-блока «ранних» ошибок (v0.9.5):
+        # заполняются по мере разбора запроса (тело — сразу после чтения,
+        # модель — после валидации).
+        _req_ctx.in_body = ""
+        _req_ctx.model = ""
         try:
             # Обновляем глобальный fallback для _d(), чтобы человекочитаемый
             # лог тоже писался в правильный сессионный файл.
@@ -338,7 +421,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "Expected /v1/messages"})
                 return
 
-            # Учёт сессии для таблицы WEBUI «Sessions» (v0.9.2): строка —
+            # Учёт сессии для таблицы сессий WEBUI (страница "/sessions",
+            # v0.9.5): строка —
             # кортеж (session, agent, model, backend, route), её создаёт
             # _register_session. Здесь, до чтения тела, вызова нет: строку
             # поставят либо 400-ветки ниже (пустым кортежем), либо ветка после
@@ -348,6 +432,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length)
             _body = body.decode()
+            # Тело запроса агента — для .err-блока «ранних» ошибок адаптера
+            # (v0.9.5, задача 7): _note_session_error пишет [REQUEST] из него,
+            # когда запрос до бэкенда не дошёл и out_body не сформирован.
+            _req_ctx.in_body = _body
             # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
             # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
             _dr(req_id, f"[BODY] {_body}")
@@ -358,13 +446,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 anthropic_req = json.loads(body)
             except json.JSONDecodeError as e:
                 # Обращение учтено пустым кортежем: до routing.decide не дошли.
-                _register_session(session_id, agent)
+                _register_session(session_id, agent, input=inp_fmt)
                 self._send_json(400, {"error": f"Invalid JSON: {e}"})
                 return
 
             model = anthropic_req.get("model")
             if not model:
-                _register_session(session_id, agent)
+                _register_session(session_id, agent, input=inp_fmt)
                 self._send_json(400, {"error": "Missing required field: model"})
                 return
 
@@ -372,6 +460,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # имя из запроса клиента — именно оно указано в _AVAILABLE_MODELS
             # (с возможными префиксами бэкендов для коллизирующих моделей).
             client_model = model
+            # Модель — в _req_ctx для .err-блока «ранних» ошибок (v0.9.5):
+            # к моменту 400-веток ниже она уже известна.
+            _req_ctx.model = client_model
             if (
                 config.ADAPTER_STRICT_MODELS
                 and _AVAILABLE_MODELS
@@ -384,7 +475,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 )
                 _dr(req_id, f"[ERROR] {msg}")
                 # Обращение учтено пустым кортежем: до routing.decide не дошли.
-                _register_session(session_id, agent)
+                _register_session(session_id, agent, input=inp_fmt)
                 self._send_json(400, {"error": msg})
                 return
 
@@ -419,12 +510,15 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             #   convert  — прямое преобразование входа в формат-цель:
             #              messages→completions (полный конвертер) или
             #              messages→messages (сортировка system в начало).
-            route = routing.decide(inp_fmt, backend_name)
+            # v0.9.5: session_id передаётся в decide/target_for_input — TARGET
+            # может быть переопределён ДЛЯ СЕССИИ (session_settings), не трогая
+            # общую настройку приложения.
+            route = routing.decide(inp_fmt, backend_name, session_id)
             route_action, out_fmt, route_msg, route_status = route
             _dr(
                 req_id,
                 f"[ROUTE] input={inp_fmt} backend={backend_name} "
-                f"target={routing.target_for_input(inp_fmt)} -> "
+                f"target={routing.target_for_input(inp_fmt, session_id)} -> "
                 f"{route_action}"
                 + (f" (out={out_fmt})" if out_fmt else "")
                 + (f": {route_msg}" if route_msg else ""),
@@ -435,13 +529,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 "route_decide",
                 input=inp_fmt,
                 backend=backend_name,
-                target=routing.target_for_input(inp_fmt),
+                target=routing.target_for_input(inp_fmt, session_id),
                 action=route_action,
                 output=out_fmt,
                 error=route_msg or None,
                 http_status=route_status,
             )
-            # Учёт сессии (таблица WEBUI «Sessions», v0.9.2): строка — кортеж
+            # Учёт сессии (таблица сессий WEBUI, страница "/sessions"): строка — кортеж
             # (session, agent, model, backend, route). Ставится ДО ветки
             # disabled/reject — таблица показывает, куда агент пытался (в т.ч.
             # «reject»/«disabled»); client_model — клиентское имя до маппинга,
@@ -456,7 +550,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             else:
                 route_str = route_action
             _register_session(
-                session_id, agent, model=client_model, backend=backend_name, route=route_str
+                session_id,
+                agent,
+                model=client_model,
+                backend=backend_name,
+                route=route_str,
+                input=inp_fmt,
             )
             if route_action in ("disabled", "reject"):
                 _dr(req_id, f"[ROUTE_REJECT] {route_msg}")
@@ -812,8 +911,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         )
                         # Протокол .err-инцидентов: финальный ответ — ошибка
                         # 4xx/5xx, запрос дошёл до бэкенда (out_body
-                        # сформирован). Файл пишется БЕЗУСЛОВНО.
-                        write_error_file(
+                        # сформирован). Файл пишется БЕЗУСЛОВНО и помечается
+                        # err_written — _note_session_error второго блока не
+                        # добавит.
+                        _write_backend_error(
                             session_id,
                             req_id,
                             final_status=final_status,
@@ -1011,7 +1112,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         failed=True,
                         passthrough=is_passthrough,
                     )
-                    write_error_file(
+                    _write_backend_error(
                         session_id,
                         req_id,
                         final_status=final_status,
@@ -1475,7 +1576,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     # ошибка 4xx/5xx, запрос дошёл до бэкенда (out_body
                     # сформирован). Пишем файл инцидента БЕЗУСЛОВНО (не
                     # зависит от ADAPTER_DEBUG_ENABLE/PARTS/TRIM).
-                    write_error_file(
+                    _write_backend_error(
                         session_id,
                         req_id,
                         final_status=final_status,
@@ -1677,7 +1778,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # 4xx/5xx, запрос дошёл до бэкенда. Файл инцидента пишется
             # БЕЗУСЛОВНО (вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). msg — полное
             # тело последней попытки (HTTPError) или текст исключения.
-            write_error_file(
+            _write_backend_error(
                 session_id,
                 req_id,
                 final_status=final_status,
@@ -1695,6 +1796,15 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 model_usage.add_usage_tokens(
                     client_model, usage_tokens["input"], usage_tokens["output"]
                 )
+            # .err-блок «ранней» ошибки запроса (v0.9.5, задача 7) — здесь, а
+            # не в момент отправки ответа: к этому моменту точно известно,
+            # писал ли подробный блок инцидента бэкенда (err_written). См.
+            # _flush_pending_error.
+            _flush_pending_error()
             delattr(_req_ctx, "req_id")
             delattr(_req_ctx, "session_id")
             delattr(_req_ctx, "session_key")
+            delattr(_req_ctx, "error_status")
+            delattr(_req_ctx, "err_written")
+            delattr(_req_ctx, "in_body")
+            delattr(_req_ctx, "model")

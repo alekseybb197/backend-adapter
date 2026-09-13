@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.4
+"""[CC] <-> [OI]-backend adapter v0.9.5
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.4"
-__comment__ = "v0.9.0: streaming SSE passthrough + input endpoint routing (/v1/chat/completions, /v1/responses, ADAPTER_*_TARGET, passthrough E->E relay_sse) + .err incident protocol (unconditional session-*.err on final 4xx/5xx, full request+error, no TRIM) + JSON probe results into LOGPATH + [EXIT] Bye inside shutdown.graceful_shutdown + CI to project checks (mypy strict) | v0.9.1: WARN events ([USAGE_WARN] stream without usage, [WARN] First message is NOT system) written to session-*.err unconditionally (full request + report) + clean shutdown fix for PyInstaller binary on Ctrl-C (unified first-signal handler, outer KeyboardInterrupt guard) + CLAUDE.md deduped | v0.9.2: passthrough messages->messages moves all role=system to the front (normalize_messages_system_first, no merging) + agent-sessions table on WEBUI status page (/api/sessions/snapshot, session_registry.py) — row = tuple (session, agent, model, backend, route): model/handler change creates a new row, return to a previous tuple reuses it (upsert, calls++), ADAPTER_SESSIONS_TABLE counts rows, no persistence + install.sh reduced to latest-release binary only (Linux /usr/local/bin, macOS ~/.local/bin, Windows -> future install.ps1) | v0.9.3: install.sh --service installs a SYSTEM systemd unit (dedicated backend-adapter user, generated config in /var/lib/backend-adapter, enabled+started) + install.sh --delete removes binary/unit/state dir/service user (idempotent, --yes for CI) + install.sh re-run is a proper update: detect existing install -> compare versions by binary banner (extract_version/version_gt, no GitHub API) -> no-op when current -> stop service -> timestamped config backups -> replace binary -> regenerate configs keeping URL/token -> restart (make_workdir avoids noexec /tmp for the version probe) + molecule scenarios install/service cover install, update and delete offline | v0.9.4: TARGET semantics reworked — a concrete format value (messages|completions|responses) now means DIRECT CONVERSION of the input into it (messages->messages = system-first sorting), new value passthrough = verbatim relay without conversion, and auto is REMOVED (invalid -> [WARN] + none); self-pairs completions->completions / responses->responses now 400 not-implemented (use passthrough for verbatim); session id extracted from JSON-valued headers (Header:json_key, e.g. x-codex-turn-metadata:session_id) in ADAPTER_SESSION_HEADER + QwenCode setup guide + client-agnostic wording; fixed doubled ADAPTER_ prefix in the 404 error text; CI path-gates per job"
+__version__ = "0.9.5"
+__comment__ = "v0.9.0: streaming SSE passthrough + input endpoint routing (/v1/chat/completions, /v1/responses, ADAPTER_*_TARGET, passthrough E->E relay_sse) + .err incident protocol (unconditional session-*.err on final 4xx/5xx, full request+error, no TRIM) + JSON probe results into LOGPATH + [EXIT] Bye inside shutdown.graceful_shutdown + CI to project checks (mypy strict) | v0.9.1: WARN events ([USAGE_WARN] stream without usage, [WARN] First message is NOT system) written to session-*.err unconditionally (full request + report) + clean shutdown fix for PyInstaller binary on Ctrl-C (unified first-signal handler, outer KeyboardInterrupt guard) + CLAUDE.md deduped | v0.9.2: passthrough messages->messages moves all role=system to the front (normalize_messages_system_first, no merging) + agent-sessions table on WEBUI status page (/api/sessions/snapshot, session_registry.py) — row = tuple (session, agent, model, backend, route): model/handler change creates a new row, return to a previous tuple reuses it (upsert, calls++), ADAPTER_SESSIONS_TABLE counts rows, no persistence + install.sh reduced to latest-release binary only (Linux /usr/local/bin, macOS ~/.local/bin, Windows -> future install.ps1) | v0.9.3: install.sh --service installs a SYSTEM systemd unit (dedicated backend-adapter user, generated config in /var/lib/backend-adapter, enabled+started) + install.sh --delete removes binary/unit/state dir/service user (idempotent, --yes for CI) + install.sh re-run is a proper update: detect existing install -> compare versions by binary banner (extract_version/version_gt, no GitHub API) -> no-op when current -> stop service -> timestamped config backups -> replace binary -> regenerate configs keeping URL/token -> restart (make_workdir avoids noexec /tmp for the version probe) + molecule scenarios install/service cover install, update and delete offline | v0.9.4: TARGET semantics reworked — a concrete format value (messages|completions|responses) now means DIRECT CONVERSION of the input into it (messages->messages = system-first sorting), new value passthrough = verbatim relay without conversion, and auto is REMOVED (invalid -> [WARN] + none); self-pairs completions->completions / responses->responses now 400 not-implemented (use passthrough for verbatim); session id extracted from JSON-valued headers (Header:json_key, e.g. x-codex-turn-metadata:session_id) in ADAPTER_SESSION_HEADER + QwenCode setup guide + client-agnostic wording; fixed doubled ADAPTER_ prefix in the 404 error text; CI path-gates per job | v0.9.5: session as a management unit — sessions table moved to its own WEBUI page /sessions (link 🗂 from the status page opens in a NEW window, back links in the current one), row reset (⏪, this tuple-row only) and delete (🗑) actions, input-endpoint column, per-session overrides of Log/Parts/TARGET via selects in the table (session_settings.py: inherit | concrete value, in-memory) applied to session_log.logging_enabled/parts_enabled and routing.decide, error counter is a link opening the session .err file in a new window (/logs/<name>, strict name pattern), and .err now records ANY error registered in the sessions table (write_session_error for 400 validation / 404 disabled / 400-502 reject / 501 models), not just backend incidents + PID file adapter.pid written on ANY launch (not only in detach), removed on graceful shutdown and via atexit, and written BEFORE the startup backend probe so the process is addressable while it runs (daemon._write_pidfile returns the path; new _pidfile_path/_remove_pidfile; console prints [PID] <pid> -> <path>)"
 
+import atexit
 import contextlib
 import os
 import signal
@@ -47,7 +48,7 @@ from backend_adapter.config import (
     _resolve_backend,
 )
 from backend_adapter.redact import redact, redact_headers
-from backend_adapter.daemon import _detach, _write_pidfile
+from backend_adapter.daemon import _detach, _remove_pidfile, _write_pidfile
 from backend_adapter.logger import _d, _dr
 from backend_adapter.tracer import (
     _trace_lock,
@@ -76,12 +77,16 @@ from backend_adapter import session_log
 
 
 if __name__ == "__main__":
+    # Detach (double fork) — только отделение от консоли. PID-файл пишется
+    # НИЖЕ, при любом запуске (не только в detach): он нужен, чтобы
+    # манипулировать процессом без консоли (контейнер, служба). Порядок
+    # важен: _detach() до записи — PID-файл должен хранить PID конечного
+    # (грандчайлд-)процесса, а не родителя, который сразу выходит.
     if ADAPTER_DETACH:
         print("[DETACH] Starting as background service...")
         print(f"Timeout:  {ADAPTER_TIMEOUT}s")
         print(f"Retries:  {ADAPTER_RETRY}")
         _detach()
-        _write_pidfile()
 
     print(f"\n{'=' * 70}")
     print(f"Backend-Adapter v{__version__}")
@@ -103,6 +108,47 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
+    # === Log directory (ADAPTER_DEBUG_LOGPATH) ===
+    # Единая директория логов сессий (debug/trace/*.parts дампы) И корень
+    # веб-интерфейса (WEBUI + model-usage.yaml). LOGPATH всегда непуст
+    # (дефолт ./tmp/logs в config): папка создаётся как корень WEBUI всегда,
+    # лог-ФАЙЛЫ в неё пишутся только при ADAPTER_DEBUG_ENABLE=1 (см. config).
+    # Путь всегда директория: проверяем, что это не файл — путь-файл сломал
+    # бы корень WEBUI даже при выключенной файловой записи.
+    # Идёт ДО стартовой проверки бэкендов: PID-файл ниже кладётся в LOGPATH,
+    # а сама проверка — сетевой опрос (может быть долгим), в течение которого
+    # процесс уже должен быть адресуемым.
+    log_path = ADAPTER_DEBUG_LOGPATH
+    if os.path.isfile(log_path):
+        print(
+            f"[FATAL] ADAPTER_DEBUG_LOGPATH указывает на файл, а нужна директория: "
+            f"{log_path!r}. Логи сессий и трейсов, *.parts дампы и корень "
+            "веб-интерфейса живут в одной папке — задайте путь к директории."
+        )
+        sys.exit(1)
+    os.makedirs(log_path, exist_ok=True)
+
+    # === PID-файл (при ЛЮБОМ запуске, не только в detach) ===
+    # Путь — LOGPATH + basename(ADAPTER_PIDFILE) (см. daemon._pidfile_path).
+    # Без консоли (контейнер, служба) это единственный способ адресовать
+    # процесс: kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid").
+    # Место записи — ДО стартовой проверки бэкендов (сетевой опрос
+    # GET /v1/models по каждому бэкенду): файл существует уже во время
+    # проверки, поэтому процесс можно найти/остановить, не дожидаясь её.
+    # Выше остались только мгновенные FATAL-проверки (пустой
+    # ADAPTER_BACKEND_CONFIG, LOGPATH-файл) — на них процесс не оставляет
+    # файла. Если же проверка бэкендов уронит старт ([FATAL] Failed to
+    # initialize backends), файл снимет atexit (зарегистрирован ниже).
+    # Существующий файл перезаписывается своим PID (stale-PID не
+    # проверяется — в контейнере PID-namespace свой).
+    # Удаление: явно в _finish (вежливый выход) + atexit — аварийный выход
+    # (sys.exit/необработанное исключение) тоже чистит за собой. Повторный
+    # сигнал (os._exit(130)) atexit не выполняет — файл остаётся, это не
+    # штатный выход; следующий старт его перезапишет.
+    _pidfile = _write_pidfile()
+    atexit.register(_remove_pidfile)
+    print(f"[PID]       {os.getpid()} → {_pidfile}")
+
     # === Backend config ===
     _d(f"[INIT] Backend config: {ADAPTER_BACKEND_CONFIG}")
     try:
@@ -116,23 +162,6 @@ if __name__ == "__main__":
     for b in _BACKENDS:
         print(f"  - {b['name']}: {b['base']}")
     print(f"{'=' * 70}\n")
-
-    # === Log directory (ADAPTER_DEBUG_LOGPATH) ===
-    # Единая директория логов сессий (debug/trace/*.parts дампы) И корень
-    # веб-интерфейса (WEBUI + model-usage.yaml). LOGPATH всегда непуст
-    # (дефолт ./tmp/logs в config): папка создаётся как корень WEBUI всегда,
-    # лог-ФАЙЛЫ в неё пишутся только при ADAPTER_DEBUG_ENABLE=1 (см. config).
-    # Путь всегда директория: проверяем, что это не файл — путь-файл сломал
-    # бы корень WEBUI даже при выключенной файловой записи.
-    log_path = ADAPTER_DEBUG_LOGPATH
-    if os.path.isfile(log_path):
-        print(
-            f"[FATAL] ADAPTER_DEBUG_LOGPATH указывает на файл, а нужна директория: "
-            f"{log_path!r}. Логи сессий и трейсов, *.parts дампы и корень "
-            "веб-интерфейса живут в одной папке — задайте путь к директории."
-        )
-        sys.exit(1)
-    os.makedirs(log_path, exist_ok=True)
 
     # ThreadingHTTPServer вместо socketserver.TCPServer: [CC] может
     # открывать несколько параллельных запросов (конкурентные tool calls),
@@ -224,6 +253,10 @@ if __name__ == "__main__":
             _model_usage.flush_table()
         except BaseException:  # noqa: BLE001 — завершение не должно падать
             pass
+        # PID-файл — после flush_table: файл снимается последним шагом
+        # штатного выхода (идемпотентно; при повторном сигнале сюда не
+        # доходим — atexit тоже не срабатывает на os._exit(130)).
+        _remove_pidfile()
 
     try:
         with QuietThreadingHTTPServer((ADAPTER_ENDPOINT_HOST, PROXY_PORT), Adapter) as httpd:

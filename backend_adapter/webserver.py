@@ -87,6 +87,10 @@ CONTENT_TYPES = {
     ".yml": "text/plain; charset=utf-8",
     ".json": "application/json; charset=utf-8",
     ".txt": "text/plain; charset=utf-8",
+    # .err — файл инцидентов сессии (session_log): раздаётся ссылкой-счётчиком
+    # «Ошибок» таблицы Sessions (v0.9.5, задача 7) как обычный текст, чтобы
+    # браузер показал его построчно, а не скачивал.
+    ".err": "text/plain; charset=utf-8",
     ".png": "image/png",
     ".puml": "text/plain; charset=utf-8",
     ".dot": "text/plain; charset=utf-8",
@@ -292,6 +296,7 @@ def serve(
         session_viewer,
         webui_config_api,
         webui_ops,
+        webui_sessions,
         webui_status,
     )
 

@@ -47,7 +47,9 @@ This file provides guidance to [CC] () when working with code in this repository
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
   `*.parts` — дампы). Вне ENABLE/PARTS/TRIM в `ADAPTER_DEBUG_LOGPATH` живут
   безусловные артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1),
-  JSON-результаты проверок бэкендов (`probe_json.py`), PID-файл (`daemon.py`).
+  JSON-результаты проверок бэкендов (`probe_json.py`), PID-файл (`daemon.py` —
+  пишется при ЛЮБОМ запуске, не только в detach; удаляется при штатном
+  завершении и через `atexit`).
 
 ## Принципы
 
@@ -62,24 +64,36 @@ This file provides guidance to [CC] () when working with code in this repository
 ## Архитектура (большая картина)
 
 Запрос клиента ([CC] / QwenCode) → адаптер: `server.py` резолвит `model` (strict/маппинг) и бэкенд
-(`config._resolve_backend`), решает **TARGET-маршрутизацию** (`routing.decide`) и
+(`config._resolve_backend`), решает **TARGET-маршрутизацию** (`routing.decide`,
+с учётом пер-сессионных переопределений `session_settings`) и
 ретранслирует в бэкенд; конверсия форматов — `convert.py` (не-стрим) /
 `streaming.py` (стрим: конверсия SSE → Anthropic или passthrough-релей
 `relay_sse`). Наблюдаемость — `tracer.py` (JSONL trace), `logger.py` (консоль),
 `session_log.py` (per-session файлы + `.err`), `redact.py` (секреты — везде).
 Детали потока — `docs/architecture.md` §4–§6.
 
+**Сессия — единица управления (v0.9.5):** `session_registry.py` ведёт таблицу
+сессий (страница `/sessions`), `session_settings.py` хранит пер-сессионные
+переопределения Log/Parts/TARGET (наследуют общие настройки приложения, пока
+не заданы явно; живут в памяти процесса). Флаги логирования читаются через
+`session_log.logging_enabled`/`parts_enabled`; TARGET — через `routing.decide`
+при непустом `session_id`. `.err` пишется для **любой** ошибки, учтённой в
+таблице сессий. Детали — `docs/routing.md` §2.4, `docs/webui.md` §4,
+`docs/logging.md`.
+
 **Инвариант DAG:** база без внутренних зависимостей при импорте — `redact.py`,
 `session_log.py`, `daemon.py`, `config.py`, `artifact_tree_common.py`,
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
-модули зависят минимум от одного из них. Новые модули — без циклов
-(dependency graph — `docs/architecture.md` §10).
+модули зависят минимум от одного из них. `session_settings.py` и
+`session_registry.py` — листы DAG (импортируют только `config`). Новые модули —
+без циклов (dependency graph — `docs/architecture.md` §10).
 
 **WEBUI** (поднимается всегда — флага отключения нет): ядро `webserver.py`
 (реестр эндпоинтов, `serve()`) в daemon-потоке + модули-эндпоинты
-(`webui_status.py` `/`, `webui_ops.py` health, `webui_config_api.py` `/config`,
-`session_viewer.py` `/session`); корень — `ADAPTER_DEBUG_LOGPATH`. Prometheus-
-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) — отдельный слушатель, не эндпоинт WEBUI.
+(`webui_status.py` `/`, `webui_sessions.py` `/sessions`, `webui_ops.py` health,
+`webui_config_api.py` `/config`, `session_viewer.py` `/session`); корень —
+`ADAPTER_DEBUG_LOGPATH`. Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) —
+отдельный слушатель, не эндпоинт WEBUI.
 Новый эндпоинт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
 Поведение страниц и API — `docs/webui.md`.
 

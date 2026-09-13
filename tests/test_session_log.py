@@ -575,3 +575,237 @@ class TestWriteWarnFile:
         assert content.count("==================== END ERROR") == 1
         assert "warn one" in content
         assert "final_status=502" in content
+
+
+class TestWriteSessionError:
+    """Tests for write_session_error() — ошибки УРОВНЯ АДАПТЕРА в .err
+    (v0.9.5, задача 7): запрос до бэкенда не дошёл (400 валидации, 404
+    disabled-входа, 400/502 reject маршрута). Тот же безусловный канал, что
+    write_error_file, но с [ADAPTER_ERROR] и ВХОДЯЩИМ телом."""
+
+    def _fresh(self):
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log
+        session_log._DEBUG_IS_DIR = True
+        session_log._TRACE_IS_DIR = True
+        return session_log
+
+    def _write(self, session_log, tmp_path, **overrides):
+        args = dict(
+            final_status=400,
+            message="Missing required field: model",
+            model="unknown-model",
+            in_body='{"prompt": "hi"}',
+        )
+        args.update(overrides)
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._TRACE_PATH = str(tmp_path)
+        session_log._session_file_ts["sess1"] = "20260908-120000"
+        session_log.write_session_error("sess1", "req123", **args)
+
+    def test_writes_adapter_error_block(self, tmp_path):
+        session_log = self._fresh()
+        self._write(session_log, tmp_path)
+        files = list(tmp_path.glob("session-*.err"))
+        assert len(files) == 1
+        content = files[0].read_text(encoding="utf-8")
+        assert "==================== ERROR ====================" in content
+        assert "==================== END ERROR ====================" in content
+        assert "final_status=400" in content
+        assert "[ADAPTER_ERROR] Missing required field: model" in content
+        # [REQUEST] — ВХОДЯЩЕЕ тело запроса агента, не исходящее к бэкенду
+        assert '{"prompt": "hi"}' in content
+        # Запрос к бэкенду не уходил — backend_url в блоке нет
+        assert "backend_url" not in content
+
+    def test_writes_at_enable_zero(self, tmp_path):
+        """Безусловность: пишется при ADAPTER_DEBUG_ENABLE=0."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG = False
+        self._write(session_log, tmp_path)
+        assert len(list(tmp_path.glob("session-*.err"))) == 1
+
+    def test_no_trim(self, tmp_path):
+        """Содержимое БЕЗ обрезки по ADAPTER_DEBUG_TRIM."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG_TRIM = 10
+        long_body = '{"prompt": "' + "x" * 5000 + '"}'
+        self._write(session_log, tmp_path, in_body=long_body)
+        content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
+        assert long_body in content
+
+    def test_redact_by_default(self, tmp_path):
+        """По умолчанию секреты в блоке маскируются redact."""
+        session_log = self._fresh()
+        from backend_adapter import config
+        config.ADAPTER_SENSITIVE_LOGGING_ENABLE = False
+        self._write(
+            session_log, tmp_path,
+            in_body='{"text": "Authorization: Bearer sk-live-abcdef123456"}',
+            message="bad token Authorization: Bearer sk-live-abcdef123456",
+        )
+        content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
+        assert "sk-live-abcdef123456" not in content
+        assert "REDACTED" in content
+
+    def test_bytes_body_decoded(self, tmp_path):
+        """bytes-тело декодируется как UTF-8 (как write_error_file)."""
+        session_log = self._fresh()
+        self._write(session_log, tmp_path, in_body='{"a": "привет"}'.encode())
+        content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
+        assert '{"a": "привет"}' in content
+
+    def test_shares_err_file_with_backend_incident(self, tmp_path):
+        """ERROR-блоки обоих видов самоделимитированы и живут в ОДНОМ .err."""
+        session_log = self._fresh()
+        self._write(session_log, tmp_path)
+        session_log.write_error_file(
+            "sess1", "req456", final_status=502,
+            backend_url="http://b", model="m", out_body="{}", err_body="err",
+        )
+        files = list(tmp_path.glob("session-*.err"))
+        assert len(files) == 1
+        content = files[0].read_text(encoding="utf-8")
+        assert content.count("==================== ERROR ====================") == 2
+        assert "[ADAPTER_ERROR]" in content and "[BACKEND_ERROR]" in content
+
+    def test_never_raises(self, tmp_path):
+        """Никогда не бросает: пустой путь → нет файла, без исключений."""
+        session_log = self._fresh()
+        session_log._DEBUG_IS_DIR = False
+        session_log._DEBUG_PATH = ""
+        session_log.write_session_error(
+            "sess1", "req1", final_status=400, message="", model="", in_body=None
+        )
+        assert list(tmp_path.glob("session-*.err")) == []
+
+
+class TestErrorFileName:
+    """Tests for error_file_name() — basename .err сессии для ссылки-счётчика
+    «Ошибок» таблицы Sessions (v0.9.5, задача 7)."""
+
+    def _fresh(self):
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import session_log
+        session_log._DEBUG_IS_DIR = True
+        session_log._TRACE_IS_DIR = True
+        return session_log
+
+    def test_none_without_ts(self, tmp_path):
+        """Сессия ещё не фиксировала ts → None (файла точно нет)."""
+        session_log = self._fresh()
+        session_log._DEBUG_PATH = str(tmp_path)
+        assert session_log.error_file_name("sess1") is None
+
+    def test_none_without_path(self):
+        session_log = self._fresh()
+        session_log._DEBUG_PATH = ""
+        session_log._DEBUG_IS_DIR = False
+        assert session_log.error_file_name("sess1") is None
+
+    def test_none_for_empty_session(self, tmp_path):
+        session_log = self._fresh()
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._session_file_ts["sess1"] = "20260908-120000"
+        assert session_log.error_file_name("") is None
+
+    def test_name_matches_written_file(self, tmp_path):
+        """Имя совпадает с basename реально записанного .err (тот же
+        _make_session_file) — ссылка WEBUI не ведёт в никуда."""
+        session_log = self._fresh()
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._session_file_ts["sess1"] = "20260908-120000"
+        session_log.write_session_error(
+            "sess1", "req1", final_status=400, message="m", model="m", in_body="{}"
+        )
+        written = list(tmp_path.glob("session-*.err"))[0].name
+        assert session_log.error_file_name("sess1") == written
+
+    def test_does_not_create_file(self, tmp_path):
+        """Вычисление имени файлов на диске НЕ создаёт (чистая функция)."""
+        session_log = self._fresh()
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._session_file_ts["sess1"] = "20260908-120000"
+        assert session_log.error_file_name("sess1") is not None
+        assert list(tmp_path.glob("session-*")) == []
+
+    def test_name_is_single_path_component(self, tmp_path):
+        """Имя — ОДИН компонент пути: слэши и разделители из session_id
+        заменяются на "_" (_make_session_file), поэтому обход каталога через
+        имя невозможен. Точки в session_id допустимы и сохраняются (они не
+        разделители), но путь остаётся односоставным."""
+        session_log = self._fresh()
+        session_log._DEBUG_PATH = str(tmp_path)
+        session_log._session_file_ts["a/b..c"] = "20260908-120000"
+        name = session_log.error_file_name("a/b..c")
+        assert name is not None
+        assert "/" not in name
+        assert os.sep not in name
+        assert os.path.basename(name) == name
+        assert name.endswith(".err")
+        # Строгий шаблон WEBUI (webui_sessions._ERR_NAME_RE) пропускает такое
+        # имя: безопасный набор символов фиксированной длины + ".err".
+        import re as _re
+        assert _re.fullmatch(r"session-[0-9]{8}-[0-9]{6}-[A-Za-z0-9._-]{1,8}\.err", name)
+
+
+class TestPerSessionGates:
+    """logging_enabled/parts_enabled (v0.9.5) — пер-сессионный гейт файловой
+    записи поверх общих настроек приложения (session_settings.effective)."""
+
+    def _fresh(self):
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import config, session_log, session_settings
+        return config, session_log, session_settings
+
+    def test_inherit_from_config(self):
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = True
+        config.ADAPTER_DEBUG_PARTS = False
+        assert session_log.logging_enabled("sess1") is True
+        assert session_log.parts_enabled("sess1") is False
+
+    def test_session_override_wins(self):
+        config, session_log, session_settings = self._fresh()
+        config.ADAPTER_DEBUG = False
+        session_settings.set_config("sess1", {"ADAPTER_DEBUG": True})
+        assert session_log.logging_enabled("sess1") is True
+        assert session_log.logging_enabled("other") is False  # соседняя сессия
+
+    def test_parts_override_wins(self):
+        config, session_log, session_settings = self._fresh()
+        config.ADAPTER_DEBUG_PARTS = False
+        session_settings.set_config("sess1", {"ADAPTER_DEBUG_PARTS": True})
+        assert session_log.parts_enabled("sess1") is True
+        assert session_log.parts_enabled("other") is False
+
+    def test_empty_session_id_uses_config(self):
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = True
+        assert session_log.logging_enabled("") is True
+
+    def test_inherit_value_uses_config(self):
+        config, session_log, session_settings = self._fresh()
+        config.ADAPTER_DEBUG = True
+        session_settings.set_config("sess1", {"ADAPTER_DEBUG": False})
+        session_settings.set_config("sess1", clear=("ADAPTER_DEBUG",))
+        assert session_log.logging_enabled("sess1") is True  # снова наследует
+
+    def test_fallback_when_session_settings_unavailable(self):
+        """Отказ session_settings не должен гасить файловую запись — фолбэк
+        на общую настройку config."""
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = True
+        with mock.patch.dict("sys.modules", {"backend_adapter.session_settings": None}):
+            assert session_log.logging_enabled("sess1") is True

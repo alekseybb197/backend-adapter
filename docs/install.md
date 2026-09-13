@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.4) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v0.9.5) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -190,23 +190,30 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (27 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
-│   ├── server.py              # HTTP-сервер, Handler
+│   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
+│   ├── routing.py             # Входные эндпоинты/TARGET: decide() по кэшу проб
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
-│   ├── session_log.py         # Per-session логи с FIFO eviction
+│   ├── session_log.py         # Per-session логи с FIFO eviction + .err-канал
+│   ├── session_registry.py    # Таблица сессий (страница /sessions): строка-кортеж
+│   ├── session_settings.py    # Пер-сессионные переопределения Log/Parts/TARGET
 │   ├── daemon.py              # Detach (double fork)
+│   ├── shutdown.py            # Обработка Ctrl-C/SIGTERM
 │   ├── logger.py              # Debug-логирование с redaction
 │   ├── redact.py              # Маскирование секретов (токены, ключи)
 │   ├── webserver.py           # WEBUI-ядро: общий веб-сервер, роутинг эндпойнтов, CLI
 │   ├── webui_status.py        # WEBUI-эндпойнт "/": статус (версия, LLM, модели)
+│   ├── webui_sessions.py      # WEBUI "/sessions": таблица сессий + /api/sessions/*
 │   ├── webui_ops.py           # WEBUI health-эндпоинты "/healthz" "/health" "/live" "/ready"
 │   ├── webui_config_api.py    # WEBUI-эндпойнт "/config": runtime-пул debug-переменных
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
+│   ├── model_usage.py         # Персистентный учёт использованных моделей, тарифы
 │   ├── probe_json.py          # JSON-результаты проверок бэкендов в LOGPATH
+│   ├── cli.py                 # Консольный entry point пакета
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
@@ -660,8 +667,9 @@ export ADAPTER_DEBUG_ENABLE=0
 # пишет полные строки (v0.8.6-реформа)
 # export ADAPTER_DEBUG_TRIM=3000
 
-# Имя PID-файла в detach-режиме (v0.9.0): файл кладётся в
-# ADAPTER_DEBUG_LOGPATH (basename значения; дефолт — adapter.pid).
+# Имя PID-файла: кладётся в ADAPTER_DEBUG_LOGPATH (basename значения;
+# дефолт — adapter.pid). Пишется при ЛЮБОМ запуске (v0.9.5) и удаляется
+# при штатном завершении — управление процессом без консоли.
 # export ADAPTER_PIDFILE="adapter.pid"
 
 # JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
@@ -823,7 +831,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Claude Code Adapter v0.9.4 (...
+Backend-Adapter v0.9.5
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -863,16 +871,24 @@ Detach-режим (double fork UNIX-daemon pattern):
 
 - Родительский процесс завершается немедленно
 - stdio/stderr перенаправлены в `/dev/null`
-- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH` (v0.9.0): имя — `adapter.pid`
-  или `basename(ADAPTER_PIDFILE)`)
+- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH`: имя — `adapter.pid`
+  или `basename(ADAPTER_PIDFILE)`
 - Логи идут в директорию `ADAPTER_DEBUG_LOGPATH`, если задана
   (пусто — файловая запись выключена, только консоль)
+
+> **PID-файл — не только для detach.** Он пишется при **любом** запуске
+> (v0.9.5): путь — `ADAPTER_DEBUG_LOGPATH/adapter.pid`, в консоль печатается
+> строка `[PID] <pid> → <путь>`. Это позволяет управлять процессом без
+> консоли — в контейнере или в составе службы. При штатном завершении
+> (`SIGINT`/`SIGTERM`) и на обычном выходе (ранний `[FATAL]`, необработанное
+> исключение) файл удаляется. При **повторном** сигнале (`os._exit(130)`)
+> файл остаётся — следующий запуск его перезапишет.
 
 Управление:
 
 ```bash
 cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid"   # прочитать PID
-kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить
+kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить (SIGTERM)
 ```
 
 > **Важно:** detach-режим не предназначен для продакшен-использования.
@@ -1009,6 +1025,13 @@ Adapter cannot start. Exiting.
 > Включать detach-режим (`ADAPTER_DETACH_ENABLE=1`) вместе с systemd нельзя:
 > двойной форк отделит процесс от управления systemd, и `Restart=on-failure` не сработает.
 
+> **PID-файл.** При `Type=simple` systemd знает PID сам, и файл ему не нужен —
+> но адаптер всё равно пишет `ADAPTER_DEBUG_LOGPATH/adapter.pid` (v0.9.5) и
+> снимает его при остановке. Если нужен `Type=forking`, укажите в юните
+> `PIDFile=<ADAPTER_DEBUG_LOGPATH>/adapter.pid` — путь совпадает с тем, куда
+> пишет адаптер. В контейнере (без systemd) это единственный способ адресовать
+> процесс: `kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")`.
+
 **Установка:**
 
 ```bash
@@ -1066,7 +1089,7 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 | Процесс живёт сам по себе | systemd следит за процессом |
 | Нет рестарта при падении | `Restart=on-failure` |
 | Нет логов | логи в `journalctl` |
-| PID-файл вручную | systemd сам знает PID |
+| PID-файл вручную | systemd сам знает PID (адаптер пишет файл в обоих режимах) |
 | Подходит для тестов | **подходит для продакшена** |
 
 ### 9.2 macOS — launchd

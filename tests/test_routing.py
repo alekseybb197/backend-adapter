@@ -174,6 +174,82 @@ class TestTargetForInput(_RouteCase):
         assert self.routing.target_for_input("completions") == "none"
 
 
+class TestTargetEnvName(_RouteCase):
+    """target_env_name — публичный доступ к _ENV_NAMES для WEBUI."""
+
+    def test_maps_each_input_to_its_variable(self):
+        assert self.routing.target_env_name("messages") == "ADAPTER_MESSAGES_TARGET"
+        assert self.routing.target_env_name("completions") == "ADAPTER_COMPLETIONS_TARGET"
+        assert self.routing.target_env_name("responses") == "ADAPTER_RESPONSES_TARGET"
+
+    def test_matches_env_names_table(self):
+        # Зеркало приватной таблицы: имя переменной — то же, что в decide
+        # подставляется в ERROR_DISABLED (иначе селект таблицы Sessions
+        # адресовал бы не ту переменную, что управляет входом строки).
+        for inp, name in self.routing._ENV_NAMES.items():
+            assert self.routing.target_env_name(inp) == name
+
+
+# ---------------------------------------------------------------------------
+# Пер-сессионный TARGET (v0.9.5): decide/target_for_input читают
+# session_settings.effective при непустом session_id
+# ---------------------------------------------------------------------------
+
+class TestPerSessionTarget(_RouteCase):
+    def _settings(self):
+        from backend_adapter import session_settings
+
+        return session_settings
+
+    def test_session_override_wins_over_config(self):
+        # Общая настройка — passthrough, сессия переопределена в none:
+        # запрос этой сессии выключается, общая настройка не тронута.
+        self._set_target(messages="passthrough")
+        self._support("test", "messages", True)
+        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "none"})
+        assert self.routing.target_for_input("messages", "s-1") == "none"
+        assert self.routing.target_for_input("messages") == "passthrough"
+        action, _out, msg, status = self.routing.decide("messages", "test", "s-1")
+        assert action == "disabled"
+        assert status == 404
+        assert "ADAPTER_MESSAGES_TARGET=none" in msg
+
+    def test_inherit_falls_back_to_config(self):
+        # "inherit" — запись есть, но трактуется как «взять общее».
+        self._set_target(messages="passthrough")
+        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
+        assert self.routing.target_for_input("messages", "s-1") == "passthrough"
+
+    def test_unset_session_uses_config(self):
+        # Переопределения нет — действует общая настройка приложения
+        # (поведение прежних версий без изменений).
+        self._set_target(messages="messages")
+        assert self.routing.target_for_input("messages", "s-2") == "messages"
+
+    def test_other_session_not_affected(self):
+        # Переопределение адресуется session_id: соседняя сессия видит общее.
+        self._set_target(completions="passthrough")
+        self._settings().set_config("s-1", {"ADAPTER_COMPLETIONS_TARGET": "none"})
+        assert self.routing.target_for_input("completions", "s-1") == "none"
+        assert self.routing.target_for_input("completions", "s-2") == "passthrough"
+
+    def test_decide_routes_session_to_other_backend_target(self):
+        # Сессия уходит на другой маршрут, чем общая настройка: общая —
+        # messages→completions, сессия — passthrough messages.
+        self._set_target(messages="completions")
+        self._support("test", "messages", True)
+        self._support("test", "completions", True)
+        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
+        action, out, _msg, status = self.routing.decide("messages", "test", "s-1")
+        assert action == "passthrough"
+        assert out == "messages"
+        assert status == 200
+        # Без session_id — прежний маршрут (convert).
+        action, out, _msg, _status = self.routing.decide("messages", "test")
+        assert action == "convert"
+        assert out == "completions"
+
+
 # ---------------------------------------------------------------------------
 # decide — таблица решений (все — ТОЛЬКО по кэшу, без сети)
 # ---------------------------------------------------------------------------

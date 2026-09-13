@@ -46,20 +46,30 @@ backend_adapter/
 │                             токены usage ответов (input/output) + дымовая проба
 │                             эндпоинтов по каждой модели; перепроверка строки
 │                             (reprobe); персистентный YAML (version: 2, миграция v1)
-├── session_registry.py     ← таблица сессий агентов (секция «Sessions»,
-│                             v0.9.2): in-memory, строка = КОРТЕЖ (session,
+├── session_registry.py     ← таблица сессий агентов (страница "/sessions",
+│                             v0.9.2/v0.9.5): in-memory, строка = КОРТЕЖ (session,
 │                             agent, model, backend, route) — смена модели или
 │                             обработчика даёт новую строку (upsert по полному
-│                             кортежу), плюс last_seen/calls/errors; БЕЗ
+│                             кортежу), плюс input/last_seen/calls/errors; БЕЗ
 │                             персистентности; лист DAG — импортирует config
+├── session_settings.py     ← пер-сессионные переопределения (v0.9.5): in-memory
+│                             dict session_id → {ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS,
+│                             ADAPTER_*_TARGET}; три состояния (не задано / inherit
+│                             / значение); API override/effective/set_config;
+│                             лист DAG — импортирует config
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
 │                             "/api/model-usage/reset", "/api/model-usage/reprobe",
 │                             "/api/model-usage/delete", "/api/model-usage/reprobe-state",
-│                             "/api/model-usage/snapshot", "/api/sessions/snapshot":
+│                             "/api/model-usage/snapshot":
 │                             status page (version, LLM endpoints, models) +
 │                             background-check state + секция «Models in use»
 │                             (live-счётчики, сброс счётчиков/перепроверка/удаление
-│                             строки) + секция «Sessions» (live-счётчики)
+│                             строки)
+├── webui_sessions.py       ← WEBUI страница "/sessions" (таблица сессий, v0.9.5,
+│                             задача 1): endpoints "/api/sessions/snapshot|reset|
+│                             delete|settings" + "/logs/<имя>" (раздача .err);
+│                             колонки «Входной эндпойнт», «Ошибок»-ссылка на .err,
+│                             пер-сессионные Log/Parts/TARGET — см. §6.10
 ├── webui_ops.py            ← WEBUI health endpoints "/healthz", "/health", "/live",
 │                             "/ready" (200/503 JSON; readiness по _BACKENDS/
 │                             _AVAILABLE_MODELS) — см. §6.7
@@ -154,21 +164,38 @@ module on one level, see ADR 2026-09-01).
 
 ## 4. Request lifecycle
 
-### 4.1 Startup (`backend-adapter.py:80–122`)
+### 4.1 Startup (`backend-adapter.py:79–164`)
 
-1. If `ADAPTER_DETACH_ENABLE=1` — double-fork daemonize + write PID file
+1. If `ADAPTER_DETACH_ENABLE=1` — double-fork daemonize (detach only;
+   the PID file is written below, at any startup, so it holds the PID of
+   the final grandchild process, not the exiting parent)
 2. Parse env config → `backend_adapter/config.py` (all env vars with `ADAPTER_` prefix)
-3. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend (this startup probe is unconditional — it fills the model list used for strict validation; a backend that fails to respond only logs a `[WARN]` and drops out, but the adapter exits `[FATAL]` if no models were retrieved from any backend), resolve model collisions by prefixing with `<backend_name>.`
-4. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
-   (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
-   `0.0.0.0` — all interfaces)
-5. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
+3. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
    empty/unset — the path is always non-empty; v0.8.6): created unconditionally at
    startup (it doubles as the WEBUI root); **file** logging of sessions/traces/dumps
    only happens at `ADAPTER_DEBUG_ENABLE=1` (master switch of the *file* write —
    console debug logs are unconditional); points at an existing **file** →
    `[FATAL]` + hint + `sys.exit(1)` (the path is always a directory).
-6. Start the WEBUI in a daemon thread via
+4. Write the PID file (`daemon._write_pidfile`): path is
+   `ADAPTER_DEBUG_LOGPATH/basename(ADAPTER_PIDFILE)` (default `adapter.pid`;
+   an absolute `ADAPTER_PIDFILE` outside LOGPATH is ignored). Written on
+   **every** launch, not only in detach mode (v0.9.5), so the process can be
+   addressed without a console (container, service); an existing file is
+   overwritten with our PID (no stale-PID check). Written **before** the
+   backend check (step 5, a network probe that can be slow), so the process is
+   addressable while it runs; only the instant `[FATAL]` checks (empty
+   `ADAPTER_BACKEND_CONFIG`, LOGPATH-is-a-file) precede it, and a backend-init
+   failure still cleans the file up via `atexit`.
+   Cleanup: `_remove_pidfile` (removes the file only if it holds the current
+   PID) runs at the end of the graceful procedure (`_finish`, SIGINT/SIGTERM)
+   and via `atexit` on any normal interpreter exit (early `[FATAL]`,
+   unhandled exception). A repeated signal (`os._exit(130)`) skips `atexit` —
+   the file remains; the next launch overwrites it. Not shown in the WEBUI.
+5. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend (this startup probe is unconditional — it fills the model list used for strict validation; a backend that fails to respond only logs a `[WARN]` and drops out, but the adapter exits `[FATAL]` if no models were retrieved from any backend), resolve model collisions by prefixing with `<backend_name>.`
+6. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
+   (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
+   `0.0.0.0` — all interfaces)
+7. Start the WEBUI in a daemon thread via
    `webserver.serve(root, __version__)` on `ADAPTER_WEBUI_HOST:<ADAPTER_WEBUI_PORT>`
    (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
    careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` — the WEBUI
@@ -207,7 +234,7 @@ module on one level, see ADR 2026-09-01).
 `/v1/chat/completions` ([OI] Chat Completions), `/v1/responses` ([OI] Responses
 API) — пути зеркалят `config.ENDPOINT_PROBES`. Что делать с запросом на каждом
 входе решает **TARGET-маршрутизация** (`backend_adapter/routing.py`, лист DAG,
-импортирует только config; его импортирует только server.py): три
+импортирует config и session_settings; его импортирует только server.py): три
 env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 `ADAPTER_COMPLETIONS_TARGET` и `ADAPTER_RESPONSES_TARGET` (дефолт `none`) —
 префикс = входной эндпоинт, значение ∈
@@ -217,18 +244,23 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 `[WARN]` + `none`). **Принципы настройки, матрица «вход × значение» и
 перспективы — [`docs/routing.md`](routing.md).**
 
-`routing.decide(inp, backend_name)` возвращает `(action, out_fmt, msg, status)`
-по **кэшу проб** `config.endpoint_support(backend_name, pname)` (геттер
-`_ENDPOINT_STATE`; сети в запросе нет — None трактуется как «нет данных»,
-оптимистично): action ∈ {passthrough (TARGET=passthrough: тело на эндпойнт
+`routing.decide(inp, backend_name, session_id="")` возвращает
+`(action, out_fmt, msg, status)` по **кэшу проб**
+`config.endpoint_support(backend_name, pname)` (геттер `_ENDPOINT_STATE`; сети
+в запросе нет — None трактуется как «нет данных», оптимистично): action ∈
+{passthrough (TARGET=passthrough: тело на эндпойнт
 входного формата дословно, бэкенд его поддерживает), convert (реализованные
 пары — сегодня `messages→completions` и `messages→messages`), reject
 (нереализованная конверсия → 400 «conversion … is not implemented»; маршрут
 при подтверждённо не поддерживающем бэкенде → 502), disabled (TARGET=none →
 404)}. Реестр реализованных пар — `IMPLEMENTED_CONVERSIONS` в routing.py.
+При **непустом** `session_id` значение TARGET берётся пер-сессионно
+(`session_settings.effective` поверх общей настройки, v0.9.5 — см. §6.11 и
+`docs/routing.md` §2.4); `routing.target_env_name(inp)` отдаёт имя переменной
+входа для WEBUI.
 
 Общий конвейер (для всех трёх входов; disabled/reject уходят ответом ДО
-обращения к бэкенду — usage-учёт и `.err` не пишутся):
+обращения к бэкенду — usage-учёт не пишется, но `.err`-блок пишется, v0.9.5):
 
 ```
 1. Extract session_id, req_id, update session_log context
@@ -250,11 +282,13 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
    - Explicit prefix (<backend>.model) → strip, route
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
-8. routing.decide(fmt, backend_name) → action/out_fmt
+8. routing.decide(fmt, backend_name, session_id) → action/out_fmt
    - учёт сессии (session_registry.register по полному кортежу session+agent+
-     model+backend+route — включая reject/disabled: видно, куда агент пытался;
-     upsert, calls+1, эвикция по ADAPTER_SESSIONS_TABLE; v0.9.2, см. §6.10)
-   - disabled/reject → JSON-ответ (404/400/502), return (запрос до бэкенда не дошёл)
+     model+backend+route+input — включая reject/disabled: видно, куда агент
+     пытался; upsert, calls+1, эвикция по ADAPTER_SESSIONS_TABLE; v0.9.2/v0.9.5,
+     см. §6.10)
+   - disabled/reject → JSON-ответ (404/400/502), return (запрос до бэкенда не
+     дошёл — но `.err`-блок пишется, v0.9.5, см. §8.4)
 9. Only messages→completions conversion: trace tool_results from incoming messages
    (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
    tools, tool_choice, system)
@@ -731,7 +765,7 @@ tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не 
 роняет. Модуль — лист DAG: импортируется config.py и model_usage.py
 (оба корня DAG), сам на верхнем уровне — stdlib only.
 
-### 6.10 Таблица активных сессий агентов («Sessions», `session_registry.py`, v0.9.2)
+### 6.10 Таблица активных сессий агентов (`session_registry.py`, v0.9.2; страница `/sessions` — v0.9.5)
 
 In-memory реестр (`_TABLE: dict[SessionKey → строка]` + lock), где
 **`SessionKey = tuple[str, str, str, str, str]` = `(session, agent, model,
@@ -740,13 +774,15 @@ backend, route)`**, а строка — «закреплённое соотве�
 из списка `ADAPTER_SESSION_HEADER`, дефолт
 `X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id`;
 ни одного — `unknown`), плюс
-сопровождающие поля: время последнего
+сопровождающие поля: входной эндпойнт (`input`, v0.9.5 — НЕ часть ключа),
+время последнего
 обращения, счётчики обращений и ошибок. Смена модели агентом или смена
 обработчика (правило TARGET) — **новое событие → новая строка**; возврат к
-уже встречавшемуся кортежу — та же строка (upsert, `calls++`). Секция
-«Sessions» на статус-странице `/` — `webui_status._sessions_rows_html`;
-live-обновление — JS `sessions_poll` → `/api/sessions/snapshot` (см.
-`docs/webui.md` §3/§6).
+уже встречавшемуся кортежу — та же строка (upsert, `calls++`). Таблица
+переехала со статус-страницы `/` на отдельную страницу `/sessions`
+(v0.9.5, задача 1) — `webui_sessions.py` (`_sessions_rows_html`); на `/`
+осталась ссылка 🗂 (открывается в новом окне). Live-обновление — JS
+`sessions_poll` → `/api/sessions/snapshot` (см. `docs/webui.md` §4/§7).
 
 Точки учёта — `server.do_POST` (все через хелпер `_register_session` →
 `session_registry.register`, возвращающий ключ в thread-local
@@ -779,7 +815,68 @@ live-обновление — JS `sessions_poll` → `/api/sessions/snapshot` (�
 только в памяти процесса, каждый запуск начинается заново. Модуль — лист DAG:
 на верхнем уровне импортирует только config (читает `ADAPTER_SESSIONS_TABLE`
 живьём — переживает reload конфига в тестах); потребители — server.py (пишет)
-и webui_status.py (читает/рендерит).
+и webui_sessions.py (читает/рендерит).
+
+### 6.11 Пер-сессионные настройки (`session_settings.py`, v0.9.5)
+
+In-memory реестр переопределений «сессия → настройка» (`_OVERRIDES:
+dict[session_id, dict[name, value]]` + lock). Сессия — единица управления:
+для отдельного `session_id` можно переопределить флаги логирования и TARGET,
+не трогая общую настройку приложения. Пул — `config.SESSION_CONFIG_POOL`
+(`ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS`, `ADAPTER_MESSAGES_TARGET`,
+`ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET`), типы —
+`config._SESSION_CONFIG_TYPES` (bool ×2, enum ×3 с доменом
+`SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)`).
+
+Три состояния записи (для TARGET; у bool состояния `inherit` нет — снятие
+переопределения эквивалентно):
+
+| Состояние | `effective(session_id, name)` |
+|---|---|
+| записи нет | общая настройка `config.<name>` (в т.ч. её последующие изменения) |
+| `"inherit"` | то же (взять общее), но запись существует и видна в WEBUI |
+| конкретное значение | переопределение сессии |
+
+- API: `override(session_id, name) -> Any|None` (сырое значение или None),
+  `effective(session_id, name) -> Any` (переопределение либо `config.<name>`,
+  `None`-безопасно), `session_overrides(session_id) -> dict`,
+  `set_config(session_id, values=None, clear=()) -> dict|None` (валидация по
+  `_SESSION_CONFIG_TYPES`, невалидное/внепуловое молча игнорируется),
+  `clear_session(session_id) -> bool`, `reset()` (для тестов).
+- Потребители — `session_log.logging_enabled`/`parts_enabled` (флаги
+  логирования) и `routing.decide`/`target_for_input` (пер-сессионный TARGET,
+  непустой `session_id`; пустой → общая настройка) — см. §4.2 и
+  `docs/routing.md` §2.4.
+- Задаётся из WEBUI: выпадающие списки в таблице `/sessions`
+  (`webui_sessions.py`) либо `POST /api/sessions/settings`. Адресуется сессии,
+  а не строке-кортежу, поэтому переживает вытеснение строки из таблицы, но
+  **не переживает перезапуск** (в отличие от `model-usage.yaml`).
+- Модуль — лист DAG: на верхнем уровне импортирует только `config`.
+
+### 6.12 Страница `/sessions` — таблица сессий и пер-сессионное управление (`webui_sessions.py`, v0.9.5)
+
+WEBUI-модуль-эндпойнт (`@webserver.register`, импортируется в
+`webserver.serve()`), вынесенный из `webui_status.py` при переезде таблицы
+сессий на отдельную страницу (задача 1). Эндпойнты:
+
+| Эндпойнт | Назначение |
+|---|---|
+| GET `/sessions` | страница с таблицей сессий (13 колонок) + JS-поллинг счётчиков |
+| GET `/api/sessions/snapshot` | снимок строк (JSON; `errors_html`, `input`, `key`) |
+| POST `/api/sessions/reset` | обнуление счётчиков **одной строки-кортежа** (⏪) |
+| POST `/api/sessions/delete` | удаление строки-кортежа (🗑) |
+| POST `/api/sessions/settings` | пер-сессионные Log / Parts / TARGET (JSON или форма) |
+| GET `/logs/<имя>` | раздача `.err`-файла сессии (имя — по `_ERR_NAME_RE`) |
+
+Колонки, отличающие v0.9.5: **«Входной эндпойнт»** (`input` строки —
+константен, задаётся агентом, `routing.INPUT_PATHS`), **«Ошибок»** (число —
+ссылка на `.err`-файл сессии, `target="_blank"`, задача 7), **«Log» / «Parts» /
+«TARGET»** (выпадающие списки — пер-сессионные переопределения, `inherit` =
+общая настройка), **«Actions»** (⏪ + 🗑). Изменение настройки — PRG-форма
+(POST → 303 на GET `/sessions`). Ссылки со статус-страницы `/` на `/sessions`
+открываются в **новом окне**, обратные («Статус 📊») — в текущем (v0.9.5,
+задачи 1–2). Пер-сессионные значения — `session_settings` (§6.11); строки —
+`session_registry` (§6.10). Поведение страницы и API — `docs/webui.md` §4/§7.
 
 ### 6.2 Разрешение коллизий имён моделей
 
@@ -837,6 +934,12 @@ Debug flags (runtime pool):
 | `ADAPTER_DEBUG_PARTS` | Per-session `.json`+`.yaml` dumps of all logged protocol parts |
 | `ADAPTER_DEBUG_TRIM` | Console trim limit in chars (0 = no trim; default 3000) |
 | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | Disables the redaction sanitizer (1 = raw secrets) |
+
+`ADAPTER_DEBUG` and `ADAPTER_DEBUG_PARTS` are additionally **per-session
+overridable** (v0.9.5, §6.11): `session_log.logging_enabled(session_id)` /
+`parts_enabled(session_id)` read the session override via
+`session_settings.effective`, falling back to the app-wide value when unset.
+`ADAPTER_DEBUG_TRIM` and the sanitizer stay app-wide only.
 
 ### 8.2 Structured trace (`tracer.py`)
 
@@ -896,13 +999,20 @@ Long base64/hex strings may also be matched.
 ### 8.4 Per-session files (`session_log.py`)
 
 - File naming: `session-<YYYYMMDD-HHMMSS>-<sessionID_short>.<ext>` (`.log` — debug,
-  `.jsonl` — trace), plus `session-*.parts/` dump directories — all flat in
+  `.jsonl` — trace), plus `session-*.parts/` dump directories and the
+  unconditional `session-*.err` incident/WARN/error channel — all flat in
   `ADAPTER_DEBUG_LOGPATH`
 - Timestamp frozen on first use per session (all traffic → same file)
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
 - The log directory `ADAPTER_DEBUG_LOGPATH` is created on demand when set
   (adapter startup when `ADAPTER_DEBUG_ENABLE=1`, and/or at first write);
   empty (default) — no directory, no disk writes
+- **Per-session gates (v0.9.5):** `logging_enabled(session_id)` /
+  `parts_enabled(session_id)` read the session override (`session_settings.
+  effective`) falling back to the app-wide `config.ADAPTER_DEBUG` /
+  `ADAPTER_DEBUG_PARTS`. Empty `session_id` → app-wide value. The
+  unconditional `.err`/WARN channels are **not** gated by these — see
+  `docs/logging.md`
 
 ### 8.5 Per-session protocol dumps — `ADAPTER_DEBUG_PARTS` (`.json` + `.yaml` pairs)
 
@@ -1003,27 +1113,37 @@ backend-adapter.py
   │                       пер-модельные пробы эндпоинтов пишут JSON-дампы в LOGPATH)
   ├── session_registry.py → config (лист DAG: in-memory таблица сессий агентов
   │                       — строка = кортеж session+agent+model+backend+route,
-  │                       секция «Sessions» — v0.9.2)
+  │                       страница "/sessions" — v0.9.2/v0.9.5)
+  ├── session_settings.py → config (лист DAG: пер-сессионные переопределения
+  │                       ADAPTER_DEBUG/PARTS/TARGET — v0.9.5; потребители —
+  │                       session_log, routing, webui_sessions)
   ├── probe_json.py      (no internal deps on the top level — stdlib only;
   │                       config/redact читаются локально внутри записи)
-  ├── routing.py         → config (лист DAG: входные форматы, TARGET-реестр,
-  │                       decide по кэшу endpoint_support — см. §4.2)
+  ├── routing.py         → config, session_settings (лист DAG по config: входные
+  │                       форматы, TARGET-реестр, decide по кэшу endpoint_support
+  │                       + пер-сессионный TARGET — см. §4.2)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
   ├── tracer.py          → session_log, config, redact
   ├── logger.py          → config, redact, session_log
   ├── redact.py          (no internal deps — stdlib only)
-  ├── session_log.py     (no internal deps — PyYAML)
+  ├── session_log.py     (no internal deps — PyYAML; session_settings читается
+  │                       локально внутри logging_enabled/parts_enabled)
   ├── daemon.py          (no internal deps — stdlib only)
-  ├── webserver.py       → session_viewer, webui_status, webui_config_api, webui_ops
+  ├── webserver.py       → session_viewer, webui_status, webui_sessions,
+  │                       webui_config_api, webui_ops
   │                       (WEBUI core: serve() импортирует встроенные
   │                       эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
   ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state",
   │                       "/api/model-usage/snapshot", "/api/model-usage/reset",
   │                       "/api/model-usage/delete", "/api/model-usage/reprobe",
-  │                       "/api/model-usage/reprobe-state", "/api/sessions/snapshot"),
-  │                       config, model_usage, session_registry
+  │                       "/api/model-usage/reprobe-state"),
+  │                       config, model_usage
+  ├── webui_sessions.py  → webserver (страница "/sessions" + эндпоинты
+  │                       "/api/sessions/snapshot|reset|delete|settings",
+  │                       "/logs/<имя>"), config, session_registry, session_settings,
+  │                       session_log, routing
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   ├── webui_ops.py       → webserver (эндпоинты "/healthz" "/health" "/live" "/ready"),
   │                       config (readiness: _BACKENDS/_AVAILABLE_MODELS)
@@ -1056,5 +1176,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.4** (see `backend-adapter.py`).
+Current: **v0.9.5** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).
