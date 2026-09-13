@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.5
+"""[CC] <-> [OI]-backend adapter v0.9.6
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.5"
-__comment__ = "v0.9.0: streaming SSE passthrough + input endpoint routing (/v1/chat/completions, /v1/responses, ADAPTER_*_TARGET, passthrough E->E relay_sse) + .err incident protocol (unconditional session-*.err on final 4xx/5xx, full request+error, no TRIM) + JSON probe results into LOGPATH + [EXIT] Bye inside shutdown.graceful_shutdown + CI to project checks (mypy strict) | v0.9.1: WARN events ([USAGE_WARN] stream without usage, [WARN] First message is NOT system) written to session-*.err unconditionally (full request + report) + clean shutdown fix for PyInstaller binary on Ctrl-C (unified first-signal handler, outer KeyboardInterrupt guard) + CLAUDE.md deduped | v0.9.2: passthrough messages->messages moves all role=system to the front (normalize_messages_system_first, no merging) + agent-sessions table on WEBUI status page (/api/sessions/snapshot, session_registry.py) — row = tuple (session, agent, model, backend, route): model/handler change creates a new row, return to a previous tuple reuses it (upsert, calls++), ADAPTER_SESSIONS_TABLE counts rows, no persistence + install.sh reduced to latest-release binary only (Linux /usr/local/bin, macOS ~/.local/bin, Windows -> future install.ps1) | v0.9.3: install.sh --service installs a SYSTEM systemd unit (dedicated backend-adapter user, generated config in /var/lib/backend-adapter, enabled+started) + install.sh --delete removes binary/unit/state dir/service user (idempotent, --yes for CI) + install.sh re-run is a proper update: detect existing install -> compare versions by binary banner (extract_version/version_gt, no GitHub API) -> no-op when current -> stop service -> timestamped config backups -> replace binary -> regenerate configs keeping URL/token -> restart (make_workdir avoids noexec /tmp for the version probe) + molecule scenarios install/service cover install, update and delete offline | v0.9.4: TARGET semantics reworked — a concrete format value (messages|completions|responses) now means DIRECT CONVERSION of the input into it (messages->messages = system-first sorting), new value passthrough = verbatim relay without conversion, and auto is REMOVED (invalid -> [WARN] + none); self-pairs completions->completions / responses->responses now 400 not-implemented (use passthrough for verbatim); session id extracted from JSON-valued headers (Header:json_key, e.g. x-codex-turn-metadata:session_id) in ADAPTER_SESSION_HEADER + QwenCode setup guide + client-agnostic wording; fixed doubled ADAPTER_ prefix in the 404 error text; CI path-gates per job | v0.9.5: session as a management unit — sessions table moved to its own WEBUI page /sessions (link 🗂 from the status page opens in a NEW window, back links in the current one), row reset (⏪, this tuple-row only) and delete (🗑) actions, input-endpoint column, per-session overrides of Log/Parts/TARGET via selects in the table (session_settings.py: inherit | concrete value, in-memory) applied to session_log.logging_enabled/parts_enabled and routing.decide, error counter is a link opening the session .err file in a new window (/logs/<name>, strict name pattern), and .err now records ANY error registered in the sessions table (write_session_error for 400 validation / 404 disabled / 400-502 reject / 501 models), not just backend incidents + PID file adapter.pid written on ANY launch (not only in detach), removed on graceful shutdown and via atexit, and written BEFORE the startup backend probe so the process is addressable while it runs (daemon._write_pidfile returns the path; new _pidfile_path/_remove_pidfile; console prints [PID] <pid> -> <path>)"
+__version__ = "0.9.6"
+__comment__ = (
+    "Anthropic API <-> [OI]-backend proxy: двунаправленная конвертация "
+    "сообщений/инструментов (Messages <-> Chat Completions/Responses), "
+    "стриминг SSE, multi-backend YAML, per-session Log/Parts/TARGET, "
+    "перманентный runtime-пул (state.yaml), WEBUI и Prometheus-экспортёр. "
+    "История изменений — changelog.md; версия — __version__."
+)
 
 import atexit
 import contextlib
@@ -14,6 +20,15 @@ import threading
 from collections import Counter
 
 # ==================== Package imports ====================
+# Строгая проверка env ДО импорта config (v0.9.6): config.py читает env на
+# уровне модуля и парсит int(...) — невалидное значение (ADAPTER_PROXY_PORT=abc)
+# упало бы голым ValueError раньше любой проверки. validate_env даёт [FATAL]
+# с понятным текстом и sys.exit(1) (адаптер не стартует). Импортируется
+# первым: сам модуль — лист DAG (только stdlib).
+from backend_adapter import env_validate
+
+env_validate.validate_env()
+
 from backend_adapter.config import (
     PROXY_PORT,
     ADAPTER_ENDPOINT_HOST,
@@ -75,6 +90,11 @@ from backend_adapter.server import Adapter, QuietThreadingHTTPServer
 # session_log — globals only (functions used internally by module)
 from backend_adapter import session_log
 
+# state_store — перманентное состояние runtime-пула (state.yaml, v0.9.6).
+# Импорт ради побочного эффекта apply_on_startup ниже (регистрация колбека
+# записи) — как модуль, не отдельными именами.
+from backend_adapter import state_store
+
 
 if __name__ == "__main__":
     # Detach (double fork) — только отделение от консоли. PID-файл пишется
@@ -127,6 +147,15 @@ if __name__ == "__main__":
         )
         sys.exit(1)
     os.makedirs(log_path, exist_ok=True)
+
+    # === Перманентное состояние runtime-пула (state.yaml, v0.9.6) ===
+    # Файл есть → его значения применяются ПОВЕРХ env (файл отражает последнее
+    # явное действие пользователя, env — исходную конфигурацию); файла нет →
+    # создаётся из текущих env-значений. Идёт ДО _init_multi_backends и до
+    # подъёма WEBUI: применённые TARGET-маршрутизация и маппинг моделей должны
+    # быть выставлены до старта бэкендов/роутинга. Битый файл не роняет старт —
+    # [WARN] + работа на env (см. state_store.apply_on_startup).
+    state_store.apply_on_startup()
 
     # === PID-файл (при ЛЮБОМ запуске, не только в detach) ===
     # Путь — LOGPATH + basename(ADAPTER_PIDFILE) (см. daemon._pidfile_path).

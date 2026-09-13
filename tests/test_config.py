@@ -247,6 +247,77 @@ backend:
         result = config._parse_backend_yaml("/nonexistent/path.yaml")
         assert result is None
 
+    def test_invalid_base_url_skipped(self, tmp_path, capsys):
+        # base без http(s):// — запись пропускается с [WARN] (v0.9.6):
+        # иначе бэкенд с мусорным адресом падал бы позже на urlopen.
+        yaml_content = """backend:
+  - name: home
+    base: localhost:8002
+    key: KEY1
+  - name: good
+    base: http://localhost:8003
+    key: KEY2
+"""
+        yaml_file = tmp_path / "badurl.yaml"
+        yaml_file.write_text(yaml_content)
+
+        _reload_config()
+        from backend_adapter import config
+        os.environ["KEY1"] = "v1"
+        os.environ["KEY2"] = "v2"
+        result = config._parse_backend_yaml(str(yaml_file))
+
+        assert result is not None
+        assert [b["name"] for b in result] == ["good"]
+        out = capsys.readouterr().out
+        assert "[WARN]" in out and "localhost:8002" in out
+
+    def test_missing_fields_warn(self, tmp_path, capsys):
+        # Нет key — запись пропускается с [WARN] и названным полем.
+        yaml_content = """backend:
+  - name: nokey
+    base: http://localhost:8002
+"""
+        yaml_file = tmp_path / "nofield.yaml"
+        yaml_file.write_text(yaml_content)
+
+        _reload_config()
+        from backend_adapter import config
+        result = config._parse_backend_yaml(str(yaml_file))
+
+        assert result is None  # нет валидных записей
+        out = capsys.readouterr().out
+        assert "[WARN]" in out and "nokey" in out and "key" in out
+
+
+class TestIsHttpUrl:
+    """_is_http_url: base бэкенда обязан быть http(s)-URL (v0.9.6)."""
+
+    def setup_method(self):
+        _reload_config()
+        from backend_adapter import config
+        self.config = config
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "http://localhost:8002",
+            "https://litellm.example.com",
+            "https://api.example.com/v1",
+            "HTTPS://EXAMPLE.COM",
+            "  http://x.local  ",
+        ],
+    )
+    def test_accepts(self, value):
+        assert self.config._is_http_url(value) is True
+
+    @pytest.mark.parametrize(
+        "value",
+        ["localhost:8002", "ftp://x.local", "example.com", "", "http://", "://x"],
+    )
+    def test_rejects(self, value):
+        assert self.config._is_http_url(value) is False
+
 
 class TestResolveBackend:
     """Tests for _resolve_backend()."""
@@ -955,18 +1026,22 @@ class TestRuntimeConfig:
         self.config = config
 
     def test_valid_keys_applied(self):
-        """Valid bool/int values are applied and visible in get_runtime_config()."""
+        """Valid bool/int values are applied and visible in get_runtime_config().
+
+        v0.9.6: Log и Parts заданы СОГЛАСОВАННО (Log=on, Parts=on) — иначе
+        сработал бы каскад Parts→Log (Parts не может быть активен без Log).
+        """
         result = self.config.set_runtime_config(
-            ADAPTER_DEBUG=False,
+            ADAPTER_DEBUG=True,
             ADAPTER_DEBUG_PARTS=True,
             ADAPTER_TRACE_REASONING_MAX_CHARS=500,
         )
-        assert result["ADAPTER_DEBUG"] is False
+        assert result["ADAPTER_DEBUG"] is True
         assert result["ADAPTER_DEBUG_PARTS"] is True
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
         # Проверка через get
         current = self.config.get_runtime_config()
-        assert current["ADAPTER_DEBUG"] is False
+        assert current["ADAPTER_DEBUG"] is True
         assert current["ADAPTER_DEBUG_PARTS"] is True
         assert current["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
 
@@ -1007,14 +1082,18 @@ class TestRuntimeConfig:
         assert self.config.ADAPTER_DEBUG_LOGPATH == logpath_before  # не изменилось
 
     def test_wrong_type_not_applied(self):
-        """Wrong type for known key is not applied; other keys still apply."""
+        """Wrong type for known key is not applied; other keys still apply.
+
+        Второй ключ — ADAPTER_DEBUG_PARTS=False (не True): с True каскад
+        v0.9.6 включил бы Log, и проверка «Log остался прежним» не имела бы
+        смысла."""
         debug_before = self.config.ADAPTER_DEBUG
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG="not-a-bool",  # неверный тип
-            ADAPTER_DEBUG_PARTS=True,  # верный тип
+            ADAPTER_DEBUG_PARTS=False,  # верный тип
         )
         assert result["ADAPTER_DEBUG"] is debug_before  # осталось прежнее значение
-        assert result["ADAPTER_DEBUG_PARTS"] is True  # применилось
+        assert result["ADAPTER_DEBUG_PARTS"] is False  # применилось
 
     def test_bool_not_passed_as_int(self):
         """Bool is checked BEFORE int — bool doesn't pass as int field."""
@@ -1037,6 +1116,44 @@ class TestRuntimeConfig:
         """ADAPTER_DEBUG_PARTS принимает только bool: строка игнорируется."""
         result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS="yes")
         assert result["ADAPTER_DEBUG_PARTS"] is False  # осталось прежнее значение
+
+    def test_parts_on_enables_log(self):
+        """Каскад (v0.9.6): Parts=on при Log=off включает Log."""
+        self.config.ADAPTER_DEBUG = False
+        self.config.ADAPTER_DEBUG_PARTS = False
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS=True)
+        assert result["ADAPTER_DEBUG_PARTS"] is True
+        assert result["ADAPTER_DEBUG"] is True
+        assert self.config.ADAPTER_DEBUG is True
+
+    def test_log_off_disables_parts(self):
+        """Каскад (v0.9.6): выключение Log гасит Parts."""
+        self.config.ADAPTER_DEBUG = True
+        self.config.ADAPTER_DEBUG_PARTS = True
+        result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
+        assert result["ADAPTER_DEBUG"] is False
+        assert result["ADAPTER_DEBUG_PARTS"] is False
+        assert self.config.ADAPTER_DEBUG_PARTS is False
+
+    def test_log_off_and_parts_on_parts_wins(self):
+        """В одном вызове Log=off + Parts=on: побеждает явное намерение Parts."""
+        self.config.ADAPTER_DEBUG = True
+        self.config.ADAPTER_DEBUG_PARTS = False
+        result = self.config.set_runtime_config(
+            ADAPTER_DEBUG=False, ADAPTER_DEBUG_PARTS=True
+        )
+        assert result["ADAPTER_DEBUG"] is True
+        assert result["ADAPTER_DEBUG_PARTS"] is True
+
+    def test_unrelated_key_does_not_cascade(self):
+        """Несогласованность из env (Log=off, Parts=on) не «лечится»
+        изменением посторонней настройки: каскад срабатывает только когда
+        тронут один из двух тумблеров."""
+        self.config.ADAPTER_DEBUG = False
+        self.config.ADAPTER_DEBUG_PARTS = True
+        result = self.config.set_runtime_config(ADAPTER_DEBUG_TRIM=1234)
+        assert result["ADAPTER_DEBUG_PARTS"] is True  # не тронуто
+        assert result["ADAPTER_DEBUG"] is False
 
     def test_trim_int_applied(self):
         """ADAPTER_DEBUG_TRIM: int применяется, 0 допустим (без обрезки)."""

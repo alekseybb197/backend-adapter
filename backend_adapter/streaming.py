@@ -7,6 +7,7 @@ message_delta / message_stop).
 """
 
 import json
+import time
 import uuid
 
 from . import config
@@ -462,3 +463,139 @@ def _write_sse_error_native(wfile, inp_fmt: str, message: str) -> None:
         _sse_write(wfile, "error", payload)
     except Exception:
         pass
+
+
+def _synthetic_text_response(text: str, model: str) -> dict:
+    """Собирает ЗАВЕРШЁННЫЙ (status=completed) объект ответа Responses API
+    с одним текстовым сообщением ассистента — общий билдер для
+    build_responses_control_response (non-stream) и
+    emit_responses_control_message (SSE) ниже (v0.9.6, routing:
+    responses→responses, см. convert.detect_model_switch_command).
+
+    ``usage: None`` — синтетический ответ не стоил ни одного токена
+    реальной модели, отчитываться перед клиентом нечем; отсутствие usage-
+    события в SSE-варианте (см. emit_responses_control_message) означает,
+    что relay_sse-подобный учёт usage для этого ответа корректно даёт {}."""
+    response_id = f"resp_adapter_{uuid.uuid4().hex}"
+    item_id = f"msg_adapter_{uuid.uuid4().hex}"
+    item = {
+        "id": item_id,
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": [item],
+        "usage": None,
+    }
+
+
+def build_responses_control_response(text: str, model: str) -> dict:
+    """Non-stream синтетический ответ /v1/responses (см.
+    emit_responses_control_message — тот же контент SSE-потоком).
+    Вызывающая сторона (server.py) отдаёт результат клиенту как обычный
+    JSON 200, не открывая SSE — ``self._send_json(200, ...)``."""
+    return _synthetic_text_response(text, model)
+
+
+def emit_responses_control_message(wfile, text: str, model: str) -> None:
+    """Синтетический (НЕ от бэкенда) ответ Responses API одним текстовым
+    сообщением ассистента — для служебных команд адаптера
+    (convert.detect_model_switch_command), которые не должны доходить до
+    настоящей модели (v0.9.6). Пишет полную последовательность событий,
+    которой достаточно клиенту Responses API, чтобы показать сообщение и
+    штатно завершить turn: response.created -> output_item.added ->
+    content_part.added -> output_text.delta -> output_text.done ->
+    content_part.done -> output_item.done -> response.completed.
+
+    Синтетический текст уходит ОДНИМ delta-событием, без пословной имитации
+    печати — это служебное уведомление адаптера, а не текст, сгенерированный
+    моделью, изображать правдоподобный стриминг незачем.
+
+    Заголовки ответа должны быть уже отправлены вызывающим кодом
+    (``self._start_sse``) — эта функция только пишет события, как и
+    relay_sse/_write_sse_error_native выше."""
+    obj = _synthetic_text_response(text, model)
+    item = obj["output"][0]
+    item_id = item["id"]
+    base_response = {k: v for k, v in obj.items() if k not in ("output", "status")}
+
+    _sse_write(
+        wfile,
+        "response.created",
+        {
+            "type": "response.created",
+            "response": {**base_response, "status": "in_progress", "output": []},
+        },
+    )
+    item_in_progress = {**item, "status": "in_progress", "content": []}
+    _sse_write(
+        wfile,
+        "response.output_item.added",
+        {"type": "response.output_item.added", "output_index": 0, "item": item_in_progress},
+    )
+    part_in_progress = {"type": "output_text", "text": "", "annotations": []}
+    _sse_write(
+        wfile,
+        "response.content_part.added",
+        {
+            "type": "response.content_part.added",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": part_in_progress,
+        },
+    )
+    _sse_write(
+        wfile,
+        "response.output_text.delta",
+        {
+            "type": "response.output_text.delta",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "delta": text,
+        },
+    )
+    part_done = item["content"][0]
+    _sse_write(
+        wfile,
+        "response.output_text.done",
+        {
+            "type": "response.output_text.done",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "text": text,
+        },
+    )
+    _sse_write(
+        wfile,
+        "response.content_part.done",
+        {
+            "type": "response.content_part.done",
+            "item_id": item_id,
+            "output_index": 0,
+            "content_index": 0,
+            "part": part_done,
+        },
+    )
+    _sse_write(
+        wfile,
+        "response.output_item.done",
+        {"type": "response.output_item.done", "output_index": 0, "item": item},
+    )
+    _sse_write(
+        wfile,
+        "response.completed",
+        {
+            "type": "response.completed",
+            "response": {**base_response, "status": "completed", "output": [item]},
+        },
+    )

@@ -410,6 +410,36 @@ class TestDecideExplicitConvert(_RouteCase):
         assert status == 502
         assert "does not support messages" in msg
 
+    def test_responses_to_responses_is_convert(self):
+        # responses→responses — реализованная пара (v0.9.6): «внутренний
+        # конвертор» — store=false + /model, без перестановки полей. TARGET
+        # responses на входе responses даёт convert (не passthrough, не
+        # reject), выходной формат — responses.
+        self._set_target(responses="responses")
+        self._support("test", "responses", True)
+        action, out, msg, status = self.routing.decide("responses", "test")
+        assert action == "convert"
+        assert out == "responses"
+        assert msg == ""
+        assert status == 200
+
+    def test_responses_to_responses_optimistic_when_never_probed(self):
+        # None (не пробовано) → оптимистичный convert, как у messages→messages.
+        self._set_target(responses="responses")
+        self._support("test", "responses", None)
+        action, out, _msg, status = self.routing.decide("responses", "test")
+        assert action == "convert"
+        assert out == "responses"
+        assert status == 200
+
+    def test_responses_to_responses_rejected_when_unsupported(self):
+        self._set_target(responses="responses")
+        self._support("test", "responses", False)
+        action, _out, msg, status = self.routing.decide("responses", "test")
+        assert action == "reject"
+        assert status == 502
+        assert "does not support responses" in msg
+
 
 class TestDecideUnimplemented(_RouteCase):
     @pytest.mark.parametrize(
@@ -422,8 +452,9 @@ class TestDecideUnimplemented(_RouteCase):
             ("responses", "completions", ("responses", "completions")),
             # self-пары без конвертера (реестр False) — тоже 400; дословная
             # передача таких входов достигается значением TARGET=passthrough.
+            # (responses→responses с v0.9.6 — реализованная пара: внутренний
+            # конвертор store=false + /model, см. TestDecideResponses.)
             ("completions", "completions", ("completions", "completions")),
-            ("responses", "responses", ("responses", "responses")),
         ],
     )
     def test_unimplemented_pair_rejected(self, inp, target, pair):

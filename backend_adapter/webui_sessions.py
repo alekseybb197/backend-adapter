@@ -13,7 +13,7 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
 Колонки строки (13):
 
     Сессия | Агент | Модель | Бэкенд | Входной эндпойнт | Маршрут |
-    Последнее обращение | Вызовов | Ошибок | Log | Parts | TARGET | Actions
+    Последнее обращение | C | E | Log | Parts | TARGET | Actions
 
   - «Входной эндпойнт» — константа строки: путь запроса выбирает АГЕНТ
     (messages|completions|responses), адаптер его не меняет. Это же значение
@@ -21,13 +21,16 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
   - «Маршрут» — КУДА адаптер решил отправить (passthrough/convert/reject/
     disabled): производная от TARGET на момент обращения;
   - «Log»/«Parts» — селекты ADAPTER_DEBUG/ADAPTER_DEBUG_PARTS (inherit/on/
-    off): объём файловой записи для сессии;
+    off): объём файловой записи для сессии. Parts активен только при
+    включённом Log: при Log=off его селект заблокирован (v0.9.6);
   - «TARGET» — селект TARGET-переменной входного эндпойнта строки
     (inherit + домен config.TARGET_ALLOWED_VALUES);
-  - «Ошибок» — счётчик; при наличии .err-файла сессии число становится
-    ссылкой на него (/logs/<имя>, открывается в НОВОМ окне браузера);
-  - «Actions» — ⏪ (обнулить счётчики ЭТОЙ строки-кортежа) и 🗑 (удалить
-    строку).
+  - «C»/«E» — счётчики Вызовов/Ошибок (заголовки укорочены в v0.9.6);
+    у «E» при наличии .err-файла сессии число становится ссылкой на него
+    (/logs/<имя>, открывается в НОВОМ окне браузера);
+  - «Сессия» — 🗑 (удалить строку-кортеж) ПЕРЕД коротким id сессии в одной
+    ячейке (v0.9.6, задача 5);
+  - «Actions» — ⏪ (обнулить счётчики ЭТОЙ строки-кортежа).
 
 Все селекты и кнопки — обычные HTML-формы (PRG через 303 на GET /sessions),
 без JS: изменение селекта отправляет форму сразу (onchange="this.form.submit()").
@@ -35,11 +38,12 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
 приложения — видно, к чему вернётся сессия (задача 4: дефолт сессии —
 общие настройки).
 
-Счётчики Вызовов/Ошибок обновляются без перезагрузки: безусловный JS
+Вся наблюдаемая часть строки обновляется без перезагрузки: безусловный JS
 sessions_poll каждые 5 с опрашивает /api/sessions/snapshot и правит ячейки
-по data-атрибутам (data-calls — textContent, data-errors — innerHTML:
-errors_html приходит с сервера ГОТОВЫМ HTML — числом или ссылкой, как
-cost_html у таблицы моделей). Строки сопоставляются по data-key
+по data-атрибутам (agent/model/backend/route/seen — textContent, data-calls —
+textContent, data-errors — innerHTML: errors_html приходит с сервера ГОТОВЫМ
+HTML — числом или ссылкой, как cost_html у таблицы моделей), а также
+переставляет строки в порядок снимка. Строки сопоставляются по data-key
 (JSON-строка кортежа): одна сессия может занимать НЕСКОЛЬКО строк.
 
 Раздача .err-файлов: GET /logs/<имя> отдаёт файл из корня WEBUI
@@ -110,13 +114,20 @@ def _stored_bool(session_id: str, name: str) -> str:
     return "1" if value else "0"
 
 
-def _select_form_html(session_id: str, name: str, options, selected: str) -> str:
+def _select_form_html(
+    session_id: str, name: str, options, selected: str, *, disabled: bool = False
+) -> str:
     """HTML ячейки настройки: форма + выпадающий список, отправляющийся сразу.
 
     POST уходит на /api/sessions/settings с query ``session``+``name``
     (имя настройки — ровно env-переменная пула, напр. ADAPTER_DEBUG), а
     значение — поле ``value``. ``onchange="this.form.submit()"`` отправляет
-    форму без отдельной кнопки (одно поле — одно действие)."""
+    форму без отдельной кнопки (одно поле — одно действие).
+
+    ``disabled`` (v0.9.6) — селект заблокирован: сейчас так рендерится Parts
+    при выключенном Log (Parts не может быть активен без Log, см. каскад в
+    session_settings). Заблокированный select не отправляет значение —
+    «залипшего» включения Parts форма не создаст."""
     opts = "".join(
         f'<option value="{html.escape(value)}"'
         f"{' selected' if value == selected else ''}>"
@@ -124,11 +135,37 @@ def _select_form_html(session_id: str, name: str, options, selected: str) -> str
         for value, label in options
     )
     qs = f"session={quote(str(session_id), safe='')}&name={quote(str(name), safe='')}"
+    dis = " disabled" if disabled else ""
     return (
         f'<form method="post" action="/api/sessions/settings?{qs}" style="margin:0">'
-        f'<select name="value" onchange="this.form.submit()" '
+        f'<select name="value" onchange="this.form.submit()"{dis} '
         f'style="font:inherit;max-width:170px">{opts}</select>'
         "</form>"
+    )
+
+
+def _parts_cell_html(session_id: str) -> str:
+    """HTML ячейки «Parts»: селект ADAPTER_DEBUG_PARTS, заблокированный при
+    выключенном Log (v0.9.6).
+
+    Parts — подробная запись ПОВЕРХ обычных логов: при Log=off он не может
+    быть активен (см. каскад в config.set_runtime_config/session_settings),
+    поэтому селект показывается выключенным («off») и disabled — снять
+    блокировку можно только включением Log в соседней ячейке."""
+    log_on = bool(session_settings.effective(session_id, "ADAPTER_DEBUG"))
+    if not log_on:
+        return _select_form_html(
+            session_id,
+            "ADAPTER_DEBUG_PARTS",
+            _bool_options("ADAPTER_DEBUG_PARTS"),
+            "0",
+            disabled=True,
+        )
+    return _select_form_html(
+        session_id,
+        "ADAPTER_DEBUG_PARTS",
+        _bool_options("ADAPTER_DEBUG_PARTS"),
+        _stored_bool(session_id, "ADAPTER_DEBUG_PARTS"),
     )
 
 
@@ -168,14 +205,15 @@ def _errors_cell_html(row: dict) -> str:
 
 
 def _actions_cell_html(row: dict) -> str:
-    """HTML ячейки Actions: ⏪ (обнулить счётчики строки) + 🗑 (удалить строку).
+    """HTML ячейки Actions: ⏪ (обнулить счётчики строки).
 
-    Обе кнопки — PRG-формы (POST → 303 на GET /sessions). ⏪ обнуляет
-    счётчики ТОЛЬКО этой строки-кортежа (сессия может занимать несколько
-    строк — соседние не трогаются); 🗑 удаляет строку целиком. ``key`` —
-    компактная JSON-строка кортежа (session_registry.key_json)."""
+    Кнопка — PRG-форма (POST → 303 на GET /sessions). ⏪ обнуляет счётчики
+    ТОЛЬКО этой строки-кортежа (сессия может занимать несколько строк —
+    соседние не трогаются); ``key`` — компактная JSON-строка кортежа
+    (session_registry.key_json). Кнопка удаления 🗑 живёт в первой ячейке,
+    рядом с id сессии (v0.9.6, задача 5) — см. _session_cell_html."""
     q = quote(str(row.get("key", "")), safe="")
-    btn = "background:none;border:none;padding:0;font:inherit;cursor:pointer;margin-right:6px"
+    btn = "background:none;border:none;padding:0;font:inherit;cursor:pointer"
     return (
         "<td>"
         f'<form method="post" action="/api/sessions/reset?key={html.escape(q)}" '
@@ -183,11 +221,28 @@ def _actions_cell_html(row: dict) -> str:
         f'<button type="submit" aria-label="Сбросить счётчики строки сессии" '
         f'title="Сбросить счётчики строки сессии" style="color:#555;{btn}">⏪</button>'
         "</form>"
+        "</td>"
+    )
+
+
+def _session_cell_html(row: dict) -> str:
+    """HTML первой ячейки строки: 🗑 + короткий id сессии (v0.9.6, задача 5).
+
+    Корзина стоит ПЕРЕД номером сессии, в ОДНОЙ ячейке с ним: удаление —
+    действие над сессией, поэтому оно адресует её визуально. Кнопка 🗑 —
+    PRG-форма (POST /api/sessions/delete?key=… → 303 на GET /sessions),
+    удаляет строку-кортеж целиком. Полный session_id — в title кода."""
+    session = str(row.get("session", ""))
+    q = quote(str(row.get("key", "")), safe="")
+    btn = "background:none;border:none;padding:0;font:inherit;cursor:pointer;margin-right:4px"
+    return (
+        "<td>"
         f'<form method="post" action="/api/sessions/delete?key={html.escape(q)}" '
         'style="display:inline">'
         f'<button type="submit" aria-label="Удалить строку сессии" '
         f'title="Удалить строку сессии" style="color:#c0392b;{btn}">🗑</button>'
         "</form>"
+        f'<code title="{html.escape(session)}">{html.escape(session[:8])}</code>'
         "</td>"
     )
 
@@ -200,28 +255,35 @@ def _sessions_rows_html(rows: list[dict]) -> str:
     сверху). Одна сессия может занимать НЕСКОЛЬКО строк (сменила модель/
     обработчик) — поэтому ``session`` не уникален: строка несёт data-key с
     JSON-строкой всего кортежа, и JS sessions_poll сопоставляет строки по
-    нему (порядок меняется при всплытии строки вверх). data-session (полный
-    session_id) остаётся для наглядности/отладки. Сессия — UUID-подобный id:
-    показываем первые 8 символов в <code>, полный id — в title. Все значения —
-    html.escape; счётчики несут data-атрибуты (data-calls/data-errors) —
-    поллинг правит ячейки по ним, а не по позиции колонки."""
+    нему. data-session (полный session_id) остаётся для наглядности/отладки.
+    Сессия — UUID-подобный id: показываем первые 8 символов в <code>,
+    полный id — в title. Все значения — html.escape. Каждая наблюдаемая
+    ячейка несёт data-атрибут (data-seen/agent/model/backend/route/calls/
+    errors): поллинг правит содержимое по нему, а не по позиции колонки,
+    а главное — переставляет <tr> в порядок снимка (всплытие новой строки
+    наверх) без перезагрузки страницы."""
     body = []
     for row in rows:
         session = str(row.get("session", ""))
         key = str(row.get("key", ""))
+        agent = html.escape(str(row.get("agent", "")))
+        model = html.escape(str(row.get("model", "")))
+        backend = html.escape(str(row.get("backend", "")))
+        route = html.escape(str(row.get("route", "")))
+        last_seen = html.escape(str(row.get("last_seen", "")))
         body.append(
             f'<tr data-session="{html.escape(session)}" data-key="{html.escape(key)}">'
-            f'<td><code title="{html.escape(session)}">{html.escape(session[:8])}</code></td>'
-            f"<td>{html.escape(str(row.get('agent', '')))}</td>"
-            f"<td>{html.escape(str(row.get('model', '')))}</td>"
-            f"<td>{html.escape(str(row.get('backend', '')))}</td>"
+            f"{_session_cell_html(row)}"
+            f'<td data-agent="{agent}">{agent}</td>'
+            f'<td data-model="{model}">{model}</td>'
+            f'<td data-backend="{backend}">{backend}</td>'
             f"<td>{_input_cell_html(row)}</td>"
-            f"<td>{html.escape(str(row.get('route', '')))}</td>"
-            f"<td>{html.escape(str(row.get('last_seen', '')))}</td>"
+            f'<td data-route="{route}">{route}</td>'
+            f'<td data-seen="{last_seen}">{last_seen}</td>'
             f'<td data-calls="{row.get("calls", 0)}">{row.get("calls", 0)}</td>'
             f'<td data-errors="{row.get("errors", 0)}">{_errors_cell_html(row)}</td>'
             f"<td>{_select_form_html(session, 'ADAPTER_DEBUG', _bool_options('ADAPTER_DEBUG'), _stored_bool(session, 'ADAPTER_DEBUG'))}</td>"
-            f"<td>{_select_form_html(session, 'ADAPTER_DEBUG_PARTS', _bool_options('ADAPTER_DEBUG_PARTS'), _stored_bool(session, 'ADAPTER_DEBUG_PARTS'))}</td>"
+            f"<td>{_parts_cell_html(session)}</td>"
             f"<td>{_target_cell_html(row)}</td>"
             f"{_actions_cell_html(row)}"
             "</tr>"
@@ -282,9 +344,11 @@ def _render_sessions_page(context) -> bytes:
   <b>TARGET</b> переопределяют настройки <b>только для этой сессии</b>; вариант
   «inherit» означает «взять общую настройку приложения» (её значение показано в
   скобках). Изменение применяется сразу и действует на последующие запросы.
+  <b>Parts</b> работает только при включённом <b>Log</b>: при Log=off его
+  селект заблокирован, а включение Parts само включает Log.
 </p>
 <table>
-  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Входной эндпойнт</th><th>Маршрут</th><th>Последнее обращение</th><th>Вызовов</th><th>Ошибок</th><th>Log</th><th>Parts</th><th>TARGET</th><th>Actions</th></tr>
+  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Входной эндпойнт</th><th>Маршрут</th><th>Последнее обращение</th><th>C</th><th>E</th><th>Log</th><th>Parts</th><th>TARGET</th><th>Actions</th></tr>
   {_sessions_rows_html(rows)}
 </table>
 </body>
@@ -295,15 +359,20 @@ def _render_sessions_page(context) -> bytes:
 
 # Live-обновление таблицы: JS sessions_poll каждые 5 с опрашивает
 # /api/sessions/snapshot (session_registry.sessions_snapshot() — копии строк
-# из памяти, сети нет) и обновляет счётчики. Строки сопоставляются ПО
-# data-key (JSON-строка кортежа), а НЕ по data-session: одна сессия может
-# занимать несколько строк, session не уникален. Ячейки ищутся по
-# data-атрибутам (data-calls/data-errors), а не по позиции колонки —
-# добавление/перестановка колонок поллинг не ломает. Вызовов — textContent,
-# Ошибок — innerHTML (errors_html: число ИЛИ готовая ссылка на .err-файл).
-# Состав/число строк не совпало (новый кортеж / эвикция по глубине) —
-# location.reload() перерисует таблицу. Оверхед — один маленький JSON раз в
-# 5 с на вкладку; скрытую вкладку браузер троттлит.
+# из памяти, сети нет) и синхронизирует ВСЮ наблюдаемую часть строки с
+# снимком, без перезагрузки страницы. Строки сопоставляются ПО data-key
+# (JSON-строка кортежа), а НЕ по data-session: одна сессия может занимать
+# несколько строк, session не уникален. Ячейки ищутся по data-атрибутам
+# (data-seen/agent/model/backend/route/calls/errors), а не по позиции
+# колонки — добавление/перестановка колонок поллинг не ломает. Числовые и
+# текстовые ячейки — textContent, Ошибок — innerHTML (errors_html: число ИЛИ
+# готовая ссылка на .err-файл). Снимок отсортирован (новые сверху): поллинг
+# переставляет DOM-<tr> в порядок снимка через appendChild (перемещает
+# существующий узел, не клонируя), поэтому строка, получившая новое
+# обращение, всплывает наверх без reload. Состав/число
+# строк не совпало (новый кортеж / эвикция по глубине) — location.reload()
+# перерисует таблицу целиком. Оверхед — один маленький JSON раз в 5 с на
+# вкладку; скрытую вкладку браузер троттлит.
 sessions_poll_script = """
 <script>
   function sessions_poll() {
@@ -314,9 +383,22 @@ sessions_poll_script = """
         if (trs.length !== rows.length) { location.reload(); return; }
         var byKey = {};
         for (var i = 0; i < rows.length; i++) { byKey[rows[i]["key"]] = rows[i]; }
+        var domByKey = {};
+        for (var d = 0; d < trs.length; d++) { domByKey[trs[d].getAttribute("data-key")] = trs[d]; }
+        // Сначала правим содержимое по ключу (без перестановки), затем
+        // переставляем <tr> в порядок снимка — иначе вставка раньше времени
+        // «перепрыгнет» строку и собьёт индекс текущего цикла. Пары
+        // [data-атрибут ячейки, поле снимка]: имена расходятся (data-seen ↔
+        // last_seen), поэтому по имени атрибута поле не искать.
+        var fields = [["agent", "agent"], ["model", "model"], ["backend", "backend"], ["route", "route"], ["seen", "last_seen"]];
         for (var j = 0; j < trs.length; j++) {
           var row = byKey[trs[j].getAttribute("data-key")];
           if (!row) { location.reload(); return; }
+          for (var f = 0; f < fields.length; f++) {
+            var cell = trs[j].querySelector("[data-" + fields[f][0] + "]");
+            var val = String(row[fields[f][1]] == null ? "" : row[fields[f][1]]);
+            if (cell && cell.textContent !== val) { cell.textContent = val; }
+          }
           var calls = trs[j].querySelector("[data-calls]");
           if (calls && String(calls.textContent) !== String(row["calls"])) {
             calls.textContent = row["calls"];
@@ -324,6 +406,20 @@ sessions_poll_script = """
           var errs = trs[j].querySelector("[data-errors]");
           if (errs && errs.innerHTML !== row["errors_html"]) {
             errs.innerHTML = row["errors_html"];
+          }
+        }
+        // Перестановка в порядок снимка (новые сверху): appendChild
+        // перемещает существующий <tr> в конец родителя, не клонируя; цикл по
+        // rows выставит их в порядке снимка. Заголовочный <tr> (без data-key)
+        // в domByKey отсутствует и не затрагивается — остаётся первым. Родитель
+        // — <tbody>, а при его отсутствии сам <table> (без явного tbody строки
+        // лежат напрямую в table).
+        var parent = document.querySelector("table tbody") || document.querySelector("table");
+        if (parent) {
+          for (var k = 0; k < rows.length; k++) {
+            var want = domByKey[rows[k]["key"]];
+            if (!want) { location.reload(); return; }
+            parent.appendChild(want);
           }
         }
         setTimeout(sessions_poll, 5000);
@@ -672,6 +768,8 @@ __all__ = [
     "_input_cell_html",
     "_errors_cell_html",
     "_target_cell_html",
+    "_parts_cell_html",
+    "_session_cell_html",
     "_actions_cell_html",
     "_sessions_rows_html",
     "_render_sessions_page",

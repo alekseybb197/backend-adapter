@@ -242,3 +242,98 @@ class TestSurvivesRowEviction:
         # sess1 вытеснена из таблицы Sessions — но её настройка цела.
         assert [r["session"] for r in session_registry.sessions_snapshot()] == ["sess2"]
         assert ss.override("sess1", "ADAPTER_DEBUG") is True
+
+
+class TestModelOverride:
+    """set_model_override/model_override (v0.9.6) — служебный ключ активной
+    модели сессии, задаётся командой "/model <имя>". Хранится в том же
+    _OVERRIDES, но вне SESSION_CONFIG_POOL/set_config."""
+
+    def test_set_and_get(self, ss):
+        assert ss.model_override("sess1") is None
+        ss.set_model_override("sess1", "qwen3-coder")
+        assert ss.model_override("sess1") == "qwen3-coder"
+
+    def test_overwrite(self, ss):
+        ss.set_model_override("sess1", "a")
+        ss.set_model_override("sess1", "b")
+        assert ss.model_override("sess1") == "b"
+
+    def test_empty_session_noop(self, ss):
+        ss.set_model_override("", "qwen3-coder")
+        assert ss.model_override("") is None
+
+    def test_model_override_survives_config_clear_of_pool_keys(self, ss):
+        # Служебный ключ не входит в SESSION_CONFIG_POOL — set_config/clear
+        # не должны его задеть.
+        ss.set_model_override("sess1", "qwen3-coder")
+        ss.set_config("sess1", clear=("ADAPTER_DEBUG",))
+        assert ss.model_override("sess1") == "qwen3-coder"
+
+    def test_model_override_removed_by_clear_session(self, ss):
+        ss.set_model_override("sess1", "qwen3-coder")
+        assert ss.clear_session("sess1") is True
+        assert ss.model_override("sess1") is None
+
+    def test_model_override_removed_by_reset(self, ss):
+        ss.set_model_override("sess1", "qwen3-coder")
+        ss.reset()
+        assert ss.model_override("sess1") is None
+
+    def test_set_config_ignores_model_override_key(self, ss):
+        # Если кто-то передаст _model_override через set_config (мимо
+        # set_model_override), он не попадёт в SESSION_CONFIG_POOL —
+        # молча проигнорируется, как и любой ключ вне пула.
+        ss.set_config("sess1", {"_model_override": "qwen3-coder"})
+        assert ss.model_override("sess1") is None
+
+
+class TestLogPartsCascade:
+    """Каскад Log/Parts пер-сессионных переопределений (v0.9.6, задача 6).
+
+    Parts — подробная запись поверх логов: сессия не может иметь Parts без
+    Log. Направление каскада задаёт явное намерение Parts."""
+
+    def test_parts_on_while_log_off_enables_log(self, ss, cfg):
+        # Parts=on при Log=off → Log включается (переопределением сессии).
+        cfg.ADAPTER_DEBUG = False
+        ss.set_config("sess1", {"ADAPTER_DEBUG_PARTS": True})
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is True
+        assert ss.effective("sess1", "ADAPTER_DEBUG_PARTS") is True
+
+    def test_log_off_disables_parts(self, ss, cfg):
+        # Log=off при Parts=on → Parts гасится (записью False).
+        cfg.ADAPTER_DEBUG = True
+        ss.set_config("sess1", {"ADAPTER_DEBUG_PARTS": True})
+        ss.set_config("sess1", {"ADAPTER_DEBUG": False})
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is False
+        assert ss.effective("sess1", "ADAPTER_DEBUG_PARTS") is False
+        # Запись Parts зафиксирована явно (не «наследовать» общий Parts=on).
+        assert ss.override("sess1", "ADAPTER_DEBUG_PARTS") is False
+
+    def test_log_off_with_parts_inherited_disables(self, ss, cfg):
+        # Общий Parts=on, сессия выключает Log — Parts гасится, т.к. иначе
+        # унаследовал бы общий on и остался бы активен без Log.
+        cfg.ADAPTER_DEBUG = True
+        cfg.ADAPTER_DEBUG_PARTS = True
+        ss.set_config("sess1", {"ADAPTER_DEBUG": False})
+        assert ss.effective("sess1", "ADAPTER_DEBUG_PARTS") is False
+
+    def test_parts_on_with_log_on_both_explicit_wins(self, ss, cfg):
+        # В одном вызове Log=off и Parts=on — побеждает явное намерение Parts.
+        cfg.ADAPTER_DEBUG = True
+        ss.set_config("sess1", {"ADAPTER_DEBUG": False, "ADAPTER_DEBUG_PARTS": True})
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is True
+        assert ss.effective("sess1", "ADAPTER_DEBUG_PARTS") is True
+
+    def test_clearing_log_off_falls_back_to_config(self, ss, cfg):
+        # Снятие переопределения Log возвращает общую настройку; Parts
+        # остаётся согласован (общий Log=on).
+        cfg.ADAPTER_DEBUG = True
+        cfg.ADAPTER_DEBUG_PARTS = False
+        ss.set_config("sess1", {"ADAPTER_DEBUG": False})
+        ss.set_config("sess1", clear=("ADAPTER_DEBUG",))
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is True
+        assert ss.effective("sess1", "ADAPTER_DEBUG_PARTS") is False
+
+

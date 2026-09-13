@@ -96,24 +96,36 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_MODELS_MAPPING": "Маппинг моделей agent→backend: agent:backend,agent2:backend2 (пусто — маппинг отключён)",
     }
 
+    # Parts — подробная запись ПОВЕРХ логов (v0.9.6): при снятом Log чекбокс
+    # показывается выключенным и disabled. Согласованность обеспечивает
+    # серверный каскад (config.set_runtime_config), но env мог задать
+    # несогласованную пару (PARTS=1 при DEBUG=0) — рендер это выравнивает.
+    parts_locked = not current_values.get("ADAPTER_DEBUG", False)
+
     rows = []
     for name in bool_fields:
         value = current_values.get(name, False)
         desc = field_descriptions.get(name, "")
+        # Parts при выключенном Log — всегда «off» + disabled (каскад).
+        locked = name == "ADAPTER_DEBUG_PARTS" and parts_locked
+        if locked:
+            value = False
         checked = "checked" if value else ""
-        hidden_value = "1" if value else "0"
-        # Для каждого bool-поля — ПАРА полей: checkbox (шлёт value=1, только
-        # когда отмечен) + hidden-поле текущего состояния. Hidden-поле шлёт
-        # 1/0 ВСЕГДА под именем "_<NAME>" (префикс "_" — чтобы разбор POST
-        # ниже внёс в data именно "<NAME>": сначала явное значение checkbox-а,
-        # затем всегда-присутствующее hidden-состояние). Идиома нужна потому,
-        # что снятая галка просто отсутствует в теле POST — без hidden-
-        # «соседа» выключить bool через форму было бы невозможно.
+        # Hidden-«сосед» bool-поля несёт КОНСТАНТУ "0" (выключено), а не
+        # текущее состояние: снятая галка просто отсутствует в теле POST, и
+        # без «соседа» выключить bool через форму было бы невозможно. Разбор
+        # берёт ПОСЛЕДНЕЕ значение ключа (values[-1]), поэтому hidden обязан
+        # идти ПЕРВЫМ, а checkbox — вторым: отмеченная галка ("_NAME=0&NAME=1")
+        # даёт 1, снятая (только "_NAME=0") — 0. Hidden с ТЕКУЩИМ состоянием
+        # (как было до v0.9.6) перебивал галку и переключение через форму не
+        # работало вовсе — только JSON-API.
+        hidden_value = "0"
+        dis = " disabled" if locked else ""
         rows.append(f"""
       <tr>
         <td><label for="{name}">{html.escape(name)}</label></td>
-        <td><input type="checkbox" id="{name}" name="{name}" value="1" {checked}>
-            <input type="hidden" name="_{name}" value="{hidden_value}">
+        <td><input type="hidden" name="_{name}" value="{hidden_value}">
+            <input type="checkbox" id="{name}" name="{name}" value="1" {checked}{dis}>
         </td>
         <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
@@ -204,11 +216,39 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 <p style="color:#888; margin-top: 16px; font-size: 13px">
   Изменения применяются немедленно и не требуют перезапуска адаптера.
   Неизвестные ключи и значения неверного типа игнорируются.
+  <b>Parts</b> работает только при включённом <b>Log</b>.
 </p>
+{log_parts_script}
 </body>
 </html>
 """
     return html_page.encode("utf-8")
+
+
+# Минимальный inline-JS связки Log/Parts (v0.9.6): переключает disabled у
+# чекбокса Parts при клике по Log, не дожидаясь POST. Источник истины —
+# серверный каскад (config.set_runtime_config), этот скрипт лишь делает
+# намерение видимым сразу: снятый Log гасит и блокирует Parts, включение Log
+# снова делает Parts доступным. Серверный рендер уже выставил начальное
+# состояние (disabled при Log=off) — скрипт синхронизируется с ним по DOM.
+# hidden-«сосед» Parts править НЕ нужно: он несёт константу "0" и в POST идёт
+# ПЕРВЫМ, а checkbox (если отмечен) — вторым; разбор присваивает ключ в
+# порядке тела, поэтому отмеченная галка перекрывает hidden, снятая — нет.
+log_parts_script = """
+<script>
+  (function () {
+    var log = document.getElementById("ADAPTER_DEBUG");
+    var parts = document.getElementById("ADAPTER_DEBUG_PARTS");
+    if (!log || !parts) { return; }
+    function sync() {
+      parts.disabled = !log.checked;
+      if (!log.checked) { parts.checked = false; }
+    }
+    log.addEventListener("change", sync);
+    sync();
+  })();
+</script>
+"""
 
 
 # ==================== ЭНДПОЙНТ ====================
@@ -256,21 +296,18 @@ class ConfigEndpoint(webserver.Endpoint):
             # form-data (application/x-www-form-urlencoded)
             length = int(handler.headers.get("Content-Length", 0))
             body = handler.rfile.read(length).decode("utf-8")
-            # Каждое bool-поле формы шлёт ПАРУ значений: явный checkbox
-            # (value=1, только когда отмечен) и всегда-присутствующее
-            # hidden-поле "_<NAME>" с текущим состоянием (1/0). Разбор ниже:
-            # значения каждого ключа складываются в список, из которого мы
-            # берём ПОСЛЕДНЕЕ — hidden-состояние; ключ "_NAME" затем пишется
-            # в data как "NAME". Если галка отмечена — checkbox внёс "NAME"→True
-            # (состояние «включено»), если снята — остаётся только hidden
-            # "_NAME"→0 → False. int-поля всегда присутствуют (type="number").
+            # Каждое bool-поле формы шлёт ПАРУ значений: hidden-поле "_<NAME>"
+            # с КОНСТАНТОЙ "0" (в HTML оно идёт ПЕРВЫМ) и checkbox
+            # (value=1, шлётся ВТОРЫМ, только когда отмечен). Разбор ниже берёт
+            # ПОСЛЕДНЕЕ значение ключа: отмеченная галка ("_NAME=0&NAME=1") →
+            # True, снятая (только "_NAME=0") → False; ключ "_NAME" пишется в
+            # data как "NAME". int-поля всегда присутствуют (type="number").
             parsed = parse_qs(body, keep_blank_values=True)
             for key, values in parsed.items():
                 if not values:
                     continue
-                # Последнее значение: для bool — это hidden-«сосед» (при
-                # отмеченной галке checkbox "NAME"=1 идёт ПЕРВЫМ, затем
-                # hidden "_NAME"=1 — оба дают True, не конфликтуют).
+                # Последнее значение ключа: у bool-поля это checkbox, если он
+                # отмечен, иначе hidden-константа "0".
                 val = values[-1]
                 # hidden-ключ "_NAME" → имя "NAME"
                 data_key = key[1:] if key.startswith("_") else key
@@ -288,7 +325,7 @@ class ConfigEndpoint(webserver.Endpoint):
                     except ValueError:
                         data[data_key] = val
                 elif expected is bool:
-                    # bool-поля: checkbox value=1 + hidden "_NAME"=1/0.
+                    # bool-поля: hidden "_NAME"=0 + checkbox value=1.
                     if val.lower() in ("1", "true", "on", "yes"):
                         data[data_key] = True
                     elif val.lower() in ("0", "false", "off", "no"):

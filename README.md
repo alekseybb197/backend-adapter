@@ -1,6 +1,6 @@
 # backend-adapter — Anthropic API ↔ [OI] Backend Proxy
 
-> **v0.9.5** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v0.9.6** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
@@ -86,7 +86,7 @@ qwen                   # QwenCode   — см. docs/qwen-code.md
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа (__version__)
-├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py)
+├── backend_adapter/            # Доменный пакет (34 модуля, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
 │   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
 │   ├── routing.py              # Входные эндпоинты/TARGET: decide() по кэшу проб
@@ -96,6 +96,8 @@ backend-adapter/
 │   ├── session_log.py          # Per-session логи с FIFO eviction
 │   ├── session_registry.py     # Таблица сессий (страница /sessions): строка-кортеж
 │   ├── session_settings.py     # Пер-сессионные переопределения Log/Parts/TARGET
+│   ├── state_store.py          # Перманентный runtime-пул (state.yaml, v0.9.6)
+│   ├── env_validate.py         # Строгая валидация env при старте (v0.9.6)
 │   ├── daemon.py               # Detach (double fork)
 │   ├── shutdown.py             # Обработка Ctrl-C/SIGTERM
 │   ├── logger.py               # Консольные debug-логи (безусловны)

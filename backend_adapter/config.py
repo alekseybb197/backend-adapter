@@ -14,10 +14,13 @@ import time
 import urllib.error
 import urllib.request
 
-from . import probe_json  # JSON-дампы результатов проверок в LOGPATH (лист DAG)
+from . import (
+    env_validate,  # строгий разбор bool/int env (лист DAG, v0.9.6)
+    probe_json,  # JSON-дампы результатов проверок в LOGPATH (лист DAG)
+)
 
 # ==================== НАСТРОЙКИ ====================
-PROXY_PORT = int(os.environ.get("ADAPTER_PROXY_PORT", "9999"))
+PROXY_PORT = env_validate.parse_int(os.environ.get("ADAPTER_PROXY_PORT", "9999"), 9999)
 # Адрес (host), на котором слушает HTTP-эндпоинт адаптера. Пусто / не задано —
 # дефолт 127.0.0.1 (localhost). "0.0.0.0" — слушать на всех интерфейсах
 # (доступ из сети). Идиом `or "127.0.0.1"`, а не get(name, default): пустая
@@ -28,7 +31,7 @@ ADAPTER_ENDPOINT_HOST = os.environ.get("ADAPTER_ENDPOINT_HOST", "") or "127.0.0.
 #   ADAPTER_DEBUG_ENABLE=1 — файлы пишутся в ADAPTER_DEBUG_LOGPATH;
 #   0 (по умолчанию) — на диск ничего не пишется (консольные debug-блоки
 #   при этом БЕЗУСЛОВНЫ — печатаются всегда, независимо от этого флага).
-ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "0").lower() not in ("0", "false", "no", "")
+ADAPTER_DEBUG = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_ENABLE", "0"))
 # Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы)
 # и корень веб-интерфейса (WEBUI, model-usage.yaml). ВСЕГДА непуст: пусто /
 # не задано → дефолт "./tmp/logs" (относительно папки запуска). Папка
@@ -36,19 +39,30 @@ ADAPTER_DEBUG = os.environ.get("ADAPTER_DEBUG_ENABLE", "0").lower() not in ("0",
 # только при ADAPTER_DEBUG_ENABLE=1 (см. ADAPTER_DEBUG выше). Режим «один
 # файл» удалён — путь всегда директория.
 ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "") or "./tmp/logs"
-ADAPTER_DETACH = os.environ.get("ADAPTER_DETACH_ENABLE", "0").lower() in ("1", "true", "yes")
-ADAPTER_TIMEOUT = int(os.environ.get("ADAPTER_TIMEOUT", "300"))
-ADAPTER_RETRY = int(os.environ.get("ADAPTER_RETRY_COUNT", "3"))
+# Имя файла перманентного состояния runtime-пула (v0.9.6, state_store.py):
+# только ИМЯ, путь — os.path.join(ADAPTER_DEBUG_LOGPATH, ADAPTER_STATE) (та же
+# директория, что логи/WEBUI/model-usage.yaml). Хранит значения
+# RUNTIME_CONFIG_POOL, изменённые через /config: применяется на старте ПОВЕРХ
+# env и перезаписывается при каждом изменении пула. Пер-сессионные настройки
+# сюда не попадают (см. state_store).
+ADAPTER_STATE = os.environ.get("ADAPTER_STATE", "state.yaml")
+ADAPTER_DETACH = env_validate.parse_bool(os.environ.get("ADAPTER_DETACH_ENABLE", "0"))
+ADAPTER_TIMEOUT = env_validate.parse_int(os.environ.get("ADAPTER_TIMEOUT", "300"), 300)
+ADAPTER_RETRY = env_validate.parse_int(os.environ.get("ADAPTER_RETRY_COUNT", "3"), 3)
 # Лимит консольного debug-вывода (v0.8.6-реформа): консоль — единственный
 # ВСЕГДА-включённый канал, поэтому любая строка обрезается до N символов
 # (0 = без обрезки). Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1)
 # лимит НЕ уважает — туда пишутся полные части (см. trim_limit() и logger.py).
-ADAPTER_DEBUG_TRIM = int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"))
-ADAPTER_TRACE_REASONING_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"))
-ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = int(os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"))
+ADAPTER_DEBUG_TRIM = env_validate.parse_int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"), 3000)
+ADAPTER_TRACE_REASONING_MAX_CHARS = env_validate.parse_int(
+    os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"), 0
+)
+ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = env_validate.parse_int(
+    os.environ.get("ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS", "0"), 0
+)
 
 
-ADAPTER_STRICT_MODELS = os.environ.get("ADAPTER_STRICT_MODELS", "1").lower() in ("1", "true", "yes")
+ADAPTER_STRICT_MODELS = env_validate.parse_bool(os.environ.get("ADAPTER_STRICT_MODELS", "1"), True)
 
 
 def trim_limit() -> int:
@@ -68,12 +82,7 @@ def trim_limit() -> int:
 # каждая пишущая точка сама решает, какой тег дампить). Срабатывает только
 # при ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
 # (файлы кладутся в неё). Пусто / 0 / false — выкл.
-ADAPTER_DEBUG_PARTS = os.environ.get("ADAPTER_DEBUG_PARTS", "").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
-)
+ADAPTER_DEBUG_PARTS = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_PARTS", ""))
 
 # ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
 # Подмножество переменных выше, которые можно менять НЕ ПЕРЕЗАПУСКАЯ адаптер —
@@ -224,6 +233,29 @@ def get_runtime_config() -> dict:
     return {name: globals()[name] for name in RUNTIME_CONFIG_POOL}
 
 
+# Колбеки, вызываемые ПОСЛЕ применения set_runtime_config (v0.9.6): канал
+# уведомления о смене пула, чтобы персистентность (state_store) не была
+# вплетена в корень DAG. config.py НЕ импортирует state_store — наоборот,
+# state_store при старте регистрирует здесь свою функцию записи
+# (config.set_on_change(state_store.save-обёртка)); цикл импорта невозможен.
+# Список — под _ON_CHANGE_LOCK: регистрация идёт со старта, вызовы — из
+# потоков WEBUI.
+_ON_CHANGE: list = []
+_ON_CHANGE_LOCK = threading.Lock()
+
+
+def set_on_change(callback) -> None:
+    """Зарегистрировать колбек, вызываемый после успешного применения пула.
+
+    Колбек получает снимок ``get_runtime_config()``. Регистрируется один раз
+    на старте (state_store.apply_on_startup). Повторная регистрация того же
+    объекта игнорируется (идемпотентность на случай переинициализации).
+    """
+    with _ON_CHANGE_LOCK:
+        if callback not in _ON_CHANGE:
+            _ON_CHANGE.append(callback)
+
+
 def set_runtime_config(**kwargs) -> dict:
     """Меняет подмножество RUNTIME_CONFIG_POOL — для POST /config.
 
@@ -244,6 +276,10 @@ def set_runtime_config(**kwargs) -> dict:
     для известного ключа — тоже игнорируется (не применяется), остальные
     ключи всё равно применяются. Возвращает get_runtime_config() ПОСЛЕ
     применения — вызывающий видит, что реально изменилось.
+
+    Если применён ХОТЯ БЫ один ключ — вызываются колбеки из _ON_CHANGE
+    (v0.9.6, set_on_change): так state_store персистит новое состояние на
+    диск, оставаясь в стороне от корня DAG.
     """
     global ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS, ADAPTER_DEBUG_TRIM
     global ADAPTER_SENSITIVE_LOGGING_ENABLE, ADAPTER_STREAMING_ENABLE
@@ -252,6 +288,7 @@ def set_runtime_config(**kwargs) -> dict:
     global ADAPTER_MESSAGES_TARGET, ADAPTER_COMPLETIONS_TARGET, ADAPTER_RESPONSES_TARGET
     global ADAPTER_MODELS_MAPPING
 
+    changed = False
     for name, value in kwargs.items():
         if name not in RUNTIME_CONFIG_POOL:
             continue
@@ -261,6 +298,7 @@ def set_runtime_config(**kwargs) -> dict:
         if not accepts_value(expected, value):
             continue
         globals()[name] = value
+        changed = True
         # Маппинг моделей — особый случай: server.py держит ССЫЛКУ на словарь
         # _MAP (`from .config import _MAP`), поэтому переприсваивание
         # ADAPTER_MODELS_MAPPING в одиночку не обновило бы живой резолвер.
@@ -270,6 +308,35 @@ def set_runtime_config(**kwargs) -> dict:
         if name == "ADAPTER_MODELS_MAPPING":
             _MAP.clear()
             _MAP.update(_parse_models_mapping(value))
+
+    # === Каскад Log/Parts (v0.9.6) ===
+    # Parts — подробная запись поверх обычных логов: без активного Log он
+    # бессмыслен (дампы частей протокола пишутся тем же трактом, что и
+    # session-*.log). Каскад срабатывает, только если в ЭТОМ вызове тронут
+    # один из двух тумблеров (иначе несогласованность из env не «лечится»
+    # побочным изменением TARGET-настройки). Направление выбирается по
+    # явному намерению Parts:
+    #   - Parts=on → Log включается (намерение исполняется: Parts не может
+    #     быть активен без Log);
+    #   - иначе (Log выключили) → Parts гасится.
+    # Приоритет у явного намерения Parts: если в одном POST пришли Log=off и
+    # Parts=on, побеждает Parts (пользователь явно просил parts). Применяется
+    # ПОСЛЕ цикла, поэтому результат не зависит от порядка ключей в kwargs.
+    if {"ADAPTER_DEBUG", "ADAPTER_DEBUG_PARTS"} & kwargs.keys() and (
+        ADAPTER_DEBUG_PARTS and not ADAPTER_DEBUG
+    ):
+        if kwargs.get("ADAPTER_DEBUG_PARTS") is True:
+            ADAPTER_DEBUG = True
+        else:
+            ADAPTER_DEBUG_PARTS = False
+        changed = True
+
+    if changed:
+        with _ON_CHANGE_LOCK:
+            callbacks = list(_ON_CHANGE)
+        snapshot = get_runtime_config()
+        for cb in callbacks:
+            cb(snapshot)
 
     return get_runtime_config()
 
@@ -284,7 +351,7 @@ def set_runtime_config(**kwargs) -> dict:
 # директория ADAPTER_DEBUG_LOGPATH (см. выше; дефолт ./tmp/logs) — там же
 # лежит model-usage.yaml. Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST
 # (пусто/не задано → дефолт 127.0.0.1, только локально).
-ADAPTER_WEBUI_PORT = int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"))
+ADAPTER_WEBUI_PORT = env_validate.parse_int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"), 8765)
 # Адрес, на котором слушает веб-интерфейс; дефолт 127.0.0.1 (только
 # локально). "0.0.0.0" — доступ из сети (внимание: содержимое сессий —
 # git log, файлы, reasoning — не должно случайно утечь).
@@ -293,19 +360,18 @@ ADAPTER_WEBUI_HOST = os.environ.get("ADAPTER_WEBUI_HOST", "") or "127.0.0.1"
 # prometheus_exporter.py): включается вместе с WEBUI по умолчанию
 # (ADAPTER_EXPORTER_ENABLE=1), адрес — тот же ADAPTER_WEBUI_HOST, порт —
 # ADAPTER_EXPORTER_PORT. /metrics — text exposition 0.0.4 без библиотек.
-ADAPTER_EXPORTER_ENABLE = os.environ.get("ADAPTER_EXPORTER_ENABLE", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
+ADAPTER_EXPORTER_ENABLE = env_validate.parse_bool(
+    os.environ.get("ADAPTER_EXPORTER_ENABLE", "1"), True
 )
-ADAPTER_EXPORTER_PORT = int(os.environ.get("ADAPTER_EXPORTER_PORT", "9100"))
+ADAPTER_EXPORTER_PORT = env_validate.parse_int(
+    os.environ.get("ADAPTER_EXPORTER_PORT", "9100"), 9100
+)
 # Отключение санитайзера: при 1 — _d(), _dr() и _trace() записывают строки
 # без вызова redact(), логируются полные токены, заголовки, ключи.
 # По умолчанию false — санитайзер активен, секреты маскируются.
-ADAPTER_SENSITIVE_LOGGING_ENABLE = os.environ.get(
-    "ADAPTER_SENSITIVE_LOGGING_ENABLE", "0"
-).lower() in ("1", "true", "yes")
+ADAPTER_SENSITIVE_LOGGING_ENABLE = env_validate.parse_bool(
+    os.environ.get("ADAPTER_SENSITIVE_LOGGING_ENABLE", "0")
+)
 # Управляющий флаг для двух режимов работы адаптера:
 #   1 (по умолчанию) — "потоковый" режим: если клиент (Claude Code) просит
 #     stream=true, адаптер честно пробрасывает это бэкенду и стримит SSE
@@ -317,11 +383,8 @@ ADAPTER_SENSITIVE_LOGGING_ENABLE = os.environ.get(
 #     рубильник — например, если конкретный backend плохо/нестандартно
 #     стримит SSE и надёжнее временно вернуться к нестриминговому пути,
 #     не откатывая сам файл адаптера.
-ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
+ADAPTER_STREAMING_ENABLE = env_validate.parse_bool(
+    os.environ.get("ADAPTER_STREAMING_ENABLE", "1"), True
 )
 # БАГ 2026-08-27: в потоковом режиме адаптер НЕ просил backend прислать
 # usage в SSE (OpenAI-совместимый стриминг отдаёт usage только при явном
@@ -331,11 +394,8 @@ ADAPTER_STREAMING_ENABLE = os.environ.get("ADAPTER_STREAMING_ENABLE", "1").lower
 # Флаг-рубильник на случай backend'а, который не понимает stream_options
 # и падает на неизвестном поле (такое встречается у части OpenAI-совместимых
 # серверов старых версий) — тогда можно откатиться, не трогая сам файл.
-ADAPTER_STREAM_INCLUDE_USAGE = os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1").lower() not in (
-    "0",
-    "false",
-    "no",
-    "",
+ADAPTER_STREAM_INCLUDE_USAGE = env_validate.parse_bool(
+    os.environ.get("ADAPTER_STREAM_INCLUDE_USAGE", "1"), True
 )
 # ===================================================
 
@@ -357,10 +417,8 @@ ADAPTER_BACKEND_CONFIG = os.environ.get("ADAPTER_BACKEND_CONFIG", "")
 # 0 — автопроба отключена (колонка «не опрошено», сетевых POST-проб нет).
 # Кэш результатов — ENDPOINT_PROBE_TTL секунд (повторные заходы на страницу
 # в течение TTL не дублируют запросы к бэкенду).
-ADAPTER_ENDPOINT_PROBE = os.environ.get("ADAPTER_ENDPOINT_PROBE", "1").lower() in (
-    "1",
-    "true",
-    "yes",
+ADAPTER_ENDPOINT_PROBE = env_validate.parse_bool(
+    os.environ.get("ADAPTER_ENDPOINT_PROBE", "1"), True
 )
 
 # Таблица использованных моделей (см. backend_adapter/model_usage.py): учёт
@@ -374,10 +432,8 @@ ADAPTER_ENDPOINT_PROBE = os.environ.get("ADAPTER_ENDPOINT_PROBE", "1").lower() i
 # сохраняется в YAML-файл model-usage.yaml в корне WEBUI (см.
 # ADAPTER_MODEL_USAGE_SAVE_INTERVAL ниже) и загружается при старте;
 # в RUNTIME_CONFIG_POOL не входит.
-ADAPTER_MODEL_USAGE_ENABLE = os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1").lower() in (
-    "1",
-    "true",
-    "yes",
+ADAPTER_MODEL_USAGE_ENABLE = env_validate.parse_bool(
+    os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1"), True
 )
 
 # ==================== РОУТИНГ ВХОДНЫХ ЭНДПОИНТОВ (TARGET) ====================
@@ -444,7 +500,9 @@ ADAPTER_RESPONSES_TARGET = _parse_target(
 # строки и завершение работы адаптера сохраняют сразу (flush_table).
 # Дефолт 300 — приемлемая потеря хвоста ≤ 300 с (5 мин) при жёстком kill;
 # при штатном завершении таблица сохраняется всегда.
-ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"))
+ADAPTER_MODEL_USAGE_SAVE_INTERVAL = env_validate.parse_int(
+    os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"), 300
+)
 
 # Глубина таблицы активных сессий агентов на странице WEBUI "/sessions"
 # (v0.9.5; v0.9.2 — секция «Sessions» статус-страницы): сколько последних
@@ -456,7 +514,7 @@ ADAPTER_MODEL_USAGE_SAVE_INTERVAL = int(os.environ.get("ADAPTER_MODEL_USAGE_SAVE
 # регистрации обращения; 0 — таблица отключена (ничего не хранится). В
 # runtime-пул (/config) не входит — смена требует перезапуска, как у прочих
 # лимитов.
-ADAPTER_SESSIONS_TABLE = int(os.environ.get("ADAPTER_SESSIONS_TABLE", "10"))
+ADAPTER_SESSIONS_TABLE = env_validate.parse_int(os.environ.get("ADAPTER_SESSIONS_TABLE", "10"), 10)
 
 # ADAPTER_SESSION_HEADER — список имён HTTP-заголовков (через запятую), из
 # которых адаптер берёт идентификатор сессии агента. Побеждает ПЕРВЫЙ непустой
@@ -616,8 +674,23 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
     # Валидация + раскрытие переменных окружения в поле key
     valid_blocks: list[dict] = []
     for b in blocks:
-        if not all(k in b for k in ("name", "base", "key")):
-            print(f"[BACKEND_CONFIG] Skipping invalid entry: {b}")
+        # Явная причина пропуска (v0.9.6): раньше печатался весь блок целиком
+        # («Skipping invalid entry: {...}») — по нему не всегда видно, какого
+        # именно поля не хватает, особенно когда в блоке есть секрет key.
+        missing = [k for k in ("name", "base", "key") if not b.get(k)]
+        if missing:
+            print(
+                f"[WARN] adapter.yaml: запись {b.get('name') or '<без имени>'!r} "
+                f"пропущена — не хватает поля: {', '.join(missing)}"
+            )
+            continue
+        # base обязан быть http(s)-URL: опечатка (забытая схема, file://)
+        # иначе всплывёт лишь сетевым исключением при первой пробе бэкенда.
+        if not _is_http_url(b["base"]):
+            print(
+                f"[WARN] adapter.yaml: бэкенд {b['name']!r} пропущен — base "
+                f"{b['base']!r} не является http(s)-URL"
+            )
             continue
         # key из YAML — имя переменной окружения (например "ADAPTER_HOME_KEY");
         # заменяем на реальное значение. Если переменная не задана — оставляем
@@ -628,6 +701,16 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
         valid_blocks.append(b)
 
     return valid_blocks if valid_blocks else None
+
+
+def _is_http_url(value: str) -> bool:
+    """Похоже ли значение на http(s)-URL (схема + хост). Без сети.
+
+    Требуем схему http/https и непустой хост после неё; порт/путь/параметры
+    допускаются. Проверка лексическая — задача отсеять опечатки (``localhost``
+    без схемы, ``file://``), а не провалидировать URL по RFC."""
+    m = re.match(r"^https?://([^/\s]+)", value.strip(), re.IGNORECASE)
+    return bool(m and m.group(1))
 
 
 # ==================== MULTI-BACKEND: PROBE & INIT ====================

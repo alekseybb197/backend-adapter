@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backend-adapter"
-version = "0.9.4"
+version = "0.9.6"
 description = "Anthropic API ↔ OpenAI Backend Proxy Adapter"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -78,13 +78,16 @@ ignore = [
 # WEBUI endpoint methods `GET`/`POST` mirror BaseHTTPRequestHandler dispatch
 # names, not regular functions; backend-adapter.py re-exports config globals
 # used only for their side effects, so unused imports are intentional there.
+# E402 on the script is likewise deliberate: env_validate.validate_env() must
+# run BEFORE `from backend_adapter.config import ...` (config parses int env at
+# import time — an invalid value would raise a bare ValueError first).
 "backend_adapter/webserver.py" = ["N802"]
 "backend_adapter/webui_status.py" = ["N802"]
 "backend_adapter/session_viewer.py" = ["N802"]
 "backend_adapter/webui_config_api.py" = ["N802"]
 "backend_adapter/webui_ops.py" = ["N802"]
 "backend_adapter/webui_sessions.py" = ["N802"]
-"backend-adapter.py" = ["F401", "I001"]
+"backend-adapter.py" = ["F401", "I001", "E402"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

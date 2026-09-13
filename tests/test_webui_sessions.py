@@ -246,16 +246,34 @@ class TestSessionSelectHelpers:
         assert 'target="_blank"' in html
         assert ">2</a>" in html
 
-    def test_actions_cell_has_reset_and_delete(self):
+    def test_actions_cell_has_reset_only(self):
+        # v0.9.6 (задача 5): 🗑 переехала в первую ячейку (к id сессии),
+        # в Actions осталась только ⏪.
         config, ws = _fresh_modules()
         row = _row("sess-1")
         from urllib.parse import quote
         q = quote(row["key"], safe="")
         html = ws._actions_cell_html(row)
         assert f'action="/api/sessions/reset?key={q}"' in html
-        assert f'action="/api/sessions/delete?key={q}"' in html
-        assert "⏪" in html and "🗑" in html
+        assert "/api/sessions/delete" not in html
+        assert "⏪" in html and "🗑" not in html
         assert 'title="Сбросить счётчики строки сессии"' in html
+
+    def test_session_cell_has_delete_before_id(self):
+        # Первая ячейка: 🗑 ПЕРЕД коротким id сессии, форма удаления адресует
+        # строку-кортеж (key).
+        config, ws = _fresh_modules()
+        sid = "1ad13437-1111-2222-3333-444455556666"
+        row = _row(sid)
+        from urllib.parse import quote
+        q = quote(row["key"], safe="")
+        html = ws._session_cell_html(row)
+        assert f'action="/api/sessions/delete?key={q}"' in html
+        assert "🗑" in html
+        assert f'<code title="{sid}">{sid[:8]}</code>' in html
+        # Корзина идёт РАНЬШЕ кода сессии.
+        assert html.index("🗑") < html.index("<code")
+        assert 'title="Удалить строку сессии"' in html
         assert "color:#c0392b" in html  # удаление — красное
 
     def test_target_cell_known_and_unknown_input(self):
@@ -297,6 +315,13 @@ class TestSessionsRowsHtml:
         assert f'<code title="{sid}">{sid[:8]}</code>' in html
         assert 'data-calls="1"' in html
         assert 'data-errors="0"' in html
+        # Наблюдаемые поля несут data-атрибуты: поллинг правит их по имени,
+        # а не по позиции колонки (и переставляет строки в порядок снимка).
+        assert 'data-agent="claude-cli/2.1.236"' in html
+        assert 'data-model="m-a"' in html
+        assert 'data-backend="AAA"' in html
+        assert 'data-route="passthrough messages→messages"' in html
+        assert 'data-seen="2026-09-09 10:00:00"' in html
 
     def test_row_has_log_parts_target_selects(self):
         config, ws = _fresh_modules()
@@ -305,6 +330,38 @@ class TestSessionsRowsHtml:
         assert "name=ADAPTER_DEBUG_PARTS" in html
         assert "name=ADAPTER_MESSAGES_TARGET" in html
         assert "this.form.submit()" in html
+
+    def test_parts_cell_disabled_when_log_off(self):
+        # v0.9.6 (задача 6): при Log=off селект Parts выключен и показывает
+        # «off» — Parts не может быть активен без Log.
+        config, ws = _fresh_modules()
+        config.ADAPTER_DEBUG = False
+        html = ws._parts_cell_html("sess-1")
+        assert "name=ADAPTER_DEBUG_PARTS" in html
+        assert "disabled" in html
+        assert '<option value="0" selected>' in html
+
+    def test_parts_cell_enabled_when_log_on(self):
+        config, ws = _fresh_modules()
+        config.ADAPTER_DEBUG = True
+        html = ws._parts_cell_html("sess-1")
+        assert "name=ADAPTER_DEBUG_PARTS" in html
+        assert "disabled" not in html
+        # Хранимое переопределение Parts отражено как выбранное.
+        from backend_adapter import session_settings
+        session_settings.set_config("sess-2", {"ADAPTER_DEBUG_PARTS": True})
+        html2 = ws._parts_cell_html("sess-2")
+        assert '<option value="1" selected>' in html2
+
+    def test_parts_cell_disabled_when_session_log_off(self):
+        # Пер-сессионный Log=off (переопределение) тоже блокирует Parts, даже
+        # если общая настройка Log=on.
+        config, ws = _fresh_modules()
+        config.ADAPTER_DEBUG = True
+        from backend_adapter import session_settings
+        session_settings.set_config("sess-3", {"ADAPTER_DEBUG": False})
+        html = ws._parts_cell_html("sess-3")
+        assert "disabled" in html
 
     def test_escapes_session_and_agent(self):
         config, ws = _fresh_modules()
@@ -346,9 +403,11 @@ class TestSessionsPage:
             assert status == 200
             for header in ("Сессия", "Агент", "Модель", "Бэкенд",
                            "Входной эндпойнт", "Маршрут", "Последнее обращение",
-                           "Вызовов", "Ошибок", "Log", "Parts", "TARGET",
-                           "Actions"):
+                           "C", "E", "Log", "Parts", "TARGET", "Actions"):
                 assert f"<th>{header}</th>" in body
+            # Заголовки укорочены (v0.9.6, задача 5).
+            assert "<th>Вызовов</th>" not in body
+            assert "<th>Ошибок</th>" not in body
             assert "s-1" in body
         finally:
             httpd.shutdown()
@@ -383,6 +442,21 @@ class TestSessionsPage:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_poll_updates_all_observed_fields(self):
+        # Поллинг правит не только счётчики, но и все наблюдаемые поля
+        # (agent/model/backend/route/last_seen) и переставляет строки в
+        # порядок снимка — иначе таблица «застывает».
+        config, ws = _fresh_modules()
+        script = ws.sessions_poll_script
+        # Пары [data-атрибут, поле снимка]: имена расходятся (data-seen ↔
+        # last_seen), поэтому поиск поля по имени атрибута дал бы "" и
+        # затирал бы колонку времени.
+        assert '["seen", "last_seen"]' in script
+        assert 'row[fields[f][1]]' in script
+        # Перестановка в порядок снимка — appendChild в цикле по rows.
+        assert "parent.appendChild(want)" in script
+        assert 'domByKey[rows[k]["key"]]' in script
 
     def test_nested_path_is_404(self, tmp_path):
         config, ws = _fresh_modules()

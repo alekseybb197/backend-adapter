@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import config, model_usage, routing, session_log, session_registry
+from . import config, model_usage, routing, session_log, session_registry, session_settings
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
@@ -29,7 +29,9 @@ from .convert import (
     convert_openai_to_anthropic,
     convert_tool_choice_anthropic_to_openai,
     convert_tools_anthropic_to_openai,
+    detect_model_switch_command,
     extract_tool_results,
+    force_store_false,
     normalize_messages_system_first,
 )
 from .logger import _d, _dr
@@ -44,6 +46,8 @@ from .session_log import (
 from .streaming import (
     _sse_write,
     _write_sse_error_native,
+    build_responses_control_response,
+    emit_responses_control_message,
     relay_sse,
     stream_openai_to_anthropic,
 )
@@ -450,6 +454,47 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 self._send_json(400, {"error": f"Invalid JSON: {e}"})
                 return
 
+            # === /model <имя> — служебная команда переключения модели (v0.9.6) ===
+            # Работает ТОЛЬКО когда TARGET входа responses == "responses" (см.
+            # routing.IMPLEMENTED_CONVERSIONS[("responses","responses")]) — т.е.
+            # запрос идёт через внутренний конвертор ответов, а не
+            # TARGET=passthrough (там тело уходит дословно, без вмешательств, по
+            # определению). Нативное /model самого Codex CLI на кастомном
+            # model_provider ненадёжно (баги пикера моделей и клонирования
+            # контекста провайдера при смене модели без рестарта сессии — см.
+            # документацию проекта), поэтому адаптер держит собственный канал:
+            # пользователь пишет "/model <имя>" обычным сообщением,
+            # detect_model_switch_command перехватывает его ЗДЕСЬ, до похода к
+            # бэкенду; выбор сохраняется в session_settings и действует для всех
+            # последующих запросов сессии, пока не будет переключён снова.
+            if (
+                inp_fmt == "responses"
+                and routing.target_for_input(inp_fmt, session_id) == "responses"
+            ):
+                switch_to = detect_model_switch_command(anthropic_req.get("input") or [])
+                if switch_to:
+                    session_settings.set_model_override(session_id, switch_to)
+                    _dr(req_id, f"[MODEL_SWITCH] session={session_id} -> {switch_to}")
+                    _trace(session_id, req_id, "model_switch", model=switch_to)
+                    _register_session(
+                        session_id, agent, model=switch_to, route="model_switch", input=inp_fmt
+                    )
+                    ack_text = f"Model switched to `{switch_to}`."
+                    if bool(anthropic_req.get("stream", True)):
+                        self._start_sse(200)
+                        emit_responses_control_message(self.wfile, ack_text, switch_to)
+                    else:
+                        self._send_json(200, build_responses_control_response(ack_text, switch_to))
+                    return
+                override_model = session_settings.model_override(session_id)
+                if override_model:
+                    _dr(
+                        req_id,
+                        f"[MODEL_OVERRIDE] session={session_id}: клиент прислал model="
+                        f"{anthropic_req.get('model')!r}, применяю оверрайд сессии -> {override_model}",
+                    )
+                    anthropic_req["model"] = override_model
+
             model = anthropic_req.get("model")
             if not model:
                 _register_session(session_id, agent, input=inp_fmt)
@@ -591,14 +636,18 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             model = resolved_model
 
             # === Дословная передача (E→E): TARGET=passthrough или convert
-            #     messages→messages (сортировка system) ===
+            #     messages→messages (сортировка system) / responses→responses
+            #     (store=false + /model, v0.9.6) ===
             # Тело запроса уходит бэкенду КАК ПРИШЛО — единственные мутации:
             # ``model`` заменяется на resolved_model (маппинг/префикс бэкенда
-            # применяются и здесь) и, при аварийном рубильнике
-            # ADAPTER_STREAMING_ENABLE=0, ``stream`` принудительно гасится.
-            # Конвертация, strict-поля messages (max_tokens/system/tools/…) и
-            # антропик-трассировка сюда не входят: контракт формата E→E
-            # определяет бэкенд (он сам ответит 400 на невалидное тело), а
+            # применяются и здесь), при аварийном рубильнике
+            # ADAPTER_STREAMING_ENABLE=0 ``stream`` принудительно гасится, а для
+            # out_fmt_val == "responses" ещё и store принудительно false
+            # (force_store_false) — /model-команда обрабатывается раньше, до
+            # этой ветки (см. блок в начале do_POST), сюда доходят уже обычные
+            # запросы. Конвертация, strict-поля messages (max_tokens/system/
+            # tools/…) и антропик-трассировка сюда не входят: контракт формата
+            # E→E определяет бэкенд (он сам ответит 400 на невалидное тело), а
             # не адаптер. Ответ бэкенда отдаётся клиенту ДОСЛОВНО (см.
             # passthrough-хвост ниже) — usage читается по формату ``out_fmt``.
             if verbatim:
@@ -615,6 +664,19 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     stream_requested = False
                     _dr(req_id, "[STREAM_DISABLED] (passthrough) forcing stream=false")
                 anthropic_req["model"] = model
+                # store=false — принудительно для /v1/responses (v0.9.6), и в
+                # TARGET=passthrough, и в TARGET=responses/внутреннем конверторе:
+                # previous_response_id может резолвить только бэкенд, который сам
+                # создал предыдущий response, а сторонний бэкенд за этим
+                # адаптером чужих ответов не хранит. Пер-сессионный разбор
+                # реального трафика Codex CLI показал, что клиент уже шлёт
+                # store:false сам и пересобирает контекст на своей стороне (см.
+                # документацию проекта) — но это инвариант эндпоинта, а не
+                # свойство одного наблюдённого клиента, поэтому приводим
+                # принудительно (force_store_false, convert.py), а не полагаемся
+                # на добросовестность отправителя.
+                if out_fmt_val == "responses" and force_store_false(anthropic_req):
+                    _dr(req_id, "[STORE_ENFORCED] responses: store forced to false")
                 # convert messages→messages (v0.9.2): бэкенд (vLLM-шаблон
                 # чата) требует system первым (Jinja raise_exception 'System
                 # message must be at the beginning'), а [CC]-сессии несут
@@ -628,7 +690,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 # а TARGET=messages — «преобразование messages→messages»
                 # (сортировка полей). Прочие дословные пути
                 # (completions→completions, responses→responses) уходят как
-                # есть: там нет инварианта «system первым».
+                # есть: там нет инварианта «system первым» (responses→responses
+                # с v0.9.6 всё же не полностью пассивен — см. блок
+                # STORE_ENFORCED/MODEL_SWITCH выше и в начале do_POST, но это
+                # НЕ перестановка полей, а два точечных вмешательства).
                 if (
                     route_action == "convert"
                     and inp_fmt == "messages"

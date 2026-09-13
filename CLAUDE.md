@@ -31,9 +31,11 @@ This file provides guidance to [CC] () when working with code in this repository
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
-  `changelog.md`. Пакет `backend_adapter/` (layout и назначение каждого модуля —
-  `docs/architecture.md` §2; группа `artifact_tree*.py`, публичный API —
-  `artifact_tree.generate()`).
+  `changelog.md`. `__comment__` — **краткое фиксированное** резюме назначения
+  адаптера, при релизах не изменяется (нигде не парсится; версию читает
+  `webserver._detect_version()` из `__version__`). Пакет `backend_adapter/`
+  (layout и назначение каждого модуля — `docs/architecture.md` §2; группа
+  `artifact_tree*.py`, публичный API — `artifact_tree.generate()`).
 - **Python 3.10+** (аннотации `X | Y`); единственная внешняя зависимость —
   **PyYAML** (`requirements.txt`), всё остальное — стандартная библиотека.
 - Документация: `docs/install.md` (запуск/шаблоны продакшена),
@@ -81,12 +83,23 @@ This file provides guidance to [CC] () when working with code in this repository
 таблице сессий. Детали — `docs/routing.md` §2.4, `docs/webui.md` §4,
 `docs/logging.md`.
 
+**Персистентность runtime-пула (v0.9.6):** `state_store.py` хранит значения
+`RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, в `ADAPTER_DEBUG_LOGPATH`)
+— на старте файл применяется **поверх env** (`apply_on_startup`, вызывается из
+`backend-adapter.py` до `_init_multi_backends`), каждое изменение `/config`
+персистится через колбек `config.set_on_change` (config остаётся корнем DAG).
+Пер-сессионные настройки НЕ сохраняются. **Связка Log/Parts:** Parts активен
+только при Log (каскад в `config.set_runtime_config`/`session_settings`, гейт в
+`session_log.parts_enabled`). **Валидация env** (`env_validate.py`) — строгая, до
+импорта config: невалидный int/bool → `[FATAL]` + `sys.exit(1)`.
+
 **Инвариант DAG:** база без внутренних зависимостей при импорте — `redact.py`,
 `session_log.py`, `daemon.py`, `config.py`, `artifact_tree_common.py`,
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
-модули зависят минимум от одного из них. `session_settings.py` и
-`session_registry.py` — листы DAG (импортируют только `config`). Новые модули —
-без циклов (dependency graph — `docs/architecture.md` §10).
+модули зависят минимум от одного из них. `session_settings.py`,
+`session_registry.py`, `state_store.py` и `env_validate.py` — листы DAG
+(`env_validate` — stdlib-only, остальные импортируют только `config`). Новые
+модули — без циклов (dependency graph — `docs/architecture.md` §10).
 
 **WEBUI** (поднимается всегда — флага отключения нет): ядро `webserver.py`
 (реестр эндпоинтов, `serve()`) в daemon-потоке + модули-эндпоинты
