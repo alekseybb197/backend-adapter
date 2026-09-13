@@ -38,11 +38,12 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
 приложения — видно, к чему вернётся сессия (задача 4: дефолт сессии —
 общие настройки).
 
-Счётчики Вызовов/Ошибок обновляются без перезагрузки: безусловный JS
+Вся наблюдаемая часть строки обновляется без перезагрузки: безусловный JS
 sessions_poll каждые 5 с опрашивает /api/sessions/snapshot и правит ячейки
-по data-атрибутам (data-calls — textContent, data-errors — innerHTML:
-errors_html приходит с сервера ГОТОВЫМ HTML — числом или ссылкой, как
-cost_html у таблицы моделей). Строки сопоставляются по data-key
+по data-атрибутам (agent/model/backend/route/seen — textContent, data-calls —
+textContent, data-errors — innerHTML: errors_html приходит с сервера ГОТОВЫМ
+HTML — числом или ссылкой, как cost_html у таблицы моделей), а также
+переставляет строки в порядок снимка. Строки сопоставляются по data-key
 (JSON-строка кортежа): одна сессия может занимать НЕСКОЛЬКО строк.
 
 Раздача .err-файлов: GET /logs/<имя> отдаёт файл из корня WEBUI
@@ -254,24 +255,31 @@ def _sessions_rows_html(rows: list[dict]) -> str:
     сверху). Одна сессия может занимать НЕСКОЛЬКО строк (сменила модель/
     обработчик) — поэтому ``session`` не уникален: строка несёт data-key с
     JSON-строкой всего кортежа, и JS sessions_poll сопоставляет строки по
-    нему (порядок меняется при всплытии строки вверх). data-session (полный
-    session_id) остаётся для наглядности/отладки. Сессия — UUID-подобный id:
-    показываем первые 8 символов в <code>, полный id — в title. Все значения —
-    html.escape; счётчики несут data-атрибуты (data-calls/data-errors) —
-    поллинг правит ячейки по ним, а не по позиции колонки."""
+    нему. data-session (полный session_id) остаётся для наглядности/отладки.
+    Сессия — UUID-подобный id: показываем первые 8 символов в <code>,
+    полный id — в title. Все значения — html.escape. Каждая наблюдаемая
+    ячейка несёт data-атрибут (data-seen/agent/model/backend/route/calls/
+    errors): поллинг правит содержимое по нему, а не по позиции колонки,
+    а главное — переставляет <tr> в порядок снимка (всплытие новой строки
+    наверх) без перезагрузки страницы."""
     body = []
     for row in rows:
         session = str(row.get("session", ""))
         key = str(row.get("key", ""))
+        agent = html.escape(str(row.get("agent", "")))
+        model = html.escape(str(row.get("model", "")))
+        backend = html.escape(str(row.get("backend", "")))
+        route = html.escape(str(row.get("route", "")))
+        last_seen = html.escape(str(row.get("last_seen", "")))
         body.append(
             f'<tr data-session="{html.escape(session)}" data-key="{html.escape(key)}">'
             f"{_session_cell_html(row)}"
-            f"<td>{html.escape(str(row.get('agent', '')))}</td>"
-            f"<td>{html.escape(str(row.get('model', '')))}</td>"
-            f"<td>{html.escape(str(row.get('backend', '')))}</td>"
+            f'<td data-agent="{agent}">{agent}</td>'
+            f'<td data-model="{model}">{model}</td>'
+            f'<td data-backend="{backend}">{backend}</td>'
             f"<td>{_input_cell_html(row)}</td>"
-            f"<td>{html.escape(str(row.get('route', '')))}</td>"
-            f"<td>{html.escape(str(row.get('last_seen', '')))}</td>"
+            f'<td data-route="{route}">{route}</td>'
+            f'<td data-seen="{last_seen}">{last_seen}</td>'
             f'<td data-calls="{row.get("calls", 0)}">{row.get("calls", 0)}</td>'
             f'<td data-errors="{row.get("errors", 0)}">{_errors_cell_html(row)}</td>'
             f"<td>{_select_form_html(session, 'ADAPTER_DEBUG', _bool_options('ADAPTER_DEBUG'), _stored_bool(session, 'ADAPTER_DEBUG'))}</td>"
@@ -351,15 +359,20 @@ def _render_sessions_page(context) -> bytes:
 
 # Live-обновление таблицы: JS sessions_poll каждые 5 с опрашивает
 # /api/sessions/snapshot (session_registry.sessions_snapshot() — копии строк
-# из памяти, сети нет) и обновляет счётчики. Строки сопоставляются ПО
-# data-key (JSON-строка кортежа), а НЕ по data-session: одна сессия может
-# занимать несколько строк, session не уникален. Ячейки ищутся по
-# data-атрибутам (data-calls/data-errors), а не по позиции колонки —
-# добавление/перестановка колонок поллинг не ломает. Вызовов — textContent,
-# Ошибок — innerHTML (errors_html: число ИЛИ готовая ссылка на .err-файл).
-# Состав/число строк не совпало (новый кортеж / эвикция по глубине) —
-# location.reload() перерисует таблицу. Оверхед — один маленький JSON раз в
-# 5 с на вкладку; скрытую вкладку браузер троттлит.
+# из памяти, сети нет) и синхронизирует ВСЮ наблюдаемую часть строки с
+# снимком, без перезагрузки страницы. Строки сопоставляются ПО data-key
+# (JSON-строка кортежа), а НЕ по data-session: одна сессия может занимать
+# несколько строк, session не уникален. Ячейки ищутся по data-атрибутам
+# (data-seen/agent/model/backend/route/calls/errors), а не по позиции
+# колонки — добавление/перестановка колонок поллинг не ломает. Числовые и
+# текстовые ячейки — textContent, Ошибок — innerHTML (errors_html: число ИЛИ
+# готовая ссылка на .err-файл). Снимок отсортирован (новые сверху): поллинг
+# переставляет DOM-<tr> в порядок снимка через appendChild (перемещает
+# существующий узел, не клонируя), поэтому строка, получившая новое
+# обращение, всплывает наверх без reload. Состав/число
+# строк не совпало (новый кортеж / эвикция по глубине) — location.reload()
+# перерисует таблицу целиком. Оверхед — один маленький JSON раз в 5 с на
+# вкладку; скрытую вкладку браузер троттлит.
 sessions_poll_script = """
 <script>
   function sessions_poll() {
@@ -370,9 +383,22 @@ sessions_poll_script = """
         if (trs.length !== rows.length) { location.reload(); return; }
         var byKey = {};
         for (var i = 0; i < rows.length; i++) { byKey[rows[i]["key"]] = rows[i]; }
+        var domByKey = {};
+        for (var d = 0; d < trs.length; d++) { domByKey[trs[d].getAttribute("data-key")] = trs[d]; }
+        // Сначала правим содержимое по ключу (без перестановки), затем
+        // переставляем <tr> в порядок снимка — иначе вставка раньше времени
+        // «перепрыгнет» строку и собьёт индекс текущего цикла. Пары
+        // [data-атрибут ячейки, поле снимка]: имена расходятся (data-seen ↔
+        // last_seen), поэтому по имени атрибута поле не искать.
+        var fields = [["agent", "agent"], ["model", "model"], ["backend", "backend"], ["route", "route"], ["seen", "last_seen"]];
         for (var j = 0; j < trs.length; j++) {
           var row = byKey[trs[j].getAttribute("data-key")];
           if (!row) { location.reload(); return; }
+          for (var f = 0; f < fields.length; f++) {
+            var cell = trs[j].querySelector("[data-" + fields[f][0] + "]");
+            var val = String(row[fields[f][1]] == null ? "" : row[fields[f][1]]);
+            if (cell && cell.textContent !== val) { cell.textContent = val; }
+          }
           var calls = trs[j].querySelector("[data-calls]");
           if (calls && String(calls.textContent) !== String(row["calls"])) {
             calls.textContent = row["calls"];
@@ -380,6 +406,20 @@ sessions_poll_script = """
           var errs = trs[j].querySelector("[data-errors]");
           if (errs && errs.innerHTML !== row["errors_html"]) {
             errs.innerHTML = row["errors_html"];
+          }
+        }
+        // Перестановка в порядок снимка (новые сверху): appendChild
+        // перемещает существующий <tr> в конец родителя, не клонируя; цикл по
+        // rows выставит их в порядке снимка. Заголовочный <tr> (без data-key)
+        // в domByKey отсутствует и не затрагивается — остаётся первым. Родитель
+        // — <tbody>, а при его отсутствии сам <table> (без явного tbody строки
+        // лежат напрямую в table).
+        var parent = document.querySelector("table tbody") || document.querySelector("table");
+        if (parent) {
+          for (var k = 0; k < rows.length; k++) {
+            var want = domByKey[rows[k]["key"]];
+            if (!want) { location.reload(); return; }
+            parent.appendChild(want);
           }
         }
         setTimeout(sessions_poll, 5000);

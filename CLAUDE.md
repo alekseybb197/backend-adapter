@@ -31,9 +31,11 @@ This file provides guidance to [CC] () when working with code in this repository
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
-  `changelog.md`. Пакет `backend_adapter/` (layout и назначение каждого модуля —
-  `docs/architecture.md` §2; группа `artifact_tree*.py`, публичный API —
-  `artifact_tree.generate()`).
+  `changelog.md`. `__comment__` — **краткое фиксированное** резюме назначения
+  адаптера, при релизах не изменяется (нигде не парсится; версию читает
+  `webserver._detect_version()` из `__version__`). Пакет `backend_adapter/`
+  (layout и назначение каждого модуля — `docs/architecture.md` §2; группа
+  `artifact_tree*.py`, публичный API — `artifact_tree.generate()`).
 - **Python 3.10+** (аннотации `X | Y`); единственная внешняя зависимость —
   **PyYAML** (`requirements.txt`), всё остальное — стандартная библиотека.
 - Документация: `docs/install.md` (запуск/шаблоны продакшена),

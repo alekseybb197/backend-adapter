@@ -315,6 +315,13 @@ class TestSessionsRowsHtml:
         assert f'<code title="{sid}">{sid[:8]}</code>' in html
         assert 'data-calls="1"' in html
         assert 'data-errors="0"' in html
+        # Наблюдаемые поля несут data-атрибуты: поллинг правит их по имени,
+        # а не по позиции колонки (и переставляет строки в порядок снимка).
+        assert 'data-agent="claude-cli/2.1.236"' in html
+        assert 'data-model="m-a"' in html
+        assert 'data-backend="AAA"' in html
+        assert 'data-route="passthrough messages→messages"' in html
+        assert 'data-seen="2026-09-09 10:00:00"' in html
 
     def test_row_has_log_parts_target_selects(self):
         config, ws = _fresh_modules()
@@ -435,6 +442,21 @@ class TestSessionsPage:
         finally:
             httpd.shutdown()
             httpd.server_close()
+
+    def test_poll_updates_all_observed_fields(self):
+        # Поллинг правит не только счётчики, но и все наблюдаемые поля
+        # (agent/model/backend/route/last_seen) и переставляет строки в
+        # порядок снимка — иначе таблица «застывает».
+        config, ws = _fresh_modules()
+        script = ws.sessions_poll_script
+        # Пары [data-атрибут, поле снимка]: имена расходятся (data-seen ↔
+        # last_seen), поэтому поиск поля по имени атрибута дал бы "" и
+        # затирал бы колонку времени.
+        assert '["seen", "last_seen"]' in script
+        assert 'row[fields[f][1]]' in script
+        # Перестановка в порядок снимка — appendChild в цикле по rows.
+        assert "parent.appendChild(want)" in script
+        assert 'domByKey[rows[k]["key"]]' in script
 
     def test_nested_path_is_404(self, tmp_path):
         config, ws = _fresh_modules()
