@@ -164,21 +164,38 @@ module on one level, see ADR 2026-09-01).
 
 ## 4. Request lifecycle
 
-### 4.1 Startup (`backend-adapter.py:80–122`)
+### 4.1 Startup (`backend-adapter.py:79–164`)
 
-1. If `ADAPTER_DETACH_ENABLE=1` — double-fork daemonize + write PID file
+1. If `ADAPTER_DETACH_ENABLE=1` — double-fork daemonize (detach only;
+   the PID file is written below, at any startup, so it holds the PID of
+   the final grandchild process, not the exiting parent)
 2. Parse env config → `backend_adapter/config.py` (all env vars with `ADAPTER_` prefix)
-3. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend (this startup probe is unconditional — it fills the model list used for strict validation; a backend that fails to respond only logs a `[WARN]` and drops out, but the adapter exits `[FATAL]` if no models were retrieved from any backend), resolve model collisions by prefixing with `<backend_name>.`
-4. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
-   (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
-   `0.0.0.0` — all interfaces)
-5. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
+3. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
    empty/unset — the path is always non-empty; v0.8.6): created unconditionally at
    startup (it doubles as the WEBUI root); **file** logging of sessions/traces/dumps
    only happens at `ADAPTER_DEBUG_ENABLE=1` (master switch of the *file* write —
    console debug logs are unconditional); points at an existing **file** →
    `[FATAL]` + hint + `sys.exit(1)` (the path is always a directory).
-6. Start the WEBUI in a daemon thread via
+4. Write the PID file (`daemon._write_pidfile`): path is
+   `ADAPTER_DEBUG_LOGPATH/basename(ADAPTER_PIDFILE)` (default `adapter.pid`;
+   an absolute `ADAPTER_PIDFILE` outside LOGPATH is ignored). Written on
+   **every** launch, not only in detach mode (v0.9.5), so the process can be
+   addressed without a console (container, service); an existing file is
+   overwritten with our PID (no stale-PID check). Written **before** the
+   backend check (step 5, a network probe that can be slow), so the process is
+   addressable while it runs; only the instant `[FATAL]` checks (empty
+   `ADAPTER_BACKEND_CONFIG`, LOGPATH-is-a-file) precede it, and a backend-init
+   failure still cleans the file up via `atexit`.
+   Cleanup: `_remove_pidfile` (removes the file only if it holds the current
+   PID) runs at the end of the graceful procedure (`_finish`, SIGINT/SIGTERM)
+   and via `atexit` on any normal interpreter exit (early `[FATAL]`,
+   unhandled exception). A repeated signal (`os._exit(130)`) skips `atexit` —
+   the file remains; the next launch overwrites it. Not shown in the WEBUI.
+5. Initialize backends: empty `ADAPTER_BACKEND_CONFIG` → `[FATAL]` + `sys.exit(1)`; parse YAML (`_parse_backend_yaml`), resolve `key` env vars, probe `GET /v1/models` per backend (this startup probe is unconditional — it fills the model list used for strict validation; a backend that fails to respond only logs a `[WARN]` and drops out, but the adapter exits `[FATAL]` if no models were retrieved from any backend), resolve model collisions by prefixing with `<backend_name>.`
+6. Start `QuietThreadingHTTPServer` on `ADAPTER_ENDPOINT_HOST:<PROXY_PORT>`
+   (`ADAPTER_ENDPOINT_HOST` defaults to `127.0.0.1` — localhost only;
+   `0.0.0.0` — all interfaces)
+7. Start the WEBUI in a daemon thread via
    `webserver.serve(root, __version__)` on `ADAPTER_WEBUI_HOST:<ADAPTER_WEBUI_PORT>`
    (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
    careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` — the WEBUI

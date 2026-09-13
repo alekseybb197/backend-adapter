@@ -3,6 +3,7 @@
 Stdlib only — no internal dependencies.
 """
 
+import contextlib
 import os
 import sys
 import time
@@ -43,24 +44,59 @@ def _detach() -> None:
         os.dup2(fout.fileno(), sys.stderr.fileno())
 
 
-def _write_pidfile() -> None:
-    """Записать PID процесса в файл pid внутри ADAPTER_DEBUG_LOGPATH.
+def _pidfile_path() -> str:
+    """Путь PID-файла: ADAPTER_DEBUG_LOGPATH + basename(ADAPTER_PIDFILE).
 
     PID-файл живёт в общей директории логов/артефактов адаптера
     (ADAPTER_DEBUG_LOGPATH — единый корень WEBUI, session-логов, *.parts
     и model-usage.yaml), а не в произвольном месте. ``ADAPTER_PIDFILE``
     задаёт ИМЯ файла (или под-путь): используется basename — абсолютный
     путь вне LOGPATH игнорируется, файл всё равно кладётся в LOGPATH.
-    Пусто/не задано → ``adapter.pid``. Директория создаётся при
-    необходимости (вызов может произойти до создания корня WEBUI).
+    Пусто/не задано → ``adapter.pid``.
 
-    Модуль остаётся stdlib-only: LOGPATH читается из os.environ напрямую
-    (та же формула, что у config.ADAPTER_DEBUG_LOGPATH)."""
+    Единая формула для записи (_write_pidfile) и удаления
+    (_remove_pidfile) — путь не должен разъезжаться между ними. Модуль
+    остаётся stdlib-only: LOGPATH читается из os.environ напрямую (та же
+    формула, что у config.ADAPTER_DEBUG_LOGPATH)."""
     logpath = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip() or "./tmp/logs"
     name = os.environ.get("ADAPTER_PIDFILE", "").strip()
     if not name:
         name = "adapter.pid"
-    pidfile = os.path.join(logpath, os.path.basename(name))
-    os.makedirs(logpath, exist_ok=True)
+    return os.path.join(logpath, os.path.basename(name))
+
+
+def _write_pidfile() -> str:
+    """Записать PID процесса в PID-файл, вернуть его путь.
+
+    Пишется при ЛЮБОМ запуске адаптера (не только в detach-режиме) — файл
+    нужен, чтобы манипулировать процессом без консоли (контейнер, служба).
+    Директория создаётся при необходимости (вызов может произойти до
+    создания корня WEBUI). Существующий файл перезаписывается своим PID:
+    stale-PID не проверяется. Возвращаемый путь — для консольного
+    ``[PID]``-сообщения оператору."""
+    pidfile = _pidfile_path()
+    os.makedirs(os.path.dirname(pidfile), exist_ok=True)
     with open(pidfile, "w") as f:
         f.write(str(os.getpid()))
+    return pidfile
+
+
+def _remove_pidfile() -> None:
+    """Удалить PID-файл при завершении процесса — только если он наш.
+
+    Идемпотентна и не бросает: отсутствие файла или ошибка удаления — не
+    ошибка (процедура завершения не должна падать). Файл удаляется, лишь
+    когда содержит ТЕКУЩИЙ PID: если нас успел перезаписать более поздний
+    запуск с тем же LOGPATH, чужой PID-файл не трогаем. При повторном
+    сигнале (os._exit(130)) функция не вызывается — atexit не срабатывает,
+    и файл остаётся; это не штатный выход."""
+    pidfile = _pidfile_path()
+    try:
+        with open(pidfile) as f:
+            content = f.read().strip()
+    except OSError:
+        return
+    if content != str(os.getpid()):
+        return
+    with contextlib.suppress(OSError):
+        os.unlink(pidfile)

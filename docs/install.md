@@ -667,8 +667,9 @@ export ADAPTER_DEBUG_ENABLE=0
 # пишет полные строки (v0.8.6-реформа)
 # export ADAPTER_DEBUG_TRIM=3000
 
-# Имя PID-файла в detach-режиме (v0.9.0): файл кладётся в
-# ADAPTER_DEBUG_LOGPATH (basename значения; дефолт — adapter.pid).
+# Имя PID-файла: кладётся в ADAPTER_DEBUG_LOGPATH (basename значения;
+# дефолт — adapter.pid). Пишется при ЛЮБОМ запуске (v0.9.5) и удаляется
+# при штатном завершении — управление процессом без консоли.
 # export ADAPTER_PIDFILE="adapter.pid"
 
 # JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
@@ -870,16 +871,24 @@ Detach-режим (double fork UNIX-daemon pattern):
 
 - Родительский процесс завершается немедленно
 - stdio/stderr перенаправлены в `/dev/null`
-- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH` (v0.9.0): имя — `adapter.pid`
-  или `basename(ADAPTER_PIDFILE)`)
+- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH`: имя — `adapter.pid`
+  или `basename(ADAPTER_PIDFILE)`
 - Логи идут в директорию `ADAPTER_DEBUG_LOGPATH`, если задана
   (пусто — файловая запись выключена, только консоль)
+
+> **PID-файл — не только для detach.** Он пишется при **любом** запуске
+> (v0.9.5): путь — `ADAPTER_DEBUG_LOGPATH/adapter.pid`, в консоль печатается
+> строка `[PID] <pid> → <путь>`. Это позволяет управлять процессом без
+> консоли — в контейнере или в составе службы. При штатном завершении
+> (`SIGINT`/`SIGTERM`) и на обычном выходе (ранний `[FATAL]`, необработанное
+> исключение) файл удаляется. При **повторном** сигнале (`os._exit(130)`)
+> файл остаётся — следующий запуск его перезапишет.
 
 Управление:
 
 ```bash
 cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid"   # прочитать PID
-kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить
+kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить (SIGTERM)
 ```
 
 > **Важно:** detach-режим не предназначен для продакшен-использования.
@@ -1016,6 +1025,13 @@ Adapter cannot start. Exiting.
 > Включать detach-режим (`ADAPTER_DETACH_ENABLE=1`) вместе с systemd нельзя:
 > двойной форк отделит процесс от управления systemd, и `Restart=on-failure` не сработает.
 
+> **PID-файл.** При `Type=simple` systemd знает PID сам, и файл ему не нужен —
+> но адаптер всё равно пишет `ADAPTER_DEBUG_LOGPATH/adapter.pid` (v0.9.5) и
+> снимает его при остановке. Если нужен `Type=forking`, укажите в юните
+> `PIDFile=<ADAPTER_DEBUG_LOGPATH>/adapter.pid` — путь совпадает с тем, куда
+> пишет адаптер. В контейнере (без systemd) это единственный способ адресовать
+> процесс: `kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")`.
+
 **Установка:**
 
 ```bash
@@ -1073,7 +1089,7 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 | Процесс живёт сам по себе | systemd следит за процессом |
 | Нет рестарта при падении | `Restart=on-failure` |
 | Нет логов | логи в `journalctl` |
-| PID-файл вручную | systemd сам знает PID |
+| PID-файл вручную | systemd сам знает PID (адаптер пишет файл в обоих режимах) |
 | Подходит для тестов | **подходит для продакшена** |
 
 ### 9.2 macOS — launchd

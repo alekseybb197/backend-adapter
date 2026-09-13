@@ -275,6 +275,16 @@ class TestManualAdapterProcess:
                 )
                 assert ej["found"] is True and ej["status"] == 200, ej
 
+                # --- PID-файл при ОБЫЧНОМ запуске (не detach) ---
+                # Пишется в LOGPATH при любом запуске; содержимое — PID
+                # живого процесса (манипуляция без консоли: kill $(cat ...)).
+                pidfile = os.path.join(logs_dir, "adapter.pid")
+                assert _wait_files(logs_dir, lambda f: f == "adapter.pid"), \
+                    os.listdir(logs_dir)
+                assert int(open(pidfile).read()) == ap.proc.pid, \
+                    f"PID-файл не совпадает с процессом: {open(pidfile).read()}"
+                assert "[PID]" in out, out[:400]
+
                 # --- Cost на странице и в usage-таблице ---
                 req_body = {"model": "qwen-test",
                             "messages": [{"role": "user", "content": "hi"}],
@@ -350,6 +360,9 @@ class TestManualAdapterProcess:
                 assert rc == 0, f"SIGINT: rc={rc}"
                 assert "[EXIT] Bye" in out, out[-400:]
                 assert "Traceback" not in out.split("[EXIT] Bye")[0], out[-600:]
+                # Штатный выход снимает PID-файл (процедура завершения).
+                assert not os.path.exists(os.path.join(logs_dir, "adapter.pid")), \
+                    "PID-файл не удалён при штатном выходе"
             finally:
                 ap.proc.terminate()
                 try:
@@ -367,6 +380,9 @@ class TestManualAdapterProcess:
                 out = ap.output
                 assert rc == 0, f"SIGTERM: rc={rc}"
                 assert "[EXIT] Bye" in out, out[-400:]
+                # SIGTERM — то же вежливое завершение: PID-файл тоже снят.
+                assert not os.path.exists(os.path.join(logs_dir, "adapter.pid")), \
+                    "PID-файл не удалён при SIGTERM"
             finally:
                 ap.proc.terminate()
                 try:
@@ -387,6 +403,73 @@ class TestManualAdapterProcess:
                 out = ap.output
                 assert rc == 130, f"повторный SIGINT: rc={rc}"
                 assert "Traceback" not in out, out[-600:]
+                # Повторный сигнал убивает процесс через os._exit(130) — ни
+                # atexit, ни остаток _finish не выполняются, поэтому
+                # PID-файл остаётся. Это НЕ штатный выход (контракт): файл
+                # безвреден, следующий старт перезапишет его своим PID.
+                assert os.path.exists(os.path.join(logs_dir, "adapter.pid")), \
+                    "PID-файл удалён при аварийном выходе (rc=130) — это не штатный выход"
+            finally:
+                ap.proc.terminate()
+                try:
+                    ap.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    ap.proc.kill()
+        finally:
+            be.close()
+
+    def test_pidfile_before_backend_probe(self, tmp_path):
+        """PID-файл пишется ДО стартовой проверки бэкендов (v0.9.5).
+
+        Стартовая проба — сетевой опрос `GET /v1/models`, который может быть
+        долгим (недоступный/медленный бэкенд). Процесс должен быть адресуем
+        уже во время проверки, поэтому `adapter.pid` появляется раньше неё.
+        Проверяем на медленном fake-бэкенде (models_delay): файл есть, пока
+        проверка ещё идёт, и в консоли `[PID]` предшествует `[INIT] Probing`."""
+        logs_dir = str(tmp_path / "logs")
+        os.makedirs(logs_dir)
+
+        be = FakeBackend()
+        be.models_response = {"object": "list",
+                              "data": [{"id": "qwen-test", "object": "model"}]}
+        be.models_delay = 5.0  # растянуть стартовый опрос, чтобы наблюдать окно
+        be.serve()
+        try:
+            yaml_path = str(tmp_path / "adapter.yaml")
+            with open(yaml_path, "w") as f:
+                f.write("backend:\n"
+                        "  - name: fake\n"
+                        f"    base: {be.base_url}\n"
+                        "    key: FAKE_KEY\n"
+                        "    probe:\n"
+                        "      - completions: qwen-test\n")
+            proxy_port = _free_port()
+            web_port = _free_port()
+            exp_port = _free_port()
+            env = _adapter_env(yaml_path, "", proxy_port, web_port, exp_port,
+                               logs_dir, debug_enable="0")
+            ap = _spawn(env)
+            try:
+                # Файл появляется сразу (до проверки), а сама проверка ещё
+                # идёт: строки «Backends: N configured:» (печатается ПОСЛЕ
+                # _init_multi_backends) в консоли быть не должно.
+                assert _wait_files(logs_dir, lambda f: f == "adapter.pid",
+                                   deadline_s=4), \
+                    "PID-файл не появился до стартовой проверки бэкендов"
+                assert "Backends:" not in ap.output, \
+                    "PID-файл появился уже ПОСЛЕ проверки бэкендов:\n" + ap.output
+
+                # Дожидаемся завершения проверки и убеждаемся, что файл
+                # пережил её (не удалён и не переписан кем-то другим).
+                assert _wait_files(logs_dir, lambda f: f == "fake.models.json",
+                                   deadline_s=20), os.listdir(logs_dir)
+                pidfile = os.path.join(logs_dir, "adapter.pid")
+                assert os.path.exists(pidfile), "PID-файл исчез после проверки"
+                assert int(open(pidfile).read()) == ap.proc.pid, open(pidfile).read()
+                out = ap.output
+                assert "[PID]" in out and "[INIT] Probing backend 'fake'" in out, out
+                assert out.index("[PID]") < out.index("[INIT] Probing backend 'fake'"), \
+                    "в консоли [PID] идёт после [INIT] Probing — порядок нарушен"
             finally:
                 ap.proc.terminate()
                 try:

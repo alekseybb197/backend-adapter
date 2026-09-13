@@ -240,6 +240,10 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     """HTTP handler that returns pre-programmed responses."""
 
     models_response = None
+    # Задержка ответа GET /v1/models, сек: тест порядка старта (PID-файл
+    # пишется ДО стартовой проверки бэкендов) растягивает проверку, чтобы
+    # успеть наблюдать файл, пока она ещё идёт. 0 — без задержки.
+    models_delay = 0.0
     completions_response = None
     completions_status = 200
     # Responses API (v0.9.0): тело/статус для POST /v1/responses (passthrough
@@ -262,6 +266,8 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
         FakeBackendHandler.request_count += 1
         FakeBackendHandler.requests.append((self.path, "GET", None))
         if self.path == "/v1/models":
+            if FakeBackendHandler.models_delay:
+                time.sleep(FakeBackendHandler.models_delay)
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -362,6 +368,14 @@ class FakeBackend:
         FakeBackendHandler.models_response = value
 
     @property
+    def models_delay(self):
+        return FakeBackendHandler.models_delay
+
+    @models_delay.setter
+    def models_delay(self, value):
+        FakeBackendHandler.models_delay = value
+
+    @property
     def completions_response(self):
         return FakeBackendHandler.completions_response
 
@@ -446,6 +460,7 @@ def fake_backend():
     backend = FakeBackend()
     # Reset handler state
     FakeBackendHandler.models_response = None
+    FakeBackendHandler.models_delay = 0.0
     FakeBackendHandler.completions_response = None
     FakeBackendHandler.completions_status = 200
     FakeBackendHandler.responses_response = None

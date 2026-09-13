@@ -63,6 +63,70 @@ class TestWritePidFile:
         assert int((target / "adapter.pid").read_text()) == os.getpid()
 
 
+class TestRemovePidFile:
+    """Tests for _remove_pidfile() / _pidfile_path().
+
+    PID-файл пишется при ЛЮБОМ запуске (не только в detach) и удаляется при
+    штатном/аварийном завершении. Удаляется ТОЛЬКО свой файл (содержимое ==
+    текущий PID): файл, оставшийся от более позднего запуска с тем же LOGPATH,
+    не трогаем. Отсутствие файла — не ошибка (процедура завершения не должна
+    падать), повторный вызов идемпотентен.
+    """
+
+    def _env(self, monkeypatch, tmp_path, name="adapter.pid"):
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", str(tmp_path))
+        monkeypatch.setenv("ADAPTER_PIDFILE", name)
+        _reload_all()
+
+    def test_removes_own_pidfile(self, tmp_path, monkeypatch):
+        self._env(monkeypatch, tmp_path)
+        from backend_adapter.daemon import _write_pidfile, _remove_pidfile
+        _write_pidfile()
+        assert (tmp_path / "adapter.pid").exists()
+        _remove_pidfile()
+        assert not (tmp_path / "adapter.pid").exists()
+
+    def test_missing_file_is_noop(self, tmp_path, monkeypatch):
+        """Файла нет — удаление не бросает (нет процесса-предшественника)."""
+        self._env(monkeypatch, tmp_path)
+        from backend_adapter.daemon import _remove_pidfile
+        _remove_pidfile()
+
+    def test_idempotent(self, tmp_path, monkeypatch):
+        """Повторное удаление (штатный выход + atexit) — не ошибка."""
+        self._env(monkeypatch, tmp_path)
+        from backend_adapter.daemon import _write_pidfile, _remove_pidfile
+        _write_pidfile()
+        _remove_pidfile()
+        _remove_pidfile()
+        assert not (tmp_path / "adapter.pid").exists()
+
+    def test_respects_pidfile_basename(self, tmp_path, monkeypatch):
+        """Абсолютный путь в ADAPTER_PIDFILE → basename внутри LOGPATH:
+        удаляется файл в LOGPATH, а не по абсолютному пути."""
+        self._env(monkeypatch, tmp_path, name="/abs/other/test.pid")
+        from backend_adapter.daemon import _write_pidfile, _remove_pidfile
+        _write_pidfile()
+        assert (tmp_path / "test.pid").exists()
+        _remove_pidfile()
+        assert not (tmp_path / "test.pid").exists()
+
+    def test_does_not_remove_foreign_pid(self, tmp_path, monkeypatch):
+        """Чужой PID в файле (нас перезапустили с тем же LOGPATH) не трогаем."""
+        self._env(monkeypatch, tmp_path)
+        from backend_adapter.daemon import _write_pidfile, _remove_pidfile
+        _write_pidfile()
+        (tmp_path / "adapter.pid").write_text("999999")
+        _remove_pidfile()
+        assert (tmp_path / "adapter.pid").read_text() == "999999"
+
+    def test_pidfile_path_matches_written(self, tmp_path, monkeypatch):
+        """_pidfile_path() — та же формула, что у записи (пути не разъезжаются)."""
+        self._env(monkeypatch, tmp_path)
+        from backend_adapter.daemon import _pidfile_path, _write_pidfile
+        assert _pidfile_path() == _write_pidfile()
+
+
 class TestDetach:
     """Tests for _detach().
 
