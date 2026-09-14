@@ -1,71 +1,75 @@
 # backend-adapter — history / changelog
 
 
-## v0.9.7 (WIP — конверсия responses→completions, матрица роутингов)
+## v0.9.7 — конвертер `responses→completions` + схлопывание роли `developer`; полнота канала `.err`
 
-<!-- WIP: записи по мере согласованных коммитов группы v0.9.7. -->
+### 2026-09-14 Саммари ветки v0.9.7 (2 коммита между merge PR #19 (v0.9.6) и снятием WIP)
 
-### WIP: конвертер `responses → completions` + схлопывание роли `developer`
+**Цель:** дать входу `/v1/responses` полную кросс-форматную конверсию в Chat
+Completions (по образцу `messages→completions`) и закрыть последние пробелы
+`.err`-канала, чтобы ошибка распознанного входа попадала в лог инцидентов
+независимо от таблицы сессий.
 
-**Конвертер `responses → completions`** — полная кросс-форматная конверсия
-(значение `ADAPTER_RESPONSES_TARGET=completions`): запрос
-`input`/`instructions`/`tools` собирается в Chat Completions
-`messages`/`tools` (`convert_responses_input_to_openai_messages`,
-`convert_responses_tools_to_openai`,
-`convert_responses_tool_choice_to_openai`), ответ бэкенда пересобирается в
-Responses-объект (`convert_openai_completions_to_responses`), стрим
-completions-SSE — в поток Responses-событий
-(`stream_openai_completions_to_responses`). Пара внесена в
-`routing.IMPLEMENTED_CONVERSIONS[("responses","completions")]`; поддерживает
-команду `/model`. Детали — `docs/routing.md` §2.2/§2.5,
-`docs/architecture.md` §5.5.
+**Решение:**
+- **Конвертер `responses → completions`** (коммит 1) — полная кросс-форматная
+  конверсия (значение `ADAPTER_RESPONSES_TARGET=completions`): запрос
+  `input`/`instructions`/`tools` собирается в Chat Completions
+  `messages`/`tools` (`convert_responses_input_to_openai_messages`,
+  `convert_responses_tools_to_openai`,
+  `convert_responses_tool_choice_to_openai`), ответ бэкенда пересобирается в
+  Responses-объект (`convert_openai_completions_to_responses`), стрим
+  completions-SSE — в поток Responses-событий
+  (`stream_openai_completions_to_responses`). Пара внесена в
+  `routing.IMPLEMENTED_CONVERSIONS[("responses","completions")]`; поддерживает
+  команду `/model`. Детали — `docs/routing.md` §2.2/§2.5,
+  `docs/architecture.md` §5.5;
+- **Схлопывание роли `developer`** (коммит 1) — часть локальных chat-шаблонов
+  (в первую очередь Qwen3-семейство под llama.cpp) не знает роль `developer`
+  вовсе (падение `Unexpected message role`) и одновременно требует, чтобы
+  system-сообщение было РОВНО ОДНО и строго первым (`System message must be at
+  the beginning`). Клиент (Codex CLI) шлёт в `input` элементы
+  `{type:"message", role:"developer"}` — они конвертировались в отдельные
+  messages с ролью `developer`, что валило шаблон. Теперь
+  `convert_responses_input_to_openai_messages` **схлопывает** текст всех
+  `developer`-элементов в единое system-сообщение вместе с `instructions`
+  (склейка через `\n\n`); роль `developer` в выходных messages не попадает.
+  Схлопывается **только `developer`** — элементы `role="system"` не трогаются.
+  Тесты — `tests/test_convert.py` (`TestConvertResponsesInputToOpenAiMessages`);
+- **Полнота канала `.err`** (коммит 2) — пять пробелов:
+  1. **Отвязка от таблицы сессий.** Право на `.err`-блок определялось непустым
+     `session_key`, а `session_registry.register` возвращает `None` при
+     `ADAPTER_SESSIONS_TABLE=0` — ошибки входа (reject-502, disabled-404,
+     ранние 400) молча выпадали из канала. Введён флаг `_req_ctx.err_eligible`:
+     взводится в `_register_session` безусловно (входной путь распознан).
+     Счётчик «Ошибок» строки по-прежнему ведётся только при живой таблице.
+  2. **`GET /v1/models` 501** (список моделей не прогрет) не писал `.err` —
+     `do_GET` не заводил контекст запроса. Общие хелперы
+     `_err_ctx_begin`/`_err_ctx_end`; контекст заводится в `do_GET` и в
+     `do_POST`.
+  3. **Неподдерживаемые HTTP-методы** (`PUT`/`DELETE`/`PATCH`/`OPTIONS`/
+     `TRACE`) отвечали HTML-`501` через базовый `send_error`, мимо `.err`.
+     Добавлен `_unsupported_method` — JSON-`501` + `.err`.
+  4. **Необработанное исключение в `do_POST`** уходило в
+     `socketserver.handle_error`: клиент не получал ответа, `.err` молчал.
+     Верхнеуровневый `except`: если ответ не начат — JSON-`500` (и `.err`);
+     если начат — пометка `error_status=(200, …)` для `.err`; исключение не
+     пробрасывается.
+  5. **Обрыв потока mid-stream** (после `_start_sse(200)`: passthrough,
+     `responses→completions`, `messages→completions`) писал только SSE-событие
+     `error`. Теперь — `.err`-блок с `final_status=200` и `err_body` с
+     префиксом `mid-stream abort:` + инкремент счётчика «Ошибок».
 
-**Схлопывание роли `developer` (Jinja-шаблон).** Часть локальных
-chat-шаблонов (в первую очередь Qwen3-семейство под llama.cpp) не знает роль
-`developer` вовсе (падение `Unexpected message role`) и одновременно требует,
-чтобы system-сообщение было РОВНО ОДНО и строго первым (`System message must
-be at the beginning`). Клиент (Codex CLI) шлёт в `input` элементы
-`{type:"message", role:"developer"}` — они конвертировались в отдельные
-messages с ролью `developer`, что валило шаблон.
+  Тесты — `tests/test_server.py` (`TestErrFileProtocol`); доки —
+  `docs/logging.md`, `docs/webui.md`, `docs/architecture.md` §4.3/§8.4.
 
-Решение: `convert_responses_input_to_openai_messages` **схлопывает** текст
-всех `developer`-элементов в единое system-сообщение вместе с `instructions`
-(склейка через `\n\n`); роль `developer` в выходных messages не попадает.
-Схлопывается **только `developer`** — элементы `role="system"` не трогаются.
-Тесты — `tests/test_convert.py`
-(`TestConvertResponsesInputToOpenAiMessages`); доки — `docs/routing.md` §2.2,
-`docs/architecture.md` §5.5.
-
-### WIP: полнота канала `.err`
-
-**Не все 5xx попадали в `.err`.** Пять пробелов:
-
-1. **Отвязка от таблицы сессий.** Право на `.err`-блок определялось
-   непустым `session_key`, а `session_registry.register` возвращает `None`
-   при `ADAPTER_SESSIONS_TABLE=0` — ошибки входа (reject-502, disabled-404,
-   ранние 400) молча выпадали из канала. Введён флаг
-   `_req_ctx.err_eligible`: взводится в `_register_session` безусловно
-   (входной путь распознан). Счётчик «Ошибок» строки по-прежнему ведётся
-   только при живой таблице.
-2. **`GET /v1/models` 501** (список моделей не прогрет) не писал `.err` —
-   `do_GET` не заводил контекст запроса. Общие хелперы
-   `_err_ctx_begin`/`_err_ctx_end`; контекст заводится в `do_GET` и в
-   `do_POST`.
-3. **Неподдерживаемые HTTP-методы** (`PUT`/`DELETE`/`PATCH`/`OPTIONS`/
-   `TRACE`) отвечали HTML-`501` через базовый `send_error`, мимо `.err`.
-   Добавлен `_unsupported_method` — JSON-`501` + `.err`.
-4. **Необработанное исключение в `do_POST`** уходило в
-   `socketserver.handle_error`: клиент не получал ответа, `.err` молчал.
-   Верхнеуровневый `except`: если ответ не начат — JSON-`500` (и `.err`);
-   если начат — пометка `error_status=(200, …)` для `.err`; исключение не
-   пробрасывается.
-5. **Обрыв потока mid-stream** (после `_start_sse(200)`: passthrough,
-   `responses→completions`, `messages→completions`) писал только SSE-событие
-   `error`. Теперь — `.err`-блок с `final_status=200` и `err_body` с
-   префиксом `mid-stream abort:` + инкремент счётчика «Ошибок».
-
-Тесты — `tests/test_server.py` (`TestErrFileProtocol`); доки —
-`docs/logging.md`, `docs/webui.md`, `docs/architecture.md` §4.3/§8.4.
+**Следствия:** Responses-клиент (Codex CLI) может работать через бэкенд без
+нативного `/v1/responses` — полной конверсией `responses→completions`;
+Jinja-шаблоны Qwen3/llama.cpp больше не падают на роли `developer`. Канал
+`.err` покрывает весь ошибочный трафик распознанного входа: он **не** зависит
+от таблицы сессий (`ADAPTER_SESSIONS_TABLE=0` его не отключает) и включает
+`500`/`501`, а также обрывы потока mid-stream (`final_status=200`, пометка
+`mid-stream abort`). Версия v0.9.7 публикуется (снятие WIP). Рабочее дерево
+чистое — ветка готова к проверке и отправке в удалённый репозиторий.
 
 
 ## v0.9.6 — восемь улучшений: responses→responses + `/model`, перманентный `state.yaml`, валидация env/YAML, дробные тарифы, таблица сессий, связка Log/Parts, live-обновление таблицы сессий, краткий `__comment__`
