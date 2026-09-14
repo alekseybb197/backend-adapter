@@ -79,8 +79,10 @@ This file provides guidance to [CC] () when working with code in this repository
 переопределения Log/Parts/TARGET (наследуют общие настройки приложения, пока
 не заданы явно; живут в памяти процесса). Флаги логирования читаются через
 `session_log.logging_enabled`/`parts_enabled`; TARGET — через `routing.decide`
-при непустом `session_id`. `.err` пишется для **любой** ошибки, учтённой в
-таблице сессий. Детали — `docs/routing.md` §2.4, `docs/webui.md` §4,
+при непустом `session_id`. `.err` пишется для **любой** ошибки распознанного
+входного пути (`_req_ctx.err_eligible`) и **не** зависит от
+`ADAPTER_SESSIONS_TABLE` (v0.9.7); счётчик «Ошибок» строки ведётся только при
+живой таблице. Детали — `docs/routing.md` §2.4, `docs/webui.md` §4,
 `docs/logging.md`.
 
 **Персистентность runtime-пула (v0.9.6):** `state_store.py` хранит значения

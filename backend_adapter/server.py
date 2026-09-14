@@ -26,10 +26,15 @@ from .config import (
 )
 from .convert import (
     convert_messages_anthropic_to_openai,
+    convert_openai_completions_to_responses,
     convert_openai_to_anthropic,
+    convert_responses_input_to_openai_messages,
+    convert_responses_tool_choice_to_openai,
+    convert_responses_tools_to_openai,
     convert_tool_choice_anthropic_to_openai,
     convert_tools_anthropic_to_openai,
     detect_model_switch_command,
+    extract_responses_tool_results,
     extract_tool_results,
     force_store_false,
     normalize_messages_system_first,
@@ -49,6 +54,7 @@ from .streaming import (
     build_responses_control_response,
     emit_responses_control_message,
     relay_sse,
+    stream_openai_completions_to_responses,
     stream_openai_to_anthropic,
 )
 from .tracer import _lookup_tool_use_name, _lookup_tool_use_producer, _trace
@@ -174,7 +180,16 @@ def _register_session(
     responses): НЕ часть ключа, а сопровождение строки — колонка «Входной
     эндпоинт» и выбор TARGET-селекта строки в таблице Sessions. 400-ветки
     валидации тела передают его, хотя до ``routing.decide`` не дошли: путь
-    уже распознан (``routing.input_path_to_format``)."""
+    уже распознан (``routing.input_path_to_format``).
+
+    v0.9.7: помимо ключа строки, здесь же взводится ``_req_ctx.err_eligible``
+    — признак «входной путь распознан, ошибка этого запроса подлежит записи в
+    .err». Раньше право на .err-блок определялось непустым ``session_key``, и
+    при ``ADAPTER_SESSIONS_TABLE=0`` (учёт выключен → ``register`` вернул None)
+    ошибки входа молча выпадали из канала. Теперь канал .err от таблицы
+    сессий НЕ зависит: счётчик «Ошибок» живёт только при включённой таблице,
+    а .err пишется всегда."""
+    _req_ctx.err_eligible = True
     _req_ctx.session_key = session_registry.register(
         session_id, agent, model=model, backend=backend, route=route, input=input
     )
@@ -197,8 +212,9 @@ def _flush_pending_error() -> None:
     """Дописать .err-блок «ранней» ошибки запроса (v0.9.5, задача 7).
 
     Точка вызова — ``finally`` в do_POST: к этому моменту известен финальный
-    исход запроса. Если ответ клиенту был ошибкой (>= 400), учтённой в
-    таблице Sessions, но подробного блока инцидента бэкенда не писалось
+    исход запроса. Если ответ клиенту был ошибкой (>= 400) на распознанном
+    входном пути (``_req_ctx.err_eligible``), но подробного блока инцидента
+    бэкенда не писалось
     (``_write_backend_error``), — пишем обобщённый ERROR-блок
     (``write_session_error``). Так .err покрывает ВЕСЬ ошибочный трафик
     сессии, а не только инциденты бэкенда: 400 валидации тела (Invalid JSON /
@@ -223,6 +239,51 @@ def _flush_pending_error() -> None:
     )
 
 
+def _err_ctx_begin(headers, err_eligible: bool = True) -> tuple[str, str]:
+    """Инициализировать thread-local контекст запроса для .err-канала.
+    Возвращает (session_id, req_id).
+
+    v0.9.7: ``err_eligible`` по умолчанию True — для служебных обработчиков
+    (do_GET, неподдерживаемые HTTP-методы), которые по определению отвечают
+    ошибкой (501), нужной в .err. В do_POST флаг стартует False и взводится
+    в ``_register_session`` (после распознавания входного пути), чтобы 404
+    не-входного пути .err не писал."""
+    session_id = _extract_session_id(headers)
+    req_id = uuid.uuid4().hex[:12]
+    _req_ctx.req_id = req_id
+    _req_ctx.session_id = session_id
+    _req_ctx.session_key = None
+    _req_ctx.err_eligible = err_eligible
+    _req_ctx.error_status = None
+    _req_ctx.err_written = False
+    _req_ctx.response_started = False
+    _req_ctx.in_body = ""
+    _req_ctx.model = ""
+    return session_id, req_id
+
+
+def _err_ctx_end() -> None:
+    """Закрыть thread-local контекст запроса: дописать отложенный .err-блок
+    (``_flush_pending_error``) и убрать атрибуты, иначе они «залипнут» на
+    следующий запрос в этом же потоке (ThreadingHTTPServer переиспользует
+    потоки). Парная к ``_err_ctx_begin``; в do_POST тот же финал выполняется
+    в его ``finally`` (там сначала фиксируется usage-учёт)."""
+    _flush_pending_error()
+    for attr in (
+        "req_id",
+        "session_id",
+        "session_key",
+        "err_eligible",
+        "error_status",
+        "err_written",
+        "response_started",
+        "in_body",
+        "model",
+    ):
+        if hasattr(_req_ctx, attr):
+            delattr(_req_ctx, attr)
+
+
 class Adapter(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         rid = getattr(_req_ctx, "req_id", "-")
@@ -241,13 +302,20 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         (``_req_ctx.error_status``) — .err-блок по ней допишет
         ``_flush_pending_error`` в finally. Отложенность нужна, чтобы
         подробный блок инцидента бэкенда (пишется после отправки ответа) не
-        дублировался обобщённым. Запросы без учёта (ключ None) .err не
-        трогают, как и счётчик."""
+        дублировался обобщённым.
+
+        v0.9.7: право на .err-блок определяется ``_req_ctx.err_eligible``
+        (входной путь распознан / служебный обработчик), а НЕ непустым
+        ``session_key`` — так ошибки пишутся в .err и при выключенной таблице
+        сессий (``ADAPTER_SESSIONS_TABLE=0``). Счётчик строки по-прежнему
+        инкрементится только при живом ключе (``record_error``)."""
         if status < 400:
             return
         key = getattr(_req_ctx, "session_key", None)
         session_registry.record_error(key)
-        if key is not None and getattr(_req_ctx, "error_status", None) is None:
+        if getattr(_req_ctx, "err_eligible", False) and (
+            getattr(_req_ctx, "error_status", None) is None
+        ):
             _req_ctx.error_status = (status, message)
 
     def _send_json(self, status, data):
@@ -257,6 +325,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         if isinstance(data, dict):
             message = str(data.get("error", "") or "")
         self._note_session_error(status, message)
+        _req_ctx.response_started = True
         body = json.dumps(data, ensure_ascii=False).encode()
         try:
             self.send_response(status)
@@ -280,6 +349,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         и тело — как пришли (passthrough E→E, non-stream). Никакой
         пере-сериализации: байты body пишутся как есть."""
         self._note_session_error(status)
+        _req_ctx.response_started = True
         try:
             self.send_response(status)
             if content_type:
@@ -327,6 +397,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
+        # Ответ уже начат: верхнеуровневый except в do_POST не сможет отдать
+        # JSON-error статус (см. _req_ctx.response_started).
+        _req_ctx.response_started = True
 
     def do_HEAD(self):
         # Кто-то (health-check / сетевой пробник) стучится HEAD-запросами на
@@ -339,32 +412,77 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/v1/models":
-            # Возвращаем список моделей, полученный от бэкенда.
-            # Формат — OpenAI-совместимый: {object: "list", data: [...]}.
-            if not _AVAILABLE_MODELS:
+        # Контекст .err-канала заводим на весь обработчик (v0.9.7): /v1/models
+        # отвечает 501, пока список моделей не прогрет, — эту ошибку нужно
+        # видеть в .err. Прочие GET-пути (health-check / 404) .err не пишут,
+        # поэтому err_eligible стартует False и взводится только для /v1/models.
+        _err_ctx_begin(self.headers, err_eligible=False)
+        try:
+            if self.path == "/v1/models":
+                # Возвращаем список моделей, полученный от бэкенда.
+                # Формат — [OI]-совместимый: {object: "list", data: [...]}.
+                _req_ctx.err_eligible = True
+                if not _AVAILABLE_MODELS:
+                    self._send_json(
+                        501,
+                        {
+                            "error": "Model list not yet available. "
+                            "Backend models have not been probed successfully yet."
+                        },
+                    )
+                    return
                 self._send_json(
-                    501,
+                    200,
                     {
-                        "error": "Model list not yet available. "
-                        "Backend models have not been probed successfully yet."
+                        "object": "list",
+                        "data": list(_AVAILABLE_MODELS.values()),
                     },
                 )
-                return
-            self._send_json(
-                200,
-                {
-                    "object": "list",
-                    "data": list(_AVAILABLE_MODELS.values()),
-                },
-            )
-        else:
-            self._send_json(404, {"error": f"Unknown GET path: {self.path}"})
+            else:
+                self._send_json(404, {"error": f"Unknown GET path: {self.path}"})
+        finally:
+            _err_ctx_end()
+
+    def _unsupported_method(self):
+        """Неподдерживаемый HTTP-метод (PUT/DELETE/PATCH/...): базовый
+        BaseHTTPRequestHandler отвечает на них 501 через send_error()
+        (HTML-тело, мимо _send_json) — такая ошибка в .err не попадала.
+        Отвечаем JSON-ом и проводим её через .err-канал (v0.9.7). Контекст
+        запроса заводим явно — do_POST здесь не вызывается."""
+        _err_ctx_begin(self.headers)
+        try:
+            self._send_json(501, {"error": f"Unsupported method: {self.command}"})
+        finally:
+            _err_ctx_end()
+
+    # Не-POST/GET/HEAD методы уходят в один обработчик (JSON-501 + .err).
+    def do_PUT(self):
+        self._unsupported_method()
+
+    def do_DELETE(self):
+        self._unsupported_method()
+
+    def do_PATCH(self):
+        self._unsupported_method()
+
+    def do_OPTIONS(self):
+        self._unsupported_method()
+
+    def do_TRACE(self):
+        self._unsupported_method()
 
     def do_POST(self):
         req_t0 = time.time()
-        session_id = _extract_session_id(self.headers)
-        req_id = uuid.uuid4().hex[:12]
+        # Контекст .err-канала запроса (v0.9.7) заводится общим хелпером:
+        # error_status — первая ошибка ответа (status, message) для
+        # обобщённого блока, err_written — «подробный блок инцидента бэкенда
+        # уже написан». Сброс на КАЖДОМ запросе обязателен: thread-local
+        # переживает запрос в пределах потока, и «залипшие» значения исказили
+        # бы следующий запрос (пропущенный или лишний .err-блок).
+        # err_eligible стартует False — право на .err даёт распознанный
+        # входной путь (взводится в _register_session); in_body/model — тело
+        # и модель запроса для «ранних» ошибок (заполняются по ходу разбора).
+        session_id, req_id = _err_ctx_begin(self.headers, err_eligible=False)
         # Имя агента для таблицы сессий WEBUI (страница "/sessions", v0.9.5):
         # User-Agent до
         # первого пробела — [CC] CLI шлёт «claude-cli/2.1.236 (external, cli)»,
@@ -381,26 +499,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         usage_tokens = {"input": 0, "output": 0}
         usage_active = False
 
-        _req_ctx.req_id = req_id
-        _req_ctx.session_id = session_id
         # Ключ строки таблицы сессий (страница "/sessions") ставится
-        # _register_session —
-        # на входном пути (после распознавания пути / после routing.decide).
-        # None здесь — «учёта нет»: _note_session_error тогда no-op.
-        _req_ctx.session_key = None
-        # Состояние .err-канала запроса (v0.9.5, задача 7): error_status —
-        # первая ошибка ответа (status, message) для обобщённого блока,
-        # err_written — «подробный блок инцидента бэкенда уже написан».
-        # Сброс на КАЖДОМ запросе обязателен: thread-local переживает запрос
-        # в пределах потока, и «залипшие» значения исказили бы следующий
-        # запрос (пропущенный или лишний .err-блок).
-        _req_ctx.error_status = None
-        _req_ctx.err_written = False
-        # Тело и модель запроса — для .err-блока «ранних» ошибок (v0.9.5):
-        # заполняются по мере разбора запроса (тело — сразу после чтения,
-        # модель — после валидации).
-        _req_ctx.in_body = ""
-        _req_ctx.model = ""
+        # _register_session — на входном пути (после распознавания пути /
+        # после routing.decide). None — «учёта нет»: счётчик строки не
+        # инкрементится, но .err-канал от ключа не зависит (v0.9.7).
         try:
             # Обновляем глобальный fallback для _d(), чтобы человекочитаемый
             # лог тоже писался в правильный сессионный файл.
@@ -455,21 +557,26 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 return
 
             # === /model <имя> — служебная команда переключения модели (v0.9.6) ===
-            # Работает ТОЛЬКО когда TARGET входа responses == "responses" (см.
-            # routing.IMPLEMENTED_CONVERSIONS[("responses","responses")]) — т.е.
-            # запрос идёт через внутренний конвертор ответов, а не
-            # TARGET=passthrough (там тело уходит дословно, без вмешательств, по
-            # определению). Нативное /model самого Codex CLI на кастомном
-            # model_provider ненадёжно (баги пикера моделей и клонирования
-            # контекста провайдера при смене модели без рестарта сессии — см.
-            # документацию проекта), поэтому адаптер держит собственный канал:
-            # пользователь пишет "/model <имя>" обычным сообщением,
-            # detect_model_switch_command перехватывает его ЗДЕСЬ, до похода к
-            # бэкенду; выбор сохраняется в session_settings и действует для всех
-            # последующих запросов сессии, пока не будет переключён снова.
-            if (
-                inp_fmt == "responses"
-                and routing.target_for_input(inp_fmt, session_id) == "responses"
+            # Работает для ЛЮБОГО TARGET входа responses, который идёт через
+            # конвертор, а не дословно — сейчас это "responses" (внутренний
+            # конвертор, см. IMPLEMENTED_CONVERSIONS[("responses","responses")])
+            # и "completions" (полная кросс-форматная конвертация, см.
+            # IMPLEMENTED_CONVERSIONS[("responses","completions")], v0.9.7); НЕ
+            # срабатывает при TARGET=passthrough (там тело уходит дословно,
+            # без вмешательств, по определению). Нативное /model самого Codex
+            # CLI на кастомном model_provider ненадёжно (баги пикера моделей и
+            # клонирования контекста провайдера при смене модели без рестарта
+            # сессии — см. документацию проекта), поэтому адаптер держит
+            # собственный канал: пользователь пишет "/model <имя>" обычным
+            # сообщением, detect_model_switch_command перехватывает его ЗДЕСЬ,
+            # до похода к бэкенду; выбор сохраняется в session_settings и
+            # действует для всех последующих запросов сессии, пока не будет
+            # переключён снова. Ответ-подтверждение — всегда в формате
+            # Responses (клиент говорит с адаптером через /v1/responses
+            # независимо от TARGET-а, которым обслуживается сам обмен).
+            if inp_fmt == "responses" and routing.target_for_input(inp_fmt, session_id) in (
+                "responses",
+                "completions",
             ):
                 switch_to = detect_model_switch_command(anthropic_req.get("input") or [])
                 if switch_to:
@@ -925,6 +1032,22 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                     failed_mid_stream=True,
                                     passthrough=is_passthrough,
                                 )
+                                # Обрыв потока — инцидент (v0.9.7): заголовки 200
+                                # уже ушли клиенту, но ответ оборван. Пишем .err
+                                # (final_status=200 + пометка mid-stream abort) и
+                                # инкрементим счётчик «Ошибок» строки сессии.
+                                _write_backend_error(
+                                    session_id,
+                                    req_id,
+                                    final_status=200,
+                                    backend_url=backend_url,
+                                    model=model,
+                                    out_body=out_body,
+                                    err_body=f"mid-stream abort: {type(e).__name__}: {e}",
+                                )
+                                session_registry.record_error(
+                                    getattr(_req_ctx, "session_key", None)
+                                )
                                 return
                             if attempt < ADAPTER_RETRY:
                                 delay = 2**attempt
@@ -1186,6 +1309,492 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         out_body=out_body,
                         err_body=msg,
                     )
+                return
+
+            # === responses → completions (v0.9.7) ===
+            # Полная кросс-форматная конвертация: TARGET=completions для входа
+            # responses (routing.IMPLEMENTED_CONVERSIONS[("responses",
+            # "completions")]). До этой точки дошли, только если verbatim=False
+            # (иначе выше уже был return) — при текущем реестре это означает
+            # РОВНО inp_fmt=="responses" (единственная незеркальная пара для
+            # входа responses, кроме уже отработавшего self-пары выше).
+            # messages→completions ниже — отдельная, НЕ общая с этой веткой
+            # реализация (см. её собственный комментарий): дублирование
+            # структуры retry-цикла осознанное и следует уже принятому в
+            # проекте разделению (у passthrough-стрима и messages→completions-
+            # стрима тоже два независимых цикла, а не общий helper).
+            if inp_fmt == "responses":
+                assert out_fmt_val == "completions", out_fmt_val
+
+                r_stream_requested = bool(anthropic_req.get("stream", False))
+                if r_stream_requested and not config.ADAPTER_STREAMING_ENABLE:
+                    _dr(
+                        req_id,
+                        "[STREAM_DISABLED] Клиент просил stream=true, но "
+                        "ADAPTER_STREAMING_ENABLE=0 -> forcing backend_stream=False",
+                    )
+                    r_stream_requested = False
+
+                r_instructions = anthropic_req.get("instructions")
+                r_input = anthropic_req.get("input") or []
+                r_messages = convert_responses_input_to_openai_messages(r_input, r_instructions)
+
+                # Трассировка tool_result — ДО отправки бэкенду, наблюдение за
+                # тем, что харнесс уже прислал в этом запросе (см. docstring
+                # extract_responses_tool_results — без кросс-запросной
+                # привязки к породившему tool-call, в отличие от Anthropic-пути).
+                for tr in extract_responses_tool_results(r_input):
+                    _dr(
+                        req_id,
+                        f"[TOOL_RESULT] call_id={tr['call_id']} len={len(str(tr['content']))}",
+                    )
+                    _trace(
+                        session_id,
+                        req_id,
+                        "tool_result",
+                        tool_use_id=tr["call_id"],
+                        content=tr["content"],
+                    )
+
+                r_openai_body: dict = {
+                    "model": model,
+                    "messages": r_messages,
+                    "stream": r_stream_requested,
+                }
+                if r_stream_requested and config.ADAPTER_STREAM_INCLUDE_USAGE:
+                    r_openai_body["stream_options"] = {"include_usage": True}
+                if anthropic_req.get("tools"):
+                    r_openai_body["tools"] = convert_responses_tools_to_openai(
+                        anthropic_req["tools"]
+                    )
+                    _dr(req_id, f"[TOOLS] Passed {len(r_openai_body['tools'])} tools")
+                if anthropic_req.get("tool_choice"):
+                    r_openai_body["tool_choice"] = convert_responses_tool_choice_to_openai(
+                        anthropic_req["tool_choice"]
+                    )
+                    _dr(req_id, f"[TOOL_CHOICE] {r_openai_body['tool_choice']}")
+
+                # Тот же инвариант конвертации, что и у messages→completions
+                # ниже: часть бэкендов (vLLM-шаблон чата) требует system
+                # первым сообщением. Здесь он обеспечен
+                # normalize_messages_system_first ВНУТРИ
+                # convert_responses_input_to_openai_messages — проверка тут
+                # только диагностическая, как и в messages→completions.
+                r_system_ok = bool(r_messages) and r_messages[0]["role"] == "system"
+                _trace(
+                    session_id,
+                    req_id,
+                    "adapter_invariant_check",
+                    check="system_message_first",
+                    passed=r_system_ok,
+                    first_role=(r_messages[0]["role"] if r_messages else None),
+                )
+                _dr(
+                    req_id,
+                    "[CHECK] First message is system, OK"
+                    if r_system_ok
+                    else f"[WARN] First message is NOT system: "
+                    f"{r_messages[0]['role'] if r_messages else 'empty'}",
+                )
+
+                _dr(req_id, f"[OPENAI_BODY] {json.dumps(r_openai_body, ensure_ascii=False)}")
+                if config.ADAPTER_DEBUG_PARTS:
+                    write_debug_json(session_id, "OPENAI_BODY", r_openai_body)
+
+                r_backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
+                r_backend_key = backend_cfg["key"]
+                r_out_body = json.dumps(r_openai_body, ensure_ascii=False).encode()
+                r_req = urllib.request.Request(
+                    r_backend_url,
+                    data=r_out_body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {r_backend_key}",
+                        "Connection": "keep-alive",
+                    },
+                    method="POST",
+                )
+
+                if r_stream_requested:
+                    r_last_error: tuple[int | str, str] | None = None
+                    r_started = False
+                    for attempt in range(1, ADAPTER_RETRY + 1):
+                        try:
+                            _dr(
+                                req_id,
+                                f"[FETCH] (responses->completions stream) Attempt "
+                                f"{attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_attempt",
+                                attempt=attempt,
+                                timeout=ADAPTER_TIMEOUT,
+                                streaming=True,
+                            )
+                            t0 = time.time()
+                            resp = urllib.request.urlopen(
+                                r_req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT
+                            )
+                            _dr(
+                                req_id,
+                                f"[FETCH] Заголовки получены за {time.time() - t0:.1f}s, "
+                                f"status={resp.status}",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=True,
+                                status=resp.status,
+                                elapsed_ms=int((time.time() - t0) * 1000),
+                            )
+                            self._start_sse(200)
+                            r_started = True
+                            r_approx_prompt_chars = len(json.dumps(r_messages, ensure_ascii=False))
+                            _finish_reason, r_usage = stream_openai_completions_to_responses(
+                                resp,
+                                self.wfile,
+                                model,
+                                session_id,
+                                req_id,
+                                approx_prompt_chars=r_approx_prompt_chars,
+                                out_body=r_out_body,
+                                backend_url=r_backend_url,
+                            )
+                            if r_usage.get("prompt_tokens") or r_usage.get("completion_tokens"):
+                                usage_tokens["input"] += int(r_usage.get("prompt_tokens") or 0)
+                                usage_tokens["output"] += int(r_usage.get("completion_tokens") or 0)
+                            _dr(req_id, f"[OK] Stream done, finish_reason={_finish_reason}")
+                            _trace(
+                                session_id,
+                                req_id,
+                                "request_end",
+                                http_status=200,
+                                retries_used=attempt - 1,
+                                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                streamed=True,
+                            )
+                            return
+
+                        except urllib.error.HTTPError as e:
+                            err_raw = e.read()
+                            err = err_raw.decode()
+                            _dr(
+                                req_id,
+                                f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
+                            )
+                            error_value = (
+                                err[:500]
+                                if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                                else redact(err[:500])
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status=e.code,
+                                error=error_value,
+                            )
+                            r_last_error = (e.code, err)
+                            if e.code not in (429, 502, 503, 504):
+                                break
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                                time.sleep(delay)
+
+                        except TimeoutError as e:
+                            _dr(
+                                req_id,
+                                f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after "
+                                f"{ADAPTER_TIMEOUT}s",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status="timeout",
+                                error=str(e),
+                            )
+                            r_last_error = ("timeout", str(e))
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s before next attempt...")
+                                time.sleep(delay)
+
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                            _dr(
+                                req_id,
+                                f"[CLIENT_GONE] {type(e).__name__} while streaming: client disconnected",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "request_end",
+                                http_status=None,
+                                retries_used=attempt - 1,
+                                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                streamed=True,
+                                client_gone=True,
+                            )
+                            return
+
+                        except Exception as e:
+                            _dr(
+                                req_id,
+                                f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status="error",
+                                error=f"{type(e).__name__}: {e}",
+                            )
+                            r_last_error = ("error", str(e))
+                            if r_started:
+                                with contextlib.suppress(Exception):
+                                    _write_sse_error_native(
+                                        self.wfile, inp_fmt, f"{type(e).__name__}: {e}"
+                                    )
+                                _trace(
+                                    session_id,
+                                    req_id,
+                                    "request_end",
+                                    http_status=200,
+                                    retries_used=attempt - 1,
+                                    total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                    streamed=True,
+                                    failed_mid_stream=True,
+                                )
+                                # Обрыв потока — инцидент (v0.9.7): см.
+                                # аналогичную ветку passthrough.
+                                _write_backend_error(
+                                    session_id,
+                                    req_id,
+                                    final_status=200,
+                                    backend_url=r_backend_url,
+                                    model=model,
+                                    out_body=r_out_body,
+                                    err_body=f"mid-stream abort: {type(e).__name__}: {e}",
+                                )
+                                session_registry.record_error(
+                                    getattr(_req_ctx, "session_key", None)
+                                )
+                                return
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                                time.sleep(delay)
+
+                    if r_last_error and not r_started:
+                        code, msg = r_last_error
+                        if code == "timeout":
+                            self._send_json(
+                                504,
+                                {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"},
+                            )
+                            final_status = 504
+                        elif isinstance(code, int):
+                            self._send_json(code, {"error": f"Backend error: {msg}"})
+                            final_status = code
+                        else:
+                            self._send_json(
+                                502,
+                                {
+                                    "error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"
+                                },
+                            )
+                            final_status = 502
+                        _trace(
+                            session_id,
+                            req_id,
+                            "request_end",
+                            http_status=final_status,
+                            retries_used=ADAPTER_RETRY,
+                            total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                            failed=True,
+                            streamed=True,
+                        )
+                        _write_backend_error(
+                            session_id,
+                            req_id,
+                            final_status=final_status,
+                            backend_url=r_backend_url,
+                            model=model,
+                            out_body=r_out_body,
+                            err_body=msg,
+                        )
+                    return
+
+                # === Нестриминговая ветка responses→completions ===
+                r_last_error = None
+                for attempt in range(1, ADAPTER_RETRY + 1):
+                    try:
+                        _dr(
+                            req_id,
+                            f"[FETCH] Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_attempt",
+                            attempt=attempt,
+                            timeout=ADAPTER_TIMEOUT,
+                        )
+                        t0 = time.time()
+                        resp = urllib.request.urlopen(
+                            r_req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT
+                        )
+                        raw = resp.read()
+                        elapsed = time.time() - t0
+                        _dr(
+                            req_id,
+                            f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes",
+                        )
+                        if config.ADAPTER_DEBUG_PARTS:
+                            write_debug_json(session_id, "FETCH_RAW", raw.decode())
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=True,
+                            status=resp.status,
+                            elapsed_ms=int(elapsed * 1000),
+                        )
+                        o = json.loads(raw)
+                        responses_resp = convert_openai_completions_to_responses(o, model)
+                        u = o.get("usage") or {}
+                        if u.get("prompt_tokens") or u.get("completion_tokens"):
+                            usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
+                            usage_tokens["output"] += int(u.get("completion_tokens") or 0)
+                        _dr(req_id, f"[RESPONSE] {json.dumps(responses_resp, ensure_ascii=False)}")
+                        if config.ADAPTER_DEBUG_PARTS:
+                            write_debug_json(session_id, "RESPONSE", responses_resp)
+                        self._send_json(200, responses_resp)
+                        _dr(req_id, "[OK] Done")
+                        _trace(
+                            session_id,
+                            req_id,
+                            "request_end",
+                            http_status=200,
+                            retries_used=attempt - 1,
+                            total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                            streamed=False,
+                        )
+                        return
+                    except urllib.error.HTTPError as e:
+                        err_raw = e.read()
+                        err = err_raw.decode()
+                        _dr(
+                            req_id,
+                            f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
+                        )
+                        error_value = (
+                            err[:500]
+                            if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                            else redact(err[:500])
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status=e.code,
+                            error=error_value,
+                        )
+                        r_last_error = (e.code, err)
+                        if e.code not in (429, 502, 503, 504):
+                            break
+                        if attempt < ADAPTER_RETRY:
+                            time.sleep(2**attempt)
+                    except TimeoutError as e:
+                        _dr(req_id, f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out")
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status="timeout",
+                            error=str(e),
+                        )
+                        r_last_error = ("timeout", str(e))
+                        if attempt < ADAPTER_RETRY:
+                            time.sleep(2**attempt)
+                    except Exception as e:
+                        _dr(
+                            req_id,
+                            f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status="error",
+                            error=f"{type(e).__name__}: {e}",
+                        )
+                        r_last_error = ("error", str(e))
+                        if attempt < ADAPTER_RETRY:
+                            time.sleep(2**attempt)
+
+                # Все попытки исчерпаны — как соседние ветки: 504/код/502.
+                # r_last_error может остаться None при ADAPTER_RETRY_COUNT=0
+                # (цикл не выполнился) — fallback 502, как в convert-ветке ниже.
+                if r_last_error:
+                    code, msg = r_last_error
+                    if code == "timeout":
+                        self._send_json(
+                            504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"}
+                        )
+                        final_status = 504
+                    elif isinstance(code, int):
+                        self._send_json(code, {"error": f"Backend error: {msg}"})
+                        final_status = code
+                    else:
+                        self._send_json(
+                            502,
+                            {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"},
+                        )
+                        final_status = 502
+                else:
+                    msg = f"Backend unavailable after {ADAPTER_RETRY} attempts"
+                    self._send_json(
+                        502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"}
+                    )
+                    final_status = 502
+                _trace(
+                    session_id,
+                    req_id,
+                    "request_end",
+                    http_status=final_status,
+                    retries_used=ADAPTER_RETRY,
+                    total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                    failed=True,
+                    streamed=False,
+                )
+                _write_backend_error(
+                    session_id,
+                    req_id,
+                    final_status=final_status,
+                    backend_url=r_backend_url,
+                    model=model,
+                    out_body=r_out_body,
+                    err_body=msg,
+                )
                 return
 
             max_tokens = anthropic_req.get("max_tokens", 4096)
@@ -1597,6 +2206,18 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 streamed=True,
                                 failed_mid_stream=True,
                             )
+                            # Обрыв потока — инцидент (v0.9.7): см.
+                            # аналогичную ветку passthrough.
+                            _write_backend_error(
+                                session_id,
+                                req_id,
+                                final_status=200,
+                                backend_url=backend_url,
+                                model=model,
+                                out_body=out_body,
+                                err_body=f"mid-stream abort: {type(e).__name__}: {e}",
+                            )
+                            session_registry.record_error(getattr(_req_ctx, "session_key", None))
                             return
                         if attempt < ADAPTER_RETRY:
                             delay = 2**attempt
@@ -1852,6 +2473,32 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 out_body=out_body,
                 err_body=msg,
             )
+        except Exception as e:
+            # Верхнеуровневый перехват (v0.9.7): раньше исключение из тела
+            # do_POST уходило в socketserver.handle_error — клиент не получал
+            # ответа вовсе, а .err-канал молчал. Теперь отвечаем 500 (если
+            # ответ ещё не начат) и всегда фиксируем инцидент.
+            _dr(req_id, f"[FAIL] Unhandled {type(e).__name__}: {e}")
+            if not getattr(_req_ctx, "response_started", False):
+                # Ответ не начат — можно отдать честный 500; это же выставит
+                # error_status, и finally допишет обобщённый .err-блок.
+                self._send_json(500, {"error": f"Internal adapter error: {type(e).__name__}: {e}"})
+            else:
+                # Стрим уже начат (заголовки ушли): статус клиенту не
+                # поменять. Инцидент всё равно фиксируем в .err — помечаем
+                # финальный статус 200 с текстом обрыва.
+                _req_ctx.error_status = (
+                    200,
+                    f"unhandled mid-stream error: {type(e).__name__}: {e}",
+                )
+            _trace(
+                session_id,
+                req_id,
+                "request_end",
+                failed=True,
+                error=f"{type(e).__name__}: {e}",
+                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+            )
         finally:
             # Фиксация учёта usage (таблица WEBUI «Использованные модели»):
             # единственная точка записи на любой исход запроса (успех, ошибка,
@@ -1861,15 +2508,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 model_usage.add_usage_tokens(
                     client_model, usage_tokens["input"], usage_tokens["output"]
                 )
-            # .err-блок «ранней» ошибки запроса (v0.9.5, задача 7) — здесь, а
-            # не в момент отправки ответа: к этому моменту точно известно,
-            # писал ли подробный блок инцидента бэкенда (err_written). См.
-            # _flush_pending_error.
-            _flush_pending_error()
-            delattr(_req_ctx, "req_id")
-            delattr(_req_ctx, "session_id")
-            delattr(_req_ctx, "session_key")
-            delattr(_req_ctx, "error_status")
-            delattr(_req_ctx, "err_written")
-            delattr(_req_ctx, "in_body")
-            delattr(_req_ctx, "model")
+            # .err-блок «ранней» ошибки запроса (v0.9.5, задача 7) и очистка
+            # thread-local — общий финал (v0.9.7), см. _flush_pending_error /
+            # _err_ctx_end.
+            _err_ctx_end()

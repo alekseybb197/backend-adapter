@@ -137,8 +137,8 @@ module on one level, see ADR 2026-09-01).
 │   routing.decide(fmt, backend_name) → action                    │
 │     решения по TARGET + кэшу endpoint_support (сети нет)        │
 │   ├─ disabled (TARGET=none) / reject                            │
-│   │    404 / 400 / 502 JSON  (usage и .err не пишутся —         │
-│   │    запрос до бэкенда не дошёл)                              │
+│   │    404 / 400 / 502 JSON  (usage не пишется — запрос до      │
+│   │    бэкенда не дошёл; .err-блок пишется, v0.9.5)             │
 │   ├─ passthrough E→E (TARGET=passthrough, или convert           │
 │   │    messages→messages — сортировка system)                   │
 │   │    body["model"] = resolved_model;                          │
@@ -256,7 +256,8 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 в запросе нет — None трактуется как «нет данных», оптимистично): action ∈
 {passthrough (TARGET=passthrough: тело на эндпойнт
 входного формата дословно, бэкенд его поддерживает), convert (реализованные
-пары — сегодня `messages→completions` и `messages→messages`), reject
+пары — `messages→completions`, `messages→messages`, `responses→responses`,
+`responses→completions`), reject
 (нереализованная конверсия → 400 «conversion … is not implemented»; маршрут
 при подтверждённо не поддерживающем бэкенде → 502), disabled (TARGET=none →
 404)}. Реестр реализованных пар — `IMPLEMENTED_CONVERSIONS` в routing.py.
@@ -295,11 +296,16 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
      см. §6.10)
    - disabled/reject → JSON-ответ (404/400/502), return (запрос до бэкенда не
      дошёл — но `.err`-блок пишется, v0.9.5, см. §8.4)
-9. Only messages→completions conversion: trace tool_results from incoming messages
-   (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
-   tools, tool_choice, system)
+9. Convert-ветки (out_fmt != inp_fmt):
+   - messages→completions: trace tool_results from incoming messages
+     (causality: tool_use_id → parent req_id); convert Anthropic → [OI] (messages,
+     tools, tool_choice, system)
+   - responses→completions (v0.9.7): convert Responses input/instructions/tools →
+     [OI] messages/tools (convert_responses_input_to_openai_messages и др.);
+     инвариант «system первым» обеспечивает normalize_messages_system_first внутри
+     конвертера
    Дословная ветка (out_fmt == inp_fmt): TARGET=passthrough ИЛИ convert
-   messages→messages. Тело как пришло — мутация body["model"] = resolved_model
+   messages→messages / responses→responses. Тело как пришло — мутация body["model"] = resolved_model
    (и stream:false при ADAPTER_STREAMING_ENABLE=0); конвертеры не участвуют,
    поля запроса не валидируются (бэкенд ответит 400 сам). Исключение v0.9.2 —
    только convert messages→messages: все role=system переносятся в начало
@@ -316,6 +322,9 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
    ├─ Stream branch:
    │  ├─ conversion: urllib urlopen → _start_sse() → stream_openai_to_anthropic()
    │  │   └─ Chunk-by-chunk SSE conversion, write Anthropic SSE events to wfile
+   │  ├─ responses→completions (v0.9.7): urllib urlopen → _start_sse() →
+   │  │   stream_openai_completions_to_responses()
+   │  │   └─ Chunk-by-chunk SSE conversion completions → Responses events
    │  └─ passthrough E→E: urllib urlopen → _start_sse() → relay_sse()
    │      └─ Вербатим-релей байтов бэкенда клиенту (без пере-фрейминга); по пути —
    │         скан SSE-строк на usage (см. §5.4); конец потока — по EOF бэкенда
@@ -323,6 +332,8 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
    └─ Non-stream branch:
       ├─ conversion: urllib urlopen → read full → convert_openai_to_anthropic()
       │   └─ Single JSON response → _send_json()
+      ├─ responses→completions (v0.9.7): urllib urlopen → read full →
+      │   convert_openai_completions_to_responses() → _send_json()
       └─ passthrough E→E: тело ответа бэкенда дословно → _send_raw(200, ...)
 13. Usage tokens из ответа по формату выхода: completions — usage.prompt_tokens/
     completion_tokens; responses/messages — usage.input_tokens/output_tokens
@@ -342,7 +353,10 @@ Returns `_AVAILABLE_MODELS` in OpenAI `list` format:
 {"object": "list", "data": [<model dict>, ...]}
 ```
 
-Returns 501 if models haven't been probed yet.
+Returns 501 if models haven't been probed yet (the 501 is recorded in the `.err`
+channel, v0.9.7 — see §8.4). Unsupported HTTP methods (PUT/DELETE/PATCH/OPTIONS/
+TRACE) are answered JSON-501 via `_unsupported_method` (also `.err`), instead of
+the base class's HTML `send_error`.
 
 ---
 
@@ -415,6 +429,33 @@ CLIENT_GONE или SSE-событие ошибки. Сбой бэкенда **п
 message}`; completions: `{"error": {...}}`; messages: антропик-обвязка
 `{type: "error", error: {...}}`) — клиент умеет разбирать его в своём
 протоколе; запись глотает исключения (клиент мог уже отвалиться).
+
+### 5.5 Responses ↔ Completions (`convert.py`/`streaming.py`, v0.9.7)
+
+Полная кросс-форматная конверсия пары `responses→completions`
+(`ADAPTER_RESPONSES_TARGET=completions`) — отдельная реализация, не общая с
+`messages→completions` (иная входная форма: `input`-массив Responses).
+
+| Responses (запрос) | Completions |
+|---|---|
+| `instructions` | `messages[0]` (system) |
+| `input[].type = "message"` | `{role, content}` (текст всех блоков); `role=developer` **схлопывается** в единое system-сообщение вместе с `instructions` |
+| `input[].type = "function_call"` | assistant с `tool_calls[{id: call_id, function:{name, arguments}}]` |
+| `input[].type = "function_call_output"` | `{role: "tool", tool_call_id: call_id, content: output}` |
+| `input[].type = "reasoning"` | пропускается (нет эквивалента) |
+| `tools[]` (плоская схема) | `tools[]` (`{type, function:{name, description, parameters}}`) |
+| `tool_choice` | `tool_choice` (выбор функции — вложенно) |
+
+К собранным `messages` применяется `normalize_messages_system_first` («system
+первым»). Ответ бэкенда пересобирается в Responses-объект
+(`convert_openai_completions_to_responses`: `content`→`output_text`-item,
+`tool_calls`→`function_call`-items, `usage.prompt/completion_tokens`→
+`input/output_tokens`); стрим — `stream_openai_completions_to_responses`
+(события `response.created` → `output_item.added`/`content_part.added` →
+`output_text.delta`/`function_call_arguments.delta` → `…done` →
+`response.completed`). call_id не требует кросс-запросного реестра: клиент
+эхует его сам через `function_call_output`. Команда `/model` поддерживается
+(см. `docs/routing.md` §2.5).
 
 ---
 
@@ -1053,6 +1094,12 @@ Long base64/hex strings may also be matched.
   `.jsonl` — trace), plus `session-*.parts/` dump directories and the
   unconditional `session-*.err` incident/WARN/error channel — all flat in
   `ADAPTER_DEBUG_LOGPATH`
+- **`.err` is independent of `ADAPTER_SESSIONS_TABLE` (v0.9.7):** whether a
+  request's error is written is decided by `_req_ctx.err_eligible` (input path
+  recognised), not by a live sessions-table row. Covered: backend incidents
+  (4xx/5xx after retries), adapter-level errors (400/404/502 rejects, 501 model
+  list), unhandled `do_POST` exceptions (500), unsupported methods (501) and
+  mid-stream aborts (`final_status=200`, `mid-stream abort: …`)
 - Timestamp frozen on first use per session (all traffic → same file)
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
 - The log directory `ADAPTER_DEBUG_LOGPATH` is created on demand when set
@@ -1233,5 +1280,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.6** (see `backend-adapter.py`).
+Current: **v0.9.7** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

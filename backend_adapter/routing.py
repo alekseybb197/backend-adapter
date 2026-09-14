@@ -62,7 +62,17 @@ INPUT_PATHS: dict[Format, str] = {
 #       ненадёжность нативного /model у Codex CLI на кастомных
 #       model_provider (см. документацию проекта). В отличие от
 #       messages→messages здесь нет сортировки полей — сама структура
-#       input не меняется, кроме этих двух точечных вмешательств.
+#       input не меняется, кроме этих двух точечных вмешательств;
+#   responses → completions (v0.9.7) — полный кросс-форматный конвертер,
+#       аналог messages→completions по роли (запрос
+#       convert_responses_input_to_openai_messages, ответ
+#       convert_openai_completions_to_responses, стрим
+#       stream_openai_completions_to_responses — convert.py/streaming.py).
+#       Как и messages→messages, применяет normalize_messages_system_first
+#       («сортировка полей» — system первым) к собранным messages. Как и
+#       responses→responses, поддерживает "/model <имя>"
+#       (detect_model_switch_command) — служебная команда перехватывается
+#       ДО конвертации, реальный бэкенд не вызывается.
 # Прочие пары (completions→messages, messages→responses, …, а также
 # self-пара completions→completions) не реализованы: для дословной передачи
 # таких входов используйте TARGET=passthrough.
@@ -73,7 +83,7 @@ IMPLEMENTED_CONVERSIONS: dict[tuple[Format, Format], bool] = {
     ("messages", "responses"): False,
     ("responses", "messages"): False,
     ("completions", "responses"): False,
-    ("responses", "completions"): False,
+    ("responses", "completions"): True,
     ("completions", "completions"): False,
     ("responses", "responses"): True,
 }
@@ -190,10 +200,11 @@ def decide(
         return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=inp), 502)
 
     # --- конкретный формат: прямое преобразование inp → out ---
-    # Реализованные пары — реестр IMPLEMENTED_CONVERSIONS (messages→completions
-    # и messages→messages); для self-пар completions→completions и
-    # responses→responses преобразования нет (400) — дословная передача таких
-    # входов достигается значением TARGET=passthrough.
+    # Реализованные пары — реестр IMPLEMENTED_CONVERSIONS (messages→completions,
+    # messages→messages, responses→responses, responses→completions); для
+    # остальных (в т.ч. self-пары completions→completions) преобразования нет
+    # (400) — дословная передача таких входов достигается значением
+    # TARGET=passthrough.
     assert target in ("messages", "completions", "responses"), target
     out = target
     if IMPLEMENTED_CONVERSIONS.get((inp, out)):

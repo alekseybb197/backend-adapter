@@ -444,8 +444,9 @@ ADAPTER_MODEL_USAGE_ENABLE = env_validate.parse_bool(
 # Значение задаёт, ЧТО делать с запросом на этом входе:
 #   messages|completions|responses — конкретный формат-цель: ПРЯМОЕ
 #       преобразование запроса входа в указанный формат (реестр
-#       routing.IMPLEMENTED_CONVERSIONS; сейчас messages→completions и
-#       messages→messages — сортировка system в начало). Нереализованная
+#       routing.IMPLEMENTED_CONVERSIONS; сейчас messages→completions,
+#       messages→messages — сортировка system в начало, responses→responses
+#       и responses→completions). Нереализованная
 #       пара даёт ошибку агенту (400 «conversion … is not implemented»);
 #   passthrough — передать на соответствующий входу эндпойнт бэкенда БЕЗ
 #       преобразования: тело и SSE уходят дословно (E→E);

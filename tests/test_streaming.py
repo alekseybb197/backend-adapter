@@ -185,6 +185,228 @@ class TestStreamOpenAItoAnthropic:
         stream_openai_to_anthropic(stream, wfile, "test", "sess", "req")
 
 
+def _parse_events(wfile):
+    """Парсит буфер FakeWfile в список (event, data) — Responses-события."""
+    text = wfile.data.decode("utf-8")
+    events = []
+    for block in text.strip().split("\n\n"):
+        if not block.strip():
+            continue
+        evt = None
+        data = None
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                evt = line[7:].strip()
+            elif line.startswith("data: "):
+                data = json.loads(line[6:])
+        if evt and data is not None:
+            events.append((evt, data))
+    return events
+
+
+class TestStreamCompletionsToResponses:
+    """Tests for stream_openai_completions_to_responses() (v0.9.7) —
+    стрим [OI] chat.completions → поток событий Responses API."""
+
+    def test_text_chunks_event_sequence(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "H"}, "index": 0}], "usage": {}}',
+            b'data: {"choices": [{"delta": {"content": "i"}, "index": 0}], "usage": {}}',
+            b'data: {"choices": [{"delta": {"finish_reason": "stop"}, "index": 0}], '
+            b'"usage": {"completion_tokens": 1, "prompt_tokens": 5}}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        finish, usage = stream_openai_completions_to_responses(
+            FakeRespStream(lines), wfile, "test", "sess", "req", approx_prompt_chars=20
+        )
+        assert finish == "stop"
+        assert usage["completion_tokens"] == 1
+        types = [e[0] for e in _parse_events(wfile)]
+        assert types == [
+            "response.created",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+            "response.output_text.delta",
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+
+    def test_text_assembled_in_done(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "Hel"}}]}',
+            b'data: {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(
+            FakeRespStream(lines), wfile, "m", "sess", "req"
+        )
+        events = _parse_events(wfile)
+        done = next(e for e in events if e[0] == "response.output_text.done")[1]
+        assert done["text"] == "Hello"
+        item_done = next(e for e in events if e[0] == "response.output_item.done")[1]
+        assert item_done["item"]["content"][0]["text"] == "Hello"
+
+    def test_tool_call_accumulated_by_index(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", '
+            b'"function": {"name": "Bash"}}]}}]}',
+            b'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, '
+            b'"function": {"arguments": "{\\"cmd\\":"}}]}}]}',
+            b'data: {"choices": [{"delta": {"tool_calls": [{"index": 0, '
+            b'"function": {"arguments": " \\"ls\\"}"}}]}}]}',
+            b'data: {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        finish, _ = stream_openai_completions_to_responses(
+            FakeRespStream(lines), wfile, "m", "sess", "req"
+        )
+        assert finish == "tool_calls"
+        events = _parse_events(wfile)
+        types = [e[0] for e in events]
+        assert types.count("response.output_item.added") == 1
+        assert types.count("response.function_call_arguments.delta") == 2
+        done = next(e for e in events if e[0] == "response.function_call_arguments.done")[1]
+        assert done["arguments"] == '{"cmd": "ls"}'
+        item_done = next(e for e in events if e[0] == "response.output_item.done")[1]
+        assert item_done["item"]["type"] == "function_call"
+        assert item_done["item"]["call_id"] == "call_1"
+        assert item_done["item"]["name"] == "Bash"
+        # Итоговый output response.completed несёт function_call-item.
+        completed = next(e for e in events if e[0] == "response.completed")[1]
+        assert completed["response"]["output"][0]["type"] == "function_call"
+        assert completed["response"]["output"][0]["arguments"] == '{"cmd": "ls"}'
+
+    def test_multiple_tool_calls(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"tool_calls": ['
+            b'{"index": 0, "id": "c0", "function": {"name": "A", "arguments": "{}"}},'
+            b'{"index": 1, "id": "c1", "function": {"name": "B", "arguments": "{}"}}]}}]}',
+            b'data: {"choices": [{"delta": {"finish_reason": "tool_calls"}}]}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(FakeRespStream(lines), wfile, "m", "s", "r")
+        events = _parse_events(wfile)
+        added = [e[1] for e in events if e[0] == "response.output_item.added"]
+        assert len(added) == 2
+        assert added[0]["item"]["call_id"] == "c0"
+        assert added[1]["item"]["call_id"] == "c1"
+        assert added[0]["output_index"] != added[1]["output_index"]
+
+    def test_usage_from_chunk(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}], '
+            b'"usage": {"prompt_tokens": 11, "completion_tokens": 22}}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(FakeRespStream(lines), wfile, "m", "s", "r")
+        completed = next(e for e in _parse_events(wfile) if e[0] == "response.completed")[1]
+        assert completed["response"]["usage"] == {
+            "input_tokens": 11,
+            "output_tokens": 22,
+            "total_tokens": 33,
+        }
+
+    def test_heuristic_input_tokens_writes_warn(self, tmp_path):
+        _reload_all()
+        from backend_adapter import session_log as slog
+        slog._DEBUG_IS_DIR = True
+        slog._TRACE_IS_DIR = True
+        slog._DEBUG_PATH = str(tmp_path)
+        slog._TRACE_PATH = str(tmp_path)
+        slog._session_logs.clear()
+        slog._session_file_ts.clear()
+        slog._session_file_ts["sess1"] = "20260909-100000"
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(
+            FakeRespStream(lines), wfile, "m", "sess1", "req1",
+            approx_prompt_chars=200, out_body=b'{"model": "m"}', backend_url="http://b/v1",
+        )
+        completed = next(e for e in _parse_events(wfile) if e[0] == "response.completed")[1]
+        assert completed["response"]["usage"]["input_tokens"] == 50
+        files = list(tmp_path.glob("session-*.err"))
+        assert len(files) == 1
+        content = files[0].read_text(encoding="utf-8")
+        assert "input_tokens оценён эвристически" in content
+
+    def test_no_warn_without_out_body(self, tmp_path):
+        _reload_all()
+        from backend_adapter import session_log as slog
+        slog._DEBUG_IS_DIR = True
+        slog._TRACE_IS_DIR = True
+        slog._DEBUG_PATH = str(tmp_path)
+        slog._TRACE_PATH = str(tmp_path)
+        slog._session_logs.clear()
+        slog._session_file_ts.clear()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}',
+            b'data: [DONE]',
+        ]
+        stream_openai_completions_to_responses(
+            FakeRespStream(lines), FakeWfile(), "m", "sess1", "req1", approx_prompt_chars=200
+        )
+        assert list(tmp_path.glob("session-*.err")) == []
+
+    def test_invalid_chunk_skipped(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'data: NOT VALID JSON',
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(FakeRespStream(lines), wfile, "m", "s", "r")
+        done = next(e for e in _parse_events(wfile) if e[0] == "response.output_text.done")[1]
+        assert done["text"] == "x"
+
+    def test_empty_stream_completes(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(FakeRespStream([]), wfile, "m", "s", "r")
+        events = _parse_events(wfile)
+        assert [e[0] for e in events] == ["response.created", "response.completed"]
+        completed = events[-1][1]
+        assert completed["response"]["output"] == []
+
+    def test_non_data_lines_skipped(self):
+        _reload_all()
+        from backend_adapter.streaming import stream_openai_completions_to_responses
+        lines = [
+            b'',
+            b': keepalive\n\n',
+            b'data: {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]}',
+            b'data: [DONE]',
+        ]
+        wfile = FakeWfile()
+        stream_openai_completions_to_responses(FakeRespStream(lines), wfile, "m", "s", "r")
+        assert "response.completed" in wfile.data.decode()
+
+
 class TestRelaySse:
     """Tests for relay_sse() — passthrough E→E SSE relay."""
 

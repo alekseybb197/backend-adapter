@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.6) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v0.9.7) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -741,6 +741,9 @@ export ADAPTER_MESSAGES_TARGET=completions
 
 # /v1/responses: default none — вход закрыт (404).
 # passthrough → дословная передача на /v1/responses бэкенда.
+# responses → внутренний конвертер responses→responses (store:false) + /model.
+# completions → полная конверсия responses→completions на /v1/chat/completions
+#               бэкенда (v0.9.7) + /model.
 # export ADAPTER_RESPONSES_TARGET=passthrough
 ```
 
@@ -831,7 +834,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v0.9.6
+Backend-Adapter v0.9.7
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation

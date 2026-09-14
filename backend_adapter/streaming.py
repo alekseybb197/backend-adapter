@@ -345,6 +345,380 @@ def stream_openai_to_anthropic(
     return stop_reason, usage
 
 
+def stream_openai_completions_to_responses(
+    resp,
+    wfile,
+    model,
+    session_id,
+    req_id,
+    approx_prompt_chars=0,
+    out_body=None,
+    backend_url="",
+):
+    """Построчно читает SSE-ответ бэкенда ([OI] chat.completions streaming
+    формат) и на лету конвертирует каждый чанк в поток Responses API
+    событий (response.created / output_item.added / content_part.added /
+    output_text.delta / function_call_arguments.delta / …done /
+    output_item.done / response.completed), записывая их в wfile сразу по
+    мере поступления (routing: responses→completions, v0.9.7).
+
+    Структура — сознательное зеркало stream_openai_to_anthropic выше
+    (тот же чанк-формат бэкенда, та же идея накопления tool_calls по
+    ``delta.tool_calls[].index``), но целевой словарь событий — Responses,
+    а не Anthropic-блоки: там, где Anthropic обходится одним
+    content_block на весь tool_use, Responses заводит ОТДЕЛЬНЫЙ
+    output_item (type function_call) на каждый вызов, с парой
+    function_call_arguments.delta/done вместо input_json_delta.
+
+    Кросс-запросная причинность (аналог _register_tool_use/
+    _lookup_tool_use_producer у Anthropic-пути) здесь НЕ ведётся: call_id
+    у Responses эхуется клиентом напрямую через function_call_output.call_id
+    (см. convert.convert_responses_input_to_openai_messages), в отличие от
+    Anthropic tool_use_id, который изобретает сам адаптер и должен потом
+    сам же и узнавать — отдельный реестр для этого пути не нужен.
+
+    Возвращает (finish_reason, usage) — usage в СЫРЫХ ключах бэкенда
+    (prompt_tokens/completion_tokens), как и stream_openai_to_anthropic:
+    вызывающий код (server.py) считает токены одинаково для обоих путей."""
+    response_id = f"resp_{uuid.uuid4().hex}"
+    created_at = int(time.time())
+
+    def _envelope(status: str, output: list, usage_obj: dict | None = None) -> dict:
+        env = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "status": status,
+            "model": model,
+            "output": output,
+        }
+        if usage_obj is not None:
+            env["usage"] = usage_obj
+        return env
+
+    _sse_write(
+        wfile,
+        "response.created",
+        {"type": "response.created", "response": _envelope("in_progress", [])},
+    )
+
+    output_index = -1
+    text_item: dict | None = None  # {"index", "item_id"} — текущий текстовый output_item
+    text_buf: list[str] = []
+    reasoning_buf: list[str] = []
+    # delta.tool_calls[].index -> {"output_index", "call_id", "name", "args_buf"}
+    tool_state: dict[int, dict] = {}
+    finish_reason = "stop"
+    usage: dict = {}
+
+    def _close_text_item():
+        """Закрывает текущий текстовый output_item (output_text.done ->
+        content_part.done -> output_item.done), если он открыт."""
+        nonlocal text_item
+        if text_item is None:
+            return
+        full = "".join(text_buf)
+        item_id = text_item["item_id"]
+        idx = text_item["index"]
+        _sse_write(
+            wfile,
+            "response.output_text.done",
+            {
+                "type": "response.output_text.done",
+                "item_id": item_id,
+                "output_index": idx,
+                "content_index": 0,
+                "text": full,
+            },
+        )
+        part = {"type": "output_text", "text": full, "annotations": []}
+        _sse_write(
+            wfile,
+            "response.content_part.done",
+            {
+                "type": "response.content_part.done",
+                "item_id": item_id,
+                "output_index": idx,
+                "content_index": 0,
+                "part": part,
+            },
+        )
+        _sse_write(
+            wfile,
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": idx,
+                "item": {
+                    "id": item_id,
+                    "type": "message",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [part],
+                },
+            },
+        )
+        text_item = None
+
+    def _close_tool_item(st: dict):
+        """Закрывает один function_call output_item (function_call_arguments.done
+        -> output_item.done)."""
+        args = "".join(st["args_buf"]) or "{}"
+        _sse_write(
+            wfile,
+            "response.function_call_arguments.done",
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": st["item_id"],
+                "output_index": st["output_index"],
+                "arguments": args,
+            },
+        )
+        _sse_write(
+            wfile,
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": st["output_index"],
+                "item": {
+                    "id": st["item_id"],
+                    "type": "function_call",
+                    "status": "completed",
+                    "call_id": st["call_id"],
+                    "name": st["name"],
+                    "arguments": args,
+                },
+            },
+        )
+
+    for raw_line in resp:
+        line = raw_line.decode("utf-8", errors="replace").strip("\n").strip("\r")
+        if not line or not line.startswith("data:"):
+            continue
+        payload = line[len("data:") :].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            _dr(req_id, f"[STREAM_WARN] Не удалось распарсить SSE-чанк бэкенда: {payload[:200]}")
+            continue
+
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+
+        choices = chunk.get("choices") or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = choice.get("delta") or {}
+        if choice.get("finish_reason"):
+            finish_reason = choice["finish_reason"]
+
+        # reasoning_content — как и в stream_openai_to_anthropic, только на
+        # trace: Responses API мог бы завести отдельный reasoning-item, но
+        # без encrypted_content конкретного провайдера это не настоящий
+        # reasoning-блок Responses — фабриковать его не будем, только копим
+        # для диагностики (см. [RESPONSE]-лог ниже).
+        if delta.get("reasoning_content"):
+            reasoning_buf.append(delta["reasoning_content"])
+
+        text_piece = delta.get("content")
+        if text_piece:
+            if text_item is None:
+                output_index += 1
+                item_id = f"msg_{uuid.uuid4().hex}"
+                text_item = {"index": output_index, "item_id": item_id}
+                _sse_write(
+                    wfile,
+                    "response.output_item.added",
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "status": "in_progress",
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    },
+                )
+                _sse_write(
+                    wfile,
+                    "response.content_part.added",
+                    {
+                        "type": "response.content_part.added",
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                    },
+                )
+            text_buf.append(text_piece)
+            _sse_write(
+                wfile,
+                "response.output_text.delta",
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": text_item["item_id"],
+                    "output_index": text_item["index"],
+                    "content_index": 0,
+                    "delta": text_piece,
+                },
+            )
+
+        for tc in delta.get("tool_calls") or []:
+            oi = tc.get("index", 0)
+            func = tc.get("function", {}) or {}
+            st = tool_state.get(oi)
+            if st is None:
+                # Новый tool_call — если в этот момент открыт текстовый
+                # output_item, закрываем его: у Responses каждый tool_call —
+                # отдельный output_item со своим output_index, вперемешку с
+                # текстом в рамках ОДНОГО текстового item'а они не бывают.
+                _close_text_item()
+                output_index += 1
+                call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:12]}"
+                name = func.get("name", "")
+                item_id = f"fc_{uuid.uuid4().hex}"
+                st = {
+                    "output_index": output_index,
+                    "item_id": item_id,
+                    "call_id": call_id,
+                    "name": name,
+                    "args_buf": [],
+                }
+                tool_state[oi] = st
+                _sse_write(
+                    wfile,
+                    "response.output_item.added",
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": output_index,
+                        "item": {
+                            "id": item_id,
+                            "type": "function_call",
+                            "status": "in_progress",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": "",
+                        },
+                    },
+                )
+            elif func.get("name") and not st["name"]:
+                st["name"] = func["name"]
+
+            args_piece = func.get("arguments")
+            if args_piece:
+                st["args_buf"].append(args_piece)
+                _sse_write(
+                    wfile,
+                    "response.function_call_arguments.delta",
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": st["item_id"],
+                        "output_index": st["output_index"],
+                        "delta": args_piece,
+                    },
+                )
+
+    _close_text_item()
+    for st in tool_state.values():
+        _close_tool_item(st)
+
+    input_tokens = usage.get("prompt_tokens")
+    input_tokens_estimated = False
+    if input_tokens is None:
+        input_tokens = max(1, approx_prompt_chars // 4) if approx_prompt_chars else 0
+        input_tokens_estimated = True
+        warn_text = (
+            f"Backend не вернул usage в стриме — input_tokens оценён "
+            f"эвристически (~{input_tokens}, chars/4), реальное число неизвестно"
+        )
+        _dr(req_id, f"[USAGE_WARN] {warn_text}")
+        if out_body is not None:
+            write_warn_file(
+                session_id,
+                req_id,
+                backend_url=backend_url,
+                model=model,
+                out_body=out_body,
+                warn_body=warn_text,
+            )
+
+    # Итоговый output — в порядке output_index: текстовые items уже закрыты
+    # выше синхронно (не хранятся отдельно), поэтому здесь собираем сводку
+    # ТОЛЬКО из tool_state для response.completed.output — этого достаточно
+    # клиенту: он уже получил полные item'ы через output_item.done события
+    # выше, response.completed лишь подтверждает финальное состояние.
+    final_output = [
+        {
+            "id": st["item_id"],
+            "type": "function_call",
+            "status": "completed",
+            "call_id": st["call_id"],
+            "name": st["name"],
+            "arguments": "".join(st["args_buf"]) or "{}",
+        }
+        for st in tool_state.values()
+    ]
+    usage_obj = {
+        "input_tokens": input_tokens,
+        "output_tokens": usage.get("completion_tokens", 0),
+        "total_tokens": input_tokens + usage.get("completion_tokens", 0),
+    }
+    _sse_write(
+        wfile,
+        "response.completed",
+        {"type": "response.completed", "response": _envelope("completed", final_output, usage_obj)},
+    )
+
+    _trace(
+        session_id,
+        req_id,
+        "usage_report",
+        input_tokens=input_tokens,
+        input_tokens_estimated=input_tokens_estimated,
+        output_tokens=usage.get("completion_tokens", 0),
+        streamed=True,
+    )
+
+    full_text = "".join(text_buf)
+    full_reasoning = "".join(reasoning_buf)
+    tool_use_summaries = [
+        {"id": st["call_id"], "name": st["name"], "input": "".join(st["args_buf"]) or "{}"}
+        for st in tool_state.values()
+    ]
+    resp_snapshot = {
+        "streamed": True,
+        "text_len": len(full_text),
+        "reasoning_len": len(full_reasoning),
+        "tool_uses_count": len(tool_use_summaries),
+        "text": full_text,
+        "reasoning": full_reasoning,
+        "tool_uses": tool_use_summaries,
+    }
+    _dr(req_id, f"[RESPONSE] {json.dumps(resp_snapshot, ensure_ascii=False, default=str)}")
+    if config.ADAPTER_DEBUG_PARTS:
+        write_debug_json(session_id, "RESPONSE", resp_snapshot)
+
+    _trace(
+        session_id,
+        req_id,
+        "response_content",
+        text_len=len(full_text),
+        tool_uses=tool_use_summaries,
+        finish_reason_raw=finish_reason,
+        reasoning_present=bool(full_reasoning.strip()),
+        reasoning_len=len(full_reasoning),
+        reasoning=_cap(full_reasoning, config.ADAPTER_TRACE_REASONING_MAX_CHARS),
+        streamed=True,
+    )
+
+    return finish_reason, usage
+
+
 # --- Passthrough E→E: релей SSE-потока бэкенда клиенту без конвертации ---
 
 # usage-ключи ответа по формату (в passthrough формат входа == формата
