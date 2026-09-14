@@ -36,6 +36,38 @@ messages с ролью `developer`, что валило шаблон.
 (`TestConvertResponsesInputToOpenAiMessages`); доки — `docs/routing.md` §2.2,
 `docs/architecture.md` §5.5.
 
+### WIP: полнота канала `.err`
+
+**Не все 5xx попадали в `.err`.** Пять пробелов:
+
+1. **Отвязка от таблицы сессий.** Право на `.err`-блок определялось
+   непустым `session_key`, а `session_registry.register` возвращает `None`
+   при `ADAPTER_SESSIONS_TABLE=0` — ошибки входа (reject-502, disabled-404,
+   ранние 400) молча выпадали из канала. Введён флаг
+   `_req_ctx.err_eligible`: взводится в `_register_session` безусловно
+   (входной путь распознан). Счётчик «Ошибок» строки по-прежнему ведётся
+   только при живой таблице.
+2. **`GET /v1/models` 501** (список моделей не прогрет) не писал `.err` —
+   `do_GET` не заводил контекст запроса. Общие хелперы
+   `_err_ctx_begin`/`_err_ctx_end`; контекст заводится в `do_GET` и в
+   `do_POST`.
+3. **Неподдерживаемые HTTP-методы** (`PUT`/`DELETE`/`PATCH`/`OPTIONS`/
+   `TRACE`) отвечали HTML-`501` через базовый `send_error`, мимо `.err`.
+   Добавлен `_unsupported_method` — JSON-`501` + `.err`.
+4. **Необработанное исключение в `do_POST`** уходило в
+   `socketserver.handle_error`: клиент не получал ответа, `.err` молчал.
+   Верхнеуровневый `except`: если ответ не начат — JSON-`500` (и `.err`);
+   если начат — пометка `error_status=(200, …)` для `.err`; исключение не
+   пробрасывается.
+5. **Обрыв потока mid-stream** (после `_start_sse(200)`: passthrough,
+   `responses→completions`, `messages→completions`) писал только SSE-событие
+   `error`. Теперь — `.err`-блок с `final_status=200` и `err_body` с
+   префиксом `mid-stream abort:` + инкремент счётчика «Ошибок».
+
+Тесты — `tests/test_server.py` (`TestErrFileProtocol`); доки —
+`docs/logging.md`, `docs/webui.md`, `docs/architecture.md` §4.3/§8.4.
+
+
 ## v0.9.6 — восемь улучшений: responses→responses + `/model`, перманентный `state.yaml`, валидация env/YAML, дробные тарифы, таблица сессий, связка Log/Parts, live-обновление таблицы сессий, краткий `__comment__`
 
 ### 2026-09-13 Саммари ветки v0.9.6 (2 коммита между merge PR #18 (v0.9.5) и снятием WIP)

@@ -90,6 +90,10 @@ class ServerSetupMixin:
         if mock_err:
             server_mod.write_error_file = lambda *a, **kw: None
             server_mod.write_warn_file = lambda *a, **kw: None
+            # v0.9.7: обобщённый .err-блок «ранней» ошибки (write_session_error)
+            # тоже безусловен — мокаем, иначе unit-тесты без LOGPATH пишут в
+            # дефолтный ./tmp/logs.
+            server_mod.write_session_error = lambda *a, **kw: None
 
         # Used-models table: reset + mock the per-model endpoint probe so the
         # server hook never fires real network requests; tests override the
@@ -1863,3 +1867,120 @@ class TestErrFileProtocol(ServerSetupMixin):
         content = self._err_files(tmp_path)[0].read_text(encoding="utf-8")
         assert "sk-live-abcdef123456" in content
         assert "REDACTED" not in content
+
+    # -- полнота канала (v0.9.7) -------------------------------------------
+
+    def _support(self, path, found):
+        """Наполнить кэш проб бэкенда 'test' результатом (для reject-502)."""
+        from backend_adapter import config as cfg
+        state = cfg._ENDPOINT_STATE.setdefault(
+            "test", {"at": 0.0, "endpoints": {}, "errors": {}}
+        )
+        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
+
+    def test_reject_502_writes_err_without_sessions_table(self, fake_backend, tmp_path):
+        """reject-502 маршрута при ADAPTER_SESSIONS_TABLE=0: строки в таблице
+        нет (счётчик не ведётся), но .err пишется — канал не зависит от
+        таблицы сессий (v0.9.7)."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_SESSIONS_TABLE = 0
+        cfg.ADAPTER_COMPLETIONS_TARGET = "passthrough"
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            self._support("/v1/chat/completions", False)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model", "messages": []},
+                    headers={"X-Claude-Code-Session-Id": "sess-rej"},
+                )
+                assert resp["status"] == 502
+            finally:
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        assert "final_status=502" in content
+        assert "[ADAPTER_ERROR]" in content
+        assert "does not support" in content
+        # Таблица отключена — строк не появилось (счётчик «Ошибок» не ведётся)
+        from backend_adapter import session_registry
+        assert session_registry.sessions_snapshot() == []
+
+    def test_models_501_writes_err(self, fake_backend, tmp_path):
+        """GET /v1/models до прогрева списка моделей → 501 и .err (v0.9.7)."""
+        fake_backend.models_response = {"data": []}
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            from backend_adapter import config as cfg
+            cfg._AVAILABLE_MODELS.clear()
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "GET", "/v1/models",
+                    headers={"X-Claude-Code-Session-Id": "sess-models"},
+                )
+                assert resp["status"] == 501
+            finally:
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        assert "final_status=501" in content
+        assert "[ADAPTER_ERROR]" in content
+
+    def test_unsupported_method_writes_err(self, fake_backend, tmp_path):
+        """Неподдерживаемый метод (DELETE) → JSON-501 и .err (v0.9.7), а не
+        HTML send_error базового класса."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "DELETE", "/v1/messages",
+                    headers={"X-Claude-Code-Session-Id": "sess-del"},
+                )
+                assert resp["status"] == 501
+                assert "Unsupported method: DELETE" in resp["body"]
+            finally:
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        assert "final_status=501" in errs[0].read_text(encoding="utf-8")
+
+    def test_mid_stream_abort_writes_err(self, fake_backend, tmp_path):
+        """Обрыв потока после _start_sse(200) → .err с пометкой mid-stream
+        abort и final_status=200 (v0.9.7): заголовки уже ушли, откат на JSON
+        невозможен, но инцидент фиксируется."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_COMPLETIONS_TARGET = "passthrough"
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.sse_lines = ['data: {"choices": [{"delta": {"content": "Hi"}}]}\n\n']
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            self._support("/v1/chat/completions", True)
+            from backend_adapter import server as server_mod
+            orig_relay = server_mod.relay_sse
+
+            def boom(resp, wfile, req_id, inp_fmt):
+                raise RuntimeError("backend stream broke")
+
+            server_mod.relay_sse = boom
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "stream": True},
+                    headers={"X-Claude-Code-Session-Id": "sess-mid"},
+                )
+                assert resp["status"] == 200
+            finally:
+                server_mod.relay_sse = orig_relay
+                server.shutdown()
+        errs = self._err_files(tmp_path)
+        assert len(errs) == 1
+        content = errs[0].read_text(encoding="utf-8")
+        assert "final_status=200" in content
+        assert "mid-stream abort" in content
+        assert "backend stream broke" in content

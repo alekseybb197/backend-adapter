@@ -137,8 +137,8 @@ module on one level, see ADR 2026-09-01).
 │   routing.decide(fmt, backend_name) → action                    │
 │     решения по TARGET + кэшу endpoint_support (сети нет)        │
 │   ├─ disabled (TARGET=none) / reject                            │
-│   │    404 / 400 / 502 JSON  (usage и .err не пишутся —         │
-│   │    запрос до бэкенда не дошёл)                              │
+│   │    404 / 400 / 502 JSON  (usage не пишется — запрос до      │
+│   │    бэкенда не дошёл; .err-блок пишется, v0.9.5)             │
 │   ├─ passthrough E→E (TARGET=passthrough, или convert           │
 │   │    messages→messages — сортировка system)                   │
 │   │    body["model"] = resolved_model;                          │
@@ -353,7 +353,10 @@ Returns `_AVAILABLE_MODELS` in OpenAI `list` format:
 {"object": "list", "data": [<model dict>, ...]}
 ```
 
-Returns 501 if models haven't been probed yet.
+Returns 501 if models haven't been probed yet (the 501 is recorded in the `.err`
+channel, v0.9.7 — see §8.4). Unsupported HTTP methods (PUT/DELETE/PATCH/OPTIONS/
+TRACE) are answered JSON-501 via `_unsupported_method` (also `.err`), instead of
+the base class's HTML `send_error`.
 
 ---
 
@@ -1091,6 +1094,12 @@ Long base64/hex strings may also be matched.
   `.jsonl` — trace), plus `session-*.parts/` dump directories and the
   unconditional `session-*.err` incident/WARN/error channel — all flat in
   `ADAPTER_DEBUG_LOGPATH`
+- **`.err` is independent of `ADAPTER_SESSIONS_TABLE` (v0.9.7):** whether a
+  request's error is written is decided by `_req_ctx.err_eligible` (input path
+  recognised), not by a live sessions-table row. Covered: backend incidents
+  (4xx/5xx after retries), adapter-level errors (400/404/502 rejects, 501 model
+  list), unhandled `do_POST` exceptions (500), unsupported methods (501) and
+  mid-stream aborts (`final_status=200`, `mid-stream abort: …`)
 - Timestamp frozen on first use per session (all traffic → same file)
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
 - The log directory `ADAPTER_DEBUG_LOGPATH` is created on demand when set

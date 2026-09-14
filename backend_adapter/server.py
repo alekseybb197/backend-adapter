@@ -180,7 +180,16 @@ def _register_session(
     responses): НЕ часть ключа, а сопровождение строки — колонка «Входной
     эндпоинт» и выбор TARGET-селекта строки в таблице Sessions. 400-ветки
     валидации тела передают его, хотя до ``routing.decide`` не дошли: путь
-    уже распознан (``routing.input_path_to_format``)."""
+    уже распознан (``routing.input_path_to_format``).
+
+    v0.9.7: помимо ключа строки, здесь же взводится ``_req_ctx.err_eligible``
+    — признак «входной путь распознан, ошибка этого запроса подлежит записи в
+    .err». Раньше право на .err-блок определялось непустым ``session_key``, и
+    при ``ADAPTER_SESSIONS_TABLE=0`` (учёт выключен → ``register`` вернул None)
+    ошибки входа молча выпадали из канала. Теперь канал .err от таблицы
+    сессий НЕ зависит: счётчик «Ошибок» живёт только при включённой таблице,
+    а .err пишется всегда."""
+    _req_ctx.err_eligible = True
     _req_ctx.session_key = session_registry.register(
         session_id, agent, model=model, backend=backend, route=route, input=input
     )
@@ -203,8 +212,9 @@ def _flush_pending_error() -> None:
     """Дописать .err-блок «ранней» ошибки запроса (v0.9.5, задача 7).
 
     Точка вызова — ``finally`` в do_POST: к этому моменту известен финальный
-    исход запроса. Если ответ клиенту был ошибкой (>= 400), учтённой в
-    таблице Sessions, но подробного блока инцидента бэкенда не писалось
+    исход запроса. Если ответ клиенту был ошибкой (>= 400) на распознанном
+    входном пути (``_req_ctx.err_eligible``), но подробного блока инцидента
+    бэкенда не писалось
     (``_write_backend_error``), — пишем обобщённый ERROR-блок
     (``write_session_error``). Так .err покрывает ВЕСЬ ошибочный трафик
     сессии, а не только инциденты бэкенда: 400 валидации тела (Invalid JSON /
@@ -229,6 +239,51 @@ def _flush_pending_error() -> None:
     )
 
 
+def _err_ctx_begin(headers, err_eligible: bool = True) -> tuple[str, str]:
+    """Инициализировать thread-local контекст запроса для .err-канала.
+    Возвращает (session_id, req_id).
+
+    v0.9.7: ``err_eligible`` по умолчанию True — для служебных обработчиков
+    (do_GET, неподдерживаемые HTTP-методы), которые по определению отвечают
+    ошибкой (501), нужной в .err. В do_POST флаг стартует False и взводится
+    в ``_register_session`` (после распознавания входного пути), чтобы 404
+    не-входного пути .err не писал."""
+    session_id = _extract_session_id(headers)
+    req_id = uuid.uuid4().hex[:12]
+    _req_ctx.req_id = req_id
+    _req_ctx.session_id = session_id
+    _req_ctx.session_key = None
+    _req_ctx.err_eligible = err_eligible
+    _req_ctx.error_status = None
+    _req_ctx.err_written = False
+    _req_ctx.response_started = False
+    _req_ctx.in_body = ""
+    _req_ctx.model = ""
+    return session_id, req_id
+
+
+def _err_ctx_end() -> None:
+    """Закрыть thread-local контекст запроса: дописать отложенный .err-блок
+    (``_flush_pending_error``) и убрать атрибуты, иначе они «залипнут» на
+    следующий запрос в этом же потоке (ThreadingHTTPServer переиспользует
+    потоки). Парная к ``_err_ctx_begin``; в do_POST тот же финал выполняется
+    в его ``finally`` (там сначала фиксируется usage-учёт)."""
+    _flush_pending_error()
+    for attr in (
+        "req_id",
+        "session_id",
+        "session_key",
+        "err_eligible",
+        "error_status",
+        "err_written",
+        "response_started",
+        "in_body",
+        "model",
+    ):
+        if hasattr(_req_ctx, attr):
+            delattr(_req_ctx, attr)
+
+
 class Adapter(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         rid = getattr(_req_ctx, "req_id", "-")
@@ -247,13 +302,20 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         (``_req_ctx.error_status``) — .err-блок по ней допишет
         ``_flush_pending_error`` в finally. Отложенность нужна, чтобы
         подробный блок инцидента бэкенда (пишется после отправки ответа) не
-        дублировался обобщённым. Запросы без учёта (ключ None) .err не
-        трогают, как и счётчик."""
+        дублировался обобщённым.
+
+        v0.9.7: право на .err-блок определяется ``_req_ctx.err_eligible``
+        (входной путь распознан / служебный обработчик), а НЕ непустым
+        ``session_key`` — так ошибки пишутся в .err и при выключенной таблице
+        сессий (``ADAPTER_SESSIONS_TABLE=0``). Счётчик строки по-прежнему
+        инкрементится только при живом ключе (``record_error``)."""
         if status < 400:
             return
         key = getattr(_req_ctx, "session_key", None)
         session_registry.record_error(key)
-        if key is not None and getattr(_req_ctx, "error_status", None) is None:
+        if getattr(_req_ctx, "err_eligible", False) and (
+            getattr(_req_ctx, "error_status", None) is None
+        ):
             _req_ctx.error_status = (status, message)
 
     def _send_json(self, status, data):
@@ -263,6 +325,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         if isinstance(data, dict):
             message = str(data.get("error", "") or "")
         self._note_session_error(status, message)
+        _req_ctx.response_started = True
         body = json.dumps(data, ensure_ascii=False).encode()
         try:
             self.send_response(status)
@@ -286,6 +349,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         и тело — как пришли (passthrough E→E, non-stream). Никакой
         пере-сериализации: байты body пишутся как есть."""
         self._note_session_error(status)
+        _req_ctx.response_started = True
         try:
             self.send_response(status)
             if content_type:
@@ -333,6 +397,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
+        # Ответ уже начат: верхнеуровневый except в do_POST не сможет отдать
+        # JSON-error статус (см. _req_ctx.response_started).
+        _req_ctx.response_started = True
 
     def do_HEAD(self):
         # Кто-то (health-check / сетевой пробник) стучится HEAD-запросами на
@@ -345,32 +412,77 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == "/v1/models":
-            # Возвращаем список моделей, полученный от бэкенда.
-            # Формат — OpenAI-совместимый: {object: "list", data: [...]}.
-            if not _AVAILABLE_MODELS:
+        # Контекст .err-канала заводим на весь обработчик (v0.9.7): /v1/models
+        # отвечает 501, пока список моделей не прогрет, — эту ошибку нужно
+        # видеть в .err. Прочие GET-пути (health-check / 404) .err не пишут,
+        # поэтому err_eligible стартует False и взводится только для /v1/models.
+        _err_ctx_begin(self.headers, err_eligible=False)
+        try:
+            if self.path == "/v1/models":
+                # Возвращаем список моделей, полученный от бэкенда.
+                # Формат — [OI]-совместимый: {object: "list", data: [...]}.
+                _req_ctx.err_eligible = True
+                if not _AVAILABLE_MODELS:
+                    self._send_json(
+                        501,
+                        {
+                            "error": "Model list not yet available. "
+                            "Backend models have not been probed successfully yet."
+                        },
+                    )
+                    return
                 self._send_json(
-                    501,
+                    200,
                     {
-                        "error": "Model list not yet available. "
-                        "Backend models have not been probed successfully yet."
+                        "object": "list",
+                        "data": list(_AVAILABLE_MODELS.values()),
                     },
                 )
-                return
-            self._send_json(
-                200,
-                {
-                    "object": "list",
-                    "data": list(_AVAILABLE_MODELS.values()),
-                },
-            )
-        else:
-            self._send_json(404, {"error": f"Unknown GET path: {self.path}"})
+            else:
+                self._send_json(404, {"error": f"Unknown GET path: {self.path}"})
+        finally:
+            _err_ctx_end()
+
+    def _unsupported_method(self):
+        """Неподдерживаемый HTTP-метод (PUT/DELETE/PATCH/...): базовый
+        BaseHTTPRequestHandler отвечает на них 501 через send_error()
+        (HTML-тело, мимо _send_json) — такая ошибка в .err не попадала.
+        Отвечаем JSON-ом и проводим её через .err-канал (v0.9.7). Контекст
+        запроса заводим явно — do_POST здесь не вызывается."""
+        _err_ctx_begin(self.headers)
+        try:
+            self._send_json(501, {"error": f"Unsupported method: {self.command}"})
+        finally:
+            _err_ctx_end()
+
+    # Не-POST/GET/HEAD методы уходят в один обработчик (JSON-501 + .err).
+    def do_PUT(self):
+        self._unsupported_method()
+
+    def do_DELETE(self):
+        self._unsupported_method()
+
+    def do_PATCH(self):
+        self._unsupported_method()
+
+    def do_OPTIONS(self):
+        self._unsupported_method()
+
+    def do_TRACE(self):
+        self._unsupported_method()
 
     def do_POST(self):
         req_t0 = time.time()
-        session_id = _extract_session_id(self.headers)
-        req_id = uuid.uuid4().hex[:12]
+        # Контекст .err-канала запроса (v0.9.7) заводится общим хелпером:
+        # error_status — первая ошибка ответа (status, message) для
+        # обобщённого блока, err_written — «подробный блок инцидента бэкенда
+        # уже написан». Сброс на КАЖДОМ запросе обязателен: thread-local
+        # переживает запрос в пределах потока, и «залипшие» значения исказили
+        # бы следующий запрос (пропущенный или лишний .err-блок).
+        # err_eligible стартует False — право на .err даёт распознанный
+        # входной путь (взводится в _register_session); in_body/model — тело
+        # и модель запроса для «ранних» ошибок (заполняются по ходу разбора).
+        session_id, req_id = _err_ctx_begin(self.headers, err_eligible=False)
         # Имя агента для таблицы сессий WEBUI (страница "/sessions", v0.9.5):
         # User-Agent до
         # первого пробела — [CC] CLI шлёт «claude-cli/2.1.236 (external, cli)»,
@@ -387,26 +499,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
         usage_tokens = {"input": 0, "output": 0}
         usage_active = False
 
-        _req_ctx.req_id = req_id
-        _req_ctx.session_id = session_id
         # Ключ строки таблицы сессий (страница "/sessions") ставится
-        # _register_session —
-        # на входном пути (после распознавания пути / после routing.decide).
-        # None здесь — «учёта нет»: _note_session_error тогда no-op.
-        _req_ctx.session_key = None
-        # Состояние .err-канала запроса (v0.9.5, задача 7): error_status —
-        # первая ошибка ответа (status, message) для обобщённого блока,
-        # err_written — «подробный блок инцидента бэкенда уже написан».
-        # Сброс на КАЖДОМ запросе обязателен: thread-local переживает запрос
-        # в пределах потока, и «залипшие» значения исказили бы следующий
-        # запрос (пропущенный или лишний .err-блок).
-        _req_ctx.error_status = None
-        _req_ctx.err_written = False
-        # Тело и модель запроса — для .err-блока «ранних» ошибок (v0.9.5):
-        # заполняются по мере разбора запроса (тело — сразу после чтения,
-        # модель — после валидации).
-        _req_ctx.in_body = ""
-        _req_ctx.model = ""
+        # _register_session — на входном пути (после распознавания пути /
+        # после routing.decide). None — «учёта нет»: счётчик строки не
+        # инкрементится, но .err-канал от ключа не зависит (v0.9.7).
         try:
             # Обновляем глобальный fallback для _d(), чтобы человекочитаемый
             # лог тоже писался в правильный сессионный файл.
@@ -936,6 +1032,22 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                     failed_mid_stream=True,
                                     passthrough=is_passthrough,
                                 )
+                                # Обрыв потока — инцидент (v0.9.7): заголовки 200
+                                # уже ушли клиенту, но ответ оборван. Пишем .err
+                                # (final_status=200 + пометка mid-stream abort) и
+                                # инкрементим счётчик «Ошибок» строки сессии.
+                                _write_backend_error(
+                                    session_id,
+                                    req_id,
+                                    final_status=200,
+                                    backend_url=backend_url,
+                                    model=model,
+                                    out_body=out_body,
+                                    err_body=f"mid-stream abort: {type(e).__name__}: {e}",
+                                )
+                                session_registry.record_error(
+                                    getattr(_req_ctx, "session_key", None)
+                                )
                                 return
                             if attempt < ADAPTER_RETRY:
                                 delay = 2**attempt
@@ -1463,6 +1575,20 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                     total_elapsed_ms=int((time.time() - req_t0) * 1000),
                                     streamed=True,
                                     failed_mid_stream=True,
+                                )
+                                # Обрыв потока — инцидент (v0.9.7): см.
+                                # аналогичную ветку passthrough.
+                                _write_backend_error(
+                                    session_id,
+                                    req_id,
+                                    final_status=200,
+                                    backend_url=r_backend_url,
+                                    model=model,
+                                    out_body=r_out_body,
+                                    err_body=f"mid-stream abort: {type(e).__name__}: {e}",
+                                )
+                                session_registry.record_error(
+                                    getattr(_req_ctx, "session_key", None)
                                 )
                                 return
                             if attempt < ADAPTER_RETRY:
@@ -2080,6 +2206,18 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 streamed=True,
                                 failed_mid_stream=True,
                             )
+                            # Обрыв потока — инцидент (v0.9.7): см.
+                            # аналогичную ветку passthrough.
+                            _write_backend_error(
+                                session_id,
+                                req_id,
+                                final_status=200,
+                                backend_url=backend_url,
+                                model=model,
+                                out_body=out_body,
+                                err_body=f"mid-stream abort: {type(e).__name__}: {e}",
+                            )
+                            session_registry.record_error(getattr(_req_ctx, "session_key", None))
                             return
                         if attempt < ADAPTER_RETRY:
                             delay = 2**attempt
@@ -2335,6 +2473,32 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 out_body=out_body,
                 err_body=msg,
             )
+        except Exception as e:
+            # Верхнеуровневый перехват (v0.9.7): раньше исключение из тела
+            # do_POST уходило в socketserver.handle_error — клиент не получал
+            # ответа вовсе, а .err-канал молчал. Теперь отвечаем 500 (если
+            # ответ ещё не начат) и всегда фиксируем инцидент.
+            _dr(req_id, f"[FAIL] Unhandled {type(e).__name__}: {e}")
+            if not getattr(_req_ctx, "response_started", False):
+                # Ответ не начат — можно отдать честный 500; это же выставит
+                # error_status, и finally допишет обобщённый .err-блок.
+                self._send_json(500, {"error": f"Internal adapter error: {type(e).__name__}: {e}"})
+            else:
+                # Стрим уже начат (заголовки ушли): статус клиенту не
+                # поменять. Инцидент всё равно фиксируем в .err — помечаем
+                # финальный статус 200 с текстом обрыва.
+                _req_ctx.error_status = (
+                    200,
+                    f"unhandled mid-stream error: {type(e).__name__}: {e}",
+                )
+            _trace(
+                session_id,
+                req_id,
+                "request_end",
+                failed=True,
+                error=f"{type(e).__name__}: {e}",
+                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+            )
         finally:
             # Фиксация учёта usage (таблица WEBUI «Использованные модели»):
             # единственная точка записи на любой исход запроса (успех, ошибка,
@@ -2344,15 +2508,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 model_usage.add_usage_tokens(
                     client_model, usage_tokens["input"], usage_tokens["output"]
                 )
-            # .err-блок «ранней» ошибки запроса (v0.9.5, задача 7) — здесь, а
-            # не в момент отправки ответа: к этому моменту точно известно,
-            # писал ли подробный блок инцидента бэкенда (err_written). См.
-            # _flush_pending_error.
-            _flush_pending_error()
-            delattr(_req_ctx, "req_id")
-            delattr(_req_ctx, "session_id")
-            delattr(_req_ctx, "session_key")
-            delattr(_req_ctx, "error_status")
-            delattr(_req_ctx, "err_written")
-            delattr(_req_ctx, "in_body")
-            delattr(_req_ctx, "model")
+            # .err-блок «ранней» ошибки запроса (v0.9.5, задача 7) и очистка
+            # thread-local — общий финал (v0.9.7), см. _flush_pending_error /
+            # _err_ctx_end.
+            _err_ctx_end()
