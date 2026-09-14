@@ -1,6 +1,41 @@
 # backend-adapter — history / changelog
 
 
+## v0.9.7 (WIP — конверсия responses→completions, матрица роутингов)
+
+<!-- WIP: записи по мере согласованных коммитов группы v0.9.7. -->
+
+### WIP: конвертер `responses → completions` + схлопывание роли `developer`
+
+**Конвертер `responses → completions`** — полная кросс-форматная конверсия
+(значение `ADAPTER_RESPONSES_TARGET=completions`): запрос
+`input`/`instructions`/`tools` собирается в Chat Completions
+`messages`/`tools` (`convert_responses_input_to_openai_messages`,
+`convert_responses_tools_to_openai`,
+`convert_responses_tool_choice_to_openai`), ответ бэкенда пересобирается в
+Responses-объект (`convert_openai_completions_to_responses`), стрим
+completions-SSE — в поток Responses-событий
+(`stream_openai_completions_to_responses`). Пара внесена в
+`routing.IMPLEMENTED_CONVERSIONS[("responses","completions")]`; поддерживает
+команду `/model`. Детали — `docs/routing.md` §2.2/§2.5,
+`docs/architecture.md` §5.5.
+
+**Схлопывание роли `developer` (Jinja-шаблон).** Часть локальных
+chat-шаблонов (в первую очередь Qwen3-семейство под llama.cpp) не знает роль
+`developer` вовсе (падение `Unexpected message role`) и одновременно требует,
+чтобы system-сообщение было РОВНО ОДНО и строго первым (`System message must
+be at the beginning`). Клиент (Codex CLI) шлёт в `input` элементы
+`{type:"message", role:"developer"}` — они конвертировались в отдельные
+messages с ролью `developer`, что валило шаблон.
+
+Решение: `convert_responses_input_to_openai_messages` **схлопывает** текст
+всех `developer`-элементов в единое system-сообщение вместе с `instructions`
+(склейка через `\n\n`); роль `developer` в выходных messages не попадает.
+Схлопывается **только `developer`** — элементы `role="system"` не трогаются.
+Тесты — `tests/test_convert.py`
+(`TestConvertResponsesInputToOpenAiMessages`); доки — `docs/routing.md` §2.2,
+`docs/architecture.md` §5.5.
+
 ## v0.9.6 — восемь улучшений: responses→responses + `/model`, перманентный `state.yaml`, валидация env/YAML, дробные тарифы, таблица сессий, связка Log/Parts, live-обновление таблицы сессий, краткий `__comment__`
 
 ### 2026-09-13 Саммари ветки v0.9.6 (2 коммита между merge PR #18 (v0.9.5) и снятием WIP)

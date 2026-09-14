@@ -936,6 +936,187 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
+    # -- convert responses→completions (TARGET=completions, v0.9.7) --------
+
+    def test_responses_to_completions_non_stream(self, fake_backend):
+        """ADAPTER_RESPONSES_TARGET=completions + поддержка /v1/chat/completions:
+        тело Responses конвертируется в messages (instructions → system
+        первым), уходит на /v1/chat/completions, ответ completions
+        конвертируется обратно в Responses-объект; usage — input/output."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1",
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "Hello"}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 22},
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={
+                        "model": "test-model",
+                        "instructions": "Be terse.",
+                        "input": [{"type": "message", "role": "user", "content": "Hi"}],
+                    },
+                )
+                assert resp["status"] == 200
+                data = json.loads(resp["body"])
+                # ответ — Responses-объект, а не сырой completions
+                assert data["object"] == "response"
+                assert data["status"] == "completed"
+                assert data["model"] == "test-model"
+                assert data["output"][0]["type"] == "message"
+                assert data["output"][0]["content"][0]["text"] == "Hello"
+                assert data["usage"]["input_tokens"] == 11
+                assert data["usage"]["output_tokens"] == 22
+                # запрос ушёл на /v1/chat/completions в формате messages
+                assert len(fake_backend.requests) == 1
+                path, _method, body = fake_backend.requests[0]
+                assert path == "/v1/chat/completions"
+                sent = json.loads(body)
+                assert sent["model"] == "test-model"
+                assert sent["messages"][0] == {"role": "system", "content": "Be terse."}
+                assert sent["messages"][1] == {"role": "user", "content": "Hi"}
+                # usage учтён в таблице Models in use
+                from backend_adapter import model_usage as mu
+                rows = mu.usage_snapshot()
+                assert rows[0]["input_tokens"] == 11
+                assert rows[0]["output_tokens"] == 22
+            finally:
+                server.shutdown()
+
+    def test_responses_to_completions_stream(self, fake_backend):
+        """TARGET=completions + stream=true: completions-SSE бэкенда
+        конвертируется в поток событий Responses API (response.created /
+        output_text.delta / response.completed), а не релеится дословно."""
+        from backend_adapter import config as cfg
+        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.sse_lines = [
+            'data: {"choices": [{"delta": {"content": "Hel"}}]}\n\n',
+            'data: {"choices": [{"delta": {"content": "lo"}, "finish_reason": "stop"}]}\n\n',
+            'data: {"choices": [{"delta": {}}], "usage": {"prompt_tokens": 5, "completion_tokens": 7}}\n\n',
+            "data: [DONE]\n\n",
+        ]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={
+                        "model": "test-model",
+                        "input": [{"type": "message", "role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert resp["status"] == 200
+                # поток — Responses-события, не completions-чанки
+                assert "response.created" in resp["body"]
+                assert "response.output_text.delta" in resp["body"]
+                assert "response.output_text.done" in resp["body"]
+                assert "response.completed" in resp["body"]
+                assert '"Hel"' in resp["body"]
+                # запрос ушёл на /v1/chat/completions со stream=true
+                path, _method, body = fake_backend.requests[0]
+                assert path == "/v1/chat/completions"
+                sent = json.loads(body)
+                assert sent["stream"] is True
+                from backend_adapter import model_usage as mu
+                rows = mu.usage_snapshot()
+                assert rows[0]["input_tokens"] == 5
+                assert rows[0]["output_tokens"] == 7
+            finally:
+                server.shutdown()
+
+    def test_responses_to_completions_session_route(self, fake_backend):
+        """Строка таблицы Sessions показывает маршрут
+        «convert responses→completions»."""
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "chat1",
+            "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={"model": "test-model",
+                          "input": [{"role": "user", "content": "Hi"}]},
+                    headers={"X-Claude-Code-Session-Id": "sess-rc"},
+                )
+                assert resp["status"] == 200
+                from backend_adapter import session_registry
+                rows = session_registry.sessions_snapshot()
+                assert rows[0]["route"] == "convert responses→completions"
+            finally:
+                server.shutdown()
+
+    def test_responses_to_completions_model_switch(self, fake_backend):
+        """«/model <имя>» при TARGET=completions: команда перехватывается ДО
+        бэкенда (никакого POST к нему), ответ — синтетический ack, строка
+        сессии с route=model_switch."""
+        from backend_adapter import session_settings
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={"model": "test-model",
+                          "stream": False,
+                          "input": [{"role": "user", "content": "/model qwen3-coder"}]},
+                    headers={"X-Claude-Code-Session-Id": "sess-sw"},
+                )
+                assert resp["status"] == 200
+                data = json.loads(resp["body"])
+                assert data["object"] == "response"
+                assert "qwen3-coder" in data["output"][0]["content"][0]["text"]
+                # реальный бэкенд не вызывался
+                assert fake_backend.requests == []
+                # оверрайд сохранён для сессии
+                assert session_settings.model_override("sess-sw") == "qwen3-coder"
+                from backend_adapter import session_registry
+                rows = session_registry.sessions_snapshot()
+                assert rows[0]["route"] == "model_switch"
+                assert rows[0]["model"] == "qwen3-coder"
+            finally:
+                session_settings.clear_session("sess-sw")
+                server.shutdown()
+
+    def test_responses_to_completions_rejected_502(self, fake_backend):
+        """TARGET=completions, но бэкенд подтверждённо (found=False) не
+        поддерживает /v1/chat/completions → 502, запрос не уходит."""
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", False)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={"model": "test-model",
+                          "input": [{"role": "user", "content": "Hi"}]},
+                )
+                assert resp["status"] == 502
+                assert "does not support completions" in resp["body"]
+                assert fake_backend.requests == []
+            finally:
+                server.shutdown()
+
 
 # ===========================================================================
 # Учёт сессий (v0.9.2): реестр session_registry заполняется в do_POST

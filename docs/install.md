@@ -741,6 +741,9 @@ export ADAPTER_MESSAGES_TARGET=completions
 
 # /v1/responses: default none — вход закрыт (404).
 # passthrough → дословная передача на /v1/responses бэкенда.
+# responses → внутренний конвертер responses→responses (store:false) + /model.
+# completions → полная конверсия responses→completions на /v1/chat/completions
+#               бэкенда (v0.9.7) + /model.
 # export ADAPTER_RESPONSES_TARGET=passthrough
 ```
 

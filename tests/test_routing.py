@@ -440,6 +440,35 @@ class TestDecideExplicitConvert(_RouteCase):
         assert status == 502
         assert "does not support responses" in msg
 
+    def test_responses_to_completions_is_convert(self):
+        # responses→completions — реализованная пара (v0.9.7): полный
+        # кросс-форматный конвертер + /model. TARGET completions на входе
+        # responses даёт convert (не reject), выходной формат — completions.
+        self._set_target(responses="completions")
+        self._support("test", "completions", True)
+        action, out, msg, status = self.routing.decide("responses", "test")
+        assert action == "convert"
+        assert out == "completions"
+        assert msg == ""
+        assert status == 200
+
+    def test_responses_to_completions_optimistic_when_never_probed(self):
+        # None (не пробовано) → оптимистичный convert, как у прочих пар.
+        self._set_target(responses="completions")
+        self._support("test", "completions", None)
+        action, out, _msg, status = self.routing.decide("responses", "test")
+        assert action == "convert"
+        assert out == "completions"
+        assert status == 200
+
+    def test_responses_to_completions_rejected_when_unsupported(self):
+        self._set_target(responses="completions")
+        self._support("test", "completions", False)
+        action, _out, msg, status = self.routing.decide("responses", "test")
+        assert action == "reject"
+        assert status == 502
+        assert "does not support completions" in msg
+
 
 class TestDecideUnimplemented(_RouteCase):
     @pytest.mark.parametrize(
@@ -449,11 +478,10 @@ class TestDecideUnimplemented(_RouteCase):
             ("messages", "responses", ("messages", "responses")),
             ("responses", "messages", ("responses", "messages")),
             ("completions", "responses", ("completions", "responses")),
-            ("responses", "completions", ("responses", "completions")),
             # self-пары без конвертера (реестр False) — тоже 400; дословная
             # передача таких входов достигается значением TARGET=passthrough.
-            # (responses→responses с v0.9.6 — реализованная пара: внутренний
-            # конвертор store=false + /model, см. TestDecideResponses.)
+            # (responses→responses с v0.9.6 и responses→completions с v0.9.7 —
+            # реализованные пары, см. TestDecideExplicitConvert.)
             ("completions", "completions", ("completions", "completions")),
         ],
     )
@@ -479,7 +507,6 @@ class TestDecideUnimplemented(_RouteCase):
             ("completions", "messages"),
             ("messages", "responses"),
             ("responses", "messages"),
-            ("responses", "completions"),
         ],
     )
     def test_unimplemented_pair_rejected_even_without_data(self, inp, target):

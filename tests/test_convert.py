@@ -5,11 +5,17 @@ This is the most important test file — core logic that bridges two protocols.
 import json
 
 from backend_adapter.convert import (
+    _extract_responses_message_text,
     convert_messages_anthropic_to_openai,
+    convert_openai_completions_to_responses,
     convert_openai_to_anthropic,
+    convert_responses_input_to_openai_messages,
+    convert_responses_tool_choice_to_openai,
+    convert_responses_tools_to_openai,
     convert_tool_choice_anthropic_to_openai,
     convert_tools_anthropic_to_openai,
     detect_model_switch_command,
+    extract_responses_tool_results,
     extract_text,
     extract_tool_results,
     force_store_false,
@@ -633,3 +639,458 @@ class TestConvertOpenAItoAnthropic:
         result = convert_openai_to_anthropic(resp, "test")
         # Should have both cleaned text and tool_use content
         assert any(c.get("type") == "tool_use" for c in result["content"])
+
+
+# ===========================================================================
+# responses → completions (v0.9.7)
+# ===========================================================================
+
+
+class TestExtractResponsesMessageText:
+    """Tests for _extract_responses_message_text() — полный текст content."""
+
+    def test_plain_string(self):
+        assert _extract_responses_message_text("hello") == "hello"
+
+    def test_input_text_block(self):
+        content = [{"type": "input_text", "text": "hello"}]
+        assert _extract_responses_message_text(content) == "hello"
+
+    def test_output_text_block(self):
+        content = [{"type": "output_text", "text": "hello"}]
+        assert _extract_responses_message_text(content) == "hello"
+
+    def test_text_block(self):
+        content = [{"type": "text", "text": "hello"}]
+        assert _extract_responses_message_text(content) == "hello"
+
+    def test_multiple_blocks_joined_by_newline(self):
+        content = [
+            {"type": "input_text", "text": "first"},
+            {"type": "input_text", "text": "second"},
+        ]
+        assert _extract_responses_message_text(content) == "first\nsecond"
+
+    def test_mixed_blocks(self):
+        content = [
+            {"type": "input_text", "text": "a"},
+            {"type": "image", "url": "..."},  # игнорируется
+            "raw-string",
+            {"type": "output_text", "text": "b"},
+        ]
+        assert _extract_responses_message_text(content) == "a\nraw-string\nb"
+
+    def test_non_text_types_ignored(self):
+        assert _extract_responses_message_text([{"type": "image", "url": "..."}]) == ""
+
+    def test_empty_list(self):
+        assert _extract_responses_message_text([]) == ""
+
+    def test_none_and_non_list(self):
+        assert _extract_responses_message_text(None) == ""
+        assert _extract_responses_message_text(42) == ""
+
+
+class TestConvertResponsesInputToOpenAiMessages:
+    """Tests for convert_responses_input_to_openai_messages() (v0.9.7)."""
+
+    def test_user_message(self):
+        out = convert_responses_input_to_openai_messages(
+            [{"type": "message", "role": "user", "content": "Hi"}], None
+        )
+        assert out == [{"role": "user", "content": "Hi"}]
+
+    def test_assistant_message_blocks(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            None,
+        )
+        assert out == [{"role": "assistant", "content": "ok"}]
+
+    def test_instructions_becomes_first_system(self):
+        out = convert_responses_input_to_openai_messages(
+            [{"type": "message", "role": "user", "content": "Hi"}], "rules"
+        )
+        assert out[0] == {"role": "system", "content": "rules"}
+        assert out[1]["role"] == "user"
+
+    def test_function_call_becomes_assistant_tool_calls(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "Bash",
+                    "arguments": '{"command": "ls"}',
+                }
+            ],
+            None,
+        )
+        assert out == [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "Bash", "arguments": '{"command": "ls"}'},
+                    }
+                ],
+            }
+        ]
+
+    def test_function_call_default_arguments(self):
+        out = convert_responses_input_to_openai_messages(
+            [{"type": "function_call", "call_id": "c", "name": "N"}], None
+        )
+        assert out[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+    def test_function_call_id_fallback(self):
+        # call_id отсутствует → берётся id.
+        out = convert_responses_input_to_openai_messages(
+            [{"type": "function_call", "id": "fc_9", "name": "N"}], None
+        )
+        assert out[0]["tool_calls"][0]["id"] == "fc_9"
+
+    def test_function_call_output_becomes_tool_role(self):
+        out = convert_responses_input_to_openai_messages(
+            [{"type": "function_call_output", "call_id": "call_1", "output": "result"}],
+            None,
+        )
+        assert out == [{"role": "tool", "tool_call_id": "call_1", "content": "result"}]
+
+    def test_function_call_output_list_content(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {
+                    "type": "function_call_output",
+                    "call_id": "c",
+                    "output": [{"type": "output_text", "text": "r"}],
+                }
+            ],
+            None,
+        )
+        assert out[0]["content"] == "r"
+
+    def test_reasoning_skipped(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "reasoning", "encrypted_content": "..."},
+                {"type": "message", "role": "user", "content": "Hi"},
+            ],
+            None,
+        )
+        assert out == [{"role": "user", "content": "Hi"}]
+
+    def test_unknown_item_skipped(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "file", "file_id": "f1"},
+                {"type": "message", "role": "user", "content": "Hi"},
+            ],
+            None,
+        )
+        assert out == [{"role": "user", "content": "Hi"}]
+
+    def test_non_dict_item_skipped(self):
+        out = convert_responses_input_to_openai_messages(["junk", 42], None)
+        assert out == []
+
+    def test_empty_input_no_instructions(self):
+        assert convert_responses_input_to_openai_messages([], None) == []
+
+    def test_system_first_normalized(self):
+        # system-сообщение по ходу диалога переносится в начало.
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "message", "role": "user", "content": "first"},
+                {"type": "message", "role": "system", "content": "rules"},
+            ],
+            None,
+        )
+        assert out[0]["role"] == "system"
+        assert out[1]["role"] == "user"
+
+    def test_missing_type_defaults_to_message(self):
+        out = convert_responses_input_to_openai_messages(
+            [{"role": "user", "content": "Hi"}], None
+        )
+        assert out == [{"role": "user", "content": "Hi"}]
+
+    # -- role=developer схлопывается в system (v0.9.7) --------------------
+
+    def test_developer_merged_into_system_with_instructions(self):
+        # developer-элемент схлопывается в ЕДИНОЕ system-сообщение вместе с
+        # instructions (Qwen3/llama.cpp Jinja: роль "developer" неизвестна, а
+        # system-сообщение должно быть ровно одно и первым).
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "message", "role": "developer", "content": "dev rules"},
+                {"type": "message", "role": "user", "content": "Hi"},
+            ],
+            "instructions",
+        )
+        assert out == [
+            {"role": "system", "content": "instructions\n\ndev rules"},
+            {"role": "user", "content": "Hi"},
+        ]
+
+    def test_developer_without_instructions_becomes_system(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "message", "role": "developer", "content": "dev rules"},
+                {"type": "message", "role": "user", "content": "Hi"},
+            ],
+            None,
+        )
+        assert out[0] == {"role": "system", "content": "dev rules"}
+        assert out[1] == {"role": "user", "content": "Hi"}
+
+    def test_multiple_developers_joined_in_order(self):
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "message", "role": "developer", "content": "first"},
+                {"type": "message", "role": "user", "content": "Hi"},
+                {"type": "message", "role": "developer", "content": "second"},
+            ],
+            None,
+        )
+        assert out[0] == {"role": "system", "content": "first\n\nsecond"}
+        assert out[1] == {"role": "user", "content": "Hi"}
+
+    def test_empty_developer_content_ignored(self):
+        # Пустой/None content developer-элемента не создаёт system-сообщение.
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "message", "role": "developer", "content": ""},
+                {"type": "message", "role": "developer"},
+                {"type": "message", "role": "user", "content": "Hi"},
+            ],
+            None,
+        )
+        assert out == [{"role": "user", "content": "Hi"}]
+
+    def test_developer_role_absent_in_output(self):
+        # Роль "developer" в выходных messages не остаётся ни при каких
+        # условиях (её не знает шаблон бэкенда).
+        out = convert_responses_input_to_openai_messages(
+            [
+                {"type": "message", "role": "developer", "content": "dev"},
+                {"type": "message", "role": "user", "content": "Hi"},
+                {"type": "message", "role": "assistant", "content": "ok"},
+            ],
+            "rules",
+        )
+        assert [m["role"] for m in out] == ["system", "user", "assistant"]
+
+
+class TestConvertResponsesToolsToOpenAi:
+    """Tests for convert_responses_tools_to_openai() (v0.9.7)."""
+
+    def test_single_function(self):
+        tools = [
+            {
+                "type": "function",
+                "name": "Bash",
+                "description": "run",
+                "parameters": {"type": "object"},
+            }
+        ]
+        assert convert_responses_tools_to_openai(tools) == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "run",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
+
+    def test_multiple_functions(self):
+        tools = [
+            {"type": "function", "name": "A", "parameters": {}},
+            {"type": "function", "name": "B", "parameters": {}},
+        ]
+        out = convert_responses_tools_to_openai(tools)
+        assert [t["function"]["name"] for t in out] == ["A", "B"]
+
+    def test_non_function_skipped(self):
+        tools = [{"type": "web_search"}, {"type": "function", "name": "A"}]
+        out = convert_responses_tools_to_openai(tools)
+        assert len(out) == 1
+        assert out[0]["function"]["name"] == "A"
+
+    def test_defaults(self):
+        out = convert_responses_tools_to_openai([{"type": "function", "name": "A"}])
+        assert out[0]["function"]["description"] == ""
+        assert out[0]["function"]["parameters"] == {}
+
+    def test_empty(self):
+        assert convert_responses_tools_to_openai([]) == []
+
+
+class TestConvertResponsesToolChoiceToOpenAi:
+    """Tests for convert_responses_tool_choice_to_openai() (v0.9.7)."""
+
+    def test_none_and_empty(self):
+        assert convert_responses_tool_choice_to_openai(None) == "auto"
+        assert convert_responses_tool_choice_to_openai("") == "auto"
+
+    def test_string_values_pass_through(self):
+        for value in ("auto", "none", "required"):
+            assert convert_responses_tool_choice_to_openai(value) == value
+
+    def test_function_choice_nested(self):
+        out = convert_responses_tool_choice_to_openai({"type": "function", "name": "Bash"})
+        assert out == {"type": "function", "function": {"name": "Bash"}}
+
+    def test_unknown_type_becomes_string(self):
+        assert convert_responses_tool_choice_to_openai({"type": "web_search"}) == "web_search"
+
+
+class TestConvertOpenAiCompletionsToResponses:
+    """Tests for convert_openai_completions_to_responses() (v0.9.7)."""
+
+    def test_text_response(self):
+        o = {
+            "choices": [{"message": {"role": "assistant", "content": "Hello"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7},
+        }
+        out = convert_openai_completions_to_responses(o, "test-model")
+        assert out["object"] == "response"
+        assert out["status"] == "completed"
+        assert out["model"] == "test-model"
+        assert out["id"].startswith("resp_")
+        assert isinstance(out["created_at"], int)
+        assert len(out["output"]) == 1
+        item = out["output"][0]
+        assert item["type"] == "message"
+        assert item["role"] == "assistant"
+        assert item["content"][0]["type"] == "output_text"
+        assert item["content"][0]["text"] == "Hello"
+
+    def test_usage_mapped(self):
+        o = {
+            "choices": [{"message": {"content": "x"}}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 22, "total_tokens": 33},
+        }
+        out = convert_openai_completions_to_responses(o, "m")
+        assert out["usage"] == {"input_tokens": 11, "output_tokens": 22, "total_tokens": 33}
+
+    def test_usage_total_computed_when_missing(self):
+        o = {
+            "choices": [{"message": {"content": "x"}}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 6},
+        }
+        out = convert_openai_completions_to_responses(o, "m")
+        assert out["usage"]["total_tokens"] == 10
+
+    def test_tool_calls_become_function_call_items(self):
+        o = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "Bash", "arguments": '{"command": "ls"}'},
+                            }
+                        ],
+                    }
+                }
+            ]
+        }
+        out = convert_openai_completions_to_responses(o, "m")
+        assert len(out["output"]) == 1
+        item = out["output"][0]
+        assert item["type"] == "function_call"
+        assert item["call_id"] == "call_1"
+        assert item["name"] == "Bash"
+        assert item["arguments"] == '{"command": "ls"}'
+        assert item["id"].startswith("fc_")
+
+    def test_text_and_tool_calls_together(self):
+        o = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "thinking",
+                        "tool_calls": [{"id": "c", "function": {"name": "N", "arguments": "{}"}}],
+                    }
+                }
+            ]
+        }
+        out = convert_openai_completions_to_responses(o, "m")
+        assert [i["type"] for i in out["output"]] == ["message", "function_call"]
+
+    def test_empty_content_no_tool_calls(self):
+        o = {"choices": [{"message": {"content": ""}}]}
+        out = convert_openai_completions_to_responses(o, "m")
+        assert out["output"] == []
+
+    def test_missing_choices(self):
+        out = convert_openai_completions_to_responses({}, "m")
+        assert out["output"] == []
+        assert out["usage"]["input_tokens"] == 0
+
+    def test_tool_call_default_arguments(self):
+        o = {
+            "choices": [
+                {"message": {"tool_calls": [{"id": "c", "function": {"name": "N"}}]}}
+            ]
+        }
+        out = convert_openai_completions_to_responses(o, "m")
+        assert out["output"][0]["arguments"] == "{}"
+
+
+class TestExtractResponsesToolResults:
+    """Tests for extract_responses_tool_results() (v0.9.7)."""
+
+    def test_single_result(self):
+        items = [
+            {"type": "function_call_output", "call_id": "c1", "output": "ok"},
+        ]
+        assert extract_responses_tool_results(items) == [{"call_id": "c1", "content": "ok"}]
+
+    def test_multiple_results(self):
+        items = [
+            {"type": "function_call_output", "call_id": "c1", "output": "a"},
+            {"type": "function_call_output", "call_id": "c2", "output": "b"},
+        ]
+        assert extract_responses_tool_results(items) == [
+            {"call_id": "c1", "content": "a"},
+            {"call_id": "c2", "content": "b"},
+        ]
+
+    def test_list_output_flattened(self):
+        items = [
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [{"type": "output_text", "text": "r"}],
+            }
+        ]
+        assert extract_responses_tool_results(items) == [{"call_id": "c1", "content": "r"}]
+
+    def test_ignores_other_types(self):
+        items = [
+            {"type": "message", "role": "user", "content": "Hi"},
+            {"type": "function_call", "call_id": "c", "name": "N"},
+        ]
+        assert extract_responses_tool_results(items) == []
+
+    def test_non_dict_ignored(self):
+        assert extract_responses_tool_results(["junk"]) == []
+
+    def test_empty(self):
+        assert extract_responses_tool_results([]) == []

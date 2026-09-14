@@ -456,5 +456,6 @@ YAML-файлы проверяются **мягко** (принцип «биты
 | Включить вход `/v1/chat/completions` ([OI]-клиент) | `ADAPTER_COMPLETIONS_TARGET` | `passthrough` (дословно на [OI]-бэкенд, без преобразования) — дефолт `none` (вход закрыт) |
 | Включить вход `/v1/responses` | `ADAPTER_RESPONSES_TARGET` | `passthrough` (дословно, без преобразования) — дефолт `none` (вход закрыт) |
 | Включить конвертер `responses→responses` + команду `/model` (внутренний конвертер, `store:false`) | `ADAPTER_RESPONSES_TARGET` | `responses` (v0.9.6; см. §1а и `docs/routing.md` §2.5) |
-| Преобразовать вход в указанный формат (напр. `messages→completions`) | `ADAPTER_*_TARGET` | формат-цель: `messages` \| `completions` \| `responses`; нереализованная пара → 400 «not implemented» (см. §1а) |
+| Включить конвертер `responses→completions` + команду `/model` (полная кросс-форматная конверсия) | `ADAPTER_RESPONSES_TARGET` | `completions` (v0.9.7; см. `docs/routing.md` §2.2, §2.5) |
+| Преобразовать вход в указанный формат (напр. `messages→completions`, `responses→completions`) | `ADAPTER_*_TARGET` | формат-цель: `messages` \| `completions` \| `responses`; нереализованная пара → 400 «not implemented» (см. §1а) |
 | Валидация env при старте (невалидный int/bool → `[FATAL]` и выход) | `backend_adapter/env_validate.py` | вызывается из `backend-adapter.py` **до** импорта config (v0.9.6) |

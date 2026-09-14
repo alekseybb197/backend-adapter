@@ -26,10 +26,15 @@ from .config import (
 )
 from .convert import (
     convert_messages_anthropic_to_openai,
+    convert_openai_completions_to_responses,
     convert_openai_to_anthropic,
+    convert_responses_input_to_openai_messages,
+    convert_responses_tool_choice_to_openai,
+    convert_responses_tools_to_openai,
     convert_tool_choice_anthropic_to_openai,
     convert_tools_anthropic_to_openai,
     detect_model_switch_command,
+    extract_responses_tool_results,
     extract_tool_results,
     force_store_false,
     normalize_messages_system_first,
@@ -49,6 +54,7 @@ from .streaming import (
     build_responses_control_response,
     emit_responses_control_message,
     relay_sse,
+    stream_openai_completions_to_responses,
     stream_openai_to_anthropic,
 )
 from .tracer import _lookup_tool_use_name, _lookup_tool_use_producer, _trace
@@ -455,21 +461,26 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 return
 
             # === /model <имя> — служебная команда переключения модели (v0.9.6) ===
-            # Работает ТОЛЬКО когда TARGET входа responses == "responses" (см.
-            # routing.IMPLEMENTED_CONVERSIONS[("responses","responses")]) — т.е.
-            # запрос идёт через внутренний конвертор ответов, а не
-            # TARGET=passthrough (там тело уходит дословно, без вмешательств, по
-            # определению). Нативное /model самого Codex CLI на кастомном
-            # model_provider ненадёжно (баги пикера моделей и клонирования
-            # контекста провайдера при смене модели без рестарта сессии — см.
-            # документацию проекта), поэтому адаптер держит собственный канал:
-            # пользователь пишет "/model <имя>" обычным сообщением,
-            # detect_model_switch_command перехватывает его ЗДЕСЬ, до похода к
-            # бэкенду; выбор сохраняется в session_settings и действует для всех
-            # последующих запросов сессии, пока не будет переключён снова.
-            if (
-                inp_fmt == "responses"
-                and routing.target_for_input(inp_fmt, session_id) == "responses"
+            # Работает для ЛЮБОГО TARGET входа responses, который идёт через
+            # конвертор, а не дословно — сейчас это "responses" (внутренний
+            # конвертор, см. IMPLEMENTED_CONVERSIONS[("responses","responses")])
+            # и "completions" (полная кросс-форматная конвертация, см.
+            # IMPLEMENTED_CONVERSIONS[("responses","completions")], v0.9.7); НЕ
+            # срабатывает при TARGET=passthrough (там тело уходит дословно,
+            # без вмешательств, по определению). Нативное /model самого Codex
+            # CLI на кастомном model_provider ненадёжно (баги пикера моделей и
+            # клонирования контекста провайдера при смене модели без рестарта
+            # сессии — см. документацию проекта), поэтому адаптер держит
+            # собственный канал: пользователь пишет "/model <имя>" обычным
+            # сообщением, detect_model_switch_command перехватывает его ЗДЕСЬ,
+            # до похода к бэкенду; выбор сохраняется в session_settings и
+            # действует для всех последующих запросов сессии, пока не будет
+            # переключён снова. Ответ-подтверждение — всегда в формате
+            # Responses (клиент говорит с адаптером через /v1/responses
+            # независимо от TARGET-а, которым обслуживается сам обмен).
+            if inp_fmt == "responses" and routing.target_for_input(inp_fmt, session_id) in (
+                "responses",
+                "completions",
             ):
                 switch_to = detect_model_switch_command(anthropic_req.get("input") or [])
                 if switch_to:
@@ -1186,6 +1197,478 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         out_body=out_body,
                         err_body=msg,
                     )
+                return
+
+            # === responses → completions (v0.9.7) ===
+            # Полная кросс-форматная конвертация: TARGET=completions для входа
+            # responses (routing.IMPLEMENTED_CONVERSIONS[("responses",
+            # "completions")]). До этой точки дошли, только если verbatim=False
+            # (иначе выше уже был return) — при текущем реестре это означает
+            # РОВНО inp_fmt=="responses" (единственная незеркальная пара для
+            # входа responses, кроме уже отработавшего self-пары выше).
+            # messages→completions ниже — отдельная, НЕ общая с этой веткой
+            # реализация (см. её собственный комментарий): дублирование
+            # структуры retry-цикла осознанное и следует уже принятому в
+            # проекте разделению (у passthrough-стрима и messages→completions-
+            # стрима тоже два независимых цикла, а не общий helper).
+            if inp_fmt == "responses":
+                assert out_fmt_val == "completions", out_fmt_val
+
+                r_stream_requested = bool(anthropic_req.get("stream", False))
+                if r_stream_requested and not config.ADAPTER_STREAMING_ENABLE:
+                    _dr(
+                        req_id,
+                        "[STREAM_DISABLED] Клиент просил stream=true, но "
+                        "ADAPTER_STREAMING_ENABLE=0 -> forcing backend_stream=False",
+                    )
+                    r_stream_requested = False
+
+                r_instructions = anthropic_req.get("instructions")
+                r_input = anthropic_req.get("input") or []
+                r_messages = convert_responses_input_to_openai_messages(r_input, r_instructions)
+
+                # Трассировка tool_result — ДО отправки бэкенду, наблюдение за
+                # тем, что харнесс уже прислал в этом запросе (см. docstring
+                # extract_responses_tool_results — без кросс-запросной
+                # привязки к породившему tool-call, в отличие от Anthropic-пути).
+                for tr in extract_responses_tool_results(r_input):
+                    _dr(
+                        req_id,
+                        f"[TOOL_RESULT] call_id={tr['call_id']} len={len(str(tr['content']))}",
+                    )
+                    _trace(
+                        session_id,
+                        req_id,
+                        "tool_result",
+                        tool_use_id=tr["call_id"],
+                        content=tr["content"],
+                    )
+
+                r_openai_body: dict = {
+                    "model": model,
+                    "messages": r_messages,
+                    "stream": r_stream_requested,
+                }
+                if r_stream_requested and config.ADAPTER_STREAM_INCLUDE_USAGE:
+                    r_openai_body["stream_options"] = {"include_usage": True}
+                if anthropic_req.get("tools"):
+                    r_openai_body["tools"] = convert_responses_tools_to_openai(
+                        anthropic_req["tools"]
+                    )
+                    _dr(req_id, f"[TOOLS] Passed {len(r_openai_body['tools'])} tools")
+                if anthropic_req.get("tool_choice"):
+                    r_openai_body["tool_choice"] = convert_responses_tool_choice_to_openai(
+                        anthropic_req["tool_choice"]
+                    )
+                    _dr(req_id, f"[TOOL_CHOICE] {r_openai_body['tool_choice']}")
+
+                # Тот же инвариант конвертации, что и у messages→completions
+                # ниже: часть бэкендов (vLLM-шаблон чата) требует system
+                # первым сообщением. Здесь он обеспечен
+                # normalize_messages_system_first ВНУТРИ
+                # convert_responses_input_to_openai_messages — проверка тут
+                # только диагностическая, как и в messages→completions.
+                r_system_ok = bool(r_messages) and r_messages[0]["role"] == "system"
+                _trace(
+                    session_id,
+                    req_id,
+                    "adapter_invariant_check",
+                    check="system_message_first",
+                    passed=r_system_ok,
+                    first_role=(r_messages[0]["role"] if r_messages else None),
+                )
+                _dr(
+                    req_id,
+                    "[CHECK] First message is system, OK"
+                    if r_system_ok
+                    else f"[WARN] First message is NOT system: "
+                    f"{r_messages[0]['role'] if r_messages else 'empty'}",
+                )
+
+                _dr(req_id, f"[OPENAI_BODY] {json.dumps(r_openai_body, ensure_ascii=False)}")
+                if config.ADAPTER_DEBUG_PARTS:
+                    write_debug_json(session_id, "OPENAI_BODY", r_openai_body)
+
+                r_backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
+                r_backend_key = backend_cfg["key"]
+                r_out_body = json.dumps(r_openai_body, ensure_ascii=False).encode()
+                r_req = urllib.request.Request(
+                    r_backend_url,
+                    data=r_out_body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {r_backend_key}",
+                        "Connection": "keep-alive",
+                    },
+                    method="POST",
+                )
+
+                if r_stream_requested:
+                    r_last_error: tuple[int | str, str] | None = None
+                    r_started = False
+                    for attempt in range(1, ADAPTER_RETRY + 1):
+                        try:
+                            _dr(
+                                req_id,
+                                f"[FETCH] (responses->completions stream) Attempt "
+                                f"{attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_attempt",
+                                attempt=attempt,
+                                timeout=ADAPTER_TIMEOUT,
+                                streaming=True,
+                            )
+                            t0 = time.time()
+                            resp = urllib.request.urlopen(
+                                r_req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT
+                            )
+                            _dr(
+                                req_id,
+                                f"[FETCH] Заголовки получены за {time.time() - t0:.1f}s, "
+                                f"status={resp.status}",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=True,
+                                status=resp.status,
+                                elapsed_ms=int((time.time() - t0) * 1000),
+                            )
+                            self._start_sse(200)
+                            r_started = True
+                            r_approx_prompt_chars = len(json.dumps(r_messages, ensure_ascii=False))
+                            _finish_reason, r_usage = stream_openai_completions_to_responses(
+                                resp,
+                                self.wfile,
+                                model,
+                                session_id,
+                                req_id,
+                                approx_prompt_chars=r_approx_prompt_chars,
+                                out_body=r_out_body,
+                                backend_url=r_backend_url,
+                            )
+                            if r_usage.get("prompt_tokens") or r_usage.get("completion_tokens"):
+                                usage_tokens["input"] += int(r_usage.get("prompt_tokens") or 0)
+                                usage_tokens["output"] += int(r_usage.get("completion_tokens") or 0)
+                            _dr(req_id, f"[OK] Stream done, finish_reason={_finish_reason}")
+                            _trace(
+                                session_id,
+                                req_id,
+                                "request_end",
+                                http_status=200,
+                                retries_used=attempt - 1,
+                                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                streamed=True,
+                            )
+                            return
+
+                        except urllib.error.HTTPError as e:
+                            err_raw = e.read()
+                            err = err_raw.decode()
+                            _dr(
+                                req_id,
+                                f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
+                            )
+                            error_value = (
+                                err[:500]
+                                if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                                else redact(err[:500])
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status=e.code,
+                                error=error_value,
+                            )
+                            r_last_error = (e.code, err)
+                            if e.code not in (429, 502, 503, 504):
+                                break
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                                time.sleep(delay)
+
+                        except TimeoutError as e:
+                            _dr(
+                                req_id,
+                                f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out after "
+                                f"{ADAPTER_TIMEOUT}s",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status="timeout",
+                                error=str(e),
+                            )
+                            r_last_error = ("timeout", str(e))
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s before next attempt...")
+                                time.sleep(delay)
+
+                        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError) as e:
+                            _dr(
+                                req_id,
+                                f"[CLIENT_GONE] {type(e).__name__} while streaming: client disconnected",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "request_end",
+                                http_status=None,
+                                retries_used=attempt - 1,
+                                total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                streamed=True,
+                                client_gone=True,
+                            )
+                            return
+
+                        except Exception as e:
+                            _dr(
+                                req_id,
+                                f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}",
+                            )
+                            _trace(
+                                session_id,
+                                req_id,
+                                "backend_result",
+                                attempt=attempt,
+                                ok=False,
+                                status="error",
+                                error=f"{type(e).__name__}: {e}",
+                            )
+                            r_last_error = ("error", str(e))
+                            if r_started:
+                                with contextlib.suppress(Exception):
+                                    _write_sse_error_native(
+                                        self.wfile, inp_fmt, f"{type(e).__name__}: {e}"
+                                    )
+                                _trace(
+                                    session_id,
+                                    req_id,
+                                    "request_end",
+                                    http_status=200,
+                                    retries_used=attempt - 1,
+                                    total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                                    streamed=True,
+                                    failed_mid_stream=True,
+                                )
+                                return
+                            if attempt < ADAPTER_RETRY:
+                                delay = 2**attempt
+                                _dr(req_id, f"[RETRY] Waiting {delay}s...")
+                                time.sleep(delay)
+
+                    if r_last_error and not r_started:
+                        code, msg = r_last_error
+                        if code == "timeout":
+                            self._send_json(
+                                504,
+                                {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"},
+                            )
+                            final_status = 504
+                        elif isinstance(code, int):
+                            self._send_json(code, {"error": f"Backend error: {msg}"})
+                            final_status = code
+                        else:
+                            self._send_json(
+                                502,
+                                {
+                                    "error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"
+                                },
+                            )
+                            final_status = 502
+                        _trace(
+                            session_id,
+                            req_id,
+                            "request_end",
+                            http_status=final_status,
+                            retries_used=ADAPTER_RETRY,
+                            total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                            failed=True,
+                            streamed=True,
+                        )
+                        _write_backend_error(
+                            session_id,
+                            req_id,
+                            final_status=final_status,
+                            backend_url=r_backend_url,
+                            model=model,
+                            out_body=r_out_body,
+                            err_body=msg,
+                        )
+                    return
+
+                # === Нестриминговая ветка responses→completions ===
+                r_last_error = None
+                for attempt in range(1, ADAPTER_RETRY + 1):
+                    try:
+                        _dr(
+                            req_id,
+                            f"[FETCH] Attempt {attempt}/{ADAPTER_RETRY}, timeout={ADAPTER_TIMEOUT}s",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_attempt",
+                            attempt=attempt,
+                            timeout=ADAPTER_TIMEOUT,
+                        )
+                        t0 = time.time()
+                        resp = urllib.request.urlopen(
+                            r_req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT
+                        )
+                        raw = resp.read()
+                        elapsed = time.time() - t0
+                        _dr(
+                            req_id,
+                            f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes",
+                        )
+                        if config.ADAPTER_DEBUG_PARTS:
+                            write_debug_json(session_id, "FETCH_RAW", raw.decode())
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=True,
+                            status=resp.status,
+                            elapsed_ms=int(elapsed * 1000),
+                        )
+                        o = json.loads(raw)
+                        responses_resp = convert_openai_completions_to_responses(o, model)
+                        u = o.get("usage") or {}
+                        if u.get("prompt_tokens") or u.get("completion_tokens"):
+                            usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
+                            usage_tokens["output"] += int(u.get("completion_tokens") or 0)
+                        _dr(req_id, f"[RESPONSE] {json.dumps(responses_resp, ensure_ascii=False)}")
+                        if config.ADAPTER_DEBUG_PARTS:
+                            write_debug_json(session_id, "RESPONSE", responses_resp)
+                        self._send_json(200, responses_resp)
+                        _dr(req_id, "[OK] Done")
+                        _trace(
+                            session_id,
+                            req_id,
+                            "request_end",
+                            http_status=200,
+                            retries_used=attempt - 1,
+                            total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                            streamed=False,
+                        )
+                        return
+                    except urllib.error.HTTPError as e:
+                        err_raw = e.read()
+                        err = err_raw.decode()
+                        _dr(
+                            req_id,
+                            f"[BACKEND_ERR] HTTP {e.code} on attempt {attempt}: {err[:1500]}",
+                        )
+                        error_value = (
+                            err[:500]
+                            if config.ADAPTER_SENSITIVE_LOGGING_ENABLE
+                            else redact(err[:500])
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status=e.code,
+                            error=error_value,
+                        )
+                        r_last_error = (e.code, err)
+                        if e.code not in (429, 502, 503, 504):
+                            break
+                        if attempt < ADAPTER_RETRY:
+                            time.sleep(2**attempt)
+                    except TimeoutError as e:
+                        _dr(req_id, f"[TIMEOUT] Attempt {attempt}/{ADAPTER_RETRY} timed out")
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status="timeout",
+                            error=str(e),
+                        )
+                        r_last_error = ("timeout", str(e))
+                        if attempt < ADAPTER_RETRY:
+                            time.sleep(2**attempt)
+                    except Exception as e:
+                        _dr(
+                            req_id,
+                            f"[FETCH_ERR] Attempt {attempt}/{ADAPTER_RETRY}: {type(e).__name__}: {e}",
+                        )
+                        _trace(
+                            session_id,
+                            req_id,
+                            "backend_result",
+                            attempt=attempt,
+                            ok=False,
+                            status="error",
+                            error=f"{type(e).__name__}: {e}",
+                        )
+                        r_last_error = ("error", str(e))
+                        if attempt < ADAPTER_RETRY:
+                            time.sleep(2**attempt)
+
+                # Все попытки исчерпаны — как соседние ветки: 504/код/502.
+                # r_last_error может остаться None при ADAPTER_RETRY_COUNT=0
+                # (цикл не выполнился) — fallback 502, как в convert-ветке ниже.
+                if r_last_error:
+                    code, msg = r_last_error
+                    if code == "timeout":
+                        self._send_json(
+                            504, {"error": f"Gateway timeout after {ADAPTER_RETRY} attempts: {msg}"}
+                        )
+                        final_status = 504
+                    elif isinstance(code, int):
+                        self._send_json(code, {"error": f"Backend error: {msg}"})
+                        final_status = code
+                    else:
+                        self._send_json(
+                            502,
+                            {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"},
+                        )
+                        final_status = 502
+                else:
+                    msg = f"Backend unavailable after {ADAPTER_RETRY} attempts"
+                    self._send_json(
+                        502, {"error": f"Backend unavailable after {ADAPTER_RETRY} attempts: {msg}"}
+                    )
+                    final_status = 502
+                _trace(
+                    session_id,
+                    req_id,
+                    "request_end",
+                    http_status=final_status,
+                    retries_used=ADAPTER_RETRY,
+                    total_elapsed_ms=int((time.time() - req_t0) * 1000),
+                    failed=True,
+                    streamed=False,
+                )
+                _write_backend_error(
+                    session_id,
+                    req_id,
+                    final_status=final_status,
+                    backend_url=r_backend_url,
+                    model=model,
+                    out_body=r_out_body,
+                    err_body=msg,
+                )
                 return
 
             max_tokens = anthropic_req.get("max_tokens", 4096)

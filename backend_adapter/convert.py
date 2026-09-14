@@ -6,6 +6,8 @@ response converter (which depends on tracer package).
 
 import json
 import re
+import time
+import uuid
 from typing import Any
 
 from . import config
@@ -125,6 +127,230 @@ def detect_model_switch_command(input_items: list) -> str | None:
         return None
     m = _MODEL_SWITCH_RE.match(text.strip())
     return m.group(1) if m else None
+
+
+# === responses → completions (routing, v0.9.7) ===
+# Настоящая кросс-форматная конвертация (в отличие от responses→responses
+# выше, которая лишь точечно правит тело): input/instructions/tools ->
+# messages/tools для Chat Completions бэкенда, и обратно — completions
+# message/tool_calls -> output-массив Responses. Используется, когда
+# ADAPTER_RESPONSES_TARGET=completions (routing.py, IMPLEMENTED_CONVERSIONS).
+
+
+def _extract_responses_message_text(content) -> str:
+    """Полный текст content Responses-сообщения (message-item):
+    конкатенация всех текстовых блоков (input_text/output_text/text) через
+    перевод строки. В отличие от _extract_responses_input_text (которая
+    требует РОВНО один блок и служит только для распознавания команды
+    /model), эта функция — для настоящей конвертации: сообщение может
+    состоять из нескольких блоков (или прийти строкой, если output
+    function_call_output — string, а не список блоков)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and block.get("type") in ("input_text", "output_text", "text"):
+            parts.append(block.get("text", ""))
+    return "\n".join(parts)
+
+
+def convert_responses_input_to_openai_messages(input_items: list, instructions: str | None) -> list:
+    """Responses API ``input`` (+ top-level ``instructions``) -> Chat
+    Completions ``messages`` (routing: responses→completions, v0.9.7).
+
+    Соответствие типов input-item -> messages:
+      - ``message`` role=developer -> СХЛОПЫВАЕТСЯ в единое system-
+        сообщение вместе с ``instructions`` (см. ниже), НЕ остаётся
+        отдельной ролью "developer" в выходных messages;
+      - ``message`` (role=user/assistant) -> {role, content: весь текст
+        content, см. _extract_responses_message_text};
+      - ``function_call`` -> assistant-сообщение с
+        tool_calls=[{id: call_id, type: function, function: {name,
+        arguments}}], content=None (как у настоящего ответа модели с
+        вызовом инструмента);
+      - ``function_call_output`` -> {role: tool, tool_call_id: call_id,
+        content: output} — call_id ЭХУЕТСЯ клиентом из ранее отданного
+        адаптером function_call.call_id (см.
+        convert_openai_completions_to_responses), отдельного
+        кросс-запросного реестра для связывания не требуется;
+      - ``reasoning`` -> ПРОПУСКАЕТСЯ. У Chat Completions нет эквивалента
+        непрозрачного reasoning-блока (Responses хранит его как
+        encrypted_content конкретного провайдера) — целевой бэкенд его
+        просто не увидит, как при обычной смене модели;
+      - прочие/неизвестные типы item — пропускаются молча (чистая функция,
+        без side-effects логирования; вызывающая сторона при необходимости
+        сама решает, логировать ли необычный item).
+
+    Почему ``developer`` схлопывается в ``system``, а не остаётся своей
+    ролью (v0.9.7, разбор реальной ошибки): часть локальных chat-шаблонов
+    (в первую очередь Qwen3-семейство под llama.cpp) не знает роль
+    "developer" вовсе (падает на "Unexpected message role") И одновременно
+    жёстко требует, чтобы ролью "system" было РОВНО ОДНО сообщение и
+    непременно первым — два system-сообщения (например "instructions" как
+    system плюс отдельный "developer" item, будь он трактован как system
+    кем-то ниже по цепочке) валят автогенерацию грамматики tool-calling
+    ошибкой "System message must be at the beginning" ещё ДО генерации
+    ответа. Схлопывание в одно сообщение убирает сразу обе причины отказа.
+    Итоговое system-сообщение — это ``instructions``, затем текст каждого
+    developer-item, через двойной перевод строки, всегда одно и всегда
+    первым (закрепляется normalize_messages_system_first ниже)."""
+    system_parts: list[str] = []
+    if instructions:
+        system_parts.append(instructions)
+    out: list = []
+    for item in input_items:
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type", "message")
+        if itype == "message":
+            role = item.get("role", "user")
+            text = _extract_responses_message_text(item.get("content"))
+            if role == "developer":
+                if text:
+                    system_parts.append(text)
+                continue
+            out.append({"role": role, "content": text})
+        elif itype == "function_call":
+            out.append(
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": item.get("call_id") or item.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": item.get("name", ""),
+                                "arguments": item.get("arguments") or "{}",
+                            },
+                        }
+                    ],
+                }
+            )
+        elif itype == "function_call_output":
+            output = item.get("output", "")
+            if isinstance(output, list):
+                output = _extract_responses_message_text(output)
+            out.append({"role": "tool", "tool_call_id": item.get("call_id", ""), "content": output})
+        # itype == "reasoning" и прочее нераспознанное — пропускается.
+
+    messages: list = []
+    if system_parts:
+        messages.append({"role": "system", "content": "\n\n".join(system_parts)})
+    messages.extend(out)
+    return normalize_messages_system_first(messages)
+
+
+def convert_responses_tools_to_openai(tools: list) -> list:
+    """Responses tool schema (плоская форма: {type, name, description,
+    parameters}) -> Completions tool schema (вложенная: {type, function:
+    {name, description, parameters}}). Та же идея, что
+    convert_tools_anthropic_to_openai ниже, другая входная форма."""
+    out = []
+    for tool in tools:
+        if tool.get("type") != "function":
+            continue
+        out.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.get("name", ""),
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("parameters", {}),
+                },
+            }
+        )
+    return out
+
+
+def convert_responses_tool_choice_to_openai(tc):
+    """Responses tool_choice -> Completions tool_choice. Строковые значения
+    ("auto"/"none"/"required") совпадают в обоих форматах; отличается
+    только форма выбора конкретной функции: Responses — плоско
+    ({"type":"function","name":...}), Completions — вложенно
+    ({"type":"function","function":{"name":...}})."""
+    if not tc or isinstance(tc, str):
+        return tc or "auto"
+    if tc.get("type") == "function":
+        return {"type": "function", "function": {"name": tc.get("name", "")}}
+    return tc.get("type", "auto")
+
+
+def convert_openai_completions_to_responses(o: dict, model: str) -> dict:
+    """Completions non-stream ответ -> Responses non-stream объект
+    (routing: responses→completions, v0.9.7). Зеркало
+    convert_openai_to_anthropic ниже, целевой формат — Responses.
+
+    Кросс-запросная трассировка tool_use (parent_req_id, см.
+    _register_tool_use у Anthropic-пути) сюда сознательно не перенесена:
+    call_id у Responses эхуется клиентом напрямую через
+    function_call_output, самостоятельный реестр не нужен (см.
+    convert_responses_input_to_openai_messages)."""
+    choice = (o.get("choices") or [{}])[0]
+    msg = choice.get("message", {}) or {}
+    output_items = []
+    content = msg.get("content")
+    if content:
+        output_items.append(
+            {
+                "id": f"msg_{uuid.uuid4().hex}",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": content, "annotations": []}],
+            }
+        )
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function", {}) or {}
+        output_items.append(
+            {
+                "id": f"fc_{uuid.uuid4().hex}",
+                "type": "function_call",
+                "status": "completed",
+                "call_id": tc.get("id", ""),
+                "name": fn.get("name", ""),
+                "arguments": fn.get("arguments") or "{}",
+            }
+        )
+    usage_raw = o.get("usage") or {}
+    input_tok = usage_raw.get("prompt_tokens", 0)
+    output_tok = usage_raw.get("completion_tokens", 0)
+    return {
+        "id": f"resp_{uuid.uuid4().hex}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": model,
+        "output": output_items,
+        "usage": {
+            "input_tokens": input_tok,
+            "output_tokens": output_tok,
+            "total_tokens": usage_raw.get("total_tokens", input_tok + output_tok),
+        },
+    }
+
+
+def extract_responses_tool_results(input_items: list) -> list[dict]:
+    """``function_call_output`` items -> [{"call_id", "content"}] (routing:
+    responses→completions, v0.9.7) — для наблюдательной трассировки, аналог
+    extract_tool_results у Anthropic-пути, но БЕЗ кросс-запросной привязки
+    к породившему tool-call: call_id уже эхуется клиентом напрямую (см.
+    docstring convert_responses_input_to_openai_messages), отдельный
+    реестр не нужен. Responses не несёт отдельного признака ошибки в
+    function_call_output — is_error здесь не сообщается (в отличие от
+    Anthropic tool_result, где он есть)."""
+    out = []
+    for item in input_items:
+        if isinstance(item, dict) and item.get("type") == "function_call_output":
+            output = item.get("output", "")
+            if isinstance(output, list):
+                output = _extract_responses_message_text(output)
+            out.append({"call_id": item.get("call_id", ""), "content": output})
+    return out
 
 
 def convert_tools_anthropic_to_openai(tools):
