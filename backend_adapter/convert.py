@@ -490,6 +490,47 @@ def convert_messages_anthropic_to_openai(messages, system):
     return result
 
 
+def sanitize_max_tokens(body: dict, req_id: str = "") -> dict:
+    """Санитайзер max_tokens для исходящего запроса к бэкенду.
+
+    Проблема: Claude Code иногда шлёт max_tokens=1 (пробинг/служебный запрос),
+    а reasoning-модели отказываются выполнять такие запросы
+    (reasoning_budget_exhausted, min_max_tokens=8).
+
+    Логика:
+    - min_max_tokens = 16 — ниже этого точно служебный запрос
+    - default_max_tokens = 8192 — безопасный дефолт
+    - hard_max_tokens = 16384 — потолок, чтобы не упереться в лимит модели
+
+    Возвращает мутированный body с исправленным max_tokens.
+    Логирует факт клэмпа через _d, если передан req_id.
+    """
+    from .logger import _d
+
+    min_max_tokens = 16
+    default_max_tokens = 8192
+    hard_max_tokens = 16384
+
+    mt = body.get("max_tokens")
+    original_mt = mt
+
+    if mt is None or not isinstance(mt, (int, float)) or mt < min_max_tokens:
+        # max_tokens=1 от Claude Code — пробинг; не пробрасываем как есть
+        body["max_tokens"] = default_max_tokens
+        if req_id:
+            _d(
+                f"[{req_id}] [CLAMP] max_tokens {original_mt} -> {default_max_tokens} (too small, using default)"
+            )
+    elif mt > hard_max_tokens:
+        body["max_tokens"] = hard_max_tokens
+        if req_id:
+            _d(
+                f"[{req_id}] [CLAMP] max_tokens {original_mt} -> {hard_max_tokens} (exceeds hard limit)"
+            )
+
+    return body
+
+
 def parse_tool_calls_from_text(text):
     """Fallback: парсит <tool_call>...</tool_call> из текста (Qwen-формат)."""
     tool_calls = []

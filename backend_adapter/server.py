@@ -38,6 +38,7 @@ from .convert import (
     extract_tool_results,
     force_store_false,
     normalize_messages_system_first,
+    sanitize_max_tokens,
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
@@ -829,6 +830,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     write_debug_json(session_id, "OPENAI_BODY", anthropic_req)
                 backend_url = backend_cfg["base"].rstrip("/") + routing.INPUT_PATHS[out_fmt_val]
                 backend_key_val = backend_cfg["key"]
+                # Санитайзер max_tokens для passthrough-ветки (E→E): даже при
+                # дословной передаче нужно защитить upstream от пробинга с max_tokens=1.
+                sanitize_max_tokens(anthropic_req, req_id)
                 out_body = json.dumps(anthropic_req, ensure_ascii=False).encode()
                 _dr(req_id, f"[BACKEND_URL] {backend_url}")
                 req = urllib.request.Request(
@@ -1361,6 +1365,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     "messages": r_messages,
                     "stream": r_stream_requested,
                 }
+                # Санитайзер max_tokens для responses→completions: если клиент
+                # прислал max_tokens в теле (responses его не использует, но
+                # на всякий случай защитимся от пробинга).
+                sanitize_max_tokens(r_openai_body, req_id)
                 if r_stream_requested and config.ADAPTER_STREAM_INCLUDE_USAGE:
                     r_openai_body["stream_options"] = {"include_usage": True}
                 if anthropic_req.get("tools"):
@@ -1798,6 +1806,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 return
 
             max_tokens = anthropic_req.get("max_tokens", 4096)
+            # Санитайзер max_tokens: Claude Code иногда шлёт max_tokens=1 (пробинг),
+            # а reasoning-модели отказываются выполнять такие запросы
+            # (reasoning_budget_exhausted, min_max_tokens=8).
+            anthropic_req_sanitized = sanitize_max_tokens(anthropic_req, req_id)
+            max_tokens = anthropic_req_sanitized["max_tokens"]
+
             in_tools = anthropic_req.get("tools", [])
             in_tool_names = [t.get("name", "?") for t in in_tools]
             in_messages = anthropic_req.get("messages", [])

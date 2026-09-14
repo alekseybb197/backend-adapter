@@ -21,7 +21,49 @@ from backend_adapter.convert import (
     force_store_false,
     normalize_messages_system_first,
     parse_tool_calls_from_text,
+    sanitize_max_tokens,
 )
+
+
+class TestSanitizeMaxTokens:
+    """Tests for sanitize_max_tokens()."""
+
+    def test_small_max_tokens_replaced(self):
+        """max_tokens=1 (пробинг от Claude Code) заменяется на дефолт."""
+        body = {"max_tokens": 1}
+        result = sanitize_max_tokens(body)
+        assert result["max_tokens"] == 8192
+
+    def test_none_max_tokens_replaced(self):
+        """Отсутствие max_tokens заменяется на дефолт."""
+        body = {}
+        result = sanitize_max_tokens(body)
+        assert result["max_tokens"] == 8192
+
+    def test_large_max_tokens_clamped(self):
+        """Слишком большое max_tokens клэмпится до хард-лимита."""
+        body = {"max_tokens": 100000}
+        result = sanitize_max_tokens(body)
+        assert result["max_tokens"] == 16384
+
+    def test_normal_max_tokens_unchanged(self):
+        """Нормальное max_tokens остаётся без изменений."""
+        body = {"max_tokens": 4096}
+        result = sanitize_max_tokens(body)
+        assert result["max_tokens"] == 4096
+
+    def test_boundary_max_tokens_unchanged(self):
+        """max_tokens на границе минимума остаётся без изменений."""
+        body = {"max_tokens": 16}
+        result = sanitize_max_tokens(body)
+        assert result["max_tokens"] == 16
+
+    def test_mutation_in_place(self):
+        """Функция мутирует body на месте."""
+        body = {"max_tokens": 1, "model": "test"}
+        result = sanitize_max_tokens(body)
+        assert result is body  # тот же объект
+        assert body["max_tokens"] == 8192
 
 
 class TestExtractText:
