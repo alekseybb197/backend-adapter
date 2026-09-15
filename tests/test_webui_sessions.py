@@ -195,14 +195,12 @@ def _ctx():
 # ---------------------------------------------------------------------------
 
 class TestSessionSelectHelpers:
-    def test_bool_options_marks_inherited_value(self):
+    def test_bool_options_has_no_inherit(self):
+        # v0.9.8: у Log/Parts только on/off — состояния «inherit» нет
+        # (значение сессии всегда материализовано снимком при образовании).
         config, ws = _fresh_modules()
-        config.ADAPTER_DEBUG = False
-        assert ws._bool_options("ADAPTER_DEBUG") == (
-            ("inherit", "inherit (off)"), ("1", "on"), ("0", "off"),
-        )
-        config.ADAPTER_DEBUG = True
-        assert ws._bool_options("ADAPTER_DEBUG")[0] == ("inherit", "inherit (on)")
+        assert ws._bool_options("ADAPTER_DEBUG") == (("1", "on"), ("0", "off"))
+        assert ws._bool_options("ADAPTER_DEBUG_PARTS") == (("1", "on"), ("0", "off"))
 
     def test_target_options_include_domain(self):
         config, ws = _fresh_modules()
@@ -215,7 +213,12 @@ class TestSessionSelectHelpers:
     def test_stored_bool_states(self):
         config, ws = _fresh_modules()
         from backend_adapter import session_settings
-        assert ws._stored_bool("s-1", "ADAPTER_DEBUG") == "inherit"
+        # Необразованная сессия — страховка: показываем действующее значение
+        # (снимок ещё не взят, но «inherit» не показываем никогда).
+        config.ADAPTER_DEBUG = False
+        assert ws._stored_bool("s-1", "ADAPTER_DEBUG") == "0"
+        config.ADAPTER_DEBUG = True
+        assert ws._stored_bool("s-2", "ADAPTER_DEBUG") == "1"
         session_settings.set_config("s-1", {"ADAPTER_DEBUG": True})
         assert ws._stored_bool("s-1", "ADAPTER_DEBUG") == "1"
         session_settings.set_config("s-1", {"ADAPTER_DEBUG": False})
@@ -761,17 +764,21 @@ class TestSessionSettingsAPI:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_form_inherit_clears_bool(self, tmp_path):
+    def test_form_inherit_reinitializes_bool_from_global(self, tmp_path):
+        # v0.9.8: форма больше не шлёт "inherit" у bool, но старое значение
+        # (закладка/скрипт) трактуется как «сбросить к общему» — у снимка это
+        # свежий снимок текущего общего тумблера, запись НЕ исчезает.
         config, ws = _fresh_modules()
         from backend_adapter import session_settings
-        session_settings.set_config("s-1", {"ADAPTER_DEBUG": True})
+        config.ADAPTER_DEBUG = True
+        session_settings.set_config("s-1", {"ADAPTER_DEBUG": False})
         httpd, port = _start_server(str(tmp_path))
         try:
             _http_post_body(
                 port, "/api/sessions/settings?session=s-1&name=ADAPTER_DEBUG",
                 b"value=inherit", "application/x-www-form-urlencoded",
             )
-            assert session_settings.override("s-1", "ADAPTER_DEBUG") is None
+            assert session_settings.override("s-1", "ADAPTER_DEBUG") is True
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -833,7 +840,29 @@ class TestSessionSettingsAPI:
             overrides = json.loads(body)["overrides"]
             assert overrides["ADAPTER_DEBUG"] is True
             assert overrides["ADAPTER_COMPLETIONS_TARGET"] == "none"
-            assert "ADAPTER_DEBUG_PARTS" not in overrides
+            # v0.9.8: у снимка Log/Parts clear = свежий снимок общего тумблера
+            # (по умолчанию выключен), а не удаление ключа из строки сессии.
+            assert overrides["ADAPTER_DEBUG_PARTS"] is False
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_json_clear_target_removes_key(self, tmp_path):
+        # У TARGET-поля (живое наследование) clear именно УДАЛЯЕТ запись —
+        # это и отличает его от снимка Log/Parts.
+        config, ws = _fresh_modules()
+        from backend_adapter import session_settings
+        session_settings.set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            payload = json.dumps(
+                {"session": "s-1", "clear": ["ADAPTER_MESSAGES_TARGET"]}
+            ).encode()
+            status, _, body = _http_post_body(
+                port, "/api/sessions/settings", payload, "application/json"
+            )
+            assert status == 200
+            assert "ADAPTER_MESSAGES_TARGET" not in json.loads(body)["overrides"]
         finally:
             httpd.shutdown()
             httpd.server_close()

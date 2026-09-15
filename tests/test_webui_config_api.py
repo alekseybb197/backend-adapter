@@ -598,8 +598,49 @@ class TestConfigHTTPPost:
             httpd.server_close()
 
 
+class TestLogPartsTemplate:
+    """Log/Parts на /config — ШАБЛОН для новых сессий (v0.9.8), а не
+    выключатель функционала: смена глобального флага не трогает уже
+    образованные сессии (их значения — снимок, управляются на /sessions)."""
+
+    def test_page_states_template_semantics(self, tmp_path):
+        _reload_config()
+        from backend_adapter.webui_config_api import _render_config_page
+        from backend_adapter import config
+
+        page = _render_config_page(config.get_runtime_config()).decode("utf-8")
+        assert "для НОВЫХ сессий" in page
+        assert "не включает и не выключает" in page
+
+    def test_post_does_not_change_existing_session(self, tmp_path):
+        """POST /config ADAPTER_DEBUG=0: сессия, образованная при Log=on,
+        продолжает писать; новая сессия получает уже выключенный шаблон."""
+        _reload_config()
+        from backend_adapter import config, session_settings, session_log
+        config.ADAPTER_DEBUG = True
+        session_log.logging_enabled("sess-old")  # образование сессии (снимок on)
+        assert session_settings.override("sess-old", "ADAPTER_DEBUG") is True
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _ = _http_post(
+                port, "/config", "application/x-www-form-urlencoded",
+                b"ADAPTER_DEBUG=0",
+            )
+            assert status == 200
+            assert config.ADAPTER_DEBUG is False
+            # Существующая сессия — не тронута (снимок живёт своей жизнью).
+            assert session_log.logging_enabled("sess-old") is True
+            # Новая сессия — уже с выключенным шаблоном.
+            assert session_log.logging_enabled("sess-new") is False
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
 __all__ = [
     "TestRenderConfigPage",
     "TestConfigHTTPGet",
     "TestConfigHTTPPost",
+    "TestLogPartsTemplate",
 ]
