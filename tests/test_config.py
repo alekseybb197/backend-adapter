@@ -473,6 +473,39 @@ class TestInitMultiBackends:
         assert set(server_view_models) == {"m1", "m2"}
         assert set(server_view_map) == {"m1", "m2"}
 
+    def test_init_multi_backends_mutates_backends_list_in_place(self, tmp_path):
+        """v0.9.8: список/словарь БЭКЕНДОВ тоже мутируются на месте.
+
+        Точка входа (``backend-adapter.py``) делает
+        ``from backend_adapter.config import _BACKENDS`` и печатает стартовый
+        баннер; переприсваивание ``_BACKENDS = blocks`` оставляло ей исходный
+        ПУСТОЙ список — баннер всегда показывал «0 configured». Ссылки на
+        объекты (как у любого импортёра-по-значению) обязаны остаться живыми.
+        """
+        yaml_file = tmp_path / "init.yaml"
+        yaml_file.write_text("""backend:
+  - name: home
+    base: http://home
+    key: k
+  - name: work
+    base: http://work
+    key: k
+""")
+        _reload_config()
+        from backend_adapter import config
+
+        entrypoint_view_backends = config._BACKENDS
+        entrypoint_view_by_name = config._BACKEND_BY_NAME
+
+        with mock.patch.object(config, "_fetch_models", return_value=[{"id": "m1"}]):
+            config._init_multi_backends(str(yaml_file))
+
+        assert config._BACKENDS is entrypoint_view_backends
+        assert config._BACKEND_BY_NAME is entrypoint_view_by_name
+        assert [b["name"] for b in entrypoint_view_backends] == ["home", "work"]
+        assert set(entrypoint_view_by_name) == {"home", "work"}
+
+
 class TestRefreshModels:
     """Tests for refresh_models() — on-demand model cache refresh.
 

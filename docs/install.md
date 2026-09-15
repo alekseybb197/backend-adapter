@@ -841,7 +841,8 @@ Models:     strict validation
 Streaming:  enabled (SSE passthrough)
 
 Backends:   1 configured:
-  - home: http://127.0.0.1:8002
+  - home: http://127.0.0.1:8002  (12 models) [default]
+TARGET:     messages=completions  completions=none  responses=none
 [WEBUI] http://127.0.0.1:8765/ (root: ./tmp/logs)
 [EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================
