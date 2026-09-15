@@ -15,6 +15,8 @@
   в запросе, объявлять её заранее не нужно.
 - **QwenCode** — [docs/qwen-code.md](docs/qwen-code.md): модели объявляются
   заранее в `modelProviders`, зато у каждой может быть своё контекстное окно.
+- **Codex CLI** — [docs/codex.md](docs/codex.md): работает через Responses API
+  (`wire_api = "responses"`), переключение модели командой `/model <имя>`.
 - **Любой другой клиент** — Anthropic Messages API (`/v1/messages`) и
   [OI]-совместимые клиенты (`/v1/chat/completions`, `/v1/responses`), см.
   [docs/routing.md](docs/routing.md).
@@ -74,6 +76,7 @@ qwen                   # QwenCode   — см. docs/qwen-code.md
 | [docs/install.md](docs/install.md) | Установка, конфигурация, systemd/launchd, troubleshooting |
 | [docs/claude_code.md](docs/claude_code.md) | Настройка клиента [CC]: профиль, проектные настройки, статус-строка, модели и контекст |
 | [docs/qwen-code.md](docs/qwen-code.md) | Настройка клиента QwenCode: `modelProviders`, модели с разным контекстным окном, id сессии |
+| [docs/codex.md](docs/codex.md) | Настройка клиента Codex CLI: Responses API, `config.toml`, переключение модели командой `/model` |
 | [docs/routing.md](docs/routing.md) | Настройка входных эндпоинтов и маршрутизации (TARGET): принципы, реализованное, перспективы |
 | [docs/environment.md](docs/environment.md) | Полный справочник всех env-переменных |
 | [docs/logging.md](docs/logging.md) | Конфигурация логирования и trace |
@@ -120,7 +123,8 @@ backend-adapter/
 │   │                           #   backend-adapter.service + com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
 │   ├── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
-│   └── qwen-code/              # Локальные настройки клиента QwenCode (settings)
+│   ├── qwen-code/              # Локальные настройки клиента QwenCode (settings)
+│   └── codex/                  # Локальные настройки клиента Codex CLI (config.toml)
 ├── molecule/                   # molecule-тесты install.sh (Linux, ubuntu 24.04):
 │                               #   install — установка/обновление бинарника;
 │                               #   service — системный systemd, обновление и --delete

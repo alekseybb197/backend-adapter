@@ -25,9 +25,9 @@
 [CC] / QwenCode  <--Anthropic API-->  adapter (localhost:9999)  <--[OI] API-->  LLM Backend
 ```
 
-Руководства по настройке клиентов: [docs/claude_code.md](claude_code.md) ([CC]) и
-[docs/qwen-code.md](qwen-code.md) (QwenCode); входные эндпоинты и маршрутизация —
-[docs/routing.md](routing.md).
+Руководства по настройке клиентов: [docs/claude_code.md](claude_code.md) ([CC]),
+[docs/qwen-code.md](qwen-code.md) (QwenCode) и [docs/codex.md](codex.md) (Codex CLI);
+входные эндпоинты и маршрутизация — [docs/routing.md](routing.md).
 
 Единственная внешняя зависимость — **PyYAML** (используется в session-логировании);
 остальной код — стандартная библиотека Python. Установка зависимостей:
@@ -240,13 +240,15 @@ backend-adapter/
 │   ├── architecture.md          # Архитектура
 │   ├── claude_code.md           # Настройка клиента [CC]
 │   ├── qwen-code.md             # Настройка клиента QwenCode
+│   ├── codex.md                 # Настройка клиента Codex CLI
 │   ├── samples/                 # Примеры конфигов (см. раздел 3):
 │   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
 │   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
 │   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
 │   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
 │   ├── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
-│   └── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
+│   ├── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
+│   └── codex/                   # Локальные настройки клиента Codex CLI (не для продакшена)
 └── changelog.md                 # История версий
 ```
 

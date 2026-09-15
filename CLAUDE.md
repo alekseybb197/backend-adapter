@@ -41,7 +41,8 @@ This file provides guidance to [CC] () when working with code in this repository
 - Документация: `docs/install.md` (запуск/шаблоны продакшена),
   `docs/environment.md` (все env-переменные), `docs/logging.md` (каналы логов),
   `docs/sanitizing.md`, `docs/architecture.md` (layout §2, наблюдаемость §8,
-  DAG §10), `docs/webui.md` (WEBUI/эндпоинты).
+  DAG §10), `docs/webui.md` (WEBUI/эндпоинты), `docs/claude_code.md`,
+  `docs/qwen-code.md`, `docs/codex.md` (гайды клиентов).
 - Рабочие копии конфигов кладутся в корень репозитория как
   `adapter.env`/`adapter.yaml` (в `.gitignore`); образцы — `docs/samples/`.
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны

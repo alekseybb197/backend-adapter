@@ -13,8 +13,8 @@ authors = [
     {name = "Aleksey Barabanov", email = "alekseybb@gmail.com"},
 ]
 keywords = [
-    "claude-code", "qwen-code", "anthropic", "openai", "proxy", "adapter",
-    "llm", "api", "streaming", "sse"
+    "claude-code", "qwen-code", "codex", "anthropic", "openai", "proxy",
+    "adapter", "llm", "api", "streaming", "sse"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
