@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.7
+"""[CC] <-> [OI]-backend adapter v0.9.8
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.7"
+__version__ = "0.9.8"
 __comment__ = (
     "Anthropic API <-> [OI]-backend proxy: двунаправленная конвертация "
     "сообщений/инструментов (Messages <-> Chat Completions/Responses), "
