@@ -172,10 +172,10 @@ WinGet и npm по умолчанию требуют ручного обновл
     "DISABLE_COST_WARNINGS": "1",
 
     "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80",
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "70",
     "ENABLE_TOOL_SEARCH": "auto:5",
-    "MAX_THINKING_TOKENS": "50000",
-    "MAX_MCP_OUTPUT_TOKENS": "50000",
+    "MAX_THINKING_TOKENS": "16384",
+    "MAX_MCP_OUTPUT_TOKENS": "16384",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000",
     "BASH_DEFAULT_TIMEOUT_MS": "300000",
     "BASH_MAX_TIMEOUT_MS": "600000",
@@ -240,7 +240,7 @@ WinGet и npm по умолчанию требуют ручного обновл
 | Переменная | Значение | Назначение |
 |---|---|---|
 | `CLAUDE_CODE_AUTO_COMPACT_WINDOW` | `262144` | Локальный размер контекстного окна (клиент считает компактизацию от него) |
-| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `80` | Автокомпактизация при заполнении окна на 80% |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | `70` | Автокомпактизация при заполнении окна на 70% |
 
 > Это **одно значение на все модели** — у [CC] нет способа задать разное окно
 > для разных моделей. Подробности и сравнение с QwenCode — раздел 4.2.
@@ -265,8 +265,8 @@ WinGet и npm по умолчанию требуют ручного обновл
 | Переменная | Значение | Назначение |
 |---|---|---|
 | `ENABLE_TOOL_SEARCH` | `auto:5` | Автоматический поиск инструментов (до 5 результатов) |
-| `MAX_THINKING_TOKENS` | `50000` | Лимит токенов на extended thinking |
-| `MAX_MCP_OUTPUT_TOKENS` | `50000` | Лимит вывода MCP-инструментов |
+| `MAX_THINKING_TOKENS` | `16384` | Лимит токенов на extended thinking |
+| `MAX_MCP_OUTPUT_TOKENS` | `16384` | Лимит вывода MCP-инструментов |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | `32000` | Лимит ответа модели |
 | `BASH_DEFAULT_TIMEOUT_MS` | `300000` | Таймаут bash-команд по умолчанию (5 мин) |
 | `BASH_MAX_TIMEOUT_MS` | `600000` | Максимальный таймаут bash-команд (10 мин) |
