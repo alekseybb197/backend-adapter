@@ -446,6 +446,9 @@ class TestServe:
             prefixes = {ep.prefix for ep in webserver.Handler.endpoints}
             assert "/" in prefixes
             assert "/session" in prefixes
+            # v0.9.8: превью .err-файла (/errors/<имя> и ?section=N) — тоже
+            # встроенный эндпойнт, регистрируется тем же импортом в serve().
+            assert "/errors" in prefixes
         finally:
             httpd.server_close()
 

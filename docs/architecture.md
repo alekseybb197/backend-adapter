@@ -70,6 +70,12 @@ backend_adapter/
 │                             delete|settings" + "/logs/<имя>" (раздача .err);
 │                             колонки «Входной эндпойнт», «Ошибок»-ссылка на .err,
 │                             пер-сессионные Log/Parts/TARGET — см. §6.10
+├── webui_errors.py         ← WEBUI endpoint "/errors/<имя>" (v0.9.8, §6.12):
+│                             превью .err-файла сессии — таблица секций с
+│                             обрезанными строками; "?section=N" — сырой вид
+│                             одной секции (text/plain); чистый парсер
+│                             parse_err_sections; импортирует webui_sessions
+│                             (строгий _ERR_NAME_RE)
 ├── webui_ops.py            ← WEBUI health endpoints "/healthz", "/health", "/live",
 │                             "/ready" (200/503 JSON; readiness по _BACKENDS/
 │                             _AVAILABLE_MODELS) — см. §6.7
@@ -931,7 +937,7 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 | POST `/api/sessions/reset` | обнуление счётчиков **одной строки-кортежа** (⏪) |
 | POST `/api/sessions/delete` | удаление строки-кортежа (🗑) |
 | POST `/api/sessions/settings` | пер-сессионные Log / Parts / TARGET (JSON или форма) |
-| GET `/logs/<имя>` | раздача `.err`-файла сессии (имя — по `_ERR_NAME_RE`) |
+| GET `/logs/<имя>` | раздача `.err`-файла сессии целиком (имя — по `_ERR_NAME_RE`) |
 
 Колонки, отличающие v0.9.5: **«Входной эндпойнт»** (`input` строки —
 константен, задаётся агентом, `routing.INPUT_PATHS`), **«Ошибок»** (число —
@@ -948,6 +954,42 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 счётчиков укорочены до **`C`** / **`E`**. Селект **Parts** при выключенном Log
 сессии отрендерен как `off` и `disabled` (`_parts_cell_html` — источник
 истины серверный каскад, см. §6.11 и `docs/webui.md` §4).
+
+**v0.9.8:** ссылка-счётчик **«Ошибок»** ведёт на превью **`/errors/<имя>`**
+(`webui_errors.py`, §6.12) вместо сырого файла: `/logs/<имя>` остался
+«весь файл целиком» и доступен ссылкой с превью-страницы.
+
+#### Превью `.err`-файла (`webui_errors.py`, v0.9.8)
+
+WEBUI-модуль-эндпойнт (`@webserver.register`, импортируется в
+`webserver.serve()`), дающий два вида одного `.err`-файла сессии:
+
+| Эндпойнт | Назначение |
+|---|---|
+| GET `/errors/<имя>` | HTML-превью: таблица секций файла, длинные строки обрезаны (`text-overflow: ellipsis`) |
+| GET `/errors/<имя>?section=N` | **только** секция № N, дословно (`text/plain`) — открывается в новом окне ссылкой «№» |
+
+Разбор файла — **чистая функция** `parse_err_sections(text)` (тестируется без
+HTTP): машина состояний по четырём делимитерам `session_log`
+(`==================== [END ]ERROR|WARNING ====================`), секция =
+блок между делимитерами, текст до первого открывающего — секция `PREAMBLE`.
+Поля секции: `n` (1-based в порядке файла — он же `?section=N`), `kind`
+(`ERROR`/`WARNING`/`PREAMBLE`), `closed` (встретился закрывающий), `kind_mismatch`
+(END чужого вида), `header`, `ts`, `req_id`, `fields`
+(`session_id`/`final_status`/`model`/`backend_url`, отсутствующие → `""`),
+`body_lines`, `summary` (последняя запись тела — диагноз, а не шумный
+`[REQUEST]`) и `raw` (точный срез исходных строк вместе с делимитерами).
+
+Почему **отдельный** префикс `/errors`, а не `?section` на `/logs`:
+`/logs/<имя>` зафиксирован как «раздача файла `text/plain`» пятью тестами и
+остаётся неизменным; `/errors` даёт превью и raw под одним префиксом, не
+конфликтуя по самому длинному префиксу ни с `/`, ни с `/session`, ни с
+`/logs`. Имя валидируется тем же строгим `webui_sessions._ERR_NAME_RE`
+(обход каталога исключён структурно, как в `/logs`); потолок чтения
+`_MAX_PREVIEW_BYTES` (4 МиБ) — `.err` принципиально не обрезается при записи
+(полные тела запросов), поэтому у долгоживущей сессии растёт неограниченно.
+Разбор не переиспользует `webui_sessions` иначе как для шаблона имени —
+обратной зависимости нет, цикла нет. Поведение — `docs/webui.md` §7.10.
 
 ### 6.13 Перманентное состояние runtime-пула (`state_store.py`, v0.9.6)
 
@@ -1264,7 +1306,7 @@ backend-adapter.py
   │                       локально внутри logging_enabled/parts_enabled)
   ├── daemon.py          (no internal deps — stdlib only)
   ├── webserver.py       → session_viewer, webui_status, webui_sessions,
-  │                       webui_config_api, webui_ops
+  │                       webui_errors, webui_config_api, webui_ops
   │                       (WEBUI core: serve() импортирует встроенные
   │                       эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
@@ -1277,6 +1319,9 @@ backend-adapter.py
   │                       "/api/sessions/snapshot|reset|delete|settings",
   │                       "/logs/<имя>"), config, session_registry, session_settings,
   │                       session_log, routing
+  ├── webui_errors.py    → webserver (эндпойнт "/errors/<имя>" — превью .err и
+  │                       сырая секция), webui_sessions (строгий _ERR_NAME_RE;
+  │                       webui_sessions webui_errors не импортирует — цикла нет)
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   ├── webui_ops.py       → webserver (эндпоинты "/healthz" "/health" "/live" "/ready"),
   │                       config (readiness: _BACKENDS/_AVAILABLE_MODELS)

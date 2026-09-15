@@ -18,7 +18,9 @@ session_settings), ⏪ сброс счётчиков строки, 🗑 удал
   - TestSessionResetAPI — POST /api/sessions/reset (PRG/JSON);
   - TestSessionDeleteAPI — POST /api/sessions/delete (PRG/JSON);
   - TestSessionSettingsAPI — POST /api/sessions/settings (форма/JSON);
-  - TestSessionLogFileEndpoint — GET /logs/<name> (раздача .err, обход пути).
+  - TestSessionLogFileEndpoint — GET /logs/<name> (раздача .err, обход пути);
+  - TestErrorsPreviewEndpoint — GET /errors/<name>[?section=N] (превью секций
+    .err-файла и сырой вид одной секции, v0.9.8).
 """
 import json
 import os
@@ -237,15 +239,17 @@ class TestSessionSelectHelpers:
         assert ws._errors_cell_html({"session": "s-1", "errors": 3}) == "3"
 
     def test_errors_cell_links_err_file(self, tmp_path):
-        # Сессия фиксировала ts → число становится ссылкой на /logs/<имя>,
-        # открывающейся в НОВОМ окне (target="_blank").
+        # Сессия фиксировала ts → число становится ссылкой на ПРЕВЬЮ
+        # /errors/<имя> (v0.9.8), открывающееся в НОВОМ окне (target="_blank").
+        # Прежний адрес /logs/<имя> остался «весь файл целиком» и доступен
+        # ссылкой с превью-страницы.
         config, ws = _fresh_modules()
         from backend_adapter import session_log
         session_log._DEBUG_PATH = str(tmp_path)
         session_log._DEBUG_IS_DIR = True
         session_log._session_file_ts["s-1"] = "20260912-101010"
         html = ws._errors_cell_html({"session": "s-1", "errors": 2})
-        assert 'href="/logs/session-20260912-101010-s-1.err"' in html
+        assert 'href="/errors/session-20260912-101010-s-1.err"' in html
         assert 'target="_blank"' in html
         assert ">2</a>" in html
 
@@ -998,3 +1002,119 @@ class TestSessionLogFileEndpoint:
         assert not ws._ERR_NAME_RE.match("session-20260912-101010-a.err/x")
         assert not ws._ERR_NAME_RE.match("other.err")
         assert os.sep not in "session-20260912-101010-abcd1234.err"
+
+
+# ---------------------------------------------------------------------------
+# TestErrorsPreviewEndpoint — GET /errors/<name>[?section=N] (v0.9.8)
+# ---------------------------------------------------------------------------
+
+_ERR_SAMPLE = (
+    "==================== ERROR ====================\n"
+    "[2026-09-12T10:10:10] [r-1] session_id=sess-abcdef12 final_status=502 "
+    "model=m-a backend_url=http://127.0.0.1:8002\n"
+    "[2026-09-12T10:10:10] [r-1] [REQUEST] {\"model\": \"m-a\"}\n"
+    "[2026-09-12T10:10:10] [r-1] [BACKEND_ERROR] boom\n"
+    "==================== END ERROR ====================\n"
+    "==================== WARNING ====================\n"
+    "[2026-09-12T10:10:11] [r-2] session_id=sess-abcdef12 model=m-a "
+    "backend_url=http://127.0.0.1:8002\n"
+    "[2026-09-12T10:10:11] [r-2] [REQUEST] {\"model\": \"m-a\"}\n"
+    "[2026-09-12T10:10:11] [r-2] [WARN] First message is NOT system\n"
+    "==================== END WARNING ====================\n"
+)
+
+
+class TestErrorsPreviewEndpoint:
+    def _serve_with(self, tmp_path, body=_ERR_SAMPLE):
+        config, ws = _fresh_modules()
+        name = "session-20260912-101010-abcd1234.err"
+        (tmp_path / name).write_text(body, encoding="utf-8")
+        httpd, port = _start_server(str(tmp_path))
+        return name, httpd, port
+
+    def test_preview_html_lists_sections(self, tmp_path):
+        name, httpd, port = self._serve_with(tmp_path)
+        try:
+            status, headers, body = _http_raw(port, "GET", "/errors/" + name)
+            assert status == 200
+            assert "text/html" in headers.get("content-type", "")
+            assert "ERROR" in body and "WARNING" in body
+            # ссылка на сырой вид секции + на весь файл
+            assert f"/errors/{name}?section=1" in body
+            assert f"/logs/{name}" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_raw_section_returns_only_that_section(self, tmp_path):
+        name, httpd, port = self._serve_with(tmp_path)
+        try:
+            status, headers, body = _http_raw(port, "GET", f"/errors/{name}?section=1")
+            assert status == 200
+            assert "text/plain" in headers.get("content-type", "")
+            assert "BACKEND_ERROR" in body
+            assert "END ERROR" in body
+            assert "WARNING" not in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_second_section_raw(self, tmp_path):
+        name, httpd, port = self._serve_with(tmp_path)
+        try:
+            status, _, body = _http_raw(port, "GET", f"/errors/{name}?section=2")
+            assert status == 200
+            assert "[WARN] First message is NOT system" in body
+            assert "BACKEND_ERROR" not in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_section_out_of_range_or_bad_404(self, tmp_path):
+        name, httpd, port = self._serve_with(tmp_path)
+        try:
+            for bad in ("?section=0", "?section=99", "?section=abc"):
+                status, _, _ = _http_raw(port, "GET", f"/errors/{name}{bad}")
+                assert status == 404, bad
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_missing_file_404(self, tmp_path):
+        config, ws = _fresh_modules()
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            status, _, _ = _http_raw(
+                port, "GET", "/errors/session-20260912-101010-abcd1234.err"
+            )
+            assert status == 404
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_rejects_bad_names(self, tmp_path):
+        config, ws = _fresh_modules()
+        (tmp_path / "secret.err").write_text("secret", encoding="utf-8")
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            for bad in (
+                "secret.err",
+                "session-20260912-101010-abcd1234.txt",
+                "..%2Fsession-20260912-101010-abcd1234.err",
+                "%2Fetc%2Fpasswd",
+            ):
+                status, _, _ = _http_raw(port, "GET", "/errors/" + bad)
+                assert status == 404, bad
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_empty_file_renders_notice(self, tmp_path):
+        name, httpd, port = self._serve_with(tmp_path, body="")
+        try:
+            status, _, body = _http_raw(port, "GET", "/errors/" + name)
+            assert status == 200
+            assert "файл ошибок пуст" in body
+        finally:
+            httpd.shutdown()
+            httpd.server_close()

@@ -85,6 +85,7 @@ ignore = [
 "backend_adapter/webui_status.py" = ["N802"]
 "backend_adapter/session_viewer.py" = ["N802"]
 "backend_adapter/webui_config_api.py" = ["N802"]
+"backend_adapter/webui_errors.py" = ["N802"]
 "backend_adapter/webui_ops.py" = ["N802"]
 "backend_adapter/webui_sessions.py" = ["N802"]
 "backend-adapter.py" = ["F401", "I001", "E402"]
