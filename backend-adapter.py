@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.7
+"""[CC] <-> [OI]-backend adapter v0.9.8
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.7"
+__version__ = "0.9.8"
 __comment__ = (
     "Anthropic API <-> [OI]-backend proxy: двунаправленная конвертация "
     "сообщений/инструментов (Messages <-> Chat Completions/Responses), "
@@ -49,19 +49,12 @@ from backend_adapter.config import (
     ADAPTER_STREAM_INCLUDE_USAGE,
     ADAPTER_MODELS_MAPPING,
     ADAPTER_BACKEND_CONFIG,
-    _BACKENDS,
-    _BACKEND_BY_NAME,
-    _MODEL_TO_BACKEND,
-    _DEFAULT_BACKEND,
-    _parse_models_mapping,
-    _MAP,
-    _parse_backend_yaml,
     _init_multi_backends,
-    _AVAILABLE_MODELS,
-    _cap,
-    SSL_CTX,
-    _resolve_backend,
 )
+
+# config — модулем (не только именами): коллекции бэкендов/моделей
+# мутируются на месте, а баннер ниже читает их как атрибуты модуля.
+from backend_adapter import config as _config
 from backend_adapter.redact import redact, redact_headers
 from backend_adapter.daemon import _detach, _remove_pidfile, _write_pidfile
 from backend_adapter.logger import _d, _dr
@@ -187,9 +180,30 @@ if __name__ == "__main__":
         print("Adapter cannot start. Exiting.")
         sys.exit(1)
 
-    print(f"Backends:   {len(_BACKENDS)} configured:")
-    for b in _BACKENDS:
-        print(f"  - {b['name']}: {b['base']}")
+    # Стартовый баннер бэкендов (v0.9.8). Значения читаются ЧЕРЕЗ МОДУЛЬ
+    # (_config._BACKENDS, а не импортированные по значению имена): коллекции
+    # бэкендов/моделей мутируются на месте (_init_multi_backends), но
+    # «читаем атрибут модуля» — страховка на случай смены инварианта.
+    # Литерал "Backends:" сохранён намеренно: на нём стоит прокси времени
+    # в tests/test_manual_check.py (строка печатается ПОСЛЕ опроса бэкендов).
+    backends = _config._BACKENDS
+    model_counts: Counter[str] = Counter()
+    for _bname, _ in _config._MODEL_TO_BACKEND.values():
+        model_counts[_bname] += 1
+    print(f"Backends:   {len(backends)} configured:")
+    if not backends:
+        # На живом старте недостижимо: _init_multi_backends делает sys.exit(1)
+        # при пустом списке или «ни одной модели» (см. [WARN]/[FATAL] выше).
+        print("  (нет настроенных бэкендов — см. [WARN]/[FATAL] выше)")
+    for b in backends:
+        n_models = model_counts.get(b["name"], 0)
+        default = " [default]" if b is _config._DEFAULT_BACKEND else ""
+        print(f"  - {b['name']}: {b['base']}  ({n_models} models){default}")
+    print(
+        f"TARGET:     messages={_config.ADAPTER_MESSAGES_TARGET}  "
+        f"completions={_config.ADAPTER_COMPLETIONS_TARGET}  "
+        f"responses={_config.ADAPTER_RESPONSES_TARGET}"
+    )
     print(f"{'=' * 70}\n")
 
     # ThreadingHTTPServer вместо socketserver.TCPServer: [CC] может

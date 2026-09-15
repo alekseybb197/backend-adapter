@@ -1,0 +1,3 @@
+model_provider = "local"
+model = "local"
+model_context_window = 262144

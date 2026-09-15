@@ -1,0 +1,12 @@
+model = "local"
+model_provider = "local"
+
+[model_providers.local]
+name = "Local gateway"
+base_url = "http://127.0.0.1:9999/v1"
+env_key = "LOCAL_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+stream_idle_timeout_ms = 600000
+request_max_retries = 2
+model_context_window = 262144

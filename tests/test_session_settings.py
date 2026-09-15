@@ -1,11 +1,20 @@
 """Tests for backend_adapter.session_settings — пер-сессионные переопределения
-настроек (v0.9.5).
+настроек (v0.9.5, снимок Log/Parts — v0.9.8).
 
 Модуль — лист DAG: на верхнем уровне импортирует только ``config``. Хранит
-таблицу ``session_id → {имя_настройки: значение}`` в памяти процесса; три
-состояния настройки — НЕ ЗАДАНА (наследует общее), ``"inherit"`` (только
-TARGET-поля: запись есть, но трактуется как «взять общее») и конкретное
-значение.
+таблицу ``session_id → {имя_настройки: значение}`` в памяти процесса.
+
+**Две модели наследования (v0.9.8).** Log/Parts (``_SNAPSHOT_NAMES``) —
+СНИМОК: ``ensure_session`` копирует в сессию текущие общие тумблеры, дальше
+сессия живёт своими значениями, а общие служат шаблоном для НОВЫХ сессий;
+состояния ``"inherit"`` у них нет, «сброс» = свежий снимок. TARGET-поля —
+ЖИВОЕ наследование: три состояния (НЕ ЗАДАНА / ``"inherit"`` / конкретное
+значение).
+
+Поэтому ``set_config``/``ensure_session`` ВСЕГДА материализуют ключи Log/Parts:
+после любого обращения к сессии её строка содержит оба этих ключа (в тестах
+это отражено ожидаемым ``_snapshot()``), а «пустая строка» возможна только у
+сессии, не прошедшей ``ensure_session``.
 
 Модуль берётся фикстурой (не импортом на уровне файла): autouse isolate_logs
 (→ fresh_env) пересоздаёт backend_adapter-модули перед каждым тестом —
@@ -31,6 +40,65 @@ def cfg():
     from backend_adapter import config
 
     return config
+
+
+def _snapshot(cfg) -> dict:
+    """Снимок общих Log/Parts на текущий момент — то, что ensure_session
+    кладёт в строку сессии (дефолты fresh_env: оба выключены)."""
+    return {
+        "ADAPTER_DEBUG": bool(cfg.ADAPTER_DEBUG),
+        "ADAPTER_DEBUG_PARTS": bool(cfg.ADAPTER_DEBUG_PARTS),
+    }
+
+
+class TestEnsureSession:
+    """ensure_session() — образование сессии: снимок общих флагов Log/Parts
+    (v0.9.8)."""
+
+    def test_seeds_snapshot(self, ss, cfg):
+        cfg.ADAPTER_DEBUG = True
+        cfg.ADAPTER_DEBUG_PARTS = True
+        assert ss.ensure_session("sess1") is True
+        assert ss.session_overrides("sess1") == {
+            "ADAPTER_DEBUG": True,
+            "ADAPTER_DEBUG_PARTS": True,
+        }
+
+    def test_idempotent(self, ss):
+        assert ss.ensure_session("sess1") is True
+        assert ss.ensure_session("sess1") is False
+
+    def test_empty_session_id_noop(self, ss):
+        assert ss.ensure_session("") is False
+        assert ss.session_overrides("") == {}
+
+    def test_does_not_overwrite_explicit_value(self, ss, cfg):
+        # Сессия успела задать Log явно (страница /sessions) до первого
+        # запроса — снимок дополняет, а не переписывает.
+        cfg.ADAPTER_DEBUG = True
+        ss.set_config("sess1", {"ADAPTER_DEBUG": False})
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is False
+
+    def test_global_change_after_seed_does_not_affect_session(self, ss, cfg):
+        # Ключевое свойство снимка: глобальные тумблеры — шаблон для НОВЫХ
+        # сессий, уже образованную сессию их смена не трогает.
+        cfg.ADAPTER_DEBUG = False
+        ss.ensure_session("sess1")
+        cfg.ADAPTER_DEBUG = True
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is False
+        # ...а новая сессия получает уже новое значение шаблона.
+        assert ss.ensure_session("sess2") is True
+        assert ss.effective("sess2", "ADAPTER_DEBUG") is True
+
+    def test_snapshot_repeats_env_inconsistency(self, ss, cfg):
+        # PARTS=1 при DEBUG=0 (env каскадом не выравнивается): снимок —
+        # ТОЧНАЯ копия пары. Согласованность «Parts ⊆ Log» обеспечивает не
+        # он, а гейт session_log.parts_enabled.
+        cfg.ADAPTER_DEBUG = False
+        cfg.ADAPTER_DEBUG_PARTS = True
+        ss.ensure_session("sess1")
+        assert ss.override("sess1", "ADAPTER_DEBUG") is False
+        assert ss.override("sess1", "ADAPTER_DEBUG_PARTS") is True
 
 
 class TestOverride:
@@ -101,9 +169,10 @@ class TestEffective:
 class TestSetConfig:
     """set_config() — запись/снятие переопределений (валидация молчаливая)."""
 
-    def test_applies_valid_bool(self, ss):
+    def test_applies_valid_bool(self, ss, cfg):
         result = ss.set_config("sess1", {"ADAPTER_DEBUG": True})
-        assert result == {"ADAPTER_DEBUG": True}
+        # Строка сессии материализована целиком: снимок Log/Parts + правка.
+        assert result == {**_snapshot(cfg), "ADAPTER_DEBUG": True}
         assert ss.override("sess1", "ADAPTER_DEBUG") is True
 
     def test_applies_valid_enum(self, ss):
@@ -115,40 +184,57 @@ class TestSetConfig:
         ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
         assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") == "inherit"
 
-    def test_name_outside_pool_ignored(self, ss):
-        # Имя вне config.SESSION_CONFIG_POOL молча игнорируется.
+    def test_name_outside_pool_ignored(self, ss, cfg):
+        # Имя вне config.SESSION_CONFIG_POOL молча игнорируется (снимок
+        # Log/Parts при этом материализуется — сессия образована).
         result = ss.set_config("sess1", {"ADAPTER_DEBUG_TRIM": 500})
-        assert result == {}
-        assert ss.session_overrides("sess1") == {}
+        assert result == _snapshot(cfg)
+        assert "ADAPTER_DEBUG_TRIM" not in ss.session_overrides("sess1")
 
-    def test_wrong_type_ignored(self, ss):
+    def test_wrong_type_ignored(self, ss, cfg):
         # Строка в bool-настройку не проходит accepts_value → игнор.
         result = ss.set_config("sess1", {"ADAPTER_DEBUG": "yes"})
-        assert result == {}
+        assert result == _snapshot(cfg)
 
-    def test_wrong_enum_value_ignored(self, ss):
+    def test_wrong_enum_value_ignored(self, ss, cfg):
         # Значение вне домена TARGET молча игнорируется.
         result = ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "bogus"})
-        assert result == {}
+        assert result == _snapshot(cfg)
 
-    def test_bool_not_accepted_for_enum(self, ss):
+    def test_bool_not_accepted_for_enum(self, ss, cfg):
         result = ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": True})
-        assert result == {}
+        assert result == _snapshot(cfg)
 
-    def test_mixed_valid_and_invalid(self, ss):
+    def test_mixed_valid_and_invalid(self, ss, cfg):
         # Невалидное имя/значение игнорируются, валидное — применяется.
         result = ss.set_config(
             "sess1",
             {"ADAPTER_DEBUG": True, "NOT_A_SETTING": 1, "ADAPTER_DEBUG_PARTS": "no"},
         )
-        assert result == {"ADAPTER_DEBUG": True}
+        assert result == {**_snapshot(cfg), "ADAPTER_DEBUG": True}
 
-    def test_clear_removes_override(self, ss, cfg):
+    def test_clear_log_returns_fresh_snapshot(self, ss, cfg):
+        # У снимка Log/Parts «снять» нельзя: clear переинициализирует из
+        # текущего общего тумблера (сессия как новая), а не удаляет запись.
         cfg.ADAPTER_DEBUG = False
         ss.set_config("sess1", {"ADAPTER_DEBUG": True})
         ss.set_config("sess1", clear=("ADAPTER_DEBUG",))
-        assert ss.override("sess1", "ADAPTER_DEBUG") is None
-        assert ss.effective("sess1", "ADAPTER_DEBUG") is False  # снова наследует
+        assert ss.override("sess1", "ADAPTER_DEBUG") is False
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is False
+        # А смена общего тумблера ПОСЛЕ этого сессию снова не трогает.
+        cfg.ADAPTER_DEBUG = True
+        assert ss.effective("sess1", "ADAPTER_DEBUG") is False
+
+    def test_clear_target_removes_override(self, ss, cfg):
+        # У TARGET-поля модель наследования — живая: clear удаляет запись,
+        # и сессия снова видит общую настройку (в т.ч. её будущие смены).
+        cfg.ADAPTER_MESSAGES_TARGET = "completions"
+        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
+        ss.set_config("sess1", clear=("ADAPTER_MESSAGES_TARGET",))
+        assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") is None
+        assert ss.effective("sess1", "ADAPTER_MESSAGES_TARGET") == "completions"
+        cfg.ADAPTER_MESSAGES_TARGET = "none"
+        assert ss.effective("sess1", "ADAPTER_MESSAGES_TARGET") == "none"
 
     def test_clear_unknown_name_is_noop(self, ss):
         ss.set_config("sess1", {"ADAPTER_DEBUG": True})
@@ -166,13 +252,13 @@ class TestSetConfig:
         # Сессия не идентифицирована — переопределять нечего.
         assert ss.set_config("", {"ADAPTER_DEBUG": True}) is None
 
-    def test_empty_row_dropped(self, ss):
-        # Все переопределения сняты → запись сессии удаляется целиком
-        # (пустых строк в таблице не остаётся).
-        ss.set_config("sess1", {"ADAPTER_DEBUG": True})
-        result = ss.set_config("sess1", clear=("ADAPTER_DEBUG",))
-        assert result == {}
-        assert ss.session_overrides("sess1") == {}
+    def test_row_never_empty_after_seed(self, ss, cfg):
+        # Сессия, прошедшая set_config, образована — снимок Log/Parts в её
+        # строке остаётся, поэтому «пустой строки» не бывает (v0.9.8).
+        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "none"})
+        result = ss.set_config("sess1", clear=("ADAPTER_MESSAGES_TARGET",))
+        assert result == _snapshot(cfg)
+        assert ss.session_overrides("sess1") == _snapshot(cfg)
 
 
 class TestSessionOverrides:
@@ -188,22 +274,26 @@ class TestSessionOverrides:
         snap["ADAPTER_DEBUG"] = False
         assert ss.override("sess1", "ADAPTER_DEBUG") is True
 
-    def test_multiple_settings(self, ss):
+    def test_multiple_settings(self, ss, cfg):
         ss.set_config(
             "sess1",
             {"ADAPTER_DEBUG": True, "ADAPTER_MESSAGES_TARGET": "passthrough"},
         )
         assert ss.session_overrides("sess1") == {
+            **_snapshot(cfg),
             "ADAPTER_DEBUG": True,
             "ADAPTER_MESSAGES_TARGET": "passthrough",
         }
 
 
 class TestClearSession:
-    def test_clears_all_and_returns_true(self, ss):
-        ss.set_config("sess1", {"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_PARTS": True})
+    def test_clears_all_and_returns_true(self, ss, cfg):
+        # У образованной сессии снимок Log/Parts не удаляется — он
+        # переинициализируется текущими общими тумблерами; всё остальное
+        # (TARGET, служебный ключ модели) снимается.
+        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
         assert ss.clear_session("sess1") is True
-        assert ss.session_overrides("sess1") == {}
+        assert ss.session_overrides("sess1") == _snapshot(cfg)
 
     def test_false_when_nothing_to_clear(self, ss):
         assert ss.clear_session("sess1") is False
@@ -211,12 +301,12 @@ class TestClearSession:
     def test_empty_session_id_false(self, ss):
         assert ss.clear_session("") is False
 
-    def test_does_not_touch_other_sessions(self, ss):
+    def test_does_not_touch_other_sessions(self, ss, cfg):
         ss.set_config("sess1", {"ADAPTER_DEBUG": True})
         ss.set_config("sess2", {"ADAPTER_DEBUG": True})
         ss.clear_session("sess1")
-        assert ss.session_overrides("sess1") == {}
-        assert ss.session_overrides("sess2") == {"ADAPTER_DEBUG": True}
+        assert ss.session_overrides("sess1") == _snapshot(cfg)
+        assert ss.session_overrides("sess2") == {**_snapshot(cfg), "ADAPTER_DEBUG": True}
 
 
 class TestReset:

@@ -13,7 +13,7 @@ import uuid
 from . import config
 from .config import _cap
 from .logger import _dr
-from .session_log import write_debug_json, write_warn_file
+from .session_log import parts_enabled, write_debug_json, write_warn_file
 from .tracer import _register_tool_use, _trace
 
 
@@ -325,7 +325,7 @@ def stream_openai_to_anthropic(
         req_id,
         f"[RESPONSE] {json.dumps(resp_snapshot, ensure_ascii=False, default=str)}",
     )
-    if config.ADAPTER_DEBUG_PARTS:
+    if parts_enabled(session_id):
         write_debug_json(session_id, "RESPONSE", resp_snapshot)
 
     _trace(
@@ -700,7 +700,7 @@ def stream_openai_completions_to_responses(
         "tool_uses": tool_use_summaries,
     }
     _dr(req_id, f"[RESPONSE] {json.dumps(resp_snapshot, ensure_ascii=False, default=str)}")
-    if config.ADAPTER_DEBUG_PARTS:
+    if parts_enabled(session_id):
         write_debug_json(session_id, "RESPONSE", resp_snapshot)
 
     _trace(

@@ -41,7 +41,8 @@ This file provides guidance to [CC] () when working with code in this repository
 - Документация: `docs/install.md` (запуск/шаблоны продакшена),
   `docs/environment.md` (все env-переменные), `docs/logging.md` (каналы логов),
   `docs/sanitizing.md`, `docs/architecture.md` (layout §2, наблюдаемость §8,
-  DAG §10), `docs/webui.md` (WEBUI/эндпоинты).
+  DAG §10), `docs/webui.md` (WEBUI/эндпоинты), `docs/claude_code.md`,
+  `docs/qwen-code.md`, `docs/codex.md` (гайды клиентов).
 - Рабочие копии конфигов кладутся в корень репозитория как
   `adapter.env`/`adapter.yaml` (в `.gitignore`); образцы — `docs/samples/`.
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны
@@ -76,9 +77,15 @@ This file provides guidance to [CC] () when working with code in this repository
 
 **Сессия — единица управления (v0.9.5):** `session_registry.py` ведёт таблицу
 сессий (страница `/sessions`), `session_settings.py` хранит пер-сессионные
-переопределения Log/Parts/TARGET (наследуют общие настройки приложения, пока
-не заданы явно; живут в памяти процесса). Флаги логирования читаются через
-`session_log.logging_enabled`/`parts_enabled`; TARGET — через `routing.decide`
+переопределения Log/Parts/TARGET (живут в памяти процесса). **Две модели
+наследования (v0.9.8):** Log/Parts — **снимок** общих флагов в момент
+образования сессии (`ensure_session`), дальше сессия живёт своими значениями,
+состояния `inherit` нет; глобальные `ADAPTER_DEBUG`/`ADAPTER_DEBUG_PARTS` —
+лишь шаблон для **новых** сессий (ничего не включают/выключают на ходу).
+TARGET-поля — **живое** наследование (три состояния: не задано / `inherit` /
+значение). Флаги логирования читаются через
+`session_log.logging_enabled`/`parts_enabled` (запрос без `session_id` или с
+`unknown` не пишет файлы вообще); TARGET — через `routing.decide`
 при непустом `session_id`. `.err` пишется для **любой** ошибки распознанного
 входного пути (`_req_ctx.err_eligible`) и **не** зависит от
 `ADAPTER_SESSIONS_TABLE` (v0.9.7); счётчик «Ошибок» строки ведётся только при
@@ -91,8 +98,10 @@ This file provides guidance to [CC] () when working with code in this repository
 `backend-adapter.py` до `_init_multi_backends`), каждое изменение `/config`
 персистится через колбек `config.set_on_change` (config остаётся корнем DAG).
 Пер-сессионные настройки НЕ сохраняются. **Связка Log/Parts:** Parts активен
-только при Log (каскад в `config.set_runtime_config`/`session_settings`, гейт в
-`session_log.parts_enabled`). **Валидация env** (`env_validate.py`) — строгая, до
+только при Log — каскад на двух уровнях: глобальный в
+`config.set_runtime_config` и пер-сессионный в `session_settings.set_config`
+(Parts=on поднимает Log, Log=off гасит Parts); финальный гейт —
+`session_log.parts_enabled` (проверяет `logging_enabled`). **Валидация env** (`env_validate.py`) — строгая, до
 импорта config: невалидный int/bool → `[FATAL]` + `sys.exit(1)`.
 
 **Инвариант DAG:** база без внутренних зависимостей при импорте — `redact.py`,

@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.7) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v0.9.8) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -25,9 +25,9 @@
 [CC] / QwenCode  <--Anthropic API-->  adapter (localhost:9999)  <--[OI] API-->  LLM Backend
 ```
 
-Руководства по настройке клиентов: [docs/claude_code.md](claude_code.md) ([CC]) и
-[docs/qwen-code.md](qwen-code.md) (QwenCode); входные эндпоинты и маршрутизация —
-[docs/routing.md](routing.md).
+Руководства по настройке клиентов: [docs/claude_code.md](claude_code.md) ([CC]),
+[docs/qwen-code.md](qwen-code.md) (QwenCode) и [docs/codex.md](codex.md) (Codex CLI);
+входные эндпоинты и маршрутизация — [docs/routing.md](routing.md).
 
 Единственная внешняя зависимость — **PyYAML** (используется в session-логировании);
 остальной код — стандартная библиотека Python. Установка зависимостей:
@@ -240,13 +240,15 @@ backend-adapter/
 │   ├── architecture.md          # Архитектура
 │   ├── claude_code.md           # Настройка клиента [CC]
 │   ├── qwen-code.md             # Настройка клиента QwenCode
+│   ├── codex.md                 # Настройка клиента Codex CLI
 │   ├── samples/                 # Примеры конфигов (см. раздел 3):
 │   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
 │   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
 │   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
 │   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
 │   ├── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
-│   └── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
+│   ├── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
+│   └── codex/                   # Локальные настройки клиента Codex CLI (не для продакшена)
 └── changelog.md                 # История версий
 ```
 
@@ -834,14 +836,15 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v0.9.7
+Backend-Adapter v0.9.8
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
 Streaming:  enabled (SSE passthrough)
 
 Backends:   1 configured:
-  - home: http://127.0.0.1:8002
+  - home: http://127.0.0.1:8002  (12 models) [default]
+TARGET:     messages=completions  completions=none  responses=none
 [WEBUI] http://127.0.0.1:8765/ (root: ./tmp/logs)
 [EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================

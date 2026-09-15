@@ -70,6 +70,12 @@ backend_adapter/
 │                             delete|settings" + "/logs/<имя>" (раздача .err);
 │                             колонки «Входной эндпойнт», «Ошибок»-ссылка на .err,
 │                             пер-сессионные Log/Parts/TARGET — см. §6.10
+├── webui_errors.py         ← WEBUI endpoint "/errors/<имя>" (v0.9.8, §6.12):
+│                             превью .err-файла сессии — таблица секций с
+│                             обрезанными строками; "?section=N" — сырой вид
+│                             одной секции (text/plain); чистый парсер
+│                             parse_err_sections; импортирует webui_sessions
+│                             (строгий _ERR_NAME_RE)
 ├── webui_ops.py            ← WEBUI health endpoints "/healthz", "/health", "/live",
 │                             "/ready" (200/503 JSON; readiness по _BACKENDS/
 │                             _AVAILABLE_MODELS) — см. §6.7
@@ -875,25 +881,43 @@ dict[session_id, dict[name, value]]` + lock). Сессия — единица у
 `config._SESSION_CONFIG_TYPES` (bool ×2, enum ×3 с доменом
 `SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)`).
 
-Три состояния записи (для TARGET; у bool состояния `inherit` нет — снятие
-переопределения эквивалентно):
+**Две модели наследования (v0.9.8).** Пул делится на два вида, и это деление
+принципиально:
 
-| Состояние | `effective(session_id, name)` |
+- **Log/Parts (`_SNAPSHOT_NAMES`) — СНИМОК.** `ensure_session(session_id)`
+  (идемпотентный, вызывается на каждом обращении к `session_id`) при **первой
+  встрече** копирует текущие общие `config.ADAPTER_DEBUG`/
+  `ADAPTER_DEBUG_PARTS` в строку сессии (`_SEEDED` — множество уже
+  образованных). Дальше сессия живёт своими значениями, а общие тумблеры
+  служат лишь шаблоном для НОВЫХ сессий: их последующая смена через `/config`
+  уже существующие сессии не трогает. Состояния `"inherit"` у этих полей нет;
+  `clear` = свежий снимок текущего общего тумблера (сессия «как новая»),
+  удалять запись нельзя — иначе `effective` снова читал бы `config` живьём.
+  Согласованность «Parts ⊆ Log» обеспечивает не снимок (он — точная копия
+  пары, включая env-пару PARTS=1/DEBUG=0), а гейт `session_log.parts_enabled`.
+- **TARGET-поля — ЖИВОЕ НАСЛЕДОВАНИЕ.** Три состояния (см. таблицу ниже).
+
+| Состояние TARGET-поля | `effective(session_id, name)` |
 |---|---|
 | записи нет | общая настройка `config.<name>` (в т.ч. её последующие изменения) |
 | `"inherit"` | то же (взять общее), но запись существует и видна в WEBUI |
 | конкретное значение | переопределение сессии |
 
-- API: `override(session_id, name) -> Any|None` (сырое значение или None),
-  `effective(session_id, name) -> Any` (переопределение либо `config.<name>`,
-  `None`-безопасно), `session_overrides(session_id) -> dict`,
+- API: `ensure_session(session_id) -> bool` (образование сессии: снимок
+  Log/Parts; no-op для пустого id), `override(session_id, name) -> Any|None`
+  (сырое значение или None), `effective(session_id, name) -> Any`
+  (переопределение либо `config.<name>`, `None`-безопасно),
+  `session_overrides(session_id) -> dict`,
   `set_config(session_id, values=None, clear=()) -> dict|None` (валидация по
-  `_SESSION_CONFIG_TYPES`, невалидное/внепуловое молча игнорируется),
+  `_SESSION_CONFIG_TYPES`, невалидное/внепуловое молча игнорируется;
+  `clear` у Log/Parts = свежий снимок, у TARGET = удаление записи),
   `clear_session(session_id) -> bool`, `reset()` (для тестов).
 - Потребители — `session_log.logging_enabled`/`parts_enabled` (флаги
   логирования) и `routing.decide`/`target_for_input` (пер-сессионный TARGET,
   непустой `session_id`; пустой → общая настройка) — см. §4.2 и
-  `docs/routing.md` §2.4.
+  `docs/routing.md` §2.4. Образование сессии вызывается в самой ранней точке
+  запроса (`server._err_ctx_begin`, сразу после `_extract_session_id`) и в
+  прологе гейтов `session_log._session_flags_enabled`.
 - Задаётся из WEBUI: выпадающие списки в таблице `/sessions`
   (`webui_sessions.py`) либо `POST /api/sessions/settings`. Адресуется сессии,
   а не строке-кортежу, поэтому переживает вытеснение строки из таблицы, но
@@ -913,7 +937,7 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 | POST `/api/sessions/reset` | обнуление счётчиков **одной строки-кортежа** (⏪) |
 | POST `/api/sessions/delete` | удаление строки-кортежа (🗑) |
 | POST `/api/sessions/settings` | пер-сессионные Log / Parts / TARGET (JSON или форма) |
-| GET `/logs/<имя>` | раздача `.err`-файла сессии (имя — по `_ERR_NAME_RE`) |
+| GET `/logs/<имя>` | раздача `.err`-файла сессии целиком (имя — по `_ERR_NAME_RE`) |
 
 Колонки, отличающие v0.9.5: **«Входной эндпойнт»** (`input` строки —
 константен, задаётся агентом, `routing.INPUT_PATHS`), **«Ошибок»** (число —
@@ -930,6 +954,42 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 счётчиков укорочены до **`C`** / **`E`**. Селект **Parts** при выключенном Log
 сессии отрендерен как `off` и `disabled` (`_parts_cell_html` — источник
 истины серверный каскад, см. §6.11 и `docs/webui.md` §4).
+
+**v0.9.8:** ссылка-счётчик **«Ошибок»** ведёт на превью **`/errors/<имя>`**
+(`webui_errors.py`, §6.12) вместо сырого файла: `/logs/<имя>` остался
+«весь файл целиком» и доступен ссылкой с превью-страницы.
+
+#### Превью `.err`-файла (`webui_errors.py`, v0.9.8)
+
+WEBUI-модуль-эндпойнт (`@webserver.register`, импортируется в
+`webserver.serve()`), дающий два вида одного `.err`-файла сессии:
+
+| Эндпойнт | Назначение |
+|---|---|
+| GET `/errors/<имя>` | HTML-превью: таблица секций файла, длинные строки обрезаны (`text-overflow: ellipsis`) |
+| GET `/errors/<имя>?section=N` | **только** секция № N, дословно (`text/plain`) — открывается в новом окне ссылкой «№» |
+
+Разбор файла — **чистая функция** `parse_err_sections(text)` (тестируется без
+HTTP): машина состояний по четырём делимитерам `session_log`
+(`==================== [END ]ERROR|WARNING ====================`), секция =
+блок между делимитерами, текст до первого открывающего — секция `PREAMBLE`.
+Поля секции: `n` (1-based в порядке файла — он же `?section=N`), `kind`
+(`ERROR`/`WARNING`/`PREAMBLE`), `closed` (встретился закрывающий), `kind_mismatch`
+(END чужого вида), `header`, `ts`, `req_id`, `fields`
+(`session_id`/`final_status`/`model`/`backend_url`, отсутствующие → `""`),
+`body_lines`, `summary` (последняя запись тела — диагноз, а не шумный
+`[REQUEST]`) и `raw` (точный срез исходных строк вместе с делимитерами).
+
+Почему **отдельный** префикс `/errors`, а не `?section` на `/logs`:
+`/logs/<имя>` зафиксирован как «раздача файла `text/plain`» пятью тестами и
+остаётся неизменным; `/errors` даёт превью и raw под одним префиксом, не
+конфликтуя по самому длинному префиксу ни с `/`, ни с `/session`, ни с
+`/logs`. Имя валидируется тем же строгим `webui_sessions._ERR_NAME_RE`
+(обход каталога исключён структурно, как в `/logs`); потолок чтения
+`_MAX_PREVIEW_BYTES` (4 МиБ) — `.err` принципиально не обрезается при записи
+(полные тела запросов), поэтому у долгоживущей сессии растёт неограниченно.
+Разбор не переиспользует `webui_sessions` иначе как для шаблона имени —
+обратной зависимости нет, цикла нет. Поведение — `docs/webui.md` §7.10.
 
 ### 6.13 Перманентное состояние runtime-пула (`state_store.py`, v0.9.6)
 
@@ -1029,8 +1089,12 @@ Debug flags (runtime pool):
 
 `ADAPTER_DEBUG` and `ADAPTER_DEBUG_PARTS` are additionally **per-session
 overridable** (v0.9.5, §6.11): `session_log.logging_enabled(session_id)` /
-`parts_enabled(session_id)` read the session override via
-`session_settings.effective`, falling back to the app-wide value when unset.
+`parts_enabled(session_id)` read the session value via
+`session_settings.effective`. **v0.9.8:** that value is a **snapshot** of the
+app-wide flags taken when the session is first seen (`ensure_session`) — the
+global switches are a template for **new** sessions only and neither enable nor
+disable anything for running ones. A request with no session id writes no files
+at all (empty/`unknown` → `False`).
 `ADAPTER_DEBUG_TRIM` and the sanitizer stay app-wide only.
 
 ### 8.2 Structured trace (`tracer.py`)
@@ -1105,12 +1169,13 @@ Long base64/hex strings may also be matched.
 - The log directory `ADAPTER_DEBUG_LOGPATH` is created on demand when set
   (adapter startup when `ADAPTER_DEBUG_ENABLE=1`, and/or at first write);
   empty (default) — no directory, no disk writes
-- **Per-session gates (v0.9.5):** `logging_enabled(session_id)` /
-  `parts_enabled(session_id)` read the session override (`session_settings.
-  effective`) falling back to the app-wide `config.ADAPTER_DEBUG` /
-  `ADAPTER_DEBUG_PARTS`. Empty `session_id` → app-wide value. The
-  unconditional `.err`/WARN channels are **not** gated by these — see
-  `docs/logging.md`
+- **Per-session gates (v0.9.5, snapshot — v0.9.8):** `logging_enabled(session_id)`
+  / `parts_enabled(session_id)` read the session value (`session_settings.
+  effective`) — a **snapshot** of `config.ADAPTER_DEBUG` / `ADAPTER_DEBUG_PARTS`
+  taken when the session is first seen. Empty `session_id` and `unknown` →
+  `False` (no files for an unidentified session); the global switches are a
+  template for new sessions only. The unconditional `.err`/WARN channels are
+  **not** gated by these — see `docs/logging.md`
 
 ### 8.5 Per-session protocol dumps — `ADAPTER_DEBUG_PARTS` (`.json` + `.yaml` pairs)
 
@@ -1121,6 +1186,12 @@ selectors were removed in the v0.8.6 logging reform).
 
 - Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch for file writes) and
   the log directory `ADAPTER_DEBUG_LOGPATH` is set (created on demand)
+- **v0.9.8:** the gate at every dump call site is the **per-session**
+  `parts_enabled(session_id)`, not `config.ADAPTER_DEBUG_PARTS` — so a session
+  can collect parts while the global flag is off (and vice versa); the global
+  flag only seeds the snapshot of a new session. Dumps are written
+  **incrementally**, a pair per part as it arrives — there is no post-hoc parse
+  of `session-*.log`
 - Creates `session-<datetime>-<sessid8>.parts/` directory next to the session log files
 - Writes a **pair** of files per logged part — `.json` (machine-readable,
   `json.dumps(indent=2)`) and `.yaml` (human-readable) — via
@@ -1235,7 +1306,7 @@ backend-adapter.py
   │                       локально внутри logging_enabled/parts_enabled)
   ├── daemon.py          (no internal deps — stdlib only)
   ├── webserver.py       → session_viewer, webui_status, webui_sessions,
-  │                       webui_config_api, webui_ops
+  │                       webui_errors, webui_config_api, webui_ops
   │                       (WEBUI core: serve() импортирует встроенные
   │                       эндпойнты; CLI python -m backend_adapter.webserver)
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
@@ -1248,6 +1319,9 @@ backend-adapter.py
   │                       "/api/sessions/snapshot|reset|delete|settings",
   │                       "/logs/<имя>"), config, session_registry, session_settings,
   │                       session_log, routing
+  ├── webui_errors.py    → webserver (эндпойнт "/errors/<имя>" — превью .err и
+  │                       сырая секция), webui_sessions (строгий _ERR_NAME_RE;
+  │                       webui_sessions webui_errors не импортирует — цикла нет)
   ├── webui_config_api.py → webserver (эндпойнт "/config"), config (RUNTIME_CONFIG_POOL)
   ├── webui_ops.py       → webserver (эндпоинты "/healthz" "/health" "/live" "/ready"),
   │                       config (readiness: _BACKENDS/_AVAILABLE_MODELS)
@@ -1280,5 +1354,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.7** (see `backend-adapter.py`).
+Current: **v0.9.8** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

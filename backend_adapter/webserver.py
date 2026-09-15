@@ -295,6 +295,7 @@ def serve(
     from . import (  # noqa: F401  (регистрируют себя)
         session_viewer,
         webui_config_api,
+        webui_errors,
         webui_ops,
         webui_sessions,
         webui_status,

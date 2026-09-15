@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backend-adapter"
-version = "0.9.7"
+version = "0.9.8"
 description = "Anthropic API ↔ OpenAI Backend Proxy Adapter"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -13,8 +13,8 @@ authors = [
     {name = "Aleksey Barabanov", email = "alekseybb@gmail.com"},
 ]
 keywords = [
-    "claude-code", "qwen-code", "anthropic", "openai", "proxy", "adapter",
-    "llm", "api", "streaming", "sse"
+    "claude-code", "qwen-code", "codex", "anthropic", "openai", "proxy",
+    "adapter", "llm", "api", "streaming", "sse"
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -85,6 +85,7 @@ ignore = [
 "backend_adapter/webui_status.py" = ["N802"]
 "backend_adapter/session_viewer.py" = ["N802"]
 "backend_adapter/webui_config_api.py" = ["N802"]
+"backend_adapter/webui_errors.py" = ["N802"]
 "backend_adapter/webui_ops.py" = ["N802"]
 "backend_adapter/webui_sessions.py" = ["N802"]
 "backend-adapter.py" = ["F401", "I001", "E402"]

@@ -38,11 +38,13 @@ from .convert import (
     extract_tool_results,
     force_store_false,
     normalize_messages_system_first,
+    sanitize_max_tokens,
 )
 from .logger import _d, _dr
 from .redact import redact, redact_headers
 from .session_log import (
     UNKNOWN_SESSION_ID,
+    parts_enabled,
     write_debug_json,
     write_error_file,
     write_session_error,
@@ -249,6 +251,11 @@ def _err_ctx_begin(headers, err_eligible: bool = True) -> tuple[str, str]:
     в ``_register_session`` (после распознавания входного пути), чтобы 404
     не-входного пути .err не писал."""
     session_id = _extract_session_id(headers)
+    # Образование сессии (v0.9.8): снимок общих флагов Log/Parts берётся здесь —
+    # в самой ранней точке запроса, где session_id уже известен (до первого
+    # _d/_trace/write_debug_json и до _register_session). Идемпотентно: для уже
+    # известной сессии — проверка множества под блокировкой.
+    session_settings.ensure_session(session_id)
     req_id = uuid.uuid4().hex[:12]
     _req_ctx.req_id = req_id
     _req_ctx.session_id = session_id
@@ -545,7 +552,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
             # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
             _dr(req_id, f"[BODY] {_body}")
-            if config.ADAPTER_DEBUG_PARTS:
+            if parts_enabled(session_id):
                 write_debug_json(session_id, "BODY", _body)
 
             try:
@@ -825,10 +832,13 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     req_id,
                     f"[OPENAI_BODY] passthrough body={json.dumps(anthropic_req, ensure_ascii=False)}",
                 )
-                if config.ADAPTER_DEBUG_PARTS:
+                if parts_enabled(session_id):
                     write_debug_json(session_id, "OPENAI_BODY", anthropic_req)
                 backend_url = backend_cfg["base"].rstrip("/") + routing.INPUT_PATHS[out_fmt_val]
                 backend_key_val = backend_cfg["key"]
+                # Санитайзер max_tokens для passthrough-ветки (E→E): даже при
+                # дословной передаче нужно защитить upstream от пробинга с max_tokens=1.
+                sanitize_max_tokens(anthropic_req, req_id)
                 out_body = json.dumps(anthropic_req, ensure_ascii=False).encode()
                 _dr(req_id, f"[BACKEND_URL] {backend_url}")
                 req = urllib.request.Request(
@@ -1147,7 +1157,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             f"{len(raw)} bytes",
                         )
                         _dr(req_id, f"[FETCH_RAW] {raw.decode()}")
-                        if config.ADAPTER_DEBUG_PARTS:
+                        if parts_enabled(session_id):
                             write_debug_json(session_id, "FETCH_RAW", raw.decode())
                         _trace(
                             session_id,
@@ -1179,7 +1189,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 usage_tokens["output"] += int(u_out or 0)
 
                         resp_body = raw.decode()
-                        if config.ADAPTER_DEBUG_PARTS:
+                        if parts_enabled(session_id):
                             write_debug_json(session_id, "RESPONSE", resp_body)
                         # Тело дословно (raw), статус и Content-Type бэкенда.
                         self._send_raw(resp.status, resp.headers.get("Content-Type"), raw)
@@ -1361,6 +1371,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     "messages": r_messages,
                     "stream": r_stream_requested,
                 }
+                # Санитайзер max_tokens для responses→completions: если клиент
+                # прислал max_tokens в теле (responses его не использует, но
+                # на всякий случай защитимся от пробинга).
+                sanitize_max_tokens(r_openai_body, req_id)
                 if r_stream_requested and config.ADAPTER_STREAM_INCLUDE_USAGE:
                     r_openai_body["stream_options"] = {"include_usage": True}
                 if anthropic_req.get("tools"):
@@ -1398,7 +1412,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 )
 
                 _dr(req_id, f"[OPENAI_BODY] {json.dumps(r_openai_body, ensure_ascii=False)}")
-                if config.ADAPTER_DEBUG_PARTS:
+                if parts_enabled(session_id):
                     write_debug_json(session_id, "OPENAI_BODY", r_openai_body)
 
                 r_backend_url = backend_cfg["base"].rstrip("/") + "/v1/chat/completions"
@@ -1661,7 +1675,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             req_id,
                             f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes",
                         )
-                        if config.ADAPTER_DEBUG_PARTS:
+                        if parts_enabled(session_id):
                             write_debug_json(session_id, "FETCH_RAW", raw.decode())
                         _trace(
                             session_id,
@@ -1679,7 +1693,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
                             usage_tokens["output"] += int(u.get("completion_tokens") or 0)
                         _dr(req_id, f"[RESPONSE] {json.dumps(responses_resp, ensure_ascii=False)}")
-                        if config.ADAPTER_DEBUG_PARTS:
+                        if parts_enabled(session_id):
                             write_debug_json(session_id, "RESPONSE", responses_resp)
                         self._send_json(200, responses_resp)
                         _dr(req_id, "[OK] Done")
@@ -1798,6 +1812,12 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 return
 
             max_tokens = anthropic_req.get("max_tokens", 4096)
+            # Санитайзер max_tokens: Claude Code иногда шлёт max_tokens=1 (пробинг),
+            # а reasoning-модели отказываются выполнять такие запросы
+            # (reasoning_budget_exhausted, min_max_tokens=8).
+            anthropic_req_sanitized = sanitize_max_tokens(anthropic_req, req_id)
+            max_tokens = anthropic_req_sanitized["max_tokens"]
+
             in_tools = anthropic_req.get("tools", [])
             in_tool_names = [t.get("name", "?") for t in in_tools]
             in_messages = anthropic_req.get("messages", [])
@@ -1904,7 +1924,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     req_id,
                     f"[TOOL_RESULT] content={json.dumps(tr['content'], ensure_ascii=False, default=str)}",
                 )
-                if config.ADAPTER_DEBUG_PARTS:
+                if parts_enabled(session_id):
                     # *.parts-дамп — ОДИН на результат, полный dict (включая
                     # content целиком): тег несёт часть полностью.
                     write_debug_json(
@@ -1975,7 +1995,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 f"[OPENAI_BODY] {json.dumps(openai_body, ensure_ascii=False)}",
             )
 
-            if config.ADAPTER_DEBUG_PARTS:
+            if parts_enabled(session_id):
                 write_debug_json(session_id, "OPENAI_BODY", openai_body)
 
             # Построить URL и Authorization из resolved backend-конфига.
@@ -2303,7 +2323,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM
                     # в logger._write, файл при ENABLE=1 получит полную.
                     _dr(req_id, f"[FETCH_RAW] {raw.decode()}")
-                    if config.ADAPTER_DEBUG_PARTS:
+                    if parts_enabled(session_id):
                         write_debug_json(session_id, "FETCH_RAW", raw.decode())
                     _trace(
                         session_id,
@@ -2332,7 +2352,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[RESPONSE] {json.dumps(anthropic_resp, ensure_ascii=False)}",
                     )
-                    if config.ADAPTER_DEBUG_PARTS:
+                    if parts_enabled(session_id):
                         write_debug_json(session_id, "RESPONSE", anthropic_resp)
                     self._send_json(200, anthropic_resp)
                     _dr(req_id, "[OK] Done")

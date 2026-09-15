@@ -1247,13 +1247,16 @@ def _init_multi_backends(config_path: str) -> None:
 
     global _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND, _AVAILABLE_MODELS, _MODEL_TO_BACKEND
 
-    # Глобалы _AVAILABLE_MODELS/_MODEL_TO_BACKEND ПЕРЕживают переприсваивание:
-    # server.py и другие модули делают `from .config import _AVAILABLE_MODELS` на
-    # импорте и держат ссылку на ОРИГИНАЛЬНЫЙ объект словаря. Поэтому словари
-    # мутируются на месте (clear + update), а не пересоздаются — иначе сервер
-    # продолжает видеть пустой/устаревший кэш (501/400 на живых моделях).
-    _BACKENDS = blocks
-    _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
+    # Инвариант (v0.9.8): КОЛЛЕКЦИИ бэкендов/моделей мутируются на месте,
+    # СКАЛЯРЫ переприсваиваются. Причина — модули и точка входа делают
+    # `from .config import _BACKENDS` на импорте и держат ссылку на
+    # ОРИГИНАЛЬНЫЙ объект списка/словаря: переприсваивание оставило бы им
+    # пустой/устаревший кэш (501/400 на живых моделях; стартовый баннер
+    # печатал «0 configured», держа исходный пустой список).
+    _BACKENDS.clear()
+    _BACKENDS.extend(blocks)
+    _BACKEND_BY_NAME.clear()
+    _BACKEND_BY_NAME.update({b["name"]: b for b in blocks})
     _DEFAULT_BACKEND = blocks[0]
 
     # 1) Собрать все модели: (model_dict_copy, backend_config)
@@ -1343,8 +1346,11 @@ def reload_backend_config() -> list[dict] | None:
     фоновую проверку прежних бэкендов).
 
     Меняет ТОЛЬКО бэкенды и probe-кэш:
-      - ``_BACKENDS``/``_BACKEND_BY_NAME``/``_DEFAULT_BACKEND`` — подменяются
-        целиком (читаются как атрибуты модуля — переприсваивание допустимо);
+      - ``_BACKENDS``/``_BACKEND_BY_NAME`` — мутируются НА МЕСТЕ (clear +
+        extend/update, v0.9.8: импортированные ссылки обязаны остаться
+        живыми, иначе точка входа и другие модули видят прежний список);
+        ``_DEFAULT_BACKEND`` — скаляр, переприсваивается (читается как
+        атрибут модуля);
       - ``_ENDPOINT_STATE`` — stale-очистка: записи бэкендов, которых нет в
         новом списке, удаляются (не висят результаты проб удалённых
         бэкендов); свежие записи оставшихся сохраняются (кэш TTL 60 с не
@@ -1357,8 +1363,10 @@ def reload_backend_config() -> list[dict] | None:
     if not blocks:
         return None
     global _BACKENDS, _BACKEND_BY_NAME, _DEFAULT_BACKEND
-    _BACKENDS = blocks
-    _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
+    _BACKENDS.clear()
+    _BACKENDS.extend(blocks)
+    _BACKEND_BY_NAME.clear()
+    _BACKEND_BY_NAME.update({b["name"]: b for b in blocks})
     _DEFAULT_BACKEND = blocks[0]
     # Stale-очистка probe-кэша: результаты проб бэкендов, которых больше нет
     # в конфиге, удаляются (импортированная по ссылке _ENDPOINT_STATE
@@ -1412,8 +1420,11 @@ def refresh_models(timeout: float | None = None) -> dict:
             # Env не задаёт ни одного бэкенда — обновлять нечего.
             return {"ok": False, "count": len(_AVAILABLE_MODELS), "errors": {}}
         backends = blocks
-        _BACKENDS = blocks
-        _BACKEND_BY_NAME = {b["name"]: b for b in blocks}
+        # Мутация на месте (v0.9.8) — см. инвариант в _init_multi_backends.
+        _BACKENDS.clear()
+        _BACKENDS.extend(blocks)
+        _BACKEND_BY_NAME.clear()
+        _BACKEND_BY_NAME.update({b["name"]: b for b in blocks})
         _DEFAULT_BACKEND = blocks[0]
     all_models: list[tuple[dict, dict]] = []
     errors: dict[str, str] = {}
