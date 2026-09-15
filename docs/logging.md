@@ -116,7 +116,7 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **одн
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
 | 23 | `[BACKEND_ERR]` | INTERNAL | всегда | Код и сообщение об ошибке HTTP бэкенда |
-| 24 | `[RETRY]` | INTERNAL | всегда | Тайминги повторов попытки |
+| 24 | `[RETRY]` | INTERNAL | всегда | Тайминги повторов попытки; отдельной строкой — `reasoning budget exhausted, max_tokens {N} -> {M}` при подъёме `max_tokens` (v0.9.9, §[`docs/environment.md`](environment.md) §2) |
 | 25 | `[TIMEOUT]` | INTERNAL | всегда | Событие таймаута |
 | 26 | `[CLIENT_GONE]` (stream) | INTERNAL | всегда | Клиент отключился во время стриминга |
 | 27 | `[FETCH_ERR]` | INTERNAL | всегда | Исключение при fetch: тип + сообщение |

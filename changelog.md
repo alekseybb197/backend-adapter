@@ -33,6 +33,47 @@
   (`docs/routing.md`, `docs/webui.md`, `docs/environment.md`,
   `docs/logging.md`, `docs/architecture.md`, `CLAUDE.md`).
 
+### WIP: адаптивный ретрай `reasoning_budget_exhausted`
+
+**Цель:** не отдавать клиенту HTTP 502, когда reasoning-модель потратила весь
+`max_tokens` на внутренние рассуждения. Бэкенд в теле такой ошибки прямо
+пишет рецепт — «Увеличьте max_tokens или уберите его»; адаптер делает первое
+автоматически.
+
+**Решение:**
+- **Распознавание ошибки** — `convert.is_reasoning_budget_error`: сначала
+  JSON (`error.type == "reasoning_budget_exhausted"`, плюс вложенные
+  `detail`/`message`), затем грубый фолбэк по подстроке (бэкенд может отдать
+  не-JSON или обернуть иначе).
+- **Подъём бюджета** — `convert.bump_reasoning_budget`: новое значение
+  `max(текущее × 4, ADAPTER_REASONING_MIN_TOKENS)`; правит `max_tokens`, а при
+  его отсутствии — `max_output_tokens` (тело Responses API). Потолок
+  `sanitize_max_tokens` (16384) **не** применяется — иначе подъём был бы
+  бесполезен (16384 → 65536 → снова кламп): причина ошибки «слишком мало», а
+  не «слишком много». Факт подъёма — строкой `[RETRY] reasoning budget
+  exhausted, max_tokens {N} -> {M}`.
+- **Повтор** — прямо в существующей петле попыток, **без sleep** (изменилось
+  тело, а не подвела сеть), во **всех трактах, где правится `max_tokens`**:
+  passthrough (E→E), `responses→completions`, `messages→completions` —
+  включая стрим-ветки (там повтор возможен только до `_start_sse()`;
+  добавлены страховки `not started` / `not pt_started` / `not r_started`).
+- **Бюджеты.** Подъём расходует слот `ADAPTER_RETRY_COUNT` (тот же цикл), но
+  ограничен своим счётчиком `ADAPTER_REASONING_RETRY` (дефолт 2; `0`
+  выключает механизм целиком). Итог: число HTTP-запросов к бэкенду ≤
+  `ADAPTER_RETRY_COUNT`, поэтому `ADAPTER_RETRY_COUNT=1` делает подъём
+  невозможным. Подъём на последней попытке не делается (`attempt <
+  ADAPTER_RETRY`): повторять некуда, а `.err` не должен фиксировать правку
+  неотправленного тела. `sanitize_max_tokens` вызывается один раз до цикла и на
+  повторе не повторяется. Новые env-переменные — `ADAPTER_REASONING_RETRY`,
+  `ADAPTER_REASONING_MIN_TOKENS` (`docs/environment.md` §2, строгая
+  int-валидация `env_validate.py`).
+- Тесты — `tests/test_convert.py` (`TestIsReasoningBudgetError`,
+  `TestBumpReasoningBudget`), `tests/test_server.py`
+  (`TestReasoningBudgetRetry`: подъём и успех, исчерпание подъёмов,
+  `ADAPTER_REASONING_RETRY=0`, чужая 502 без подъёма, оба конверсионных
+  тракта). Документация — `docs/environment.md`, `docs/logging.md`,
+  `docs/architecture.md` §9.5.
+
 ## v0.9.8 — снимок Log/Parts при образовании сессии; санитайзер `max_tokens`; превью `.err` в WEBUI; информативный баннер бэкендов; гайд Codex CLI; актуализация рекомендованных настроек [CC]
 
 ### 2026-09-15 Саммари ветки v0.9.8 (9 коммитов между merge PR #20 (v0.9.7) и снятием WIP)

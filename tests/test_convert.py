@@ -5,7 +5,9 @@ This is the most important test file — core logic that bridges two protocols.
 import json
 
 from backend_adapter.convert import (
+    REASONING_BUDGET_ERROR_TYPE,
     _extract_responses_message_text,
+    bump_reasoning_budget,
     convert_messages_anthropic_to_openai,
     convert_openai_completions_to_responses,
     convert_openai_to_anthropic,
@@ -19,6 +21,7 @@ from backend_adapter.convert import (
     extract_text,
     extract_tool_results,
     force_store_false,
+    is_reasoning_budget_error,
     normalize_messages_system_first,
     parse_tool_calls_from_text,
     sanitize_max_tokens,
@@ -64,6 +67,93 @@ class TestSanitizeMaxTokens:
         result = sanitize_max_tokens(body)
         assert result is body  # тот же объект
         assert body["max_tokens"] == 8192
+
+
+class TestIsReasoningBudgetError:
+    """is_reasoning_budget_error() — распознавание ошибки бэкенда (v0.9.9)."""
+
+    def test_error_type_in_json(self):
+        err = json.dumps({"error": {"message": "…", "type": REASONING_BUDGET_ERROR_TYPE}})
+        assert is_reasoning_budget_error(err) is True
+
+    def test_nested_detail_holder(self):
+        # Вложенная форма: error.detail.type.
+        err = json.dumps({"error": {"detail": {"type": REASONING_BUDGET_ERROR_TYPE}}})
+        assert is_reasoning_budget_error(err) is True
+
+    def test_nested_message_holder(self):
+        # Вложенная форма: error.message.type.
+        err = json.dumps({"error": {"message": {"type": REASONING_BUDGET_ERROR_TYPE}}})
+        assert is_reasoning_budget_error(err) is True
+
+    def test_top_level_message_holder(self):
+        err = json.dumps({"message": {"type": REASONING_BUDGET_ERROR_TYPE}})
+        assert is_reasoning_budget_error(err) is True
+
+    def test_plain_text_fallback(self):
+        # Не-JSON тело: грубый фолбэк по подстроке.
+        assert is_reasoning_budget_error("HTTP 502: reasoning_budget_exhausted") is True
+
+    def test_other_error_type_is_false(self):
+        err = json.dumps({"error": {"type": "invalid_request_error"}})
+        assert is_reasoning_budget_error(err) is False
+
+    def test_empty_is_false(self):
+        assert is_reasoning_budget_error("") is False
+        assert is_reasoning_budget_error(None) is False
+
+
+class TestBumpReasoningBudget:
+    """bump_reasoning_budget() — подъём max_tokens (v0.9.9)."""
+
+    ERR = json.dumps({"error": {"message": "…", "type": REASONING_BUDGET_ERROR_TYPE}})
+
+    def _body(self):
+        return {"model": "m", "max_tokens": 4096}
+
+    def test_multiplier(self):
+        body = self._body()
+        assert bump_reasoning_budget(body, self.ERR) == 16384
+        assert body["max_tokens"] == 16384
+
+    def test_floor_applied(self):
+        # Небольшой max_tokens: 1024*4=4096 < floor 8192 → побеждает floor.
+        body = {"max_tokens": 1024}
+        assert bump_reasoning_budget(body, self.ERR) == 8192
+
+    def test_no_clamp_to_sanitize_ceiling(self):
+        # Клампа hard_max (16384) у подъёма НЕТ: 16384*4 = 65536.
+        body = {"max_tokens": 16384}
+        assert bump_reasoning_budget(body, self.ERR) == 65536
+        assert body["max_tokens"] == 65536
+
+    def test_max_output_tokens_key(self):
+        # Responses-тело: правим max_output_tokens, max_tokens не появляется.
+        body = {"max_output_tokens": 4096}
+        assert bump_reasoning_budget(body, self.ERR) == 16384
+        assert body["max_output_tokens"] == 16384
+        assert "max_tokens" not in body
+
+    def test_max_tokens_wins_over_max_output_tokens(self):
+        body = {"max_tokens": 2048, "max_output_tokens": 999}
+        assert bump_reasoning_budget(body, self.ERR) == 8192
+        assert body["max_output_tokens"] == 999
+
+    def test_missing_key_starts_from_zero(self):
+        # Ни max_tokens, ни max_output_tokens нет → пишем в max_tokens от нуля.
+        body = {"model": "m"}
+        assert bump_reasoning_budget(body, self.ERR) == 8192
+        assert body["max_tokens"] == 8192
+
+    def test_other_error_leaves_body_untouched(self):
+        body = self._body()
+        other = json.dumps({"error": {"type": "rate_limit_error"}})
+        assert bump_reasoning_budget(body, other) is None
+        assert body == self._body()
+
+    def test_returns_new_value(self):
+        body = {"max_tokens": 8000}
+        assert bump_reasoning_budget(body, self.ERR) == 32000
 
 
 class TestExtractText:

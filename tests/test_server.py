@@ -5,6 +5,7 @@ import socket
 import sys
 import threading
 import time
+from unittest import mock
 
 
 def _send_http(host, port, method, path, body=None, headers=None, timeout=3):
@@ -1118,6 +1119,227 @@ class TestInputEndpoints(ServerSetupMixin):
                 assert resp["status"] == 502
                 assert "does not support completions" in resp["body"]
                 assert fake_backend.requests == []
+            finally:
+                server.shutdown()
+
+
+# ===========================================================================
+# Адаптивный ретрай при reasoning_budget_exhausted (v0.9.9)
+# ===========================================================================
+
+_REASONING_ERR = {
+    "error": {
+        "message": "весь заданный вами max_tokens ушёл на внутренние рассуждения",
+        "type": "reasoning_budget_exhausted",
+        "code": 502,
+    }
+}
+_OK_COMPLETIONS = {
+    "id": "chat1",
+    "model": "test-model",
+    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+    "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+}
+
+
+class TestReasoningBudgetRetry(ServerSetupMixin):
+    """502 `reasoning_budget_exhausted` → подъём max_tokens и повтор БЕЗ
+    обычного backoff; счётчик подъёмов свой (ADAPTER_REASONING_RETRY)."""
+
+    def _enable(self, **targets: str) -> None:
+        from backend_adapter import config as cfg
+        for var, value in targets.items():
+            setattr(cfg, f"ADAPTER_{var.upper()}_TARGET", value)
+
+    def _support(self, path: str, found: bool) -> None:
+        from backend_adapter import config as cfg
+        state = cfg._ENDPOINT_STATE.setdefault(
+            "test", {"at": 0.0, "endpoints": {}, "errors": {}}
+        )
+        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
+
+    @staticmethod
+    def _sent_bodies(fake_backend):
+        return [json.loads(body) for _p, _m, body in fake_backend.requests]
+
+    def test_bump_then_success(self, fake_backend):
+        """Первый ответ — reasoning_budget_exhausted, второй — 200: клиент
+        получает 200, а max_tokens второго запроса больше первого."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_statuses = [(502, _REASONING_ERR), (200, _OK_COMPLETIONS)]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                )
+                assert resp["status"] == 200
+                sent = self._sent_bodies(fake_backend)
+                assert len(sent) == 2
+                assert sent[0]["max_tokens"] == 100
+                # max(100 * 4, ADAPTER_REASONING_MIN_TOKENS=8192) = 8192
+                assert sent[1]["max_tokens"] == 8192
+            finally:
+                server.shutdown()
+
+    def test_exhausted_bumps_return_502(self, fake_backend):
+        """Все ответы — reasoning_budget_exhausted: число запросов ограничено
+        ADAPTER_RETRY (повтор идёт в том же цикле попыток), клиент — 502."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = _REASONING_ERR
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            with mock.patch.object(server_mod, "ADAPTER_REASONING_RETRY", 2):
+                with mock.patch.object(server_mod, "ADAPTER_RETRY", 3):
+                    try:
+                        resp = _send_http(
+                            "127.0.0.1", server.port, "POST", "/v1/messages",
+                            body={"model": "test-model",
+                                  "messages": [{"role": "user", "content": "Hi"}],
+                                  "max_tokens": 100},
+                        )
+                        assert resp["status"] == 502
+                        sent = self._sent_bodies(fake_backend)
+                        # 3 попытки: 1-я без подъёма, 2-я и 3-я с подъёмом
+                        # (счётчик < ADAPTER_REASONING_RETRY=2).
+                        assert len(sent) == 3
+                        assert [b["max_tokens"] for b in sent] == [100, 8192, 32768]
+                    finally:
+                        server.shutdown()
+
+    def test_no_bump_on_last_attempt(self, fake_backend, capsys):
+        """На последней попытке подъём не делается даже при свободном счётчике:
+        повторять некуда, а правка тела попала бы в `.err` как неотправленная."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = _REASONING_ERR
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            # Счётчика хватает на все попытки — ограничителем работает ровно
+            # страховка attempt < ADAPTER_RETRY.
+            with mock.patch.object(server_mod, "ADAPTER_REASONING_RETRY", 5):
+                with mock.patch.object(server_mod, "ADAPTER_RETRY", 2):
+                    try:
+                        resp = _send_http(
+                            "127.0.0.1", server.port, "POST", "/v1/messages",
+                            body={"model": "test-model",
+                                  "messages": [{"role": "user", "content": "Hi"}],
+                                  "max_tokens": 100},
+                        )
+                        assert resp["status"] == 502
+                        sent = self._sent_bodies(fake_backend)
+                        assert [b["max_tokens"] for b in sent] == [100, 8192]
+                        # Ровно один подъём (на 1-й попытке): на 2-й — страховка.
+                        bumps = [
+                            ln
+                            for ln in capsys.readouterr().out.splitlines()
+                            if "[RETRY] reasoning budget exhausted" in ln
+                        ]
+                        assert len(bumps) == 1
+                    finally:
+                        server.shutdown()
+
+    def test_disabled_by_zero(self, fake_backend):
+        """ADAPTER_REASONING_RETRY=0 — прежнее поведение: подъёма нет."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = _REASONING_ERR
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            with mock.patch.object(server_mod, "ADAPTER_REASONING_RETRY", 0):
+                with mock.patch.object(server_mod, "ADAPTER_RETRY", 1):
+                    try:
+                        resp = _send_http(
+                            "127.0.0.1", server.port, "POST", "/v1/messages",
+                            body={"model": "test-model",
+                                  "messages": [{"role": "user", "content": "Hi"}],
+                                  "max_tokens": 100},
+                        )
+                        assert resp["status"] == 502
+                        sent = self._sent_bodies(fake_backend)
+                        assert len(sent) == 1
+                        assert sent[0]["max_tokens"] == 100
+                    finally:
+                        server.shutdown()
+
+    def test_other_502_body_not_bumped(self, fake_backend):
+        """502 с ДРУГИМ телом (не reasoning_budget_exhausted) подъёма не даёт."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"type": "internal_error"}}
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            with mock.patch.object(server_mod, "ADAPTER_RETRY", 1):
+                try:
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": "test-model",
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                    )
+                    assert resp["status"] == 502
+                    sent = self._sent_bodies(fake_backend)
+                    assert len(sent) == 1
+                    assert sent[0]["max_tokens"] == 100
+                finally:
+                    server.shutdown()
+
+    def test_passthrough_tract_bumps(self, fake_backend):
+        """Тот же механизм в passthrough-тракте (E→E): тело правится, второй
+        запрос уходит с поднятым max_tokens."""
+        self._enable(completions="passthrough")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_statuses = [(502, _REASONING_ERR), (200, _OK_COMPLETIONS)]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            self._support("/v1/chat/completions", True)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                )
+                assert resp["status"] == 200
+                sent = self._sent_bodies(fake_backend)
+                assert len(sent) == 2
+                assert sent[0]["max_tokens"] == 100
+                assert sent[1]["max_tokens"] == 8192
+            finally:
+                server.shutdown()
+
+    def test_responses_to_completions_tract_bumps(self, fake_backend):
+        """Механизм в тракте responses→completions.
+
+        Клиентский `max_tokens` в Responses-теле не используется (там
+        `max_output_tokens`), поэтому тело к бэкенду уходит с дефолтом
+        санитайзера 8192 — подъём идёт от него: 8192 -> 32768.
+        """
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_statuses = [(502, _REASONING_ERR), (200, _OK_COMPLETIONS)]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={"model": "test-model",
+                          "input": [{"role": "user", "content": "Hi"}],
+                          "max_output_tokens": 100},
+                )
+                assert resp["status"] == 200
+                sent = self._sent_bodies(fake_backend)
+                assert len(sent) == 2
+                assert sent[0]["max_tokens"] == 8192
+                assert sent[1]["max_tokens"] == 32768
             finally:
                 server.shutdown()
 

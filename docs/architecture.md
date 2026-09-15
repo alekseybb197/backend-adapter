@@ -1273,6 +1273,32 @@ Streaming retry is **pre-header only**: once `_start_sse()` sends headers and th
 
 Full retry loop with exponential backoff for both stream and non-stream branches. Retries on HTTP 429/502/503/504 and TimeoutError. Other HTTP errors (4xx) are returned immediately.
 
+### 9.5 Адаптивный ретрай `reasoning_budget_exhausted` (v0.9.9)
+
+Reasoning-модель может потратить весь `max_tokens` на внутренние рассуждения —
+тогда на ответ ничего не остаётся, и бэкенд отвечает HTTP 502 с
+`"type": "reasoning_budget_exhausted"` и рецептом «Увеличьте max_tokens».
+Адаптер распознаёт **этот конкретный тип** ошибки (`convert.is_reasoning_budget_error`
+— устойчиво к обёртке: JSON `error.type`, вложенные `detail`/`message`, фолбэк
+по подстроке) и вместо отдачи 502 клиенту поднимает `max_tokens`
+(`convert.bump_reasoning_budget`: `max(текущее × 4, ADAPTER_REASONING_MIN_TOKENS)`)
+и немедленно повторяет запрос — **без sleep**, потому что изменилось тело, а не
+подвела сеть. Кламп `sanitize_max_tokens` (16384) при подъёме не применяется:
+причина ошибки — «слишком мало», а не «слишком много».
+
+Механика — та же петля попыток: `continue` расходует слот `ADAPTER_RETRY_COUNT`,
+поэтому число HTTP-запросов к бэкенду не растёт, а отдельный счётчик
+`ADAPTER_REASONING_RETRY` (0 — выключить) ограничивает, сколько попыток из
+общего бюджета могут поднимать бюджет. На последней попытке (`attempt ==
+ADAPTER_RETRY`) подъём не делается: повторять некуда, а правка тела попала бы
+в `.err` как неотправленная. `sanitize_max_tokens` вызывается один раз до цикла
+и на повторе не повторяется — иначе клэмп съел бы подъём. Механизм
+работает во **всех трактах, где правится `max_tokens`**: passthrough (E→E,
+`anthropic_req`), `responses→completions` (`r_openai_body`),
+`messages→completions` (`openai_body`). В стрим-ветках повтор возможен только
+до `_start_sse()` (страховки `not started` / `not pt_started` / `not r_started`).
+`.err`-файл фиксирует тело последней попытки. Переменные — `docs/environment.md` §2.
+
 ---
 
 ## 10. Dependency graph

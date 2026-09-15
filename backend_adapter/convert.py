@@ -531,6 +531,75 @@ def sanitize_max_tokens(body: dict, req_id: str = "") -> dict:
     return body
 
 
+# Тип ошибки бэкенда, на которую реагирует адаптивный ретрай max_tokens
+# (v0.9.9): reasoning-модель потратила весь бюджет на внутренние рассуждения
+# и на ответ ничего не осталось. Бэкенд отвечает HTTP 502 с этим `type` и
+# рецептом «Увеличьте max_tokens».
+REASONING_BUDGET_ERROR_TYPE = "reasoning_budget_exhausted"
+
+
+def is_reasoning_budget_error(err_text: str) -> bool:
+    """True, если тело ошибки бэкенда — ``reasoning_budget_exhausted``.
+
+    Устойчиво к обёртке: сначала пробуем JSON и смотрим ``error.type`` (а
+    также вложенные ``detail``/``message``), затем — грубый фолбэк по
+    подстроке в тексте (бэкенд может отдать не-JSON или обернуть иначе).
+    """
+    if not err_text:
+        return False
+    try:
+        parsed = json.loads(err_text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return REASONING_BUDGET_ERROR_TYPE in err_text
+    if isinstance(parsed, dict):
+        err = parsed.get("error")
+        if isinstance(err, dict) and err.get("type") == REASONING_BUDGET_ERROR_TYPE:
+            return True
+        # Вложенные формы: error.detail / error.message, верхний detail/message
+        for holder in (err, parsed):
+            if not isinstance(holder, dict):
+                continue
+            for field in ("detail", "message"):
+                value = holder.get(field)
+                if isinstance(value, dict) and value.get("type") == REASONING_BUDGET_ERROR_TYPE:
+                    return True
+    return REASONING_BUDGET_ERROR_TYPE in err_text
+
+
+def bump_reasoning_budget(body: dict, err_text: str, req_id: str = "") -> int | None:
+    """Поднять ``max_tokens`` под исчерпанный reasoning-бюджет.
+
+    ``None`` — ошибка не та (тело НЕ тронуто). Иначе — новое значение:
+    ``max(mt * 4, config.ADAPTER_REASONING_MIN_TOKENS)``.
+
+    Потолок ``sanitize_max_tokens`` (16384) здесь НЕ применяется: кламп обесценил
+    бы фикс (16384 -> 65536 -> снова 16384). Причина ошибки — не «слишком много»,
+    а «слишком мало», поэтому вверх поднимаем без ограничения адаптера.
+
+    Правит ``"max_tokens"``, а при его отсутствии — ``"max_output_tokens"``
+    (тело Responses API в passthrough-тракте). Логирует подъём через ``_d``.
+    """
+    from .logger import _d
+
+    if not is_reasoning_budget_error(err_text):
+        return None
+
+    if "max_tokens" in body:
+        key = "max_tokens"
+    elif "max_output_tokens" in body:
+        key = "max_output_tokens"
+    else:
+        key = "max_tokens"
+
+    current = body.get(key)
+    base = int(current) if isinstance(current, (int, float)) else 0
+    new_value = max(base * 4, config.ADAPTER_REASONING_MIN_TOKENS)
+    body[key] = new_value
+    if req_id:
+        _d(f"[{req_id}] [RETRY] reasoning budget exhausted, max_tokens {base} -> {new_value}")
+    return new_value
+
+
 def parse_tool_calls_from_text(text):
     """Fallback: парсит <tool_call>...</tool_call> из текста (Qwen-формат)."""
     tool_calls = []

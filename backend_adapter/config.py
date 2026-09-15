@@ -49,6 +49,22 @@ ADAPTER_STATE = os.environ.get("ADAPTER_STATE", "state.yaml")
 ADAPTER_DETACH = env_validate.parse_bool(os.environ.get("ADAPTER_DETACH_ENABLE", "0"))
 ADAPTER_TIMEOUT = env_validate.parse_int(os.environ.get("ADAPTER_TIMEOUT", "300"), 300)
 ADAPTER_RETRY = env_validate.parse_int(os.environ.get("ADAPTER_RETRY_COUNT", "3"), 3)
+# Адаптивный ретрай при `reasoning_budget_exhausted` (v0.9.9): reasoning-модель
+# тратит весь `max_tokens` на внутренние рассуждения и бэкенд отвечает HTTP 502
+# с рецептом «Увеличить max_tokens». На эту КОНКРЕТНУЮ ошибку адаптер поднимает
+# `max_tokens` и немедленно повторяет запрос (без sleep: тело изменилось, а не
+# сеть подвела). Механизм включается ТОЛЬКО на этот тип ошибки и не добавляет
+# бэкофф-паузы; сам повтор идёт в общем цикле попыток, поэтому расходует слот
+# ADAPTER_RETRY_COUNT — общее число HTTP-запросов к бэкенду остаётся ≤ него
+# (при ADAPTER_RETRY_COUNT=1 подъём уже не отправить). Сколько именно из этих
+# попыток могут поднимать бюджет, ограничивает СВОЙ счётчик
+# ADAPTER_REASONING_RETRY (0 выключает механизм целиком).
+# ADAPTER_REASONING_MIN_TOKENS — нижняя граница подъёма (пол);
+# см. docs/environment.md §2.
+ADAPTER_REASONING_MIN_TOKENS = env_validate.parse_int(
+    os.environ.get("ADAPTER_REASONING_MIN_TOKENS", "8192"), 8192
+)
+ADAPTER_REASONING_RETRY = env_validate.parse_int(os.environ.get("ADAPTER_REASONING_RETRY", "2"), 2)
 # Лимит консольного debug-вывода (v0.8.6-реформа): консоль — единственный
 # ВСЕГДА-включённый канал, поэтому любая строка обрезается до N символов
 # (0 = без обрезки). Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1)

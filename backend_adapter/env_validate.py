@@ -54,6 +54,8 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_EXPORTER_PORT": "int",
     "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "int",
     "ADAPTER_SESSIONS_TABLE": "int",
+    "ADAPTER_REASONING_MIN_TOKENS": "int",
+    "ADAPTER_REASONING_RETRY": "int",
     # --- bool ---
     "ADAPTER_DEBUG_ENABLE": "bool",
     "ADAPTER_DEBUG_PARTS": "bool",

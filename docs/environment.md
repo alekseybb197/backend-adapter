@@ -159,6 +159,10 @@ backend:
 | `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` | Адрес (host), на котором слушает HTTP-эндпоинт адаптера. Пусто/не задано — дефолт `127.0.0.1` (localhost, только локально). `0.0.0.0` — слушать на всех интерфейсах (доступ из сети). |
 | `ADAPTER_TIMEOUT` | `300` | Таймаут ожидания ответа от бэкенда (в секундах). Однопоточный запрос может ждать до этого значения. |
 | `ADAPTER_RETRY_COUNT` | `3` | Количество повторных попыток при ошибке соединения с бэкендом. |
+| `ADAPTER_REASONING_RETRY` | `2` | **Подъём `max_tokens` при `reasoning_budget_exhausted`** (v0.9.9). Reasoning-модель потратила весь бюджет на внутренние рассуждения — бэкенд отвечает HTTP 502 с этим `type` и рецептом «Увеличьте max_tokens». Адаптер поднимает `max_tokens` и немедленно повторяет запрос **без sleep** (тело изменилось, а не сеть подвела). Значение — сколько подъёмов разрешено за запрос; `0` — механизм выключен (прежнее поведение: 502 уходит клиенту как есть). |
+| `ADAPTER_REASONING_MIN_TOKENS` | `8192` | Нижняя граница (пол) при подъёме `max_tokens`: новое значение — `max(текущее × 4, ADAPTER_REASONING_MIN_TOKENS)`. Потолок `sanitize_max_tokens` (16384) здесь **не** применяется: причина ошибки — «слишком мало», а не «слишком много». |
+
+> **Бюджеты попыток.** Повтор при `reasoning_budget_exhausted` идёт в том же цикле попыток, что и обычный ретрай, поэтому **общее число HTTP-запросов к бэкенду ≤ `ADAPTER_RETRY_COUNT`**, а счётчик `ADAPTER_REASONING_RETRY` лишь ограничивает, сколько из этих попыток могут поднимать `max_tokens`. При `ADAPTER_RETRY_COUNT=1` подъём отправить уже некуда — механизм фактически выключен.
 
 > Адаптер использует `ThreadingHTTPServer` — каждый запрос обрабатывается в отдельном потоке, поэтому параллельные запросы Claude Code (конкурентные tool calls) не блокируют друг друга.
 
@@ -376,7 +380,8 @@ QwenCode (проверено на 0.23.2) **не передаёт id сесси�
 раскладку файлов или структуру конфигурации, в пул не входят): сеть и адреса
 прослушивания (`ADAPTER_PROXY_PORT`, `ADAPTER_ENDPOINT_HOST`,
 `ADAPTER_WEBUI_PORT`, `ADAPTER_WEBUI_HOST`), таймауты/ретраи
-(`ADAPTER_TIMEOUT`, `ADAPTER_RETRY_COUNT`), бэкенды
+(`ADAPTER_TIMEOUT`, `ADAPTER_RETRY_COUNT`, `ADAPTER_REASONING_RETRY`,
+`ADAPTER_REASONING_MIN_TOKENS`), бэкенды
 (`ADAPTER_BACKEND_CONFIG`), стартовые режимы и артефакты
 (`ADAPTER_DETACH_ENABLE`, `ADAPTER_PIDFILE`), `ADAPTER_DEBUG_LOGPATH`
 (идентичность директории логов не должна меняться посреди сессии).
@@ -394,6 +399,7 @@ QwenCode (проверено на 0.23.2) **не передаёт id сесси�
 вызывается из `backend-adapter.py` **до** импорта `config`):
 
 - **int-переменные** (`ADAPTER_PROXY_PORT`, `ADAPTER_TIMEOUT`, `ADAPTER_RETRY_COUNT`,
+  `ADAPTER_REASONING_RETRY`, `ADAPTER_REASONING_MIN_TOKENS`,
   `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_*`, порты WEBUI/EXPORTER,
   `ADAPTER_MODEL_USAGE_SAVE_INTERVAL`, `ADAPTER_SESSIONS_TABLE`) — значение
   обязано парситься в целое;

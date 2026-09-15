@@ -262,6 +262,13 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     models_delay = 0.0
     completions_response = None
     completions_status = 200
+    # Последовательность ответов /v1/chat/completions по порядку запросов
+    # (v0.9.9, тесты адаптивного ретрая): список, из которого на каждый запрос
+    # берётся ПЕРВЫЙ элемент (pop(0)). Элемент — либо int (статус; тело берётся
+    # из completions_response), либо пара (status, body) для разнотелых
+    # сценариев (502 с ошибкой → 200 с результатом). Пусто/None — обычное
+    # поведение по completions_status/completions_response.
+    completions_statuses = None
     # Responses API (v0.9.0): тело/статус для POST /v1/responses (passthrough
     # E→E на новых входных эндпоинтах адаптера).
     responses_response = None
@@ -314,16 +321,27 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/v1/chat/completions":
-            self.send_response(FakeBackendHandler.completions_status)
+            status = FakeBackendHandler.completions_status
+            resp_body = FakeBackendHandler.completions_response
+            seq = FakeBackendHandler.completions_statuses
+            if seq:
+                # Очередь ответов по порядку запросов (v0.9.9): элемент — int
+                # (статус) либо (status, body).
+                item = seq.pop(0)
+                if isinstance(item, tuple):
+                    status, resp_body = item
+                else:
+                    status = item
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            if FakeBackendHandler.completions_status == 200 and FakeBackendHandler.completions_response:
-                self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
-            elif FakeBackendHandler.completions_response:
+            if status == 200 and resp_body:
+                self.wfile.write(json.dumps(resp_body).encode())
+            elif resp_body:
                 # Любой не-200 статус с настроенным телом — пишем его как тело
                 # ошибки (v0.9.0: .err-тесты проверяют ПОЛНОЕ сообщение бэкенда).
-                self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
-            elif FakeBackendHandler.completions_status in (429, 502, 503, 504):
+                self.wfile.write(json.dumps(resp_body).encode())
+            elif status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path == "/v1/responses":
             self.send_response(FakeBackendHandler.responses_status)
@@ -408,6 +426,14 @@ class FakeBackend:
         FakeBackendHandler.completions_status = value
 
     @property
+    def completions_statuses(self):
+        return FakeBackendHandler.completions_statuses
+
+    @completions_statuses.setter
+    def completions_statuses(self, value):
+        FakeBackendHandler.completions_statuses = value
+
+    @property
     def responses_response(self):
         return FakeBackendHandler.responses_response
 
@@ -479,6 +505,7 @@ def fake_backend():
     FakeBackendHandler.models_delay = 0.0
     FakeBackendHandler.completions_response = None
     FakeBackendHandler.completions_status = 200
+    FakeBackendHandler.completions_statuses = None
     FakeBackendHandler.responses_response = None
     FakeBackendHandler.responses_status = 200
     FakeBackendHandler.extra_post_paths = {}
