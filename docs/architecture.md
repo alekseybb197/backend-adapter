@@ -54,8 +54,8 @@ backend_adapter/
 │                             персистентности; лист DAG — импортирует config
 ├── session_settings.py     ← пер-сессионные переопределения (v0.9.5): in-memory
 │                             dict session_id → {ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS,
-│                             ADAPTER_*_TARGET}; три состояния (не задано / inherit
-│                             / значение); API override/effective/set_config;
+│                             ADAPTER_*_TARGET}; у TARGET два состояния (не задано /
+│                             значение, v0.9.9); API override/effective/set_config;
 │                             лист DAG — импортирует config
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
 │                             "/api/model-usage/reset", "/api/model-usage/reprobe",
@@ -878,8 +878,8 @@ dict[session_id, dict[name, value]]` + lock). Сессия — единица у
 не трогая общую настройку приложения. Пул — `config.SESSION_CONFIG_POOL`
 (`ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS`, `ADAPTER_MESSAGES_TARGET`,
 `ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET`), типы —
-`config._SESSION_CONFIG_TYPES` (bool ×2, enum ×3 с доменом
-`SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)`).
+`config._SESSION_CONFIG_TYPES` (bool ×2, enum ×3 с общим доменом
+`TARGET_ALLOWED_VALUES`).
 
 **Две модели наследования (v0.9.8).** Пул делится на два вида, и это деление
 принципиально:
@@ -895,13 +895,17 @@ dict[session_id, dict[name, value]]` + lock). Сессия — единица у
   удалять запись нельзя — иначе `effective` снова читал бы `config` живьём.
   Согласованность «Parts ⊆ Log» обеспечивает не снимок (он — точная копия
   пары, включая env-пару PARTS=1/DEBUG=0), а гейт `session_log.parts_enabled`.
-- **TARGET-поля — ЖИВОЕ НАСЛЕДОВАНИЕ.** Три состояния (см. таблицу ниже).
+- **TARGET-поля — ЖИВОЕ НАСЛЕДОВАНИЕ.** Два состояния (v0.9.9, см. таблицу
+  ниже).
 
 | Состояние TARGET-поля | `effective(session_id, name)` |
 |---|---|
 | записи нет | общая настройка `config.<name>` (в т.ч. её последующие изменения) |
-| `"inherit"` | то же (взять общее), но запись существует и видна в WEBUI |
 | конкретное значение | переопределение сессии |
+
+«Вернуться к общему» (v0.9.9) — снять запись: WEBUI снимает переопределение,
+когда выбранное значение совпадает с текущим общим (`set_config(clear=…)`),
+после чего сессия снова живо наследует `config.<name>`.
 
 - API: `ensure_session(session_id) -> bool` (образование сессии: снимок
   Log/Parts; no-op для пустого id), `override(session_id, name) -> Any|None`
@@ -942,8 +946,10 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 Колонки, отличающие v0.9.5: **«Входной эндпойнт»** (`input` строки —
 константен, задаётся агентом, `routing.INPUT_PATHS`), **«Ошибок»** (число —
 ссылка на `.err`-файл сессии, `target="_blank"`, задача 7), **«Log» / «Parts» /
-«TARGET»** (выпадающие списки — пер-сессионные переопределения, `inherit` =
-общая настройка), **«Actions»** (⏪ + 🗑). Изменение настройки — PRG-форма
+«TARGET»** (выпадающие списки — пер-сессионные переопределения; у TARGET
+незаданное поле показывает действующее общее значение, а выбор значения,
+совпадающего с общим, снимает переопределение — v0.9.9), **«Actions»**
+(⏪ + 🗑). Изменение настройки — PRG-форма
 (POST → 303 на GET `/sessions`). Ссылки со статус-страницы `/` на `/sessions`
 открываются в **новом окне**, обратные («Статус 📊») — в текущем (v0.9.5,
 задачи 1–2). Пер-сессионные значения — `session_settings` (§6.11); строки —

@@ -1,6 +1,38 @@
 # backend-adapter — history / changelog
 
 
+## v0.9.9 (WIP — убрать `inherit` у пер-сессионных TARGET; адаптивный ретрай `reasoning_budget_exhausted`; константное определение инструмента; убрать колонку Endpoints)
+
+<!-- WIP: записи по мере согласованных коммитов группы v0.9.9. -->
+
+### WIP: убрать `inherit` у пер-сессионных TARGET
+
+**Цель:** свести модель наследования TARGET-полей к одному принципу —
+«не задано = живое наследование общей настройки»; «вернуться к общему» —
+выбор значения, совпадающего с текущим общим (переопределение снимается).
+
+**Решение:**
+- Удалено состояние `inherit` и его домен: константа
+  `config.SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)`
+  убрана, три TARGET-записи `config._SESSION_CONFIG_TYPES` переведены на
+  общий домен `TARGET_ALLOWED_VALUES`.
+- `session_settings.effective`: `if value is None or value == "inherit"` →
+  `if value is None` — TARGET трактуется ровно как «не задано = общее».
+  Механизм «вернуться к общему» (`set_config(..., clear=...)` →
+  `row.pop(name, None)`) уже существовал и переиспользован.
+- `routing.target_for_input`: из докстринга убрано упоминание `inherit`;
+  `assert value in config.TARGET_ALLOWED_VALUES` теперь покрывает всё
+  пространство значений.
+- WEBUI (`webui_sessions.py`): `_target_options` отдаёт ровно домен;
+  `_target_cell_html` показывает действующее (общее) значение при отсутствии
+  переопределения; `_apply_setting` снимает запись, когда выбранное значение
+  равно текущему общему (`getattr(config, name)`). Строка `"inherit"`,
+  пришедшая от старой формы/скрипта, по-прежнему трактуется как «снять
+  переопределение» (мягкая совместимость).
+- Тесты и документация приведены к двум состояниям
+  (`docs/routing.md`, `docs/webui.md`, `docs/environment.md`,
+  `docs/logging.md`, `docs/architecture.md`, `CLAUDE.md`).
+
 ## v0.9.8 — снимок Log/Parts при образовании сессии; санитайзер `max_tokens`; превью `.err` в WEBUI; информативный баннер бэкендов; гайд Codex CLI; актуализация рекомендованных настроек [CC]
 
 ### 2026-09-15 Саммари ветки v0.9.8 (9 коммитов между merge PR #20 (v0.9.7) и снятием WIP)

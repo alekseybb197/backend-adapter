@@ -214,10 +214,13 @@ class TestPerSessionTarget(_RouteCase):
         assert status == 404
         assert "ADAPTER_MESSAGES_TARGET=none" in msg
 
-    def test_inherit_falls_back_to_config(self):
-        # "inherit" — запись есть, но трактуется как «взять общее».
+    def test_cleared_override_falls_back_to_config(self):
+        # v0.9.9: «вернуться к общему» — переопределение СНИМАЕТСЯ (clear),
+        # сессия снова живо наследует общую настройку.
         self._set_target(messages="passthrough")
-        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
+        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "none"})
+        assert self.routing.target_for_input("messages", "s-1") == "none"
+        self._settings().set_config("s-1", clear=("ADAPTER_MESSAGES_TARGET",))
         assert self.routing.target_for_input("messages", "s-1") == "passthrough"
 
     def test_unset_session_uses_config(self):

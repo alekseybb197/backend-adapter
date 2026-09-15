@@ -152,21 +152,14 @@ RUNTIME_CONFIG_POOL = (
 # WEBUI /config рендерит выпадающий список из него.
 TARGET_ALLOWED_VALUES = ("messages", "completions", "responses", "passthrough", "none")
 
-# Значения TARGET-переменной в ПЕР-СЕССИОННОМ переопределении (v0.9.5):
-# тот же домен, что у глобальной настройки, плюс "inherit" — «взять общую
-# настройку приложения». Отдельный домен нужен потому, что у сессии «не
-# задано» — это не «none» (выключено), а именно «наследовать»; см.
-# session_settings и docs/routing.md §2.4.
-SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)
-
 # Пул настроек, которые можно переопределить ДЛЯ ОТДЕЛЬНОЙ СЕССИИ (v0.9.5,
 # session_settings.py): дефолт каждого — соответствующая общая настройка
 # приложения (config.X), а переопределение живёт в памяти процесса и
 # адресуется session_id. Логгирование — объём записи на диск для трафика
 # этой сессии; роутинг — три TARGET-переменные входов (см. §«РОУТИНГ
-# ВХОДНЫХ ЭНДПОИНТОВ» ниже: те же имена, что в RUNTIME_CONFIG_POOL, но
-# здесь значение может быть "inherit"). Точка хранения/порты/лимиты в пул
-# не входят — они не «объём на сессию».
+# ВХОДНЫХ ЭНДПОИНТОВ» ниже: те же имена и тот же домен, что в
+# RUNTIME_CONFIG_POOL). Точка хранения/порты/лимиты в пул не входят — они
+# не «объём на сессию».
 SESSION_CONFIG_POOL = (
     "ADAPTER_DEBUG",
     "ADAPTER_DEBUG_PARTS",
@@ -176,13 +169,15 @@ SESSION_CONFIG_POOL = (
 )
 
 # Типы пер-сессионных переопределений (валидация в session_settings).
-# TARGET-поля — enum-домен с "inherit" (SESSION_TARGET_VALUES).
+# TARGET-поля — тот же enum-домен, что у глобальной настройки
+# (TARGET_ALLOWED_VALUES): состояния «inherit» у них больше нет (v0.9.9) —
+# «не задано» и есть живое наследование общей настройки.
 _SESSION_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
     "ADAPTER_DEBUG_PARTS": bool,
-    "ADAPTER_MESSAGES_TARGET": ("enum", SESSION_TARGET_VALUES),
-    "ADAPTER_COMPLETIONS_TARGET": ("enum", SESSION_TARGET_VALUES),
-    "ADAPTER_RESPONSES_TARGET": ("enum", SESSION_TARGET_VALUES),
+    "ADAPTER_MESSAGES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
+    "ADAPTER_COMPLETIONS_TARGET": ("enum", TARGET_ALLOWED_VALUES),
+    "ADAPTER_RESPONSES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
 }
 
 # Типы для валидации входа /config (POST): bool, int или enum-домен — кортеж

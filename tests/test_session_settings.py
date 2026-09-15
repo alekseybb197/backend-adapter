@@ -8,8 +8,8 @@
 СНИМОК: ``ensure_session`` копирует в сессию текущие общие тумблеры, дальше
 сессия живёт своими значениями, а общие служат шаблоном для НОВЫХ сессий;
 состояния ``"inherit"`` у них нет, «сброс» = свежий снимок. TARGET-поля —
-ЖИВОЕ наследование: три состояния (НЕ ЗАДАНА / ``"inherit"`` / конкретное
-значение).
+ЖИВОЕ наследование: два состояния (НЕ ЗАДАНА / конкретное значение);
+v0.9.9 — «вернуться к общему» = снять запись (``clear``).
 
 Поэтому ``set_config``/``ensure_session`` ВСЕГДА материализуют ключи Log/Parts:
 после любого обращения к сессии её строка содержит оба этих ключа (в тестах
@@ -102,7 +102,7 @@ class TestEnsureSession:
 
 
 class TestOverride:
-    """override() — сырое хранимое значение (включая "inherit")."""
+    """override() — сырое хранимое значение."""
 
     def test_unset_returns_none(self, ss):
         assert ss.override("sess1", "ADAPTER_DEBUG") is None
@@ -114,11 +114,12 @@ class TestOverride:
         ss.set_config("sess1", {"ADAPTER_DEBUG": True})
         assert ss.override("sess1", "ADAPTER_DEBUG") is True
 
-    def test_returns_inherit_as_stored(self, ss):
-        # "inherit" у TARGET — полноценное хранимое значение: override его
-        # отдаёт как есть, трактовку «взять общее» делает вызывающий.
-        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
-        assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") == "inherit"
+    def test_returns_none_after_clear(self, ss):
+        # v0.9.9: у TARGET «вернуться к общему» — запись СНИМАЕТСЯ, override
+        # отдаёт None (трактовку «взять общее» делает вызывающий).
+        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
+        ss.set_config("sess1", clear=("ADAPTER_MESSAGES_TARGET",))
+        assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") is None
 
     def test_unknown_name_returns_none(self, ss):
         ss.set_config("sess1", {"ADAPTER_DEBUG": True})
@@ -143,16 +144,15 @@ class TestEffective:
         # Соседняя сессия — общая настройка (изоляция).
         assert ss.effective("sess2", "ADAPTER_DEBUG") is False
 
-    def test_inherit_uses_config(self, ss, cfg):
+    def test_unset_uses_config(self, ss, cfg):
+        # Переопределения нет — действует общая настройка (живое наследование).
         cfg.ADAPTER_MESSAGES_TARGET = "passthrough"
-        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
         assert ss.effective("sess1", "ADAPTER_MESSAGES_TARGET") == "passthrough"
 
     def test_reads_config_live(self, ss, cfg):
-        # Общая настройка меняется ПОСЛЕ записи "inherit" — сессия видит новое
-        # значение (живое чтение атрибута config, не снимок).
+        # Общая настройка меняется ПОСЛЕ образования сессии — сессия без
+        # переопределения видит новое значение (живое чтение атрибута config).
         cfg.ADAPTER_MESSAGES_TARGET = "passthrough"
-        ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
         cfg.ADAPTER_MESSAGES_TARGET = "none"
         assert ss.effective("sess1", "ADAPTER_MESSAGES_TARGET") == "none"
 
@@ -179,10 +179,12 @@ class TestSetConfig:
         ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
         assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") == "passthrough"
 
-    def test_applies_inherit_for_target(self, ss):
-        # "inherit" входит в домен TARGET-полей (SESSION_TARGET_VALUES).
+    def test_inherit_not_in_target_domain(self, ss, cfg):
+        # v0.9.9: "inherit" — не значение домена TARGET, запись игнорируется
+        # (в таблице остаётся только снимок Log/Parts).
         ss.set_config("sess1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
-        assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") == "inherit"
+        assert ss.override("sess1", "ADAPTER_MESSAGES_TARGET") is None
+        assert "ADAPTER_MESSAGES_TARGET" not in ss.session_overrides("sess1")
 
     def test_name_outside_pool_ignored(self, ss, cfg):
         # Имя вне config.SESSION_CONFIG_POOL молча игнорируется (снимок

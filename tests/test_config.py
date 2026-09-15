@@ -1328,22 +1328,18 @@ class TestSessionConfigPool:
     """Домены пер-сессионных переопределений (v0.9.5, session_settings).
 
     Пул переопределяемого — SESSION_CONFIG_POOL (логирование + TARGET), типы —
-    _SESSION_CONFIG_TYPES. TARGET-поля у сессии шире общего пула: домен
-    SESSION_TARGET_VALUES добавляет "inherit" («взять общую настройку»)."""
+    _SESSION_CONFIG_TYPES. v0.9.9: у TARGET-полей нет отдельного домена —
+    тот же TARGET_ALLOWED_VALUES, что у глобальной настройки (состояния
+    «inherit» нет, «не задано» и есть живое наследование)."""
 
     def setup_method(self):
         _reload_config()
         from backend_adapter import config
         self.config = config
 
-    def test_target_values_adds_inherit(self):
-        # SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES): тот же
-        # домен плюс "inherit" — и ровно он.
-        assert self.config.SESSION_TARGET_VALUES == (
-            "inherit",
-            *self.config.TARGET_ALLOWED_VALUES,
-        )
-        assert "inherit" not in self.config.TARGET_ALLOWED_VALUES
+    def test_no_session_target_domain(self):
+        # Отдельного домена пер-сессионных TARGET-значений больше нет.
+        assert not hasattr(self.config, "SESSION_TARGET_VALUES")
 
     def test_pool_contents(self):
         # Пул — логирование (2 флага) + три TARGET-переменные входов.
@@ -1361,8 +1357,9 @@ class TestSessionConfigPool:
         for name in self.config.SESSION_CONFIG_POOL:
             assert name in self.config._SESSION_CONFIG_TYPES
 
-    def test_target_domain_has_inherit(self):
-        # TARGET-поля сессии валидируются по домену с "inherit"...
+    def test_target_domain_is_shared_with_runtime(self):
+        # v0.9.9: TARGET-поля сессии и общий пул валидируются ОДНИМ доменом —
+        # TARGET_ALLOWED_VALUES, без "inherit".
         for name in (
             "ADAPTER_MESSAGES_TARGET",
             "ADAPTER_COMPLETIONS_TARGET",
@@ -1370,13 +1367,13 @@ class TestSessionConfigPool:
         ):
             assert self.config._SESSION_CONFIG_TYPES[name] == (
                 "enum",
-                self.config.SESSION_TARGET_VALUES,
+                self.config.TARGET_ALLOWED_VALUES,
             )
-            # ...а те же имена в ОБЩЕМ пуле — по домену БЕЗ "inherit".
             assert self.config._RUNTIME_CONFIG_TYPES[name] == (
                 "enum",
                 self.config.TARGET_ALLOWED_VALUES,
             )
+        assert "inherit" not in self.config.TARGET_ALLOWED_VALUES
 
     def test_bool_fields_are_bool(self):
         assert self.config._SESSION_CONFIG_TYPES["ADAPTER_DEBUG"] is bool
