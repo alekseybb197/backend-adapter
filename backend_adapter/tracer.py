@@ -84,9 +84,8 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     # JSONL-файл, single-file режим удалён.
     # Гейт файловой записи — ПЕР-СЕССИОННЫЙ (v0.9.5, session_log.logging_enabled
     # поверх session_settings.effective): сессия может вести свой trace, не
-    # трогая общий ADAPTER_DEBUG. Живое чтение (а не разовый снимок при
-    # импорте) — переключение через /config API (см. webui_config_api.py)
-    # действует здесь сразу.
+    # трогая общий ADAPTER_DEBUG. v0.9.8: значение сессии — СНИМОК общих флагов,
+    # взятый при её образовании; запрос без заголовка сессии trace не пишет.
     if not session_log.logging_enabled(session_id):
         return
     if not (session_log._TRACE_IS_DIR and session_log._TRACE_PATH):
