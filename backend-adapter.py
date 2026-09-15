@@ -3,12 +3,12 @@
 — changelog: ../changelog.md"""
 
 __version__ = "0.9.8"
+# КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
+# от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
+# Формулировка дублируется в README.md первой строкой вводного blockquote;
+# при разработке и релизах НЕ меняется без отдельного указания (CLAUDE.md).
 __comment__ = (
-    "Anthropic API <-> [OI]-backend proxy: двунаправленная конвертация "
-    "сообщений/инструментов (Messages <-> Chat Completions/Responses), "
-    "стриминг SSE, multi-backend YAML, per-session Log/Parts/TARGET, "
-    "перманентный runtime-пул (state.yaml), WEBUI и Prometheus-экспортёр. "
-    "История изменений — changelog.md; версия — __version__."
+    "backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible backends for AI agents"
 )
 
 import atexit

@@ -31,11 +31,16 @@ This file provides guidance to [CC] () when working with code in this repository
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
-  `changelog.md`. `__comment__` — **краткое фиксированное** резюме назначения
-  адаптера, при релизах не изменяется (нигде не парсится; версию читает
-  `webserver._detect_version()` из `__version__`). Пакет `backend_adapter/`
-  (layout и назначение каждого модуля — `docs/architecture.md` §2; группа
-  `artifact_tree*.py`, публичный API — `artifact_tree.generate()`).
+  `changelog.md`. `__comment__` — **КОНСТАНТНОЕ определение инструмента**
+  (`backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
+  backends for AI agents`): однострочная формулировка назначения, **не
+  перечисление возможностей**; та же строка открывает вводный blockquote
+  `README.md` (единый смысл, продублирован осознанно). При разработке и
+  релизах **не меняется** без отдельного указания пользователя; нигде не
+  парсится (версию читает `webserver._detect_version()` из `__version__`).
+  Пакет `backend_adapter/` (layout и назначение каждого модуля —
+  `docs/architecture.md` §2; группа `artifact_tree*.py`, публичный API —
+  `artifact_tree.generate()`).
 - **Python 3.10+** (аннотации `X | Y`); единственная внешняя зависимость —
   **PyYAML** (`requirements.txt`), всё остальное — стандартная библиотека.
 - Документация: `docs/install.md` (запуск/шаблоны продакшена),
@@ -62,6 +67,10 @@ This file provides guidance to [CC] () when working with code in this repository
 - Все секреты в логах маскируются (`redact.py`); санитайзер включён по умолчанию.
 - Новые возможности покрываются флагами окружения (см. `docs/environment.md`),
   дефолты выбирают безопасное поведение.
+- **Определение инструмента — константа.** `__comment__` в `backend-adapter.py`
+  и первая строка вводного blockquote `README.md` — одна и та же фиксированная
+  формулировка назначения, а не список фич: при добавлении возможностей её
+  **не трогаем**, историю ведёт `changelog.md`.
 - Документация обновляется вместе с кодом, а не после.
 
 ## Архитектура (большая картина)
