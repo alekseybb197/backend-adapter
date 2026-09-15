@@ -758,8 +758,9 @@ class TestErrorFileName:
 
 
 class TestPerSessionGates:
-    """logging_enabled/parts_enabled (v0.9.5) — пер-сессионный гейт файловой
-    записи поверх общих настроек приложения (session_settings.effective)."""
+    """logging_enabled/parts_enabled (v0.9.5, снимок — v0.9.8) — пер-сессионный
+    гейт файловой записи: значение сессии берётся СНИМКОМ общих тумблеров в
+    момент образования сессии, дальше общие флаги её не трогают."""
 
     def _fresh(self):
         import sys
@@ -769,7 +770,7 @@ class TestPerSessionGates:
         from backend_adapter import config, session_log, session_settings
         return config, session_log, session_settings
 
-    def test_inherit_from_config(self):
+    def test_snapshot_from_config(self):
         config, session_log, _ = self._fresh()
         config.ADAPTER_DEBUG = True
         config.ADAPTER_DEBUG_PARTS = False
@@ -790,17 +791,66 @@ class TestPerSessionGates:
         assert session_log.parts_enabled("sess1") is True
         assert session_log.parts_enabled("other") is False
 
-    def test_empty_session_id_uses_config(self):
+    def test_global_parts_on_session_off_is_off(self):
+        """Обратный случай: глобальный Parts=on, сессия его выключила —
+        сбор частей у этой сессии НЕ идёт (глобальный флаг функционал не
+        включает, он лишь шаблон для новых сессий)."""
+        config, session_log, session_settings = self._fresh()
+        config.ADAPTER_DEBUG = True
+        config.ADAPTER_DEBUG_PARTS = True
+        session_settings.set_config(
+            "sess1", {"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_PARTS": False}
+        )
+        assert session_log.parts_enabled("sess1") is False
+        # А новая сессия получает глобальный шаблон.
+        assert session_log.parts_enabled("fresh") is True
+
+    def test_global_switch_off_does_not_stop_existing_session(self):
+        """Глобальные флаги НЕ выключают функционал у работающих сессий:
+        смена config после образования сессии её снимок не трогает."""
         config, session_log, _ = self._fresh()
         config.ADAPTER_DEBUG = True
-        assert session_log.logging_enabled("") is True
+        assert session_log.logging_enabled("sess1") is True
+        config.ADAPTER_DEBUG = False
+        assert session_log.logging_enabled("sess1") is True
 
-    def test_inherit_value_uses_config(self):
+    def test_global_switch_on_does_not_start_existing_session(self):
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = False
+        assert session_log.logging_enabled("sess1") is False
+        config.ADAPTER_DEBUG = True
+        assert session_log.logging_enabled("sess1") is False
+
+    def test_empty_session_id_is_off(self):
+        """Не идентифицированная сессия файлов не создаёт (требование v0.9.8),
+        даже при глобально включённой записи."""
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = True
+        config.ADAPTER_DEBUG_PARTS = True
+        assert session_log.logging_enabled("") is False
+        assert session_log.parts_enabled("") is False
+
+    def test_unknown_session_id_is_off(self):
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = True
+        assert session_log.logging_enabled(session_log.UNKNOWN_SESSION_ID) is False
+        assert session_log.parts_enabled(session_log.UNKNOWN_SESSION_ID) is False
+
+    def test_clear_reinitializes_from_current_global(self):
         config, session_log, session_settings = self._fresh()
         config.ADAPTER_DEBUG = True
         session_settings.set_config("sess1", {"ADAPTER_DEBUG": False})
+        assert session_log.logging_enabled("sess1") is False
         session_settings.set_config("sess1", clear=("ADAPTER_DEBUG",))
-        assert session_log.logging_enabled("sess1") is True  # снова наследует
+        assert session_log.logging_enabled("sess1") is True  # свежий снимок
+
+    def test_parts_without_log_in_session_is_off(self):
+        """Инвариант «Parts ⊆ Log» держит сам гейт: даже если снимок взял
+        несогласованную env-пару (PARTS=1, DEBUG=0), сбор частей выключен."""
+        config, session_log, _ = self._fresh()
+        config.ADAPTER_DEBUG = False
+        config.ADAPTER_DEBUG_PARTS = True
+        assert session_log.parts_enabled("sess1") is False
 
     def test_fallback_when_session_settings_unavailable(self):
         """Отказ session_settings не должен гасить файловую запись — фолбэк

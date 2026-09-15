@@ -467,12 +467,43 @@ def error_file_name(session_id: str) -> str | None:
     return os.path.basename(_make_session_file(_DEBUG_PATH, session_id, "err"))
 
 
+def _session_flags_enabled(session_id: str) -> bool:
+    """Пролог обоих гейтов: «сессия идентифицирована» (v0.9.8).
+
+    Логирование и сбор частей — СЕССИОННЫЕ функции: у запроса без заголовка
+    сессии (``UNKNOWN_SESSION_ID``) файлов на диске не появляется. Раньше
+    такой запрос писал ``session-<ts>-unknown.log`` — «мусорная» сессия и в
+    таблице, и в дереве артефактов. Консольный канал по-прежнему безусловен
+    (см. logger._write) — он не сессионный.
+
+    Заодно образует сессию (``session_settings.ensure_session``): снимок
+    общих флагов берётся ровно при первой встрече ``session_id`` — где бы она
+    ни произошла (запись BODY идёт РАНЬШЕ ``server._register_session``)."""
+    if not session_id or session_id == UNKNOWN_SESSION_ID:
+        return False
+    try:
+        from . import session_settings
+
+        session_settings.ensure_session(session_id)
+    except Exception:
+        # Настройка наблюдаемости не должна ронять запрос: гейты ниже сами
+        # сходят в config за общей настройкой (страховка effective).
+        pass
+    return True
+
+
 def logging_enabled(session_id: str) -> bool:
     """Действующий флаг файловой записи debug-логов для сессии (v0.9.5).
 
-    Пер-сессионное переопределение ADAPTER_DEBUG поверх общей настройки
-    приложения (session_settings.effective) — живое чтение, как и раньше
-    у ``config.ADAPTER_DEBUG``. Пустой session_id → общая настройка."""
+    Значение — СНИМОК общих флагов, взятый при образовании сессии (v0.9.8):
+    ``session_settings.ensure_session`` копирует ``config.ADAPTER_DEBUG`` в
+    сессию при первой встрече, дальше сессия живёт своим значением, а общий
+    тумблер служит шаблоном только для НОВЫХ сессий.
+
+    Пустой ``session_id`` и ``UNKNOWN_SESSION_ID`` → False (не сессия —
+    файлов не создаём, см. ``_session_flags_enabled``)."""
+    if not _session_flags_enabled(session_id):
+        return False
     try:
         from . import session_settings
 
@@ -486,8 +517,12 @@ def logging_enabled(session_id: str) -> bool:
 def parts_enabled(session_id: str) -> bool:
     """Действующий флаг ADAPTER_DEBUG_PARTS для сессии (v0.9.5).
 
-    Смысл — как у ``logging_enabled``: пер-сессионное переопределение поверх
-    общей настройки.
+    Смысл — как у ``logging_enabled``: снимок значения, взятого при
+    образовании сессии (v0.9.8). Глобальный ``config.ADAPTER_DEBUG_PARTS``
+    функционал НЕ включает: он лишь попадает в снимок новой сессии. Раньше
+    внешние гейты вызовов ``write_debug_json`` читали его напрямую — из-за
+    этого сессионный флаг не мог включить сбор, а глобальный включал его
+    всем сессиям; v0.9.8 убрала эти гейты.
 
     v0.9.6 (задача 6): Parts — подробная запись ПОВЕРХ обычных логов, без
     активного Log он не работает. Гейт ``logging_enabled`` встроен сюда, а не
