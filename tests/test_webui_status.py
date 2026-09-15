@@ -21,8 +21,9 @@ model list, failure keeps the old cache and shows the error text, standalone
 (no endpoints) renders the notice and does not start any check. The Models
 cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
 button (JS models_toggle on the page) — see TestModelsCell. The Models in use
-table (single Endpoints column — available endpoints only, comma-separated;
-footer sits right under the backends table, before the section; the 🔃
+table (no Endpoints column since v0.9.9 — available APIs live in the backends
+table's API column; footer sits right under the backends table, before the
+section; the 🔃
 refresh button lives in the page header — v0.9.0 (no standalone button
 under the table); the header shows "Backend-Adapter Version <ver>" with
 🔃/📋/🔧 icons) — see TestUsageSection. Its Actions cell holds
@@ -590,8 +591,8 @@ class TestUsageSection:
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 8 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|Cost|Endpoints|Actions).
+        # Заголовок секции + 7 колонок (Модель|Бэкенд|Вызовов|Input|
+        # Output|Cost|Actions) — колонки Endpoints нет с v0.9.9.
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Models in use</h3>" in body
@@ -602,12 +603,16 @@ class TestUsageSection:
         assert "<th>Input</th>" in body
         assert "<th>Output</th>" in body
         assert "<th>Cost</th>" in body
-        assert "<th>Endpoints</th>" in body
-        assert "<th>completions</th>" not in body
-        assert "<th>messages</th>" not in body
-        assert "<th>responses</th>" not in body
-        assert "<th>embeddings</th>" not in body
-        assert "<th>Actions</th>" in body
+        # Колонки Endpoints в usage-таблице нет (v0.9.9); одноимённая колонка
+        # таблицы бэкендов выше — сохраняется, поэтому проверяем срез от
+        # заголовка «Models in use».
+        usage = body[body.index("Models in use"):]
+        assert "<th>Endpoints</th>" not in usage
+        assert "<th>completions</th>" not in usage
+        assert "<th>messages</th>" not in usage
+        assert "<th>responses</th>" not in usage
+        assert "<th>embeddings</th>" not in usage
+        assert "<th>Actions</th>" in usage
 
     def test_empty_table_shows_placeholder(self):
         # Пустая таблица → строка «пока нет данных», никаких строк моделей.
@@ -616,26 +621,24 @@ class TestUsageSection:
         assert "пока нет данных" in body
         assert "таблица заполняется при первых запросах к моделям" in body
 
-    def test_row_renders_endpoints_cell_and_counters(self):
-        # Колонка Endpoints перечисляет только доступные (found=True): m-ok —
-        # «completions», у m-none (доступных нет) — серая «—».
+    def test_row_renders_counters(self):
+        # Строка несёт счётчики из сида; «—» остаются только в Cost
+        # (колонка Endpoints удалена в v0.9.9).
         config, ws = _fresh_modules()
         rows = [
             self._row("m-ok", endpoints={
                 "completions": {"status": 200, "found": True},
                 "messages": {"status": 404, "found": False},
-                # responses/embeddings не пробованы — нет ключей
             }),
             self._row("m-none", endpoints={}),
         ]
         body = self._seed(config, ws, usage_rows=rows)
         assert "m-ok" in body and "m-none" in body
-        # доступные эндпоинты — зелёным именем (одно на обе строки)
-        assert body.count('style="color:#1a7f37">completions</span>') == 1
-        # серых «—» ровно три: Cost у m-ok (токены 0), Cost у m-none (токены 0)
-        # и Endpoints у m-none (доступных нет) — колонка Cost не добавляет
-        # четвёртую: у m-ok она «—» по нулевым токенам, а не по Endpoints.
-        assert body.count('style="color:#aaa">—</span>') == 3
+        # серых «—» ровно две: Cost у m-ok и Cost у m-none (токены 0)
+        assert body.count('style="color:#aaa">—</span>') == 2
+        # имена эндпойнтов в usage-таблице не рендерятся вовсе (v0.9.9)
+        usage = body[body.index("Models in use"):]
+        assert 'style="color:#1a7f37">completions</span>' not in usage
         # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
         assert 'data-calls="1">1</td>' in body  # calls строки m-none
@@ -674,46 +677,20 @@ class TestUsageSection:
         assert 'title="Перепроверить бэкенды"' in body
         assert 'action="/"' in body
 
-    def test_endpoints_cell_lists_only_found(self):
-        # _endpoints_cell_html: доступные (found=True) — имена через запятую
-        # в порядке ENDPOINT_PROBES; не-200/непробованные не показываются.
-        config, ws = _fresh_modules()
-        cell = ws._endpoints_cell_html(self._row("m", endpoints={
-            "messages": {"status": 404, "found": False},
-            "completions": {"status": 200, "found": True},
-            "responses": {"status": 200, "found": True},
-        }))
-        # порядок — ENDPOINT_PROBES: completions раньше responses
-        assert cell.index("completions") < cell.index("responses")
-        assert 'style="color:#1a7f37">completions</span>' in cell
-        assert 'style="color:#1a7f37">responses</span>' in cell
-        assert "messages" not in cell
-
-    def test_endpoints_cell_none_available_placeholder(self):
-        # Пусто/все found=False — один серый «—» (никаких имён).
-        config, ws = _fresh_modules()
-        assert ws._endpoints_cell_html(self._row("m-a", endpoints={})) == (
-            '<span style="color:#aaa">—</span>'
-        )
-        assert ws._endpoints_cell_html(self._row("m-b", endpoints={
-            "completions": {"status": 404, "found": False},
-        })) == '<span style="color:#aaa">—</span>'
-
     def test_usage_rows_unit_empty_and_nonempty(self):
-        # _usage_rows_html: одна ячейка Cost/Endpoints на строку + плейсхолдер
-        # пустого.
+        # _usage_rows_html: одна ячейка Cost на строку + плейсхолдер пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"8\"" in html
+        assert "пока нет данных" in html and 'colspan="7"' in html
         row = self._row("m", endpoints={
             "completions": {"status": 200, "found": True},
         })
         html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+Cost+Endpoints+Действия = 8 ячеек
-        assert html.count("<td") == 8
+        # модель+бэкенд+вызовов+input+output+Cost+Действия = 7 ячеек
+        assert html.count("<td") == 7
         assert 'id="usage-row-0"' in html
         assert 'data-calls="1"' in html
-        assert "completions" in html  # доступный эндпоинт — в ячейке Endpoints
+        assert "completions" not in html  # колонки Endpoints нет (v0.9.9)
 
     def test_row_renders_formatted_tokens(self):
         # input_tokens/output_tokens форматируются _fmt_tokens (с разделителем).
@@ -786,7 +763,7 @@ class TestUsageSection:
         assert 'title="Удалить строку модели"' in body
         # все три формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
-        assert row_html.count("<td") == 8  # в т.ч. ячейка действий — одна
+        assert row_html.count("<td") == 7  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
         # Имя модели со спецсимволами во всех трёх формах: quote(safe="") +
@@ -825,13 +802,13 @@ class TestUsageSection:
         assert html.index("m-a") < html.index("проверяется…")
 
     def test_empty_table_no_action_forms(self):
-        # У пустой таблицы (заглушка colspan=8) форм действий нет.
+        # У пустой таблицы (заглушка colspan=7) форм действий нет.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[])
         assert 'form method="post" action="/api/model-usage/reset' not in body
         assert 'form method="post" action="/api/model-usage/reprobe' not in body
         assert 'form method="post" action="/api/model-usage/delete' not in body
-        assert "colspan=\"8\"" in body
+        assert 'colspan="7"' in body
 
     def test_page_header_is_backend_adapter(self):
         # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —

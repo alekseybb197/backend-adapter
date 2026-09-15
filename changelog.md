@@ -95,6 +95,30 @@
   `webserver._detect_version()` читает `__version__` регэкспом, флагов
   `--version`/`--help` нет, тестов на `__comment__` нет.
 
+### WIP: убрать колонку Endpoints из Models in use
+
+**Цель:** убрать дублирование — какие API-эндпойнты доступны, уже показывает
+колонка **Endpoints («Доступные API»)** таблицы бэкендов; отдельная колонка в
+usage-таблице не нужна.
+
+**Решение:**
+- `webui_status.py`: функция `_endpoints_cell_html` удалена целиком вместе с
+  ячейкой строки и `<th>Endpoints</th>` заголовка; заглушка пустой таблицы —
+  `colspan="7"`; из `__all__` имя убрано.
+- **Индексы live-поллинга не сместились:** колонка Endpoints шла после Cost,
+  поэтому `set(2..4)` (Вызовов/Input/Output) и `setHtml(5)` (Cost) указывают
+  верно и после удаления — JS-комментарий обновлён.
+- **Не тронуты:** колонка «Доступные API» таблицы бэкендов (`_api_html`), поле
+  `endpoints` в таблице `model_usage.py` и снимке `/api/model-usage/snapshot`
+  (питает `_sync_found_endpoints` → таблицу бэкендов + метрику Prometheus),
+  действие ⟳ reprobe и его эндпойнт.
+- Тесты: `tests/test_webui_status.py` (`test_section_present_with_headers`,
+  `test_row_renders_counters`, `test_usage_rows_unit_empty_and_nonempty`,
+  `test_empty_table_no_action_forms`; удалены юнит-тесты удалённой
+  `_endpoints_cell_html`), `tests/test_manual_check.py` (описание состава
+  колонок в `_usage_cost_cell`; `cells[5]` — по-прежнему Cost). Документация —
+  `docs/webui.md` §«Models in use», §`/api/model-usage/snapshot`, §«Советы».
+
 ## v0.9.8 — снимок Log/Parts при образовании сессии; санитайзер `max_tokens`; превью `.err` в WEBUI; информативный баннер бэкендов; гайд Codex CLI; актуализация рекомендованных настроек [CC]
 
 ### 2026-09-15 Саммари ветки v0.9.8 (9 коммитов между merge PR #20 (v0.9.7) и снятием WIP)

@@ -183,9 +183,10 @@ def _usage_cost_cell(page: str, row: int = 0) -> str | None:
     """Текст ячейки Cost строки usage-row-<row> статус-страницы.
 
     Ячейка Cost не несёт class/data-атрибута (рендерится как 6-й <td>
-    строки: Модель|Бэкенд|Вызовов|Input|Output|Cost|Endpoints|Действия) —
-    берём ячейку по позиции внутри <tr id="usage-row-N">. None — строки
-    с таким номером на странице нет."""
+    строки: Модель|Бэкенд|Вызовов|Input|Output|Cost|Действия — колонка
+    Endpoints удалена в v0.9.9, индекс Cost не сместился) — берём ячейку
+    по позиции внутри <tr id="usage-row-N">. None — строки с таким номером
+    на странице нет."""
     m = re.search(rf'<tr id="usage-row-{row}">(.*?)</tr>', page, re.S)
     if not m:
         return None

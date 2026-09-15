@@ -11,17 +11,18 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
   - таблицу «Models in use» — модели, к которым агент обращался
     (см. model_usage.py): счётчик обращений, токены из usage-блоков ответов
     бэкенда (input_tokens/output_tokens — prompt_tokens/completion_tokens;
-    ответы без usage не считаются) и какие API-эндпоинты доступны именно
-    для каждой модели (результат дымовой пробы этой моделью при первом
-    обращении; колонка Endpoints перечисляет только доступные).
+    ответы без usage не считаются) и стоимость накопленных токенов (Cost).
+    Колонки «Endpoints» здесь нет (v0.9.9) — какие эндпойнты доступны, видно
+    в таблице бэкендов выше («Доступные API»); проба по-прежнему ведётся
+    пер-модельно (model_usage.endpoints) и питает перепроверку ⟳.
     Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
     WEBUI и переживает перезапуски адаптера; кнопка «Сбросить» в строке
     таблицы обнуляет счётчики строки (calls/input_tokens/output_tokens →
     0; строка с результатами пробы эндпоинтов остаётся — POST
     /api/model-usage/reset, см. ModelUsageResetEndpoint). Кнопка «Перепроверить» (POST
     /api/model-usage/reprobe, см. ModelUsageReprobeEndpoint) запускает
-    фоновую повторную дымовую пробу эндпоинтов именно этой моделью — для
-    строк с «—» в колонке Endpoints; проба не трогает счётчики и токены
+    фоновую повторную дымовую пробу эндпоинтов именно этой моделью (когда
+    первая проба ничего не нашла); проба не трогает счётчики и токены
     строки. Пока перепроверка идёт, страница показывает баннер и ячейку
     «проверяется…» и авто-обновляется по завершении (JS → /api/model-usage/
     reprobe-state, см. ReprobeStateEndpoint).
@@ -324,26 +325,6 @@ def _cost_cell_html(row: dict) -> str:
     return _fmt_cost(cost, tariff["currency"])
 
 
-def _endpoints_cell_html(row: dict) -> str:
-    """HTML ячейки «Endpoints» строки таблицы Models in use.
-
-    Перечисляет ТОЛЬКО доступные эндпоинты (found=True ⇔ HTTP 200, см.
-    классификацию в config._probe_backend_endpoints): короткие имена через
-    запятую, зелёным, в порядке config.ENDPOINT_PROBES (том же, что у пробы).
-    Непрошедшие/непробованные пути (не-200, probing, ADAPTER_MODEL_USAGE_
-    ENABLE=0, модели нет у бэкенда) не показываются; если доступных нет —
-    один серый «—» вместо пустой ячейки."""
-    parts = []
-    endpoints = row.get("endpoints") or {}
-    for pname, _path, _tpl in config.ENDPOINT_PROBES:
-        ep = endpoints.get(pname)
-        if ep is not None and ep["found"]:
-            parts.append(f'<span style="color:#1a7f37">{pname}</span>')
-    if not parts:
-        return '<span style="color:#aaa">—</span>'
-    return ", ".join(parts)
-
-
 def _fmt_tokens(n: int) -> str:
     """Точное число токенов с разделителем тысяч («12 345»; 0 → «0»).
 
@@ -431,9 +412,7 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     """HTML строк таблицы Models in use (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
-    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Endpoints |
-    Actions. Колонка Endpoints перечисляет только доступные эндпоинты
-    (found=True) короткими именами через запятую (см. _endpoints_cell_html).
+    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Actions.
     input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
     _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
     Колонка Cost — стоимость накопленных токенов по тарифу модели на момент
@@ -445,7 +424,10 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     — карта client_model → True: у строки идёт фоновая перепроверка (баннер +
     авто-релоад); в ячейке Actions вместо кнопок — «проверяется…».
     Модель/бэкенд — html.escape; иконки-действия (🔄/⏪/🗑) — отдельные формы
-    в последнем <td> (см. _actions_cell_html)."""
+    в последнем <td> (см. _actions_cell_html).
+    Колонки «Endpoints» здесь нет (v0.9.9): доступные API той же модели
+    показываются в таблице бэкендов выше («Доступные API», см. _api_html),
+    дублировать их в usage-таблице не нужно."""
     body = []
     for i, r in enumerate(rows):
         reprobing_row = bool(reprobing and reprobing.get(r["model"]))
@@ -460,13 +442,12 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
             f'<td data-input="{input_tokens}">{_compact_number(input_tokens)}</td>'
             f'<td data-output="{output_tokens}">{_compact_number(output_tokens)}</td>'
             f"<td>{_cost_cell_html(r)}</td>"
-            f"<td>{_endpoints_cell_html(r)}</td>"
             f"{_actions_cell_html(r['model'], reprobing_row)}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="8" style="color:#888">пока нет данных — '
+            '<tr><td colspan="7" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -506,8 +487,7 @@ def _render_status_page(
     перечитывания конфига, M = count моделей).
     Секция «Models in use» рендерится из model_usage.usage_snapshot() (см.
     _usage_rows_html) — таблица заполняется запросами агента в этом процессе
-    независимо от проверок бэкендов; колонка Endpoints перечисляет только
-    доступные эндпоинты строки. Перепроверка строки (кнопка «Перепроверить»,
+    независимо от проверок бэкендов. Перепроверка строки (кнопка «Перепроверить»,
     model_usage.reprobe_state()) — отдельный фоновый процесс (см.
     ModelUsageReprobeEndpoint): пока идёт, страница показывает свой баннер
     и авто-обновляется по завершении (JS reprobe_poll → /api/model-usage/
@@ -717,6 +697,9 @@ def _render_status_page(
           var row = rows[i];
           var cells = trs[i].getElementsByTagName("td");
           // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output,
+          // 5 Cost, 6 Actions. Удаление колонки Endpoints (v0.9.9) индексы
+          // НЕ сместило: она шла после Cost, поэтому set(2-4) и setHtml(5)
+          // ниже по-прежнему указывают верно.
           // 5 Cost (cost_html — готовый HTML с сервера: токены × тариф
           // на текущий момент; пересчитывается в каждом снимке).
           // Счётчики (2-4) — текст через textContent. Cost (5) — HTML с
@@ -799,7 +782,7 @@ def _render_status_page(
 {footer}
 <h3 style="margin-top:24px">Models in use</h3>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Actions</th></tr>
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Actions</th></tr>
   {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
@@ -1107,7 +1090,8 @@ def _autostart_first_check() -> bool:
       - standalone (python -m backend_adapter.webserver) с YAML в
         ADAPTER_BACKEND_CONFIG: _BACKENDS пуст (адаптер не стартовал), но
         _collect_endpoints() вернёт список из YAML — первый GET запускает
-        проверку, чтобы колонка Endpoints и модели заполнились без клика;
+        проверку, чтобы колонки бэкендов (статус, API, модели) заполнились
+        без клика;
       - в процессе адаптера стартовую проверку уже запустил
         backend-adapter.py (running=True) — повторно не гоним;
       - проверка уже завершалась (done_at есть) — не гоним повторно:
@@ -1129,7 +1113,6 @@ __all__ = [
     "_config_snapshot",
     "_models_html",
     "_api_html",
-    "_endpoints_cell_html",
     "_cost_cell_html",
     "_usage_rows_html",
     "_actions_cell_html",
