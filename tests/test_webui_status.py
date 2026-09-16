@@ -9,7 +9,7 @@ there is something to check — auto-starts the FIRST check
 (_autostart_first_check: adapter start / first GET / button); POST "/"
 (the 🔃 «Перепроверить бэкенды» button (ex-«⟳ Проверить сейчас»))
 launches
-config.start_refresh(timeout=PROBE_TIMEOUT) and answers 303 See Other →
+config.start_refresh(timeout=REFRESH_TIMEOUT) and answers 303 See Other →
 GET "/" (PRG pattern: the page is shown via a plain GET, so reloads never
 repeat the POST and no «resubmit» dialog appears); while a check is running
 the page shows the «Проверка выполняется…» banner plus the status_poll JS
@@ -821,7 +821,7 @@ class TestAutoStartFirstCheck:
         with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
             assert ws._autostart_first_check() is True
         assert m_start.call_count == 1
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_running_does_not_start_second(self):
         # Проверка уже идёт (running=True): второй запуск не создаём.
@@ -1001,7 +1001,7 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 1
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_get_root_running_state_does_not_start_check(self, tmp_path):
         # Проверка уже ИДЁТ (running=True в состоянии): GET "/" новую не
@@ -1046,7 +1046,7 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 1
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_get_root_multi_lists_backends_and_models(self, tmp_path):
         config, _ = _fresh_modules()
@@ -1113,7 +1113,7 @@ class TestStatusHTTP:
 
     def test_post_starts_background_check_and_redirects(self, tmp_path):
         # POST "/" (кнопка): PRG — вызывает start_refresh(timeout=
-        # PROBE_TIMEOUT), отвечает 303 See Other с Location "/"; следующий
+        # REFRESH_TIMEOUT), отвечает 303 See Other с Location "/"; следующий
         # GET (куда уводит браузер) — обычная загрузка страницы, POST не
         # повторяется. side_effect публикует running-снимок, как настоящий
         # start_refresh: GET видит идущую проверку и вторую не запускает.
@@ -1142,7 +1142,7 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 1  # GET вторую проверку не запустил
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_post_when_check_running_redirects_then_banner(self, tmp_path):
         # Проверка уже идёт (running=True в состоянии): POST — 303; GET после
@@ -1254,7 +1254,7 @@ class TestModelUsageResetAPI:
 
     def test_post_form_reset_zeroes_counters_in_file(self, tmp_path):
         # Сброс формы обнуляет счётчики и в YAML-файле; строка остаётся
-        # (serve включил persist на root_dir=tmp_path).
+        # (serve включил persist на root_dir/var, v0.9.9).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1277,7 +1277,10 @@ class TestModelUsageResetAPI:
                 "application/x-www-form-urlencoded",
             )
             import yaml
-            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+            # Файл учёта живёт в папке состояния <root>/var (v0.9.9).
+            with open(
+                str(tmp_path / "var" / model_usage.MODEL_USAGE_FILE), encoding="utf-8"
+            ) as f:
                 data = yaml.safe_load(f)
             row = (data or {}).get("models", {}).get("m-reset")
             assert row is not None        # строка осталась в файле
@@ -1413,7 +1416,7 @@ class TestModelUsageDeleteAPI:
 
     def test_post_form_delete_removes_from_file(self, tmp_path):
         # Удаление формы перезаписывает YAML-файл без строки (serve включил
-        # persist на root_dir=tmp_path).
+        # persist на root_dir/var, v0.9.9).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1436,7 +1439,10 @@ class TestModelUsageDeleteAPI:
                 "application/x-www-form-urlencoded",
             )
             import yaml
-            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+            # Файл учёта живёт в папке состояния <root>/var (v0.9.9).
+            with open(
+                str(tmp_path / "var" / model_usage.MODEL_USAGE_FILE), encoding="utf-8"
+            ) as f:
                 data = yaml.safe_load(f)
             assert "m-del" not in (data or {}).get("models", {})
         finally:

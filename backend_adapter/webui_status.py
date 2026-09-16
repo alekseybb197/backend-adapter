@@ -32,10 +32,10 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
 Откуда данные:
   - Проверка бэкендов запускается:
       * при старте адаптера (backend-adapter.py запускает config.
-        start_refresh(timeout=PROBE_TIMEOUT) после поднятия WEBUI) и
+        start_refresh(timeout=REFRESH_TIMEOUT) после поднятия WEBUI) и
       * по кнопке 🔃 (POST "/", прежняя «⟳ Перепроверить») — работает по
         PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(
-        timeout=PROBE_TIMEOUT) (см. config._refresh_worker) и отвечает
+        timeout=REFRESH_TIMEOUT) (см. config._refresh_worker) и отвечает
         303 See Other на GET "/" — браузер переходит на страницу
         GET-навигацией, HTTP-запрос не ждёт завершения проверки.
         Поэтому обновление/авто-релоад страницы никогда не повторяет
@@ -91,7 +91,7 @@ from . import config, model_usage, webserver
 
 logger = logging.getLogger("webui_status")
 
-PROBE_TIMEOUT = 10.0  # жёсткий таймаут опроса списка моделей одного бэкенда, сек
+REFRESH_TIMEOUT = 10.0  # жёсткий таймаут опроса списка моделей одного бэкенда, сек
 
 
 # ==================== ЧИСТАЯ ЛОГИКА ====================
@@ -674,7 +674,7 @@ class StatusEndpoint(webserver.Endpoint):
     Проверка бэкендов — по кнопке 🔃 (POST "/") и при автостарте (первый
     GET, см. _autostart_first_check). POST работает по
     PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(timeout=
-    PROBE_TIMEOUT) и отвечает 303 See Other на GET "/" (HTTP не ждёт её
+    REFRESH_TIMEOUT) и отвечает 303 See Other на GET "/" (HTTP не ждёт её
     завершения; браузер переходит на страницу GET-навигацией, поэтому
     авто-релоад не повторяет POST). Кнопка ПЕРЕЧИТЫВАЕТ ADAPTER_BACKEND_CONFIG
     (start_refresh(reload=True) → config.reload_backend_config): бэкенды
@@ -725,7 +725,7 @@ class StatusEndpoint(webserver.Endpoint):
         # GET, который отрендерит баннер. В standalone без настроенных
         # эндпойнтов проверять нечего — не запускаем (GET покажет подсказку).
         if _collect_endpoints():
-            config.start_refresh(timeout=PROBE_TIMEOUT)
+            config.start_refresh(timeout=REFRESH_TIMEOUT)
         handler._redirect("/")
 
 
@@ -901,11 +901,11 @@ def _autostart_first_check() -> bool:
         return False  # уже идёт (стартовая адаптера / по кнопке)
     if state.get("done_at") is not None:
         return False  # проверка уже завершалась — не гоним повторно
-    return config.start_refresh(timeout=PROBE_TIMEOUT)
+    return config.start_refresh(timeout=REFRESH_TIMEOUT)
 
 
 __all__ = [
-    "PROBE_TIMEOUT",
+    "REFRESH_TIMEOUT",
     "MODEL_LINES",
     "_collect_endpoints",
     "_config_snapshot",

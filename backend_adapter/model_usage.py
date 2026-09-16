@@ -16,9 +16,9 @@ v0.9.9: синхронные дымовые пробы эндпойнтов пр
 больше не ждёт сетевых проб; строка несёт только счётчики, бэкенд и время
 первого обращения. Кнопка «Перепроверить» (reprobe) снята вместе с ними.
 
-Персистентность: таблица сохраняется в YAML-файл `model-usage.yaml` в корне
-WEBUI (корень — директория `ADAPTER_DEBUG_LOGPATH`, дефолт ./tmp/logs;
-та же формула, что у корня веб-сервера) и при старте загружается из него,
+Персистентность: таблица сохраняется в YAML-файл `model-usage.yaml` в папке
+состояния (`ADAPTER_DATA_ROOT/var`, дефолт ./tmp/adapter/var; та же формула,
+что у config.var_dir) и при старте загружается из него,
 если файл есть — счётчики
 переживают перезапуски адаптера. Сохранение «грязной» таблицы — не чаще
 раза в config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL (сек); создание новой строки
@@ -91,12 +91,12 @@ _TABLE_LOCK = threading.Lock()
 _TARIFFS: dict[tuple[str, str], dict] = {}
 _TARIFF_LOCK = threading.Lock()
 
-# Персистентность (YAML-файл в корне WEBUI). _PERSIST_PATH:
-#   None (дефолт) → авто-формула (прод): config.ADAPTER_DEBUG_LOGPATH (всегда непуст)
+# Персистентность (YAML-файл в папке состояния). _PERSIST_PATH:
+#   None (дефолт) → авто-формула (прод): config.var_dir() (всегда непуста)
 #   ""            → выключено (тесты, никакого файлового I/O)
 #   иначе         → явный путь к YAML-файлу (standalone webserver, тесты на tmp_path)
 # _PERSIST_LOCK сериализует запись файла; _TABLE_LOCK защищает таблицу.
-MODEL_USAGE_FILE = "model-usage.yaml"  # имя файла в корне WEBUI
+MODEL_USAGE_FILE = "model-usage.yaml"  # имя файла в папке состояния (var/)
 _PERSIST_PATH: str | None = None
 _PERSIST_LOCK = threading.Lock()
 _LOADED = False  # файл уже пытались загрузить
@@ -456,11 +456,10 @@ def lookup_tariff(model: str, backend: str) -> dict | None:
 
 
 def _default_root() -> str:
-    """Корень WEBUI — та же формула, что у webui_root в backend-adapter.py
-    (ADAPTER_DEBUG_LOGPATH, всегда непуст; дефолт ./tmp/logs). Читается
-    лениво (живое чтение config.ADAPTER_DEBUG_LOGPATH — его могут менять
-    тесты между вызовами)."""
-    return config.ADAPTER_DEBUG_LOGPATH
+    """Папка состояния ``ADAPTER_DATA_ROOT/var`` — та же формула, что у
+    config.var_dir (всегда непуста; дефолт ./tmp/adapter/var). Читается
+    лениво (живое чтение config — корень могут менять тесты между вызовами)."""
+    return config.var_dir()
 
 
 def _default_root_file() -> str:

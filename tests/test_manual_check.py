@@ -5,7 +5,7 @@
 бэкендом (tests/conftest.FakeBackend):
 
 - WEBUI и Prometheus-экспортёр поднимаются без ADAPTER_WEBUI_ENABLE (его
-  больше нет — v0.8.6), корень — ADAPTER_DEBUG_LOGPATH;
+  больше нет — v0.8.6), корень — ADAPTER_DATA_ROOT (v0.9.9);
 - консольные debug-блоки видны при ADAPTER_DEBUG_ENABLE=0; файлов на диске
   нет, кроме model-usage.yaml (после запросов) и БЕЗУСЛОВНОГО JSON-файла
   опроса списка моделей (fake.models.json — v0.9.0, пишется всегда);
@@ -23,9 +23,10 @@ venv/bin/pytest -m manual, чтобы при желании гонять тол�
 контракта graceful shutdown (см. ADR), поэтому по умолчанию тест НЕ
 пропускается.
 
-ВНИМАНИЕ: процесс-ребёнок пишет model-usage.yaml и session-* в logs_dir —
-ТОЛЬКО в tmp-директорию теста (env ADAPTER_DEBUG_LOGPATH), наружу ничего не
-выходит; FakeBackend слушает случайный порт.
+ВНИМАНИЕ: процесс-ребёнок пишет model-usage.yaml и session-* в подпапки
+log/ и var/ корня данных — ТОЛЬКО в tmp-директорию теста (env
+ADAPTER_DATA_ROOT), наружу ничего не выходит; FakeBackend слушает случайный
+порт.
 """
 import json
 import os
@@ -112,12 +113,12 @@ def _wait_http(port: int, path: str = "/healthz", deadline_s: float = 20) -> int
             time.sleep(0.3)
     return None
 
-def _wait_files(logs_dir: str, predicate, deadline_s: float = 20) -> bool:
-    """Дождаться файлов в logs_dir, удовлетворяющих predicate (имя → bool)."""
+def _wait_files(dir_path: str, predicate, deadline_s: float = 20) -> bool:
+    """Дождаться файлов в dir_path, удовлетворяющих predicate (имя → bool)."""
     deadline = time.time() + deadline_s
     while time.time() < deadline:
         try:
-            names = os.listdir(logs_dir)
+            names = os.listdir(dir_path)
         except OSError:
             names = []
         if any(predicate(f) for f in names):
@@ -155,7 +156,7 @@ def _chat(proxy_port: int, body: dict) -> tuple[int, str]:
 
 
 def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
-                 web_port: int, exp_port: int, logs_dir: str,
+                 web_port: int, exp_port: int, data_root: str,
                  debug_enable: str, trim: str = "3000") -> dict:
     """env для процесса адаптера: чистое ADAPTER_-окружение + тестовые пути."""
     env = dict(os.environ)
@@ -172,7 +173,7 @@ def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
         "ADAPTER_MODELS_TARIFFS": tariffs_path,
         # WEBUI_ENABLE больше НЕ задаём — должен подняться сам (v0.8.6)
         "ADAPTER_DEBUG_ENABLE": debug_enable,
-        "ADAPTER_DEBUG_LOGPATH": logs_dir,
+        "ADAPTER_DATA_ROOT": data_root,
         "ADAPTER_DEBUG_TRIM": trim,
     })
     return env
@@ -209,8 +210,12 @@ class TestManualAdapterProcess:
     бэкенда ~сек), дробить на части — множить время прогона."""
 
     def test_full_lifecycle(self, tmp_path):
-        logs_dir = str(tmp_path / "logs")
-        os.makedirs(logs_dir)
+        # v0.9.9: корень данных с подпапками log/ (логи, трейсы, *.parts) и
+        # var/ (PID, state.yaml, model-usage.yaml, *.models.json).
+        data_root = str(tmp_path / "data")
+        log_dir = os.path.join(data_root, "log")
+        var_dir = os.path.join(data_root, "var")
+        os.makedirs(data_root)
 
         # --- fake backend ---
         be = FakeBackend()
@@ -241,7 +246,7 @@ class TestManualAdapterProcess:
             exp_port = _free_port()
 
             env = _adapter_env(yaml_path, tariffs_path, proxy_port,
-                               web_port, exp_port, logs_dir,
+                               web_port, exp_port, data_root,
                                debug_enable="0")
             ap = _spawn(env)
             try:
@@ -255,23 +260,28 @@ class TestManualAdapterProcess:
                 assert "Backend-Adapter v0.9.8" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
+                # v0.9.9: старт создаёт обе подпапки корня данных — log/
+                # (сессии) и var/ (состояние) — независимо от
+                # ADAPTER_DEBUG_ENABLE.
+                assert os.path.isdir(log_dir), os.listdir(data_root)
+                assert os.path.isdir(var_dir), os.listdir(data_root)
                 # v0.9.0: старт пишет БЕЗУСЛОВНЫЙ JSON-файл опроса списка
-                # моделей в LOGPATH (вне ADAPTER_DEBUG_ENABLE) —
+                # моделей в var/ (вне ADAPTER_DEBUG_ENABLE) —
                 # fake.models.json. Прочих файлов при ENABLE=0 нет
                 # (session-*.log/*.jsonl не пишутся); дампы проб эндпойнтов
                 # сняты в v0.9.9.
-                assert _wait_files(logs_dir, lambda f: f == "fake.models.json"), \
-                    os.listdir(logs_dir)
-                mj = json.load(open(os.path.join(logs_dir, "fake.models.json")))
+                assert _wait_files(var_dir, lambda f: f == "fake.models.json"), \
+                    os.listdir(var_dir)
+                mj = json.load(open(os.path.join(var_dir, "fake.models.json")))
                 assert mj["ok"] is True and mj["count"] == 1, mj
                 assert mj["models"] == [{"id": "qwen-test", "object": "model"}], mj
 
                 # --- PID-файл при ОБЫЧНОМ запуске (не detach) ---
-                # Пишется в LOGPATH при любом запуске; содержимое — PID
+                # Пишется в var/ при любом запуске; содержимое — PID
                 # живого процесса (манипуляция без консоли: kill $(cat ...)).
-                pidfile = os.path.join(logs_dir, "adapter.pid")
-                assert _wait_files(logs_dir, lambda f: f == "adapter.pid"), \
-                    os.listdir(logs_dir)
+                pidfile = os.path.join(var_dir, "adapter.pid")
+                assert _wait_files(var_dir, lambda f: f == "adapter.pid"), \
+                    os.listdir(var_dir)
                 assert int(open(pidfile).read()) == ap.proc.pid, \
                     f"PID-файл не совпадает с процессом: {open(pidfile).read()}"
                 assert "[PID]" in out, out[:400]
@@ -331,13 +341,13 @@ class TestManualAdapterProcess:
             # поэтому без удаления он погасил бы ENABLE=1. Удаляем, чтобы
             # проверить именно env-путь включения файловой записи (сама
             # персистентность покрыта tests/test_state_store.py).
-            state_file = os.path.join(logs_dir, "state.yaml")
+            state_file = os.path.join(var_dir, "state.yaml")
             assert os.path.isfile(state_file), \
                 "state.yaml не создан при старте (v0.9.6)"
             os.remove(state_file)
 
             env = _adapter_env(yaml_path, tariffs_path, proxy_port,
-                               web_port, exp_port, logs_dir,
+                               web_port, exp_port, data_root,
                                debug_enable="1")
             ap = _spawn(env)
             try:
@@ -348,10 +358,17 @@ class TestManualAdapterProcess:
                 be.completions_response = None  # 200 без usage — валидный вызов
                 _chat(proxy_port, req_body)
                 time.sleep(3)
-                files2 = sorted(os.listdir(logs_dir))
+                files2 = sorted(os.listdir(log_dir))
                 assert any(f.startswith("session-") and f.endswith(".log")
                            for f in files2), files2
                 assert any(f.endswith(".jsonl") for f in files2), files2
+                # Раскладка по ролям (v0.9.9): сессии — только в log/,
+                # состояние (PID, *.models.json, *.yaml) — только в var/.
+                assert not [f for f in os.listdir(var_dir)
+                            if f.startswith("session-")], os.listdir(var_dir)
+                assert not [f for f in os.listdir(log_dir)
+                            if f.endswith((".pid", ".models.json", ".yaml"))], \
+                    os.listdir(log_dir)
 
                 # --- п.6: корректное завершение по сигналам ---
                 # 6a: один Ctrl-C (SIGINT) — вежливое завершение rc=0.
@@ -362,7 +379,7 @@ class TestManualAdapterProcess:
                 assert "[EXIT] Bye" in out, out[-400:]
                 assert "Traceback" not in out.split("[EXIT] Bye")[0], out[-600:]
                 # Штатный выход снимает PID-файл (процедура завершения).
-                assert not os.path.exists(os.path.join(logs_dir, "adapter.pid")), \
+                assert not os.path.exists(os.path.join(var_dir, "adapter.pid")), \
                     "PID-файл не удалён при штатном выходе"
             finally:
                 ap.proc.terminate()
@@ -382,7 +399,7 @@ class TestManualAdapterProcess:
                 assert rc == 0, f"SIGTERM: rc={rc}"
                 assert "[EXIT] Bye" in out, out[-400:]
                 # SIGTERM — то же вежливое завершение: PID-файл тоже снят.
-                assert not os.path.exists(os.path.join(logs_dir, "adapter.pid")), \
+                assert not os.path.exists(os.path.join(var_dir, "adapter.pid")), \
                     "PID-файл не удалён при SIGTERM"
             finally:
                 ap.proc.terminate()
@@ -408,7 +425,7 @@ class TestManualAdapterProcess:
                 # atexit, ни остаток _finish не выполняются, поэтому
                 # PID-файл остаётся. Это НЕ штатный выход (контракт): файл
                 # безвреден, следующий старт перезапишет его своим PID.
-                assert os.path.exists(os.path.join(logs_dir, "adapter.pid")), \
+                assert os.path.exists(os.path.join(var_dir, "adapter.pid")), \
                     "PID-файл удалён при аварийном выходе (rc=130) — это не штатный выход"
             finally:
                 ap.proc.terminate()
@@ -428,8 +445,9 @@ class TestManualAdapterProcess:
         раньше неё. Проверяем на медленном fake-бэкенде (models_delay): файл
         есть, пока проверка ещё идёт, и в консоли `[PID]` предшествует
         `[INIT] Probing`."""
-        logs_dir = str(tmp_path / "logs")
-        os.makedirs(logs_dir)
+        data_root = str(tmp_path / "data")
+        var_dir = os.path.join(data_root, "var")
+        os.makedirs(data_root)
 
         be = FakeBackend()
         be.models_response = {"object": "list",
@@ -447,13 +465,13 @@ class TestManualAdapterProcess:
             web_port = _free_port()
             exp_port = _free_port()
             env = _adapter_env(yaml_path, "", proxy_port, web_port, exp_port,
-                               logs_dir, debug_enable="0")
+                               data_root, debug_enable="0")
             ap = _spawn(env)
             try:
                 # Файл появляется сразу (до проверки), а сама проверка ещё
                 # идёт: строки «Backends: N configured:» (печатается ПОСЛЕ
                 # _init_multi_backends) в консоли быть не должно.
-                assert _wait_files(logs_dir, lambda f: f == "adapter.pid",
+                assert _wait_files(var_dir, lambda f: f == "adapter.pid",
                                    deadline_s=4), \
                     "PID-файл не появился до стартовой проверки бэкендов"
                 assert "Backends:" not in ap.output, \
@@ -461,9 +479,9 @@ class TestManualAdapterProcess:
 
                 # Дожидаемся завершения проверки и убеждаемся, что файл
                 # пережил её (не удалён и не переписан кем-то другим).
-                assert _wait_files(logs_dir, lambda f: f == "fake.models.json",
-                                   deadline_s=20), os.listdir(logs_dir)
-                pidfile = os.path.join(logs_dir, "adapter.pid")
+                assert _wait_files(var_dir, lambda f: f == "fake.models.json",
+                                   deadline_s=20), os.listdir(var_dir)
+                pidfile = os.path.join(var_dir, "adapter.pid")
                 assert os.path.exists(pidfile), "PID-файл исчез после проверки"
                 assert int(open(pidfile).read()) == ap.proc.pid, open(pidfile).read()
                 out = ap.output
@@ -483,8 +501,9 @@ class TestManualAdapterProcess:
         """Контракт v0.8.6-реформы на реальном процессе: при ENABLE=1 и малом
         ADAPTER_DEBUG_TRIM консоль показывает ОБРЕЗАННУЮ [BODY]-строку,
         session-*.log получает её ПОЛНОЙ."""
-        logs_dir = str(tmp_path / "logs")
-        os.makedirs(logs_dir)
+        data_root = str(tmp_path / "data")
+        log_dir = os.path.join(data_root, "log")
+        os.makedirs(data_root)
 
         be = FakeBackend()
         be.models_response = {"object": "list",
@@ -501,7 +520,7 @@ class TestManualAdapterProcess:
             web_port = _free_port()
             exp_port = _free_port()
             env = _adapter_env(yaml_path, "", proxy_port, web_port, exp_port,
-                               logs_dir, debug_enable="1", trim="60")
+                               data_root, debug_enable="1", trim="60")
             ap = _spawn(env)
             try:
                 time.sleep(4)
@@ -536,10 +555,10 @@ class TestManualAdapterProcess:
                     "в консоли [BODY] не обрезан:\n" + out[-1000:]
 
                 # Файл session-*.log несёт ПОЛНУЮ [BODY]-строку без обрезки.
-                log_files = [f for f in sorted(os.listdir(logs_dir))
+                log_files = [f for f in sorted(os.listdir(log_dir))
                              if f.startswith("session-") and f.endswith(".log")]
-                assert log_files, os.listdir(logs_dir)
-                content = open(os.path.join(logs_dir, log_files[0]),
+                assert log_files, os.listdir(log_dir)
+                content = open(os.path.join(log_dir, log_files[0]),
                                encoding="utf-8").read()
                 assert '"content": "hi"' in content, "в файле [BODY] обрезан"
             finally:

@@ -996,7 +996,7 @@ class TestReloadBackendConfig:
 
 
 class TestModelsJsonWritePoints:
-    """Точки записи JSON-файлов опроса моделей в LOGPATH (v0.9.0).
+    """Точки записи JSON-файлов опроса моделей в ADAPTER_DATA_ROOT/var (v0.9.9).
 
     .models.json пишется при каждой проверке бэкенда на список моделей:
     стартовой (_init_multi_backends) и фоновой (refresh_models) — успех и
@@ -1005,8 +1005,9 @@ class TestModelsJsonWritePoints:
 
     def _setup(self, backend=None, models=None):
         """Fresh config + один бэкенд в глобалах (+ модели в _MODEL_TO_BACKEND),
-        LOGPATH → tmp_path (иначе файлы писались бы в ./tmp/logs репозитория)."""
-        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(self._tmp)
+        DATA_ROOT → tmp_path (иначе файлы писались бы в ./tmp/adapter/var
+        репозитория)."""
+        os.environ["ADAPTER_DATA_ROOT"] = str(self._tmp)
         _reload_config()
         from backend_adapter import config
         if backend is None:
@@ -1032,7 +1033,7 @@ class TestModelsJsonWritePoints:
             return_value=[{"id": "m1", "owned_by": "me"}, {"id": "m2"}],
         ):
             cfg._init_multi_backends(str(yaml_file))
-        payload = json.loads((tmp_path / "home.models.json").read_text())
+        payload = json.loads((tmp_path / "var" / "home.models.json").read_text())
         assert payload["backend"] == "home"
         assert payload["ok"] is True
         assert payload["count"] == 2
@@ -1054,7 +1055,7 @@ class TestModelsJsonWritePoints:
             with pytest.raises(SystemExit):
                 # все бэкенды упали → [FATAL] после записи ошибки в файл
                 cfg._init_multi_backends(str(yaml_file))
-        payload = json.loads((tmp_path / "home.models.json").read_text())
+        payload = json.loads((tmp_path / "var" / "home.models.json").read_text())
         assert payload["ok"] is False
         assert "Connection refused by test" in payload["error"]
 
@@ -1074,10 +1075,10 @@ class TestModelsJsonWritePoints:
 
         with mock.patch.object(cfg, "_fetch_models", side_effect=fake_fetch):
             cfg.refresh_models()
-        ok_payload = json.loads((tmp_path / "AAA.models.json").read_text())
+        ok_payload = json.loads((tmp_path / "var" / "AAA.models.json").read_text())
         assert ok_payload["ok"] is True
         assert ok_payload["models"] == [{"id": "m-aaa"}]
-        err_payload = json.loads((tmp_path / "BBB.models.json").read_text())
+        err_payload = json.loads((tmp_path / "var" / "BBB.models.json").read_text())
         assert err_payload["ok"] is False
         assert "Connection refused by test" in err_payload["error"]
 
@@ -1089,9 +1090,9 @@ class TestModelsJsonWritePoints:
             cfg.refresh_models()
         with mock.patch.object(cfg, "_fetch_models", return_value=[{"id": "new"}]):
             cfg.refresh_models()
-        files = [f.name for f in tmp_path.iterdir()]
+        files = [f.name for f in (tmp_path / "var").iterdir()]
         assert files == ["AAA.models.json"]
-        payload = json.loads((tmp_path / "AAA.models.json").read_text())
+        payload = json.loads((tmp_path / "var" / "AAA.models.json").read_text())
         assert payload["models"] == [{"id": "new"}]
 
 
@@ -1152,12 +1153,12 @@ class TestRuntimeConfig:
     def test_key_outside_pool_ignored(self):
         """Key outside RUNTIME_CONFIG_POOL is silently ignored."""
         before = self.config.get_runtime_config()
-        # LOGPATH вне пула (неизменяемая на лету точка хранения) — игнорируется.
-        logpath_before = self.config.ADAPTER_DEBUG_LOGPATH
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_LOGPATH="/tmp/other")
+        # DATA_ROOT вне пула (неизменяемая на лету точка хранения) — игнорируется.
+        root_before = self.config.ADAPTER_DATA_ROOT
+        result = self.config.set_runtime_config(ADAPTER_DATA_ROOT="/tmp/other")
         after = self.config.get_runtime_config()
         assert result == before == after
-        assert self.config.ADAPTER_DEBUG_LOGPATH == logpath_before  # не изменилось
+        assert self.config.ADAPTER_DATA_ROOT == root_before  # не изменилось
 
     def test_wrong_type_not_applied(self):
         """Wrong type for known key is not applied; other keys still apply.
@@ -1474,3 +1475,65 @@ class TestAcceptsValue:
         assert self.config.accepts_value(float, 1.5) is False
         assert self.config.accepts_value(None, "x") is False
 
+
+class TestDataRootLayout:
+    """ADAPTER_DATA_ROOT и подпапки log/ + var/ (v0.9.9).
+
+    Переименование жёсткое: читается только ADAPTER_DATA_ROOT, старое
+    ADAPTER_DEBUG_LOGPATH больше не читается (fallback нет). Задано только
+    старое имя → на импорте [WARN] с подсказкой, старт на дефолте
+    ./tmp/adapter; содержимое старого каталога не мигрируется. Пути подпапок —
+    функции (живое чтение модульного глобала), а не снимок-константы.
+    """
+
+    def _import_fresh(self):
+        _reload_config()
+        from backend_adapter import config
+        return config
+
+    def test_default_is_tmp_adapter(self, monkeypatch):
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", "")
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "")
+        config = self._import_fresh()
+        assert config.ADAPTER_DATA_ROOT == "./tmp/adapter"
+
+    def test_explicit_value_wins(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", str(tmp_path))
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "")
+        config = self._import_fresh()
+        assert config.ADAPTER_DATA_ROOT == str(tmp_path)
+
+    def test_log_and_var_dirs_join_root(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", str(tmp_path))
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "")
+        config = self._import_fresh()
+        assert config.log_dir() == os.path.join(str(tmp_path), "log")
+        assert config.var_dir() == os.path.join(str(tmp_path), "var")
+
+    def test_dirs_read_root_live(self, monkeypatch, tmp_path):
+        """log_dir()/var_dir() читают ADAPTER_DATA_ROOT живьём (не снимок)."""
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", str(tmp_path / "a"))
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "")
+        config = self._import_fresh()
+        config.ADAPTER_DATA_ROOT = str(tmp_path / "b")
+        assert config.log_dir() == os.path.join(str(tmp_path / "b"), "log")
+        assert config.var_dir() == os.path.join(str(tmp_path / "b"), "var")
+
+    def test_old_name_only_warns_and_uses_default(self, monkeypatch, capsys):
+        """Только старое имя → [WARN] с обоими именами, старт на дефолте."""
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", "")
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "/tmp/legacy-logs")
+        config = self._import_fresh()
+        out = capsys.readouterr().out
+        assert "[WARN]" in out
+        assert "ADAPTER_DEBUG_LOGPATH" in out and "ADAPTER_DATA_ROOT" in out
+        assert "/tmp/legacy-logs" not in config.ADAPTER_DATA_ROOT
+        assert config.ADAPTER_DATA_ROOT == "./tmp/adapter"
+
+    def test_old_name_silent_when_new_set(self, monkeypatch, tmp_path, capsys):
+        """Оба заданы → старое молча игнорируется, работает новое."""
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", str(tmp_path))
+        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "/tmp/legacy-logs")
+        config = self._import_fresh()
+        assert config.ADAPTER_DATA_ROOT == str(tmp_path)
+        assert "[WARN]" not in capsys.readouterr().out

@@ -188,6 +188,16 @@ def _row(session, agent="claude-cli/2.1.236", model="m-a", backend="AAA",
     return row
 
 
+def _log_dir(tmp_path) -> str:
+    """Лог-папка WEBUI-корня — ``<root>/log`` (v0.9.9).
+
+    /logs/<имя> и /errors/<имя> раздают .err из WebContext.log_dir, поэтому
+    HTTP-тесты кладут файлы сюда, а корнем сервера остаётся сам tmp_path."""
+    d = os.path.join(str(tmp_path), "log")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _ctx():
     return mock.Mock(version="0.0.0-test")
 
@@ -956,7 +966,9 @@ class TestSessionLogFileEndpoint:
     def test_serves_err_file_as_text(self, tmp_path):
         config, ws = _fresh_modules()
         name = "session-20260912-101010-abcd1234.err"
-        (tmp_path / name).write_text("ERROR block\n", encoding="utf-8")
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, name), "w", encoding="utf-8") as f:
+            f.write("ERROR block\n")
         httpd, port = _start_server(str(tmp_path))
         try:
             status, headers, body = _http_raw(port, "GET", "/logs/" + name)
@@ -982,11 +994,16 @@ class TestSessionLogFileEndpoint:
     def test_rejects_bad_names(self, tmp_path):
         # Строгий шаблон имени: слэши, «..» и посторонние файлы не отдаются.
         config, ws = _fresh_modules()
-        # посторонний файл в корне — не .err сессии
-        (tmp_path / "secret.err").write_text("secret", encoding="utf-8")
-        (tmp_path / "session-20260912-101010-abcd1234.txt").write_text(
-            "x", encoding="utf-8"
-        )
+        # посторонний файл в лог-папке — не .err сессии
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, "secret.err"), "w", encoding="utf-8") as f:
+            f.write("secret")
+        with open(
+            os.path.join(log_dir, "session-20260912-101010-abcd1234.txt"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("x")
         httpd, port = _start_server(str(tmp_path))
         try:
             for bad in (
@@ -1003,9 +1020,11 @@ class TestSessionLogFileEndpoint:
             httpd.server_close()
 
     def test_traversal_via_dotdot_is_404(self, tmp_path):
-        # ../ не выходит за корень: после unquote остаются слэши → 404.
+        # ../ не выходит за лог-папку: после unquote остаются слэши → 404.
+        # Мишень лежит в самом корне (уровнем выше log/) — не должна отдаваться.
         config, ws = _fresh_modules()
-        outer = tmp_path.parent / "outside.err"
+        _log_dir(tmp_path)
+        outer = tmp_path / "outside.err"
         outer.write_text("nope", encoding="utf-8")
         httpd, port = _start_server(str(tmp_path))
         try:
@@ -1050,7 +1069,9 @@ class TestErrorsPreviewEndpoint:
     def _serve_with(self, tmp_path, body=_ERR_SAMPLE):
         config, ws = _fresh_modules()
         name = "session-20260912-101010-abcd1234.err"
-        (tmp_path / name).write_text(body, encoding="utf-8")
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, name), "w", encoding="utf-8") as f:
+            f.write(body)
         httpd, port = _start_server(str(tmp_path))
         return name, httpd, port
 
@@ -1116,7 +1137,9 @@ class TestErrorsPreviewEndpoint:
 
     def test_rejects_bad_names(self, tmp_path):
         config, ws = _fresh_modules()
-        (tmp_path / "secret.err").write_text("secret", encoding="utf-8")
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, "secret.err"), "w", encoding="utf-8") as f:
+            f.write("secret")
         httpd, port = _start_server(str(tmp_path))
         try:
             for bad in (

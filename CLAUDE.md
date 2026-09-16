@@ -53,11 +53,14 @@ This file provides guidance to [CC] () when working with code in this repository
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны
   и обрезаются до `ADAPTER_DEBUG_TRIM`; файловая запись гейтится
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
-  `*.parts` — дампы). Вне ENABLE/PARTS/TRIM в `ADAPTER_DEBUG_LOGPATH` живут
-  безусловные артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1),
+  `*.parts` — дампы). Корень данных — `ADAPTER_DATA_ROOT` (v0.9.9,
+  переименован из `ADAPTER_DEBUG_LOGPATH`, который больше не читается; дефолт
+  `./tmp/adapter`), внутри — две подпапки: `log/` (всё файловое о сессиях) и
+  `var/` (состояние). Вне ENABLE/PARTS/TRIM в `log/` живут безусловные
+  артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1); в `var/` —
   JSON-результат опроса списка моделей (`probe_json.py`), PID-файл (`daemon.py` —
   пишется при ЛЮБОМ запуске, не только в detach; удаляется при штатном
-  завершении и через `atexit`).
+  завершении и через `atexit`), `model-usage.yaml`, `state.yaml`.
 
 ## Принципы
 
@@ -103,7 +106,7 @@ v0.9.9 — «вернуться к общему» = снять переопре�
 `docs/logging.md`.
 
 **Персистентность runtime-пула (v0.9.6):** `state_store.py` хранит значения
-`RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, в `ADAPTER_DEBUG_LOGPATH`)
+`RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, в `ADAPTER_DATA_ROOT/var`)
 — на старте файл применяется **поверх env** (`apply_on_startup`, вызывается из
 `backend-adapter.py` до `_init_multi_backends`), каждое изменение `/config`
 персистится через колбек `config.set_on_change` (config остаётся корнем DAG).
@@ -126,7 +129,8 @@ v0.9.9 — «вернуться к общему» = снять переопре�
 (реестр эндпоинтов, `serve()`) в daemon-потоке + модули-эндпоинты
 (`webui_status.py` `/`, `webui_sessions.py` `/sessions`, `webui_ops.py` health,
 `webui_config_api.py` `/config`, `session_viewer.py` `/session`); корень —
-`ADAPTER_DEBUG_LOGPATH`. Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) —
+`ADAPTER_DATA_ROOT` (подпапка `log/` несёт `*.parts` и `.err`, `var/` —
+`model-usage.yaml`). Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) —
 отдельный слушатель, не эндпоинт WEBUI.
 Новый эндпоинт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
 Поведение страниц и API — `docs/webui.md`.

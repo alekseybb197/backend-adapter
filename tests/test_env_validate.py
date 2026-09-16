@@ -106,7 +106,7 @@ class TestValidateEnv:
 
     def test_str_vars_not_checked(self, monkeypatch):
         # str-переменные — свободный текст: любое значение валидно.
-        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "что угодно / с пробелами")
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", "что угодно / с пробелами")
         monkeypatch.setenv("ADAPTER_MODELS_MAPPING", "??:!!")
         env_validate.validate_env()
 
@@ -135,7 +135,7 @@ class TestConfigUsesValidators:
         # "off" теперь ВЫКЛЮЧЕНО (раньше молча трактовалось как включено:
         # "off" не входило в набор «выключено»).
         monkeypatch.setenv("ADAPTER_DEBUG_ENABLE", "off")
-        monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "")
+        monkeypatch.setenv("ADAPTER_DATA_ROOT", "")
         monkeypatch.setenv("ADAPTER_BACKEND_CONFIG", "")
         import sys
 

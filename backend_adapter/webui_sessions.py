@@ -50,8 +50,8 @@ HTML — числом или ссылкой, как cost_html у таблицы 
 переставляет строки в порядок снимка. Строки сопоставляются по data-key
 (JSON-строка кортежа): одна сессия может занимать НЕСКОЛЬКО строк.
 
-Раздача .err-файлов: GET /logs/<имя> отдаёт файл из корня WEBUI
-(WebContext.root_dir = ADAPTER_DEBUG_LOGPATH) как text/plain. Имя
+Раздача .err-файлов: GET /logs/<имя> отдаёт файл из лог-папки
+(WebContext.log_dir = ADAPTER_DATA_ROOT/log, v0.9.9) как text/plain. Имя
 ограничено строгим шаблоном session-<дата>-<время>-<safe8>.err — ни слэшей,
 ни «..» в нём быть не может, поэтому обход каталога исключён структурно.
 Тем же шаблоном валидируется и превью-эндпойнт /errors/<имя>
@@ -781,10 +781,10 @@ class SessionLogFileEndpoint(webserver.Endpoint):
 
     Ссылка-счётчик «Ошибок» в таблице Sessions открывает файл инцидентов
     сессии в НОВОМ окне браузера (text/plain — браузер показывает его
-    построчно). Файлы лежат в корне WEBUI (WebContext.root_dir =
-    ADAPTER_DEBUG_LOGPATH). Имя проверяется строгим шаблоном _ERR_NAME_RE —
-    в допустимом имени нет ни слэшей, ни «..», поэтому обход каталога
-    невозможен структурно (отдельная realpath-проверка не нужна)."""
+    построчно). Файлы лежат в лог-папке (WebContext.log_dir =
+    ADAPTER_DATA_ROOT/log, v0.9.9). Имя проверяется строгим шаблоном
+    _ERR_NAME_RE — в допустимом имени нет ни слэшей, ни «..», поэтому обход
+    каталога невозможен структурно (отдельная realpath-проверка не нужна)."""
 
     prefix = "/logs"
 
@@ -796,7 +796,7 @@ class SessionLogFileEndpoint(webserver.Endpoint):
         if not name or not _ERR_NAME_RE.match(name):
             handler.send_error(404, "Not found")
             return
-        path = os.path.join(handler.context.root_dir, name)
+        path = os.path.join(handler.context.log_dir, name)
         if not os.path.isfile(path):
             handler.send_error(404, "File not found")
             return

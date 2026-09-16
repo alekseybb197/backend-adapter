@@ -10,8 +10,8 @@ Tests cover:
   - add_usage_tokens: accumulates input/output usage tokens (input_tokens /
     output_tokens), flag off / zero / missing row → no-op
   - snapshot is a copy in insertion order; reset clears
-  - persistence (YAML in the WEBUI root, on tmp_path): disabled ("") does no
-    file I/O; auto path = ADAPTER_DEBUG_LOGPATH; record writes the file with
+  - persistence (YAML in the state dir, on tmp_path): disabled ("") does no
+    file I/O; auto path = ADAPTER_DATA_ROOT/var; record writes the file with
     {"version": 2, "models": ...} in insertion order; dirty file is normalized
     on load; v1 files (byte counters) migrate — calls/first_seen survive,
     tokens start at 0; unknown version (> 2) ignored; usage_snapshot triggers
@@ -240,14 +240,18 @@ class TestPersistPath:
         root = tmp_path / "webui"
         assert not (root / "model-usage.yaml").exists()
 
-    def test_auto_root_uses_logpath_default(self, tmp_path):
-        """No explicit path → ADAPTER_DEBUG_LOGPATH (v0.8.6: default ./tmp/logs,
-        no independent ./tmp/webui anymore)."""
+    def test_auto_root_uses_data_root_var(self, tmp_path):
+        """No explicit path → ADAPTER_DATA_ROOT/var (v0.9.9: дефолт
+        ./tmp/adapter, папка состояния var/)."""
         config, mu = _fresh()
         mu.set_persist_path(None)  # авто-режим (прод): _fresh оставил "" (тесты)
-        assert mu.usage_persist_file() == os.path.join("./tmp/logs", mu.MODEL_USAGE_FILE)
-        config.ADAPTER_DEBUG_LOGPATH = str(tmp_path / "logs")
-        assert mu.usage_persist_file() == str(tmp_path / "logs" / mu.MODEL_USAGE_FILE)
+        assert mu.usage_persist_file() == os.path.join(
+            "./tmp/adapter", "var", mu.MODEL_USAGE_FILE
+        )
+        config.ADAPTER_DATA_ROOT = str(tmp_path / "data")
+        assert mu.usage_persist_file() == str(
+            tmp_path / "data" / "var" / mu.MODEL_USAGE_FILE
+        )
 
     def test_explicit_path_wins(self, tmp_path):
         """Explicit persist path is returned as-is (abspath not required)."""

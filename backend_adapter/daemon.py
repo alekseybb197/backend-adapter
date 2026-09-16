@@ -45,24 +45,23 @@ def _detach() -> None:
 
 
 def _pidfile_path() -> str:
-    """Путь PID-файла: ADAPTER_DEBUG_LOGPATH + basename(ADAPTER_PIDFILE).
+    """Путь PID-файла: ADAPTER_DATA_ROOT/var + basename(ADAPTER_PIDFILE).
 
-    PID-файл живёт в общей директории логов/артефактов адаптера
-    (ADAPTER_DEBUG_LOGPATH — единый корень WEBUI, session-логов, *.parts
-    и model-usage.yaml), а не в произвольном месте. ``ADAPTER_PIDFILE``
-    задаёт ИМЯ файла (или под-путь): используется basename — абсолютный
-    путь вне LOGPATH игнорируется, файл всё равно кладётся в LOGPATH.
-    Пусто/не задано → ``adapter.pid``.
+    PID-файл живёт в папке состояния адаптера (``ADAPTER_DATA_ROOT/var`` —
+    рядом с model-usage.yaml, state.yaml и ``<бэкенд>.models.json``), а не в
+    произвольном месте. ``ADAPTER_PIDFILE`` задаёт ИМЯ файла (или под-путь):
+    используется basename — абсолютный путь вне корня данных игнорируется,
+    файл всё равно кладётся в ``var/``. Пусто/не задано → ``adapter.pid``.
 
     Единая формула для записи (_write_pidfile) и удаления
     (_remove_pidfile) — путь не должен разъезжаться между ними. Модуль
-    остаётся stdlib-only: LOGPATH читается из os.environ напрямую (та же
-    формула, что у config.ADAPTER_DEBUG_LOGPATH)."""
-    logpath = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip() or "./tmp/logs"
+    остаётся stdlib-only: корень читается из os.environ напрямую (та же
+    формула, что у config.ADAPTER_DATA_ROOT / config.var_dir)."""
+    data_root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or "./tmp/adapter"
     name = os.environ.get("ADAPTER_PIDFILE", "").strip()
     if not name:
         name = "adapter.pid"
-    return os.path.join(logpath, os.path.basename(name))
+    return os.path.join(data_root, "var", os.path.basename(name))
 
 
 def _write_pidfile() -> str:
@@ -87,7 +86,7 @@ def _remove_pidfile() -> None:
     Идемпотентна и не бросает: отсутствие файла или ошибка удаления — не
     ошибка (процедура завершения не должна падать). Файл удаляется, лишь
     когда содержит ТЕКУЩИЙ PID: если нас успел перезаписать более поздний
-    запуск с тем же LOGPATH, чужой PID-файл не трогаем. При повторном
+    запуск с тем же корнем данных, чужой PID-файл не трогаем. При повторном
     сигнале (os._exit(130)) функция не вызывается — atexit не срабатывает,
     и файл остаётся; это не штатный выход."""
     pidfile = _pidfile_path()

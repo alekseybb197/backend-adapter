@@ -39,6 +39,17 @@ def _make_parts_dir(tmp_path, name: str, parts: dict) -> str:
     return d
 
 
+def _log_dir(tmp_path) -> str:
+    """Лог-папка WEBUI-корня — ``<root>/log`` (v0.9.9).
+
+    Эндпойнты /session и /sessions читают сессии (*.parts) и .err именно из
+    WebContext.log_dir, поэтому HTTP-тесты кладут данные сюда, а корнем
+    сервера остаётся сам tmp_path."""
+    d = os.path.join(str(tmp_path), "log")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _simple_ob(part_id: int) -> dict:
     return {"messages": [{"role": "user", "content": "Hello world"}]}
 
@@ -327,7 +338,7 @@ class TestRenderShell:
 
 class TestSessionHTTP:
     def test_get_session_tabs(self, tmp_path):
-        _make_parts_dir(tmp_path, "session-A.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-A.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
         })
@@ -344,7 +355,7 @@ class TestSessionHTTP:
     def test_get_session_tabs_head_has_favicon(self, tmp_path):
         """Favicon — общий ресурс всех страниц WEBUI: /session (страница
         вкладок, порождается от статус-страницы) несёт тот же link-тег."""
-        _make_parts_dir(tmp_path, "session-A.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-A.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
         })
@@ -367,7 +378,7 @@ class TestSessionHTTP:
     def test_session_page_links_to_status_root(self, tmp_path):
         """Ссылка «Статус 📊» ведёт на корень сервера — статус-страницу "/",
         которая в этом же процессе отвечает 200 (эндпойнт зарегистрирован)."""
-        _make_parts_dir(tmp_path, "session-A.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-A.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
         })
@@ -395,7 +406,7 @@ class TestSessionHTTP:
             httpd.server_close()
 
     def test_get_tree_html_file(self, tmp_path):
-        _make_parts_dir(tmp_path, "session-B.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-B.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
         })
@@ -413,7 +424,7 @@ class TestSessionHTTP:
         несёт favicon-link — при показе в браузере иконка вкладки общая со
         статус-страницей (раздача /favicon.svg — эндпоинт ядра, доступен на
         любом пути)."""
-        _make_parts_dir(tmp_path, "session-B.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-B.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
         })
@@ -429,7 +440,7 @@ class TestSessionHTTP:
     def test_get_raw_part_file_one_level_up(self, tmp_path):
         """tree.html ссылается на raw part-файлы "../<имя>.json" — сервер
         должен отдавать файлы НА УРОВЕНЬ выше artefacts/."""
-        _make_parts_dir(tmp_path, "session-C.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-C.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hello!"),
         })
@@ -443,7 +454,7 @@ class TestSessionHTTP:
             httpd.server_close()
 
     def test_unknown_session_404(self, tmp_path):
-        _make_parts_dir(tmp_path, "session-D.parts", {})
+        _make_parts_dir(_log_dir(tmp_path), "session-D.parts", {})
         httpd, port = _start_server(str(tmp_path))
         try:
             status, _ = _http_get(port, "/session/session-unknown.parts/artefacts/tree.html")
@@ -454,7 +465,7 @@ class TestSessionHTTP:
 
     def test_path_traversal_blocked(self, tmp_path):
         """"../.." не должен выводить за пределы parts_dir."""
-        _make_parts_dir(tmp_path, "session-E.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-E.parts", {
             "a-1-openai_body.json": _simple_ob(1),
         })
         # Файл-«мишень» рядом с root (вне сессии)
@@ -472,7 +483,7 @@ class TestSessionHTTP:
 
     def test_directory_prefix_confusion(self, tmp_path):
         """Префикс '/session' не должен совпадать с '/sessionXYZ'."""
-        _make_parts_dir(tmp_path, "session-F.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-F.parts", {
             "a-1-openai_body.json": _simple_ob(1),
         })
         httpd, port = _start_server(str(tmp_path))
@@ -498,7 +509,7 @@ class TestSessionHash:
 
     def test_hash_from_dir_name(self, tmp_path):
         """Стандартное имя директории (…-<hash8>.parts) — хеш из имени, без диска."""
-        d = _make_parts_dir(tmp_path, "session-20260901-103440-e034c295.parts", {})
+        d = _make_parts_dir(_log_dir(tmp_path), "session-20260901-103440-e034c295.parts", {})
         assert self._session_hash("session-20260901-103440-e034c295.parts", str(d)) == "e034c295"
 
     def test_hash_fallback_from_part_file(self, tmp_path):
@@ -515,8 +526,8 @@ class TestSessionHash:
 
     def test_build_hash_index(self, tmp_path):
         """Индекс {hash8: имя} по списку сессий."""
-        d1 = _make_parts_dir(tmp_path, "session-20260901-103440-e034c295.parts", {})
-        d2 = _make_parts_dir(tmp_path, "session-20260901-111111-aabbccdd.parts", {})
+        d1 = _make_parts_dir(_log_dir(tmp_path), "session-20260901-103440-e034c295.parts", {})
+        d2 = _make_parts_dir(_log_dir(tmp_path), "session-20260901-111111-aabbccdd.parts", {})
         index = self._build_hash_index([
             ("session-20260901-103440-e034c295.parts", str(d1)),
             ("session-20260901-111111-aabbccdd.parts", str(d2)),
@@ -527,8 +538,8 @@ class TestSessionHash:
     def test_collision_first_wins(self, tmp_path):
         """Коллизия hash8 — первая (по порядку списка) побеждает, остальные не перетирают."""
         # Обе директории получают один и тот же hash8 из имени — намеренная коллизия
-        d1 = _make_parts_dir(tmp_path, "session-00000000-e034c295.parts", {})
-        d2 = _make_parts_dir(tmp_path, "session-11111111-e034c295.parts", {})
+        d1 = _make_parts_dir(_log_dir(tmp_path), "session-00000000-e034c295.parts", {})
+        d2 = _make_parts_dir(_log_dir(tmp_path), "session-11111111-e034c295.parts", {})
         index = self._build_hash_index([
             ("session-00000000-e034c295.parts", str(d1)),
             ("session-11111111-e034c295.parts", str(d2)),
@@ -547,7 +558,7 @@ class TestSessionViewerShortcuts:
 
     def test_png_shortcut_no_page(self, tmp_path):
         """/session/<id>/png без ?page → artefacts/tree.png."""
-        _make_parts_dir(tmp_path, "session-P.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-P.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
         })
@@ -568,7 +579,7 @@ class TestSessionViewerShortcuts:
 
     def test_png_shortcut_with_page(self, tmp_path):
         """/session/<id>/png?page=N → pages/N/tree.png (если страницы созданы)."""
-        _make_parts_dir(tmp_path, "session-Q.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-Q.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "First"),
             "c-3-openai_body.json": _simple_ob(3),
@@ -590,7 +601,7 @@ class TestSessionViewerShortcuts:
 
     def test_png_shortcut_hash8(self, tmp_path):
         """/session/<hash8>/png — короткий алиас тоже работает."""
-        _make_parts_dir(tmp_path, "session-20260901-103440-e034c295.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-20260901-103440-e034c295.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
         })
@@ -607,7 +618,7 @@ class TestSessionViewerShortcuts:
 
     def test_puml_shortcut(self, tmp_path):
         """/session/<id>/puml без ?page → artefacts/tree.puml (текст)."""
-        _make_parts_dir(tmp_path, "session-R.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-R.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
         })
@@ -628,7 +639,7 @@ class TestSessionViewerShortcuts:
 
     def test_puml_shortcut_hash8(self, tmp_path):
         """/session/<hash8>/puml — алиас в puml-шорткате."""
-        _make_parts_dir(tmp_path, "session-20260901-111111-aabbccdd.parts", {
+        _make_parts_dir(_log_dir(tmp_path), "session-20260901-111111-aabbccdd.parts", {
             "a-1-openai_body.json": _simple_ob(1),
             "b-2-fetch_raw.json": _simple_fr(2, "Hi"),
         })

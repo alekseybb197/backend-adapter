@@ -17,7 +17,7 @@
 Невалидное значение → ``[FATAL] <имя>=<знач>: ожидается <тип>`` в консоль и
 ``sys.exit(1)`` — адаптер не стартует (решение пользователя: невалидная env —
 это ошибка конфигурации, а не повод тихо работать на дефолтах; ср. FATAL на
-LOGPATH-файл и пустой ADAPTER_BACKEND_CONFIG в backend-adapter.py).
+корень-файл и пустой ADAPTER_BACKEND_CONFIG в backend-adapter.py).
 
 ``config.py`` при импорте продолжает читать env сам (обратная совместимость
 тестов, которые импортируют его без запуска скрипта), но парсит bool/int
@@ -70,7 +70,7 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_BACKEND_CONFIG": "str",
     "ADAPTER_ENDPOINT_HOST": "str",
     "ADAPTER_WEBUI_HOST": "str",
-    "ADAPTER_DEBUG_LOGPATH": "str",
+    "ADAPTER_DATA_ROOT": "str",
     "ADAPTER_PIDFILE": "str",
     "ADAPTER_STATE": "str",
     "ADAPTER_MODELS_MAPPING": "str",

@@ -2,8 +2,9 @@
 
 Единственный вид файла — ``<имя_бэкенда>.models.json``: результат
 ``GET /v1/models`` по каждому бэкенду (каждый раз перезаписывается целиком).
-Пишется в ADAPTER_DEBUG_LOGPATH как плоский JSON-файл — рядом с
-model-usage.yaml, .err-файлами и корнем WEBUI.
+Пишется в ``ADAPTER_DATA_ROOT/var`` (папка состояния) как плоский
+JSON-файл — рядом с ``model-usage.yaml`` и PID-файлом; логи, трейсы и
+``.err`` живут в соседней ``ADAPTER_DATA_ROOT/log``.
 
 v0.9.9: дампы проб эндпойнтов (``<бэкенд>.<модель>.<эндпойнт>.json``)
 удалены вместе с самими пробами — из активных проверок остался только
@@ -11,7 +12,8 @@ v0.9.9: дампы проб эндпойнтов (``<бэкенд>.<модель
 
 Канал записи БЕЗУСЛОВНЫЙ (как .err-файлы): пишется независимо от
 ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_PARTS / ADAPTER_DEBUG_TRIM; гейт —
-только наличие лог-директории LOGPATH (всегда непуст: дефолт ./tmp/logs).
+только наличие папки состояния (путь всегда непуст: дефолт
+``./tmp/adapter/var``).
 Директория создаётся при записи (os.makedirs). Секреты маскируются по
 умолчанию двумя слоями: структурно (значения ключей *_KEY/_TOKEN/_SECRET/
 _PAT/API_KEY и key/token/secret/password/authorization — рекурсивно по
@@ -79,10 +81,11 @@ def _mask_secrets(payload):
 
 
 def _logpath() -> str:
-    """Формула ADAPTER_DEBUG_LOGPATH без импорта config на верхнем уровне
-    (та же, что у config.ADAPTER_DEBUG_LOGPATH и daemon._write_pidfile):
-    пусто/не задано → дефолт ``./tmp/logs``."""
-    return os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip() or "./tmp/logs"
+    """Папка состояния ``ADAPTER_DATA_ROOT/var`` без импорта config на верхнем
+    уровне (та же формула, что у config.var_dir и daemon._pidfile_path):
+    пусто/не задано → дефолт ``./tmp/adapter`` + ``var``."""
+    root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or "./tmp/adapter"
+    return os.path.join(root, "var")
 
 
 def _write_json(file_name: str, payload: dict) -> None:
@@ -90,7 +93,7 @@ def _write_json(file_name: str, payload: dict) -> None:
 
     tmp + os.replace (как model_usage._atomic_write_yaml): «каждый раз
     перезаписывая» — файл целиком заменяется, .tmp-хвоста не остаётся.
-    Провал записи (в т.ч. непустой LOGPATH-файл, права, отвал диска) молча
+    Провал записи (в т.ч. корень-файл вместо папки, права, отвал диска) молча
     глотается — канал наблюдательный, ронять проверку ему нельзя."""
     try:
         if not file_name:
@@ -123,7 +126,7 @@ def _write_json(file_name: str, payload: dict) -> None:
 def write_models_json(backend_name: str, payload: dict) -> None:
     """Записать результат опроса бэкенда на доступные модели.
 
-    Файл: ``<имя_бэкенда>.models.json`` в ADAPTER_DEBUG_LOGPATH. ``payload`` —
+    Файл: ``<имя_бэкенда>.models.json`` в ``ADAPTER_DATA_ROOT/var``. ``payload`` —
     снимок результата ИМЕННО этого бэкенда: ``{"backend", "checked_at", "ok",
     "count", "models" | "error"}``. Вызывается из _init_multi_backends
     (старт), refresh_models (фоновая проверка/кнопка) и reload-перечитываний

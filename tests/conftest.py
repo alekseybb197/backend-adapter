@@ -29,7 +29,7 @@ def fresh_env(monkeypatch):
     Usage::
 
         config = fresh_env(ADAPTER_DEBUG_ENABLE="0",
-                           ADAPTER_DEBUG_LOGPATH="",
+                           ADAPTER_DATA_ROOT="",
                            ADAPTER_BACKEND_CONFIG="/tmp/x.yaml")
 
     After the call ``config`` is the *reloaded* module; all downstream
@@ -38,6 +38,10 @@ def fresh_env(monkeypatch):
     """
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
+        "ADAPTER_DATA_ROOT": "",
+        # Старое имя корня (v0.9.9 переименовано в ADAPTER_DATA_ROOT) —
+        # гасим унаследованное из шелла значение: непустое при пустом новом
+        # даёт [WARN] о переименовании на импорте config.
         "ADAPTER_DEBUG_LOGPATH": "",
         # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
         # Сам файл в тестах не создаётся — apply_on_startup вызывает только
@@ -105,6 +109,10 @@ def _default_config():
     """Re-import config with defaults (called by tests that need defaults)."""
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
+        "ADAPTER_DATA_ROOT": "",
+        # Старое имя корня (v0.9.9 переименовано в ADAPTER_DATA_ROOT) —
+        # гасим унаследованное из шелла значение: непустое при пустом новом
+        # даёт [WARN] о переименовании на импорте config.
         "ADAPTER_DEBUG_LOGPATH": "",
         # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
         # Сам файл в тестах не создаётся — apply_on_startup вызывает только

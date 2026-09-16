@@ -138,13 +138,20 @@ class FaviconEndpoint(Endpoint):
 
 
 class WebContext:
-    """Контекст запущенного веб-сервера: root_dir (корень, где лежат
-    *.parts сессии), version (версия кода — из backend-adapter.py,
-    передаётся в serve(), в пакете константы версии нет), verbose
-    (понижать ли прогресс-сообщения генерации деревьев до DEBUG)."""
+    """Контекст запущенного веб-сервера: root_dir (корень данных
+    ADAPTER_DATA_ROOT), log_dir (``root_dir/log`` — session-логи, trace,
+    ``*.parts`` и ``.err``), var_dir (``root_dir/var`` — состояние),
+    version (версия кода — из backend-adapter.py, передаётся в serve(),
+    в пакете константы версии нет), verbose (понижать ли прогресс-сообщения
+    генерации деревьев до DEBUG).
 
-    def __init__(self, root_dir: str, version: str, verbose: bool):
+    Две подпапки лежат в контексте, а не вычисляются эндпойнтами: так
+    эндпойнты не импортируют ``config`` и не дублируют формулу раскладки."""
+
+    def __init__(self, root_dir: str, log_dir: str, var_dir: str, version: str, verbose: bool):
         self.root_dir = root_dir
+        self.log_dir = log_dir
+        self.var_dir = var_dir
         self.version = version
         self.verbose = verbose
 
@@ -274,8 +281,10 @@ def serve(
     ``serve_forever()`` (например, в daemon-потоке, как делает
     backend-adapter.py — WEBUI поднимается всегда).
 
-    ``root_dir`` — папка, в которой лежат ``*.parts`` директории сессий
-    (в адаптере это директория ADAPTER_DEBUG_LOGPATH). ``version`` — версия кода
+    ``root_dir`` — корень данных (в адаптере ADAPTER_DATA_ROOT), внутри
+    которого ``log/`` (сессии: ``session-*.log``/``*.jsonl``/``*.parts``/
+    ``.err``) и ``var/`` (состояние: ``model-usage.yaml``, ``state.yaml``,
+    PID, ``<бэкенд>.models.json``). ``version`` — версия кода
     (передаётся из backend-adapter.py, где объявлена ``__version__``;
     в пакете её нет). ``verbose`` — как в artifact_tree.generate(): False
     понижает рутинные прогресс-сообщения генерации до DEBUG.
@@ -286,6 +295,8 @@ def serve(
     if not os.path.isdir(root_dir):
         logger.error(f"[WEBUI] Не найдена директория: {root_dir}")
         return None
+    log_dir = os.path.join(root_dir, "log")
+    var_dir = os.path.join(root_dir, "var")
 
     # Встроенные эндпойнты — единственное место их перечисления. Импорт
     # внутри функции (не на верхнем уровне): эндпойнт-модули сами
@@ -301,20 +312,23 @@ def serve(
         webui_status,
     )
 
-    # Персистентный YAML таблицы использованных моделей лежит в корне WEBUI
-    # (тот же root_dir, что у *.parts сессий). Синхронизация здесь: корень
-    # уже abspath, а model_usage не импортирует webserver — цикла нет.
-    # Standalone (python -m webserver [ROOT]) кладёт файл в явный корень.
-    _model_usage.set_persist_path(os.path.join(root_dir, _model_usage.MODEL_USAGE_FILE))
+    # Персистентный YAML таблицы использованных моделей лежит в папке
+    # состояния root_dir/var (v0.9.9) — рядом с PID-файлом и state.yaml.
+    # Синхронизация здесь: корень уже abspath, а model_usage не импортирует
+    # webserver — цикла нет. Standalone (python -m webserver [ROOT]) кладёт
+    # файл в <явный корень>/var.
+    _model_usage.set_persist_path(os.path.join(var_dir, _model_usage.MODEL_USAGE_FILE))
 
-    context = WebContext(root_dir=root_dir, version=version, verbose=verbose)
+    context = WebContext(
+        root_dir=root_dir, log_dir=log_dir, var_dir=var_dir, version=version, verbose=verbose
+    )
     Handler.context = context
     Handler.endpoints = [ep_cls(context) for ep_cls in ENDPOINTS]
 
     httpd = QuietWebServer((host, port), Handler)
     httpd.daemon_threads = True
     logger.info(f"[WEBUI] Сервер запущен: http://{host}:{port}/  (Ctrl+C — остановить)")
-    logger.info(f"[WEBUI] Корень: {root_dir}")
+    logger.info(f"[WEBUI] Корень: {root_dir}  (log: {log_dir}, var: {var_dir})")
     logger.info(f"[WEBUI] Версия кода: {version}")
     logger.info(
         "[WEBUI] Эндпойнты: " + ", ".join(sorted({f"{ep.prefix}" for ep in Handler.endpoints}))

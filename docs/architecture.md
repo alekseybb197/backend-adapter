@@ -80,7 +80,7 @@ backend_adapter/
 ├── prometheus_exporter.py  ← отдельный слушатель метрик /metrics (text exposition
 │                             0.0.4, stdlib-only) — см. §6.8
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
-├── probe_json.py           ← JSON-результат опроса списка моделей в LOGPATH
+├── probe_json.py           ← JSON-результат опроса списка моделей в var/
 │                             (<бэкенд>.models.json, безусловный канал, redact) — см. §6.9
 ├── routing.py              ← входные эндпоинты и TARGET-маршрутизация (см. §4.2):
 │                             INPUT_PATHS, IMPLEMENTED_CONVERSIONS,
@@ -178,21 +178,25 @@ module on one level, see ADR 2026-09-01).
    the PID file is written below, at any startup, so it holds the PID of
    the final grandchild process, not the exiting parent)
 2. Parse env config → `backend_adapter/config.py` (all env vars with `ADAPTER_` prefix)
-3. Log directory `ADAPTER_DEBUG_LOGPATH` (default `./tmp/logs` when the env var is
-   empty/unset — the path is always non-empty; v0.8.6): created unconditionally at
-   startup (it doubles as the WEBUI root); **file** logging of sessions/traces/dumps
-   only happens at `ADAPTER_DEBUG_ENABLE=1` (master switch of the *file* write —
-   console debug logs are unconditional); points at an existing **file** →
-   `[FATAL]` + hint + `sys.exit(1)` (the path is always a directory).
+3. Data root `ADAPTER_DATA_ROOT` (default `./tmp/adapter` when the env var is
+   empty/unset — the path is always non-empty; v0.8.6, **renamed in v0.9.9** from
+   `ADAPTER_DEBUG_LOGPATH`, which is no longer read): created unconditionally at
+   startup (it doubles as the WEBUI root); two fixed-role subdirectories are
+   created too — `log/` (session logs, traces, `*.parts` dumps, `.err` files) and
+   `var/` (PID file, `model-usage.yaml`, `state.yaml`, `<backend>.models.json`);
+   **file** logging of sessions/traces/dumps only happens at
+   `ADAPTER_DEBUG_ENABLE=1` (master switch of the *file* write — console debug
+   logs are unconditional); points at an existing **file** → `[FATAL]` + hint +
+   `sys.exit(1)` (the path is always a directory).
 4. Write the PID file (`daemon._write_pidfile`): path is
-   `ADAPTER_DEBUG_LOGPATH/basename(ADAPTER_PIDFILE)` (default `adapter.pid`;
-   an absolute `ADAPTER_PIDFILE` outside LOGPATH is ignored). Written on
+   `ADAPTER_DATA_ROOT/var/basename(ADAPTER_PIDFILE)` (default `adapter.pid`;
+   an absolute `ADAPTER_PIDFILE` outside the data root is ignored). Written on
    **every** launch, not only in detach mode (v0.9.5), so the process can be
    addressed without a console (container, service); an existing file is
    overwritten with our PID (no stale-PID check). Written **before** the
    backend check (step 5, a network probe that can be slow), so the process is
    addressable while it runs; only the instant `[FATAL]` checks (empty
-   `ADAPTER_BACKEND_CONFIG`, LOGPATH-is-a-file) precede it, and a backend-init
+   `ADAPTER_BACKEND_CONFIG`, data-root-is-a-file) precede it, and a backend-init
    failure still cleans the file up via `atexit`.
    Cleanup: `_remove_pidfile` (removes the file only if it holds the current
    PID) runs at the end of the graceful procedure (`_finish`, SIGINT/SIGTERM)
@@ -206,7 +210,7 @@ module on one level, see ADR 2026-09-01).
 7. Start the WEBUI in a daemon thread via
    `webserver.serve(root, __version__)` on `ADAPTER_WEBUI_HOST:<ADAPTER_WEBUI_PORT>`
    (default `127.0.0.1` — localhost only; `0.0.0.0` — access from the network,
-   careful with session contents) where `root` = `ADAPTER_DEBUG_LOGPATH` — the WEBUI
+   careful with session contents) where `root` = `ADAPTER_DATA_ROOT` — the WEBUI
    is always started, there is no disable flag (v0.8.6; `ADAPTER_WEBUI_ENABLE`
    removed; `/session` is empty until file logging is enabled and logs exist;
    endpoints: `/` —
@@ -517,7 +521,7 @@ GET `/` и по кнопке:
   есть что проверять — первый заход сам запускает ПЕРВУЮ проверку
   (`_autostart_first_check`), повторные — только по кнопке. POST `/`
   (кнопка 🔃 «Перепроверить бэкенды») вызывает `start_refresh(timeout=
-  PROBE_TIMEOUT)` и отвечает **303 See Other** на GET `/` (PRG: браузер
+  REFRESH_TIMEOUT)` и отвечает **303 See Other** на GET `/` (PRG: браузер
   переходит на страницу GET-навигацией, авто-релоад не повторяет POST).
   Футер проверки — «Список провайдеров обновлён в HH:MM:SS (N провайдеров,
   M моделей).» (N — `providers` снимка после перечитывания, M — моделей в
@@ -578,9 +582,10 @@ GET `/` и по кнопке:
   `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие strict-проверку
   (HTTP 400), токенов не дают.
 - **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
-  в корне WEBUI (= `ADAPTER_DEBUG_LOGPATH`, дефолт `./tmp/logs`); файл
+  в папке состояния корня данных (`ADAPTER_DATA_ROOT/var`, дефолт
+  `./tmp/adapter/var`); файл
   несёт версию формата (`version: 2`, строки — под ключом `models`). Точка
-  синхронизации пути — `webserver.serve()` (`set_persist_path(root_dir)`;
+  синхронизации пути — `webserver.serve()` (`set_persist_path(var_dir)`;
   в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении
   к пустой таблице (`_ensure_loaded_locked` под `_TABLE_LOCK`): строки
   нормализуются (счётчики/токены — неотрицательные int, незнакомые ключи
@@ -686,11 +691,12 @@ GET `/` и по кнопке:
   страницы; экспортёр не должен ронять адаптер: OSError на bind → `None`
   + строка `[EXPORTER] Failed to bind ...`, остальное работает.
 
-### 6.9 JSON-результат опроса списка моделей в LOGPATH (`probe_json.py`, v0.9.0)
+### 6.9 JSON-результат опроса списка моделей в `var/` (`probe_json.py`, v0.9.0)
 
 Безусловный наблюдательный канал (как .err-файлы, см. §8): результат опроса
-бэкенда на список моделей пишется плоским JSON-файлом в корень
-`ADAPTER_DEBUG_LOGPATH`, рядом с `model-usage.yaml` и корнем WEBUI:
+бэкенда на список моделей пишется плоским JSON-файлом в папку состояния
+`ADAPTER_DATA_ROOT/var`, рядом с `model-usage.yaml` и `state.yaml`
+(корень WEBUI — сам `ADAPTER_DATA_ROOT`):
 
 - `<имя_бэкенда>.models.json` — результат опроса `GET /v1/models`: стартовый
   `_init_multi_backends` (config.py), фоновая `refresh_models` (кнопка
@@ -888,8 +894,8 @@ HTTP): машина состояний по четырём делимитера�
 
 Модуль-лист DAG (импортирует `config` + stdlib `yaml`), хранит значения
 `config.RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, дефолт
-`state.yaml`; путь — `ADAPTER_DEBUG_LOGPATH`, `state_path()` читает атрибуты
-config живьём):
+`state.yaml`; путь — `config.var_dir()` = `ADAPTER_DATA_ROOT/var`,
+`state_path()` читает атрибуты config живьём):
 
 - `load()` — `yaml.safe_load` + валидация каждого ключа через
   `config.accepts_value` (битый файл / не-словарь / невалидная запись →
@@ -963,7 +969,7 @@ Trace event `tool_result` includes `parent_req_id` — `null` if the producer wa
 
 - **Console: unconditional** (always printed — v0.8.6), **trimmed** to
   `ADAPTER_DEBUG_TRIM` chars (`0` = no trim)
-- **File**: per-session `session-<ts>-<sid>.log` in `ADAPTER_DEBUG_LOGPATH`,
+- **File**: per-session `session-<ts>-<sid>.log` in `ADAPTER_DATA_ROOT/log`,
   written **only** when `ADAPTER_DEBUG_ENABLE=1` — and carrying the **FULL
   line, untrimmed**: the file channel is inherently full-part (v0.8.6 reform)
 - All messages pass through `redact()` to mask secrets (unless `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`)
@@ -1028,8 +1034,8 @@ Event types:
 
 Output:
 - Per-session JSONL files (`session-<ts>-<sid>.jsonl`) in the same
-  `ADAPTER_DEBUG_LOGPATH` directory as debug logs (only when the path is set —
-  empty means file logging off)
+  `ADAPTER_DATA_ROOT/log` directory as debug logs (the data root is always set —
+  file logging is switched off by `ADAPTER_DEBUG_ENABLE=0`)
 - Written only when `ADAPTER_DEBUG_ENABLE=1` (master switch)
 - All trace lines redacted (unless `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`)
 
@@ -1050,7 +1056,7 @@ Long base64/hex strings may also be matched.
 - File naming: `session-<YYYYMMDD-HHMMSS>-<sessionID_short>.<ext>` (`.log` — debug,
   `.jsonl` — trace), plus `session-*.parts/` dump directories and the
   unconditional `session-*.err` incident/WARN/error channel — all flat in
-  `ADAPTER_DEBUG_LOGPATH`
+  `ADAPTER_DATA_ROOT/log`
 - **`.err` is independent of `ADAPTER_SESSIONS_TABLE` (v0.9.7):** whether a
   request's error is written is decided by `_req_ctx.err_eligible` (input path
   recognised), not by a live sessions-table row. Covered: backend incidents
@@ -1059,9 +1065,9 @@ Long base64/hex strings may also be matched.
   mid-stream aborts (`final_status=200`, `mid-stream abort: …`)
 - Timestamp frozen on first use per session (all traffic → same file)
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
-- The log directory `ADAPTER_DEBUG_LOGPATH` is created on demand when set
-  (adapter startup when `ADAPTER_DEBUG_ENABLE=1`, and/or at first write);
-  empty (default) — no directory, no disk writes
+- The log directory `ADAPTER_DATA_ROOT/log` is created on demand (adapter
+  startup creates it unconditionally, and/or at first write); its parent
+  `ADAPTER_DATA_ROOT` is always non-empty (default `./tmp/adapter`)
 - **Per-session gates (v0.9.5, snapshot — v0.9.8):** `logging_enabled(session_id)`
   / `parts_enabled(session_id)` read the session value (`session_settings.
   effective`) — a **snapshot** of `config.ADAPTER_DEBUG` / `ADAPTER_DEBUG_PARTS`
@@ -1077,8 +1083,8 @@ per-session dumps of **all** logged protocol parts — there is no fixed tag lis
 anymore (the old `ADAPTER_DEBUG_TAGS_FULL` / `ADAPTER_DEBUG_TAGS_OUT_ALL`
 selectors were removed in the v0.8.6 logging reform).
 
-- Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch for file writes) and
-  the log directory `ADAPTER_DEBUG_LOGPATH` is set (created on demand)
+- Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch for file writes);
+  the log directory `ADAPTER_DATA_ROOT/log` is created on demand
 - **v0.9.8:** the gate at every dump call site is the **per-session**
   `parts_enabled(session_id)`, not `config.ADAPTER_DEBUG_PARTS` — so a session
   can collect parts while the global flag is off (and vice versa); the global
@@ -1119,7 +1125,7 @@ and strict-models switches), flip-able without restarting the adapter:
   `convert.py`, `streaming.py`, `tracer.py`.
 - Deliberately **excluded** from the pool: network, backend config/mapping,
   listen addresses/ports (`ADAPTER_PROXY_PORT`, `ADAPTER_ENDPOINT_HOST`,
-  `ADAPTER_WEBUI_*`), timeouts/retries, detach/pidfile, `ADAPTER_DEBUG_LOGPATH`
+  `ADAPTER_WEBUI_*`), timeouts/retries, detach/pidfile, `ADAPTER_DATA_ROOT`
   (directory identity must not change mid-flight — the session logger would
   write to a moving target).
 - Endpoint `webui_config_api.py` (`@webserver.register`, prefix `/config`): GET —

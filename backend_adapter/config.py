@@ -16,7 +16,7 @@ import urllib.request
 
 from . import (
     env_validate,  # строгий разбор bool/int env (лист DAG, v0.9.6)
-    probe_json,  # JSON-дампы опроса моделей в LOGPATH (лист DAG)
+    probe_json,  # JSON-дампы опроса моделей в var/ (лист DAG)
 )
 
 # ==================== НАСТРОЙКИ ====================
@@ -28,20 +28,60 @@ PROXY_PORT = env_validate.parse_int(os.environ.get("ADAPTER_PROXY_PORT", "9999")
 # интерфейсы) — с `or` и незаданная, и пустая дают безопасный localhost.
 ADAPTER_ENDPOINT_HOST = os.environ.get("ADAPTER_ENDPOINT_HOST", "") or "127.0.0.1"
 # Мастер-выключатель ФАЙЛОВОЙ записи debug/trace-логов и *.parts дампов:
-#   ADAPTER_DEBUG_ENABLE=1 — файлы пишутся в ADAPTER_DEBUG_LOGPATH;
+#   ADAPTER_DEBUG_ENABLE=1 — файлы пишутся в ADAPTER_DATA_ROOT/log;
 #   0 (по умолчанию) — на диск ничего не пишется (консольные debug-блоки
 #   при этом БЕЗУСЛОВНЫ — печатаются всегда, независимо от этого флага).
 ADAPTER_DEBUG = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_ENABLE", "0"))
-# Единый путь к ДИРЕКТОРИИ логов сессий (debug-логи, trace, *.parts дампы)
-# и корень веб-интерфейса (WEBUI, model-usage.yaml). ВСЕГДА непуст: пусто /
-# не задано → дефолт "./tmp/logs" (относительно папки запуска). Папка
-# создаётся на старте адаптера как корень WEBUI; лог-ФАЙЛЫ в неё пишутся
-# только при ADAPTER_DEBUG_ENABLE=1 (см. ADAPTER_DEBUG выше). Режим «один
-# файл» удалён — путь всегда директория.
-ADAPTER_DEBUG_LOGPATH = os.environ.get("ADAPTER_DEBUG_LOGPATH", "") or "./tmp/logs"
+# Корень ДАННЫХ адаптера (v0.9.9, переименован из ADAPTER_DEBUG_LOGPATH): здесь
+# живёт корень веб-интерфейса (WEBUI), а всё содержимое разложено по двум
+# подпапкам (см. log_dir/var_dir ниже). ВСЕГДА непуст: пусто / не задано →
+# дефолт "./tmp/adapter" (относительно папки запуска). Корень создаётся на
+# старте адаптера; лог-ФАЙЛЫ в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1
+# (см. ADAPTER_DEBUG выше). Режим «один файл» удалён — путь всегда директория.
+ADAPTER_DATA_ROOT = os.environ.get("ADAPTER_DATA_ROOT", "") or "./tmp/adapter"
+
+
+def log_dir() -> str:
+    """``ADAPTER_DATA_ROOT/log`` — логи, трейсы, ``*.parts``, ``.err``.
+
+    Живое чтение модульного глобала (не снимок): тесты и смена точки хранения
+    должны видеть актуальный путь. Директория создаётся на старте
+    (backend-adapter.py), запись в неё — по гейтам ADAPTER_DEBUG_ENABLE/
+    ADAPTER_DEBUG_PARTS (см. session_log).
+    """
+    return os.path.join(ADAPTER_DATA_ROOT, "log")
+
+
+def var_dir() -> str:
+    """``ADAPTER_DATA_ROOT/var`` — состояние: PID, ``model-usage.yaml``,
+    ``state.yaml``, ``<бэкенд>.models.json``.
+
+    Живое чтение модульного глобала (см. log_dir). Директория создаётся на
+    старте (backend-adapter.py).
+    """
+    return os.path.join(ADAPTER_DATA_ROOT, "var")
+
+
+# Жёсткое переименование ADAPTER_DEBUG_LOGPATH → ADAPTER_DATA_ROOT (v0.9.9):
+# старое имя больше НЕ читается (fallback нет — иначе раскладка данных
+# разъезжалась бы между двумя корнями). Если оператор задал только старое имя,
+# печатаем одну подсказку и стартуем на дефолте: молчаливое игнорирование
+# выглядело бы как «данные пропали».
+if (
+    os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip()
+    and not os.environ.get("ADAPTER_DATA_ROOT", "").strip()
+):
+    print(
+        "[WARN] ADAPTER_DEBUG_LOGPATH больше не читается (v0.9.9) — переменная "
+        "переименована в ADAPTER_DATA_ROOT (внутри появились подпапки log/ и "
+        "var/). Старое значение игнорируется, используется дефолт "
+        f"{ADAPTER_DATA_ROOT!r}. Перенесите настройку в ADAPTER_DATA_ROOT."
+    )
+
+
 # Имя файла перманентного состояния runtime-пула (v0.9.6, state_store.py):
-# только ИМЯ, путь — os.path.join(ADAPTER_DEBUG_LOGPATH, ADAPTER_STATE) (та же
-# директория, что логи/WEBUI/model-usage.yaml). Хранит значения
+# только ИМЯ, путь — os.path.join(ADAPTER_DATA_ROOT/var, ADAPTER_STATE) (папка
+# состояния рядом с PID-файлом и model-usage.yaml). Хранит значения
 # RUNTIME_CONFIG_POOL, изменённые через /config: применяется на старте ПОВЕРХ
 # env и перезаписывается при каждом изменении пула. Пер-сессионные настройки
 # сюда не попадают (см. state_store).
@@ -96,7 +136,7 @@ def trim_limit() -> int:
 # протокола (.json и .yaml парой) для ВСЕХ логгируемых частей (BODY,
 # OPENAI_BODY, FETCH_RAW, TOOL_RESULT, RESPONSE — без фиксированного списка:
 # каждая пишущая точка сама решает, какой тег дампить). Срабатывает только
-# при ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DEBUG_LOGPATH задаёт директорию
+# при ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DATA_ROOT задаёт директорию
 # (файлы кладутся в неё). Пусто / 0 / false — выкл.
 ADAPTER_DEBUG_PARTS = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_PARTS", ""))
 
@@ -127,11 +167,11 @@ ADAPTER_DEBUG_PARTS = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_PART
 # ПО ССЫЛКЕ; поэтому set_runtime_config мутирует _MAP на месте (см. ниже),
 # а не переприсваивает словарь.
 #
-# ПРИМЕЧАНИЕ: ADAPTER_DEBUG_LOGPATH сюда сознательно НЕ входит — это точка
+# ПРИМЕЧАНИЕ: ADAPTER_DATA_ROOT сюда сознательно НЕ входит — это точка
 # хранения (корень WEBUI и лог-директория), а не «переключатель объёма»:
 # смена пути на лету потребовала бы пересоздания корня веб-сервера и
 # раскладки файлов посреди сессии — за рамками задачи. (Файловая запись
-# переключается пулом через ADAPTER_DEBUG: заданный LOGPATH всегда непуст,
+# переключается пулом через ADAPTER_DEBUG: заданный корень данных всегда непуст,
 # поэтому 1 через /config сразу начнёт писать в него.)
 RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG",
@@ -359,7 +399,7 @@ def set_runtime_config(**kwargs) -> dict:
 # LLM-эндпоинты, таблица «Models in use») + health-эндпоинты (/healthz,
 # /live, /ready) + /session (просмотр *.parts сессий; при ADAPTER_DEBUG_ENABLE=0
 # логов нет — вкладки сессий пусты) + /config (runtime-пул). Корень —
-# директория ADAPTER_DEBUG_LOGPATH (см. выше; дефолт ./tmp/logs) — там же
+# директория ADAPTER_DATA_ROOT (см. выше; дефолт ./tmp/adapter) — в var/
 # лежит model-usage.yaml. Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST
 # (пусто/не задано → дефолт 127.0.0.1, только локально).
 ADAPTER_WEBUI_PORT = env_validate.parse_int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"), 8765)
@@ -754,11 +794,11 @@ def _write_models_snapshot(
     """JSON-дамп результата проверки бэкенда на доступные модели.
 
     Безусловный наблюдательный канал (v0.9.0): файл
-    ``<имя_бэкенда>.models.json`` пишется в ADAPTER_DEBUG_LOGPATH при каждой
+    ``<имя_бэкенда>.models.json`` пишется в ADAPTER_DATA_ROOT/var при каждой
     проверке — стартовой (_init_multi_backends) и фоновой (refresh_models /
     reload-перечитывания) — каждый раз перезаписываясь целиком. Вне
     ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_PARTS / TRIM (гейт — только наличие
-    LOGPATH); снимок содержит ПОЛНЫЕ записи моделей из ответа /v1/models
+    наличия var/); снимок содержит ПОЛНЫЕ записи моделей из ответа /v1/models
     (redact-маскирование секретов — внутри probe_json). Провал записи молча
     глотается модулем probe_json — проверку не роняет."""
     payload = {
@@ -1067,7 +1107,7 @@ def _refresh_worker(timeout: float | None) -> None:
 
 
 def start_refresh(timeout: float | None = None, reload: bool = True) -> bool:
-    """Запустить фоновую проверку бэкендов (модели + проба эндпоинтов).
+    """Запустить фоновую проверку бэкендов (опрос списка моделей).
 
     ``reload=True`` (по умолчанию) — перед проверкой конфиг
     ADAPTER_BACKEND_CONFIG перечитывается (reload_backend_config): кнопка 🔃

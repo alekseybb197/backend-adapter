@@ -84,16 +84,17 @@ class ServerSetupMixin:
         server_mod._trace = lambda *a, **kw: None
         server_mod.write_debug_json = lambda *a, **kw: None
         # .err-канал (v0.9.0 инциденты + v0.9.1 WARN) безусловен (не зависит от
-        # ADAPTER_DEBUG_ENABLE) — в unit-контексте без LOGPATH его надо мокать,
-        # иначе записи уходят в дефолтный ./tmp/logs. Тесты самого .err ставят
-        # LOGPATH на tmp_path и вызывают _setup_adapter(mock_err=False), чтобы
+        # ADAPTER_DEBUG_ENABLE) — в unit-контексте без лог-папки его надо
+        # мокать, иначе записи уходят в дефолтный ./tmp/adapter/log. Тесты
+        # самого .err ставят путь на tmp_path и вызывают
+        # _setup_adapter(mock_err=False), чтобы
         # канал был живым (в т.ч. WARN «First message is NOT system»).
         if mock_err:
             server_mod.write_error_file = lambda *a, **kw: None
             server_mod.write_warn_file = lambda *a, **kw: None
             # v0.9.7: обобщённый .err-блок «ранней» ошибки (write_session_error)
-            # тоже безусловен — мокаем, иначе unit-тесты без LOGPATH пишут в
-            # дефолтный ./tmp/logs.
+            # тоже безусловен — мокаем, иначе unit-тесты без лог-папки пишут
+            # в дефолтный ./tmp/adapter/log.
             server_mod.write_session_error = lambda *a, **kw: None
 
         # Used-models table: reset so tests start from an empty table (no
@@ -1789,8 +1790,8 @@ class TestSessionAccounting(ServerSetupMixin):
 
 class TestErrFileProtocol(ServerSetupMixin):
     """Протокол .err-инцидентов (v0.9.0): финальный 4xx/5xx реального
-    прокси-запроса пишет session-<ts>-<safe8>.err в LOGPATH (безусловный
-    канал — вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). Тесты ставят LOGPATH на
+    прокси-запроса пишет session-<ts>-<safe8>.err в лог-папку (безусловный
+    канал — вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). Тесты ставят путь на
     tmp_path и НЕ мокают write_error_file (mock_err=False)."""
 
     def _setup(self, fake_backend, tmp_path, mock_logger=True):
