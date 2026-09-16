@@ -193,7 +193,7 @@ backend-adapter/
 ├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
-│   ├── routing.py             # Входные эндпоинты/TARGET: decide() по кэшу проб
+│   ├── routing.py             # Входные эндпоинты/TARGET: decide() по TARGET
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
@@ -212,7 +212,7 @@ backend-adapter/
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
 │   ├── model_usage.py         # Персистентный учёт использованных моделей, тарифы
-│   ├── probe_json.py          # JSON-результаты проверок бэкендов в LOGPATH
+│   ├── probe_json.py          # JSON-результат опроса списка моделей в LOGPATH
 │   ├── cli.py                 # Консольный entry point пакета
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета

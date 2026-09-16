@@ -53,15 +53,10 @@ def fresh_env(monkeypatch):
         "ADAPTER_STREAM_INCLUDE_USAGE": "1",
         "ADAPTER_MODELS_MAPPING": "",
         "ADAPTER_BACKEND_CONFIG": "",
-        # Endpoint probe off by default in tests: probe tests opt in via
-        # _setup(probe_enabled=True); without this, refresh_models would fire
-        # real network smoke-probes in unrelated tests.
-        "ADAPTER_ENDPOINT_PROBE": "0",
-        # Used-models table: endpoint probes off by default (first use of a
-        # model would fire real HTTP POSTs). Accounting itself stays on — the
-        # flag only gates probes; tests enable it explicitly.
+        # Used-models table: off by default in tests (accounting is a no-op
+        # until a test opts in explicitly).
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
-        # Persistence of the used-models table: sane default for tests (probe
+        # Persistence of the used-models table: sane default for tests (parse
         # of the interval value happens on config import).
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         # Tariffs file for the Cost column: empty by default (no tariffs — the
@@ -125,11 +120,7 @@ def _default_config():
         "ADAPTER_STREAM_INCLUDE_USAGE": "1",
         "ADAPTER_MODELS_MAPPING": "",
         "ADAPTER_BACKEND_CONFIG": "",
-        # Endpoint probe off by default in tests: probe tests opt in via
-        # _setup(probe_enabled=True); without this, refresh_models would fire
-        # real network smoke-probes in unrelated tests.
-        "ADAPTER_ENDPOINT_PROBE": "0",
-        # Used-models table: endpoint probes off by default (see fresh_env).
+        # Used-models table: off by default in tests (see fresh_env).
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         "ADAPTER_MODELS_TARIFFS": "",
@@ -204,7 +195,6 @@ def isolate_logs(fresh_env):
     config._BACKEND_BY_NAME.clear()
     config._MODEL_TO_BACKEND.clear()
     config._DEFAULT_BACKEND = None
-    config._ENDPOINT_STATE.clear()
     config._REFRESH_JOB = None
 
     # Reset sessions table (session_registry keeps its own module global —
@@ -273,7 +263,9 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     # E→E на новых входных эндпоинтах адаптера).
     responses_response = None
     responses_status = 200
-    extra_post_paths = {}  # {path: status} — для endpoint-probe тестов
+    # {path: status} — POST-пути сверх /v1/chat/completions и /v1/responses
+    # (например /v1/messages), отвечающие настроенным статусом без тела.
+    extra_post_paths = {}
     # SSE-стрим (v0.9.0): если задан список строк — ответ text/event-stream
     # для /v1/chat/completions (построчно, как настоящий стрим), иначе —
     # обычный JSON completions_response.
@@ -356,8 +348,8 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
             elif FakeBackendHandler.responses_status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path in FakeBackendHandler.extra_post_paths:
-            # Дымовые пробы остальных эндпоинтов: /v1/messages, /v1/responses,
-            # /v1/embeddings — отвечаем настроенным статусом без тела.
+            # Прочие POST-пути (например /v1/messages) — отвечаем настроенным
+            # статусом без тела.
             self.send_response(FakeBackendHandler.extra_post_paths[self.path])
             self.send_header("Content-Type", "application/json")
             self.end_headers()

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Unit tests for backend_adapter.probe_json — JSON files of check results
-(models and endpoint probes) written to ADAPTER_DEBUG_LOGPATH (v0.9.0).
+"""Unit tests for backend_adapter.probe_json — JSON file of the backend
+model-list poll written to ADAPTER_DEBUG_LOGPATH (v0.9.0).
 
 Tests cover:
-  - name conversion for filenames: `/` and `:` → `_`; names without them
-    stay unchanged (no collisions for dots/dashes)
-  - write_models_json writes <backend>.models.json into the LOGPATH root;
-    write_endpoint_json — <backend>.<converted-model>.<pname>.json
+  - write_models_json writes <backend>.models.json into the LOGPATH root
   - overwrite: a second call replaces the whole file (one file, new content)
   - atomicity: no `.tmp` leftovers after a successful write
   - unconditional channel: files are written regardless of ADAPTER_DEBUG_ENABLE
   - sanitizer: secrets redacted by default; full data when
     ADAPTER_SENSITIVE_LOGGING_ENABLE=1
   - a write failure never raises (observational channel)
+
+v0.9.9: endpoint probes removed — write_endpoint_json and its filename
+conversion (`/`/`:` → `_`) are gone, only the models poll remains.
 """
 import json
 import os
@@ -29,15 +29,14 @@ def _reload_probe_json():
     return probe_json
 
 
-class TestConvertName:
-    def test_slash_and_colon_to_underscore(self):
-        assert _reload_probe_json()._convert_name("org/model:v1") == "org_model_v1"
+class TestNoEndpointApi:
+    """v0.9.9: дампы проб эндпойнтов удалены вместе с пробами."""
 
-    def test_plain_name_unchanged(self):
-        assert _reload_probe_json()._convert_name("qwen3.6-35b-a3b") == "qwen3.6-35b-a3b"
-
-    def test_multiple_replacements(self):
-        assert _reload_probe_json()._convert_name("a/b:c/d") == "a_b_c_d"
+    def test_endpoint_writer_removed(self):
+        pj = _reload_probe_json()
+        assert not hasattr(pj, "write_endpoint_json")
+        assert not hasattr(pj, "_convert_name")
+        assert not hasattr(pj, "_SAFE_NAME")
 
 
 class TestWriteFiles:
@@ -54,13 +53,6 @@ class TestWriteFiles:
         written = json.loads((tmp_path / "llm.models.json").read_text())
         assert written == payload
 
-    def test_writes_endpoint_json_with_converted_model(self, tmp_path):
-        pj = self._logpath(tmp_path)
-        payload = {"backend": "llm", "model": "org/model:v1", "endpoint": "completions"}
-        pj.write_endpoint_json("llm", "org/model:v1", "completions", payload)
-        assert (tmp_path / "llm.org_model_v1.completions.json").exists()
-        assert json.loads((tmp_path / "llm.org_model_v1.completions.json").read_text()) == payload
-
     def test_overwrite_replaces_whole_file(self, tmp_path):
         pj = self._logpath(tmp_path)
         pj.write_models_json("llm", {"backend": "llm", "ok": True, "count": 1, "models": [{"id": "a"}]})
@@ -72,11 +64,7 @@ class TestWriteFiles:
     def test_no_tmp_leftovers(self, tmp_path):
         pj = self._logpath(tmp_path)
         pj.write_models_json("llm", {"ok": True})
-        pj.write_endpoint_json("llm", "m:1", "completions", {"ok": True})
-        assert sorted(f.name for f in tmp_path.iterdir()) == [
-            "llm.m_1.completions.json",
-            "llm.models.json",
-        ]
+        assert sorted(f.name for f in tmp_path.iterdir()) == ["llm.models.json"]
 
     def test_logpath_created_if_missing(self, tmp_path):
         os.environ["ADAPTER_DEBUG_LOGPATH"] = str(tmp_path / "nested" / "logs")
@@ -95,9 +83,7 @@ class TestUnconditionalChannel:
         os.environ["ADAPTER_DEBUG_TRIM"] = "0"
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
-        pj.write_endpoint_json("llm", "m", "completions", {"ok": True})
         assert (tmp_path / "llm.models.json").exists()
-        assert (tmp_path / "llm.m.completions.json").exists()
 
     def test_default_logpath_used_when_env_empty(self, monkeypatch, tmp_path, capsys):
         """LOGPATH пуст/не задан → дефолт ./tmp/logs (относительно папки

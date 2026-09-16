@@ -1,16 +1,13 @@
-"""JSON-файлы результатов проверок бэкендов (v0.9.0).
+"""JSON-файл результата опроса бэкенда на список моделей (v0.9.0).
 
-Результаты проверок пишутся в ADAPTER_DEBUG_LOGPATH как плоские JSON-файлы
-с фиксированными именами — рядом с model-usage.yaml, .err-файлами и корнем
-WEBUI. Два вида:
+Единственный вид файла — ``<имя_бэкенда>.models.json``: результат
+``GET /v1/models`` по каждому бэкенду (каждый раз перезаписывается целиком).
+Пишется в ADAPTER_DEBUG_LOGPATH как плоский JSON-файл — рядом с
+model-usage.yaml, .err-файлами и корнем WEBUI.
 
-- ``<имя_бэкенда>.models.json`` — результат проверки бэкенда на доступные
-  модели (каждый раз перезаписывается целиком);
-- ``<имя_бэкенда>.<конвертированное_имя_модели>.<имя_эндпоинта>.json`` —
-  результат проверки эндпоинта модели; конвертация имени модели — замена
-  всех ``/`` и ``:`` на ``_`` (``org/model:v1`` → ``org_model_v1``); имя
-  эндпоинта — короткое из ``config.ENDPOINT_PROBES``:
-  ``completions | messages | responses | embeddings``.
+v0.9.9: дампы проб эндпойнтов (``<бэкенд>.<модель>.<эндпойнт>.json``)
+удалены вместе с самими пробами — из активных проверок остался только
+опрос списка моделей.
 
 Канал записи БЕЗУСЛОВНЫЙ (как .err-файлы): пишется независимо от
 ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_PARTS / ADAPTER_DEBUG_TRIM; гейт —
@@ -23,18 +20,13 @@ error-строках); при ADAPTER_SENSITIVE_LOGGING_ENABLE=1 пишутся 
 (живое чтение config — как session_log.write_error_file). Запись никогда не
 роняет проверку (все исключения глотаются) — канал наблюдательный.
 
-Модуль — лист DAG: импортируется config.py и model_usage.py (оба — корни
-DAG), сам на верхнем уровне импортирует только stdlib (config читается
-локально внутри функций для живого SENSITIVE-флага — циклов импорта нет).
+Модуль — лист DAG: импортируется config.py (корень DAG), сам на верхнем
+уровне импортирует только stdlib (config читается локально внутри функций
+для живого SENSITIVE-флага — циклов импорта нет).
 """
 
 import json
 import os
-import re
-
-# Конвертация именно `/` и `:` → `_` (v0.9.0); остальные символы имени
-# модели не трогаются — имена с точками/тире в коллизии не сливаются.
-_SAFE_NAME = re.compile(r"[/:]")
 
 # Ключи, чьи строковые значения считаются секретами и маскируются при
 # дампе (case-insensitive): стандартные имена полей авторизации плюс
@@ -66,12 +58,12 @@ def _mask_value(value: object) -> object:
 def _mask_secrets(payload):
     """Рекурсивно замаскировать значения секретных ключей в структуре.
 
-    ``payload`` — результат проверки (models-список бэкенда, endpoint-пробы,
-    error-строки). Строки заменяются маской в стиле redact._mask; вложенные
-    dict/list обходятся рекурсивно. Ключи словаря НЕ трогаются — это имена
-    моделей/эндпоинтов, не секреты. Bearer-фрагменты внутри error-строк
-    (свободный текст, не пара «ключ: значение») добирает текстовый redact()
-    в _write_json поверх сериализации."""
+    ``payload`` — результат опроса (models-список бэкенда, error-строки).
+    Строки заменяются маской в стиле redact._mask; вложенные dict/list
+    обходятся рекурсивно. Ключи словаря НЕ трогаются — это имена моделей,
+    не секреты. Bearer-фрагменты внутри error-строк (свободный текст, не
+    пара «ключ: значение») добирает текстовый redact() в _write_json поверх
+    сериализации."""
     if isinstance(payload, dict):
         return {
             key: (
@@ -84,15 +76,6 @@ def _mask_secrets(payload):
     if isinstance(payload, list):
         return [_mask_secrets(item) for item in payload]
     return payload
-
-
-def _convert_name(model_id: str) -> str:
-    """Конвертировать имя модели для имени файла: ``/`` и ``:`` → ``_``.
-
-    Образец коллизии: ``org/model:v1`` → ``org_model_v1``. Имена без ``/``
-    и ``:`` не меняются вовсе — файлы для разных моделей не сливаются.
-    """
-    return _SAFE_NAME.sub("_", model_id)
 
 
 def _logpath() -> str:
@@ -138,7 +121,7 @@ def _write_json(file_name: str, payload: dict) -> None:
 
 
 def write_models_json(backend_name: str, payload: dict) -> None:
-    """Записать результат проверки бэкенда на доступные модели.
+    """Записать результат опроса бэкенда на доступные модели.
 
     Файл: ``<имя_бэкенда>.models.json`` в ADAPTER_DEBUG_LOGPATH. ``payload`` —
     снимок результата ИМЕННО этого бэкенда: ``{"backend", "checked_at", "ok",
@@ -146,17 +129,3 @@ def write_models_json(backend_name: str, payload: dict) -> None:
     (старт), refresh_models (фоновая проверка/кнопка) и reload-перечитываний
     — каждый раз перезаписывает файл целиком."""
     _write_json(f"{backend_name}.models.json", payload)
-
-
-def write_endpoint_json(backend_name: str, model_id: str, pname: str, payload: dict) -> None:
-    """Записать результат проверки эндпоинта модели.
-
-    Файл: ``<имя_бэкенда>.<конверт.модель>.<pname>.json`` в
-    ADAPTER_DEBUG_LOGPATH (имя модели — через _convert_name). ``pname`` —
-    короткое имя эндпоинта из ENDPOINT_PROBES (completions/messages/responses/
-    embeddings). ``payload`` — снимок результата пробы: ``{"backend", "model",
-    "endpoint", "path", "checked_at", "status", "found", "error"}``. Пишется
-    из фоновых проб бэкендов (probe_endpoints) и пер-модельных проб
-    usage-таблицы (record_model_usage/reprobe_model) — каждый раз
-    перезаписывает файл целиком."""
-    _write_json(f"{backend_name}.{_convert_name(model_id)}.{pname}.json", payload)

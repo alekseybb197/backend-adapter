@@ -11,8 +11,8 @@ happens to each request (convert / passthrough / reject). v0.9.0.
 Модуль импортирует ``backend_adapter.config`` (корень DAG) и
 ``session_settings`` (лист DAG, пер-сессионные переопределения, v0.9.5);
 его импортирует только ``server.py``. Чистая логика без сети и HTTP —
-решение о маршруте принимается по кэшу проб (``config.endpoint_support``),
-синхронных запросов к бэкенду во время выбора НЕТ.
+маршрут выбирается только по значению TARGET-переменной, синхронных
+запросов к бэкенду во время выбора НЕТ.
 """
 
 from __future__ import annotations
@@ -21,15 +21,14 @@ from typing import Literal
 
 from . import config, session_settings
 
-# Канонические форматы = входные эндпоинты = короткие имена ENDPOINT_PROBES
-# (completions|messages|responses). Значение TARGET-переменной поверх них —
-# те же три имени (прямое преобразование) плюс passthrough/none.
+# Канонические форматы = входные эндпоинты (completions|messages|responses).
+# Значение TARGET-переменной поверх них — те же три имени (прямое
+# преобразование) плюс passthrough/none.
 Format = Literal["messages", "completions", "responses"]
 TargetValue = Literal["messages", "completions", "responses", "passthrough", "none"]
 
-# Входные пути адаптера. Зеркало ENDPOINT_PROBES (config.py) — для трёх
-# форматов, участвующих в роутинге; соответствие путей форматам
-# зафиксировано unit-тестом (не синхронизируется автоматически).
+# Входные пути адаптера — для трёх форматов, участвующих в роутинге
+# (распознавание входа в server.py, см. input_path_to_format).
 INPUT_PATHS: dict[Format, str] = {
     "messages": "/v1/messages",
     "completions": "/v1/chat/completions",
@@ -109,7 +108,6 @@ _ENV_NAMES: dict[Format, str] = {
 # (ADAPTER_<INP>_TARGET) — префикс ADAPTER_ в шаблоне не дублируется.
 ERROR_DISABLED = "endpoint is disabled ({env}=none)"
 ERROR_UNIMPLEMENTED = "conversion '{inp}' -> '{out}' is not implemented by this adapter"
-ERROR_UNSUPPORTED = "backend '{backend}' does not support {fmt} (probe: endpoint not found)"
 
 
 def target_env_name(inp: Format) -> str:
@@ -155,10 +153,8 @@ def target_for_input(inp: Format, session_id: str = "") -> TargetValue:
     return value  # type: ignore[return-value]
 
 
-def decide(
-    inp: Format, backend_name: str, session_id: str = ""
-) -> tuple[str, Format | None, str, int]:
-    """Решение о маршруте одного запроса на входе ``inp`` к бэкенду.
+def decide(inp: Format, session_id: str = "") -> tuple[str, Format | None, str, int]:
+    """Решение о маршруте одного запроса на входе ``inp``.
 
     ``session_id`` (v0.9.5) — пер-сессионный TARGET: при непустом значении
     действующая цель берётся с учётом переопределений сессии (см.
@@ -166,23 +162,18 @@ def decide(
 
     Возвращает ``(action, output_fmt, error_msg, http_status)``:
     - ``("passthrough", inp, "", 200)`` — TARGET=passthrough: тело запроса
-      уходит бэкенду КАК ЕСТЬ на эндпойнт входного формата (поддержка
-      подтверждена кэшем проб либо, при отсутствии данных, не опровергнута);
+      уходит бэкенду КАК ЕСТЬ на эндпойнт входного формата;
     - ``("convert", out, "", 200)`` — TARGET = конкретный формат: прямое
       преобразование inp → out (реализованная пара реестра
-      IMPLEMENTED_CONVERSIONS), бэкенд поддерживает ``out``;
-    - ``("reject", None, текст, 400|502)`` — запрос валиден, но маршрута
-      нет: пара не реализована (400), либо бэкенд подтверждённо не
-      поддерживает целевой формат (502);
+      IMPLEMENTED_CONVERSIONS);
+    - ``("reject", None, текст, 400)`` — запрос валиден, но маршрута нет:
+      пара не реализована (400);
     - ``("disabled", None, текст, 404)`` — вход выключен (TARGET=none).
 
-    Решения — ТОЛЬКО по кэшу проб (``config.endpoint_support``): фоновая
-    probe_endpoints + пер-модельные пробы usage-таблицы. Сети здесь НЕТ.
-
-    Семантика None (эндпоинт не пробовался / пробы выключены): «нет данных»
-    НЕ блокирует — маршрут выбирается оптимистично (passthrough / convert),
-    как вёл бы себя адаптер без роутинга. Отказ (502) — только при
-    подтверждённом found=False (проба была, не-HTTP-200).
+    Решение принимается ТОЛЬКО по TARGET-переменной — поддержка эндпойнта
+    бэкендом не проверяется (v0.9.9: активные пробы эндпойнтов удалены).
+    Неверный выбор эндпойнта фиксируется по факту ошибки бэкенда, а не
+    предугадывается.
 
     v0.9.5: непустой ``session_id`` включает пер-сессионный TARGET (см.
     ``target_for_input``) — сессия может уйти на другой маршрут, чем общая
@@ -192,12 +183,9 @@ def decide(
         return ("disabled", None, ERROR_DISABLED.format(env=_ENV_NAMES[inp]), 404)
 
     # --- passthrough: дословная передача на эндпойнт входного формата ---
-    # Тело и SSE уходят на бэкенд как пришли (вход == выход); проверяем
-    # поддержку именно входного формата.
+    # Тело и SSE уходят на бэкенд как пришли (вход == выход).
     if target == "passthrough":
-        if config.endpoint_support(backend_name, inp) is not False:
-            return ("passthrough", inp, "", 200)
-        return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=inp), 502)
+        return ("passthrough", inp, "", 200)
 
     # --- конкретный формат: прямое преобразование inp → out ---
     # Реализованные пары — реестр IMPLEMENTED_CONVERSIONS (messages→completions,
@@ -208,7 +196,5 @@ def decide(
     assert target in ("messages", "completions", "responses"), target
     out = target
     if IMPLEMENTED_CONVERSIONS.get((inp, out)):
-        if config.endpoint_support(backend_name, out) is not False:
-            return ("convert", out, "", 200)
-        return ("reject", None, ERROR_UNSUPPORTED.format(backend=backend_name, fmt=out), 502)
+        return ("convert", out, "", 200)
     return ("reject", None, ERROR_UNIMPLEMENTED.format(inp=inp, out=out), 400)

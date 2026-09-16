@@ -7,9 +7,8 @@
 - WEBUI и Prometheus-экспортёр поднимаются без ADAPTER_WEBUI_ENABLE (его
   больше нет — v0.8.6), корень — ADAPTER_DEBUG_LOGPATH;
 - консольные debug-блоки видны при ADAPTER_DEBUG_ENABLE=0; файлов на диске
-  нет, кроме model-usage.yaml (после запросов) и БЕЗУСЛОВНЫХ JSON-файлов
-  результатов проверок (fake.models.json, fake.qwen-test.completions.json —
-  v0.9.0, пишутся всегда);
+  нет, кроме model-usage.yaml (после запросов) и БЕЗУСЛОВНОГО JSON-файла
+  опроса списка моделей (fake.models.json — v0.9.0, пишется всегда);
 - файловая запись session-*.log/*.jsonl появляется при ADAPTER_DEBUG_ENABLE=1;
 - колонка Cost на странице считается из токенов × тарифов;
 - корректное завершение по сигналам: SIGINT/SIGTERM → вежливое завершение
@@ -225,9 +224,7 @@ class TestManualAdapterProcess:
                 f.write("backend:\n"
                         "  - name: fake\n"
                         f"    base: {be.base_url}\n"
-                        "    key: FAKE_KEY\n"
-                        "    probe:\n"
-                        "      - completions: qwen-test\n")
+                        "    key: FAKE_KEY\n")
 
             # тарифы
             tariffs_path = str(tmp_path / "tariffs.yaml")
@@ -258,23 +255,16 @@ class TestManualAdapterProcess:
                 assert "Backend-Adapter v0.9.8" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
-                # v0.9.0: старт пишет БЕЗУСЛОВНЫЕ JSON-файлы результатов
-                # проверок в LOGPATH (вне ADAPTER_DEBUG_ENABLE): модели —
-                # fake.models.json; проба эндпоинта (completions) —
-                # fake.qwen-test.completions.json. Прочих файлов при
-                # ENABLE=0 нет (session-*.log/*.jsonl не пишутся).
+                # v0.9.0: старт пишет БЕЗУСЛОВНЫЙ JSON-файл опроса списка
+                # моделей в LOGPATH (вне ADAPTER_DEBUG_ENABLE) —
+                # fake.models.json. Прочих файлов при ENABLE=0 нет
+                # (session-*.log/*.jsonl не пишутся); дампы проб эндпойнтов
+                # сняты в v0.9.9.
                 assert _wait_files(logs_dir, lambda f: f == "fake.models.json"), \
                     os.listdir(logs_dir)
-                assert _wait_files(
-                    logs_dir, lambda f: f == "fake.qwen-test.completions.json"
-                ), os.listdir(logs_dir)
                 mj = json.load(open(os.path.join(logs_dir, "fake.models.json")))
                 assert mj["ok"] is True and mj["count"] == 1, mj
                 assert mj["models"] == [{"id": "qwen-test", "object": "model"}], mj
-                ej = json.load(
-                    open(os.path.join(logs_dir, "fake.qwen-test.completions.json"))
-                )
-                assert ej["found"] is True and ej["status"] == 200, ej
 
                 # --- PID-файл при ОБЫЧНОМ запуске (не detach) ---
                 # Пишется в LOGPATH при любом запуске; содержимое — PID
@@ -429,14 +419,15 @@ class TestManualAdapterProcess:
         finally:
             be.close()
 
-    def test_pidfile_before_backend_probe(self, tmp_path):
+    def test_pidfile_before_backend_check(self, tmp_path):
         """PID-файл пишется ДО стартовой проверки бэкендов (v0.9.5).
 
-        Стартовая проба — сетевой опрос `GET /v1/models`, который может быть
-        долгим (недоступный/медленный бэкенд). Процесс должен быть адресуем
-        уже во время проверки, поэтому `adapter.pid` появляется раньше неё.
-        Проверяем на медленном fake-бэкенде (models_delay): файл есть, пока
-        проверка ещё идёт, и в консоли `[PID]` предшествует `[INIT] Probing`."""
+        Стартовая проверка — сетевой опрос `GET /v1/models`, который может
+        быть долгим (недоступный/медленный бэкенд). Процесс должен быть
+        адресуем уже во время проверки, поэтому `adapter.pid` появляется
+        раньше неё. Проверяем на медленном fake-бэкенде (models_delay): файл
+        есть, пока проверка ещё идёт, и в консоли `[PID]` предшествует
+        `[INIT] Probing`."""
         logs_dir = str(tmp_path / "logs")
         os.makedirs(logs_dir)
 
@@ -451,9 +442,7 @@ class TestManualAdapterProcess:
                 f.write("backend:\n"
                         "  - name: fake\n"
                         f"    base: {be.base_url}\n"
-                        "    key: FAKE_KEY\n"
-                        "    probe:\n"
-                        "      - completions: qwen-test\n")
+                        "    key: FAKE_KEY\n")
             proxy_port = _free_port()
             web_port = _free_port()
             exp_port = _free_port()
@@ -507,9 +496,7 @@ class TestManualAdapterProcess:
                 f.write("backend:\n"
                         "  - name: fake\n"
                         f"    base: {be.base_url}\n"
-                        "    key: FAKE_KEY\n"
-                        "    probe:\n"
-                        "      - completions: qwen-test\n")
+                        "    key: FAKE_KEY\n")
             proxy_port = _free_port()
             web_port = _free_port()
             exp_port = _free_port()

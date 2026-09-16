@@ -55,7 +55,7 @@ This file provides guidance to [CC] () when working with code in this repository
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
   `*.parts` — дампы). Вне ENABLE/PARTS/TRIM в `ADAPTER_DEBUG_LOGPATH` живут
   безусловные артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1),
-  JSON-результаты проверок бэкендов (`probe_json.py`), PID-файл (`daemon.py` —
+  JSON-результат опроса списка моделей (`probe_json.py`), PID-файл (`daemon.py` —
   пишется при ЛЮБОМ запуске, не только в detach; удаляется при штатном
   завершении и через `atexit`).
 

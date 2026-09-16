@@ -233,11 +233,11 @@ if __name__ == "__main__":
     if webui:
         threading.Thread(target=webui.serve_forever, daemon=True).start()
         print(f"[WEBUI] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_WEBUI_PORT}/ (root: {webui_root})")
-        # Стартовая фоновая проверка бэкендов (модели + дымовая проба
-        # API-эндпойнтов): первый GET "/" сразу показывает свежие данные,
-        # а не пустую колонку Endpoints. Дублирует стартовый опрос
-        # _init_multi_backends — приемлемо: один раз, фоново, с таймаутом
-        # PROBE_TIMEOUT (10 с на эндпоинт), не ADAPTER_TIMEOUT (300 с).
+        # Стартовая фоновая проверка бэкендов (опрос списка моделей
+        # GET /v1/models): первый GET "/" сразу показывает свежие данные.
+        # Дублирует стартовый опрос _init_multi_backends — приемлемо: один
+        # раз, фоново, с таймаутом PROBE_TIMEOUT (10 с на бэкенд), не
+        # ADAPTER_TIMEOUT (300 с).
         # Локальные импорты: скрипт не импортирует webui_status; config
         # связан только именами (не модулем).
         from backend_adapter import config as _cfg

@@ -30,7 +30,7 @@ Messages API clients** ([CC], QwenCode and any other Anthropic-API client) to
 backend-adapter.py          ← entry point (startup: config check, backend init, server)
 backend_adapter/
 ├── __init__.py             ← lazy proxy for module-level globals
-├── config.py               ← env vars, model mapping, backend routing, YAML parser, probe (refresh)
+├── config.py               ← env vars, model mapping, backend routing, YAML parser, models refresh
 ├── server.py               ← HTTP handler (Adapter), QuietThreadingHTTPServer
 ├── convert.py              ← Anthropic ↔ OpenAI conversion functions
 ├── streaming.py            ← SSE streaming: [OI] SSE → Anthropic SSE (conversion)
@@ -43,9 +43,8 @@ backend_adapter/
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
 ├── model_usage.py          ← used-models table (см. §6.6): учёт моделей запросов +
-│                             токены usage ответов (input/output) + дымовая проба
-│                             эндпоинтов по каждой модели; перепроверка строки
-│                             (reprobe); персистентный YAML (version: 2, миграция v1)
+│                             токены usage ответов (input/output); персистентный
+│                             YAML (version: 2, миграция v1)
 ├── session_registry.py     ← таблица сессий агентов (страница "/sessions",
 │                             v0.9.2/v0.9.5): in-memory, строка = КОРТЕЖ (session,
 │                             agent, model, backend, route) — смена модели или
@@ -58,13 +57,11 @@ backend_adapter/
 │                             значение, v0.9.9); API override/effective/set_config;
 │                             лист DAG — импортирует config
 ├── webui_status.py         ← WEBUI endpoints "/", "/api/refresh-state",
-│                             "/api/model-usage/reset", "/api/model-usage/reprobe",
-│                             "/api/model-usage/delete", "/api/model-usage/reprobe-state",
+│                             "/api/model-usage/reset", "/api/model-usage/delete",
 │                             "/api/model-usage/snapshot":
 │                             status page (version, LLM endpoints, models) +
 │                             background-check state + секция «Models in use»
-│                             (live-счётчики, сброс счётчиков/перепроверка/удаление
-│                             строки)
+│                             (live-счётчики, сброс счётчиков/удаление строки)
 ├── webui_sessions.py       ← WEBUI страница "/sessions" (таблица сессий, v0.9.5,
 │                             задача 1): endpoints "/api/sessions/snapshot|reset|
 │                             delete|settings" + "/logs/<имя>" (раздача .err);
@@ -83,12 +80,11 @@ backend_adapter/
 ├── prometheus_exporter.py  ← отдельный слушатель метрик /metrics (text exposition
 │                             0.0.4, stdlib-only) — см. §6.8
 ├── session_viewer.py       ← WEBUI endpoint "/session": *.parts session tabs + file serving
-├── probe_json.py           ← JSON-результаты проверок бэкендов в LOGPATH
-│                             (<бэкенд>.models.json и <бэкенд>.<модель>.<pname>.json,
-│                             безусловный канал, redact) — см. §6.9
+├── probe_json.py           ← JSON-результат опроса списка моделей в LOGPATH
+│                             (<бэкенд>.models.json, безусловный канал, redact) — см. §6.9
 ├── routing.py              ← входные эндпоинты и TARGET-маршрутизация (см. §4.2):
 │                             INPUT_PATHS, IMPLEMENTED_CONVERSIONS,
-│                             decide() по кэшу проб (лист DAG — импортирует config)
+│                             decide() (лист DAG — импортирует config)
 ├── state_store.py          ← перманентное состояние runtime-пула (v0.9.6, §6.13):
 │                             state.yaml (env ADAPTER_STATE) — load/save/apply_on_startup;
 │                             лист DAG — импортирует config + stdlib (yaml)
@@ -140,10 +136,10 @@ module on one level, see ADR 2026-09-01).
 │           (messages | completions | responses; вне трёх — 404)  │
 │   parse & validate → model обязателен → strict model check      │
 │   model mapping (ADAPTER_MODELS_MAPPING) → _resolve_backend     │
-│   routing.decide(fmt, backend_name) → action                    │
-│     решения по TARGET + кэшу endpoint_support (сети нет)        │
+│   routing.decide(fmt, session_id) → action                      │
+│     решения только по TARGET-переменной (сети нет)              │
 │   ├─ disabled (TARGET=none) / reject                            │
-│   │    404 / 400 / 502 JSON  (usage не пишется — запрос до      │
+│   │    404 / 400 JSON  (usage не пишется — запрос до            │
 │   │    бэкенда не дошёл; .err-блок пишется, v0.9.5)             │
 │   ├─ passthrough E→E (TARGET=passthrough, или convert           │
 │   │    messages→messages — сортировка system)                   │
@@ -217,10 +213,8 @@ module on one level, see ADR 2026-09-01).
    status, `/session` — session viewer, `/config` — runtime-config form,
    `/api/refresh-state` — JSON state of the background check, see §6.5,
    `/api/model-usage/reset` — zeroes a used-model row's counters (row is kept),
-   `/api/model-usage/reprobe` — background row re-probe,
    `/api/model-usage/delete` — removes a used-model row from the table and
-   the YAML file (not kept),
-   `/api/model-usage/reprobe-state` — its JSON state, see §6.6).
+   the YAML file (not kept)).
    The used-models table persists to `model-usage.yaml` (version: 2, v1 migrated)
    in `root`.
    Loading the status page `/` (GET) renders the current state
@@ -244,7 +238,7 @@ module on one level, see ADR 2026-09-01).
 
 Адаптер принимает **три** POST-входа: `/v1/messages` (Anthropic Messages API),
 `/v1/chat/completions` ([OI] Chat Completions), `/v1/responses` ([OI] Responses
-API) — пути зеркалят `config.ENDPOINT_PROBES`. Что делать с запросом на каждом
+API) — пути зеркалят `routing.INPUT_PATHS`. Что делать с запросом на каждом
 входе решает **TARGET-маршрутизация** (`backend_adapter/routing.py`, лист DAG,
 импортирует config и session_settings; его импортирует только server.py): три
 env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
@@ -256,17 +250,19 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 `[WARN]` + `none`). **Принципы настройки, матрица «вход × значение» и
 перспективы — [`docs/routing.md`](routing.md).**
 
-`routing.decide(inp, backend_name, session_id="")` возвращает
-`(action, out_fmt, msg, status)` по **кэшу проб**
-`config.endpoint_support(backend_name, pname)` (геттер `_ENDPOINT_STATE`; сети
-в запросе нет — None трактуется как «нет данных», оптимистично): action ∈
+`routing.decide(inp, session_id="")` возвращает
+`(action, out_fmt, msg, status)` **только по TARGET-переменной** (сети в
+запросе нет; поддержка эндпойнта бэкендом не проверяется — v0.9.9, активные
+пробы эндпойнтов удалены): action ∈
 {passthrough (TARGET=passthrough: тело на эндпойнт
-входного формата дословно, бэкенд его поддерживает), convert (реализованные
+входного формата дословно), convert (реализованные
 пары — `messages→completions`, `messages→messages`, `responses→responses`,
 `responses→completions`), reject
-(нереализованная конверсия → 400 «conversion … is not implemented»; маршрут
-при подтверждённо не поддерживающем бэкенде → 502), disabled (TARGET=none →
-404)}. Реестр реализованных пар — `IMPLEMENTED_CONVERSIONS` в routing.py.
+(нереализованная конверсия → 400 «conversion … is not implemented»),
+disabled (TARGET=none → 404)}. Реестр реализованных пар —
+`IMPLEMENTED_CONVERSIONS` в routing.py. Неверный выбор эндпойнта агентом
+фиксируется по факту ошибки бэкенда (ответ отдаётся клиенту как есть,
+инцидент попадает в `.err`), а не предугадывается пробой.
 При **непустом** `session_id` значение TARGET берётся пер-сессионно
 (`session_settings.effective` поверх общей настройки, v0.9.5 — см. §6.11 и
 `docs/routing.md` §2.4); `routing.target_env_name(inp)` отдаёт имя переменной
@@ -286,21 +282,20 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 4. Strict model validation (ADAPTER_STRICT_MODELS) — 400 strict также учитывается
    пустым кортежем
 5. Record usage of the client model (model_usage.record_model_usage — used-models
-   table; at first use of a model this synchronously smoke-probes that model's
-   endpoints, see §6.6; on every exit path do_POST's finally accumulates the
-   backend usage tokens via model_usage.add_usage_tokens; accounting never
-   affects the request)
+   table; no network calls, see §6.6; on every exit path do_POST's finally
+   accumulates the backend usage tokens via model_usage.add_usage_tokens;
+   accounting never affects the request)
 6. Model mapping (ADAPTER_MODELS_MAPPING string → dict)
 7. Backend resolution (_resolve_backend)
    - Explicit prefix (<backend>.model) → strip, route
    - Lookup in _MODEL_TO_BACKEND
    - Fallback → _DEFAULT_BACKEND
-8. routing.decide(fmt, backend_name, session_id) → action/out_fmt
+8. routing.decide(fmt, session_id) → action/out_fmt
    - учёт сессии (session_registry.register по полному кортежу session+agent+
      model+backend+route+input — включая reject/disabled: видно, куда агент
      пытался; upsert, calls+1, эвикция по ADAPTER_SESSIONS_TABLE; v0.9.2/v0.9.5,
      см. §6.10)
-   - disabled/reject → JSON-ответ (404/400/502), return (запрос до бэкенда не
+   - disabled/reject → JSON-ответ (404/400), return (запрос до бэкенда не
      дошёл — но `.err`-блок пишется, v0.9.5, см. §8.4)
 9. Convert-ветки (out_fmt != inp_fmt):
    - messages→completions: trace tool_results from incoming messages
@@ -479,56 +474,17 @@ backend:
   - name: litellm
     base: "https://llm.example.com"
     key: ADAPTER_LITELLM_KEY
-    probe:                   # необязательно — модель на эндпоинт дымовой пробы
-      - completions: qwen3.6
-      - messages:
-      - responses: gpt-5-sol
-      - embeddings: text-embedding-3-small
 ```
 
-### 6.4 Дымовая проба API-эндпойнтов (`probe_endpoints`, config.py)
-
-Статус-страница WEBUI `/` показывает не только список моделей бэкенда, но и
-какие известные API-эндпойнты он реально обслуживает. Определение — короткими
-POST-запросами с `max_tokens:1` по фиксированному списку `ENDPOINT_PROBES`
-(`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`);
-классификация по HTTP-коду: `200` — работает (зелёный ✓ на странице),
-любой не-200 код (`400/401/405/429`, `404`, прочие 4xx/5xx) — не работает
-(на странице не показывается), сеть/таймаут — ошибка бэкенда.
-**Политика «только явно указанные»** (единый конфиг-источник для фоновой
-проверки бэкендов, usage-пробы модели и usage-reprobe): пробуется ТОЛЬКО
-эндпоинт, перечисленный в ключе `probe` YAML-записи бэкенда **с непустой
-моделью** (у разных эндпоинтов бэкенда свои probe-модели). Ключа `probe` нет,
-эндпоинт не перечислен или значение пустое — проба этого эндпоинта **НЕ
-выполняется** (молчаливый пропуск, не ошибка; состояние бэкенда в
-`_ENDPOINT_STATE` для неперечисленных путей не создаётся). Заданная в `probe`
-модель, отсутствующая среди моделей бэкенда, пропускает только свой эндпоинт
-(точечный skip с текстом в `errors`); «дефолтной модели» больше нет — только
-явно указанные в `probe` (см. ADR v0.8.5). Бэкенд без `probe` ошибкой не
-считается: ему пробы не нужны, колонка «Доступные API» остаётся пустой.
-
-Проба встроена в `config.refresh_models` (конец функции, после обновления кэша
-моделей): вызывается при каждой фоновой проверке бэкендов — при старте
-адаптера, на первом GET `/` и по кнопке-иконке 🔃 «Перепроверить бэкенды» (POST `/` →
-`config.start_refresh` → фоновый воркер, см. §6.5). Результат добавляется в
-возвращаемый dict ключом `"probe"` (старые читатели `ok/count/errors` не
-ломаются) и кэшируется в `_ENDPOINT_STATE` (~60 с, `ENDPOINT_PROBE_TTL`);
-повторная проверка в пределах TTL сеть не трогает. **`_ENDPOINT_STATE` —
-единый источник** для колонки «Доступные API» бэкенда и экспортёра: сюда же
-`model_usage` переносит found-эндпоинты дымовых проб моделей (первое
-обращение, usage-reprobe, загрузка `model-usage.yaml` — см. §6.6;
-`config.upsert_endpoint_state`). Мастер-флаг `ADAPTER_ENDPOINT_PROBE=0`
-отключает автопробу бэкендов.
-Фактическая проба пишется в консоль блоком `[ENDPOINT_PROBE]` (print, гейт
-`ADAPTER_DEBUG_ENABLE`) — одна строка на бэкенд с сырыми HTTP-кодами; кэш-хиты
-не логируются. Проба чисто наблюдательная: на маршрутизацию запросов не влияет.
+Парсер читает только `name`/`base`/`key`; любой другой ключ (в т.ч.
+оставшийся в старом файле `probe:`) молча игнорируется.
 
 ### 6.5 Фоновая проверка бэкендов (start_refresh / refresh_state, config.py)
 
 Раньше каждый GET/POST статус-страницы `/` синхронно гонял
-`config.refresh_models` (опрос `/v1/models` всех бэкендов + дымовая проба), и
+`config.refresh_models` (опрос `/v1/models` всех бэкендов), и
 при недоступном/медленном бэкенде HTTP-ответ висел (N бэкендов × 10 с на
-эндпоинт). Теперь проверка — **фоновая**, запускается при старте адаптера, на первом
+бэкенд). Теперь проверка — **фоновая**, запускается при старте адаптера, на первом
 GET `/` и по кнопке:
 
 - **Состояние** — модульный снимок-словарь `_REFRESH_JOB` в `config.py`:
@@ -545,10 +501,9 @@ GET `/` и по кнопке:
   🔃 «Перепроверить бэкенды» (POST `/`). При `reload=True` (по умолчанию) перед
   запуском воркера вызывается `config.reload_backend_config()` — кнопка
   **перечитывает** `ADAPTER_BACKEND_CONFIG` на лету: `_BACKENDS`/
-  `_BACKEND_BY_NAME`/`_DEFAULT_BACKEND` подменяются новым списком, из
-  `_ENDPOINT_STATE` удаляются записи бэкендов, которых больше нет в YAML
-  (stale-очистка), кэши моделей/индексы не трогаются — их пересоберёт
-  `refresh_models` по новым бэкендам. Битый/недоступный YAML — `reload_
+  `_BACKEND_BY_NAME`/`_DEFAULT_BACKEND` подменяются новым списком, кэши
+  моделей/индексы не трогаются — их пересоберёт `refresh_models` по новым
+  бэкендам. Битый/недоступный YAML — `reload_
   backend_config()` возвращает `None`, прежние бэкенды остаются, `[WARN]`;
   фоновая проверка всё равно перепроверяет прежних. Под `_REFRESH_LOCK`
   публикует `running=True` и стартует daemon-поток `_refresh_worker`; пока
@@ -584,45 +539,29 @@ GET `/` и по кнопке:
 Отдельный модуль-лист DAG (импортирует только `config` и `yaml`; его
 импортируют `server.py` и `webui_status.py` — цикла нет, `config.py`
 остаётся корнем). Ведёт **персистентную таблицу** клиентских моделей, к
-которым агент реально обращался, и для каждой — доступность 4 известных
-API-эндпоинтов бэкенда **именно этой моделью**. Таблица сохраняется в
-YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Персистентность»)
-и переживает перезапуски адаптера:
+которым агент реально обращался (счётчики обращений и токены usage). Таблица
+сохраняется в YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже,
+«Персистентность») и переживает перезапуски адаптера:
 
 - **Точка учёта** — `server.do_POST`, сразу после strict-проверки модели
   (клиентское имя из BODY, **до** маппинга `_MAP`): `model_usage.record_
   model_usage(client_model)`. Недопустимая модель (HTTP 400) в таблицу не
-  попадает — хук стоит после `return`; провал резолва/пробы никогда не
+  попадает — хук стоит после `return`; провал резолва бэкенда никогда не
   роняет запрос (все исключения ловятся внутри).
 - **Схема строки** (`client_model` — ключ `_TABLE`): `backend` (имя из
   `_resolve_backend`), `calls` (счётчик обращений, растёт всегда),
   `input_tokens`/`output_tokens` (токены из usage-блоков ответов бэкенда,
-  см. ниже), `endpoints` (`{pname: {status, found}}` — только реально
-  пробованные пути; `found` ⇔ HTTP 200), `errors` (тексты сетевых ошибок
-  пробы), `first_seen` («HH:MM:SS»), `probing` (True, пока первый запрос
-  выполняет синхронную пробу). Колонки WEBUI-секции идут в порядке
-  `config.ENDPOINT_PROBES` (completions/messages/responses/embeddings).
+  см. ниже), `first_seen` («HH:MM:SS»).
 - **Поток первого обращения** — короткая критическая секция под
   `_TABLE_LOCK` (только поиск/создание/инкремент), затем **вне лока**:
-  резолв бэкенда (`config._resolve_backend`, без сети — имя для колонки) и,
-  если `config.ADAPTER_MODEL_USAGE_ENABLE`, синхронная дымовая проба
-  `_probe_model_endpoints(backend_cfg, resolved)`. Какие эндпоинты пробовать —
-  политика «только явно указанные» из §6.4: только pname, перечисленные в
-  `probe` YAML-записи бэкенда с непустой моделью (неперечисленные/пустые —
-  молчаливый пропуск); «кем пробовать» — resolved-имя ЗАПРОСА (не
-  probe-модель бэкенда). Та же низкоуровневая `config._probe_backend_endpoints`,
-  что у фоновой проверки бэкендов (§6.4), но без TTL-кэша: результат живёт
-  в строке таблицы, а найденные (HTTP 200) эндпоинты **синхронизируются** в
-  `config._ENDPOINT_STATE` бэкенда через `config.upsert_endpoint_state` —
-  единый источник колонки «Доступные API» и экспортёра (§6.4) видит их.
-  Таймаут одного POST — `MODEL_USAGE_PROBE_TIMEOUT = 10.0` (первый запрос
-  новой модели ждёт до 4×10 с; осознанно, см. ADR). Если resolved-модели
-  нет среди моделей бэкенда в `_MODEL_TO_BACKEND` — проба не выполняется
-  (колонки эндпоинтов «—»).
-- **Повторные обращения** — строка уже есть → только `calls += 1`, проба
-  никогда не повторяется. Конкурентность: два одновременных первых
-  обращения к одной модели дают одну пробу (вторая нить видит строку),
-  к разным — пробы идут параллельно в потоках `ThreadingHTTPServer`.
+  резолв бэкенда (`config._resolve_backend`, без сети — имя для колонки).
+  Сетевых запросов при учёте НЕТ (v0.9.9: дымовые пробы эндпойнтов сняты) —
+  первый запрос новой модели не ждёт ничего лишнего, только локальную
+  запись строки.
+- **Повторные обращения** — строка уже есть → только `calls += 1`.
+  Конкурентность: критическая секция короткая, поэтому два одновременных
+  первых обращения к одной модели дают одну строку, а к разным — идут
+  параллельно в потоках `ThreadingHTTPServer`.
 - **Счётчики токенов usage** — `input_tokens`/`output_tokens` копятся в
   локальных переменных `do_POST` из **usage-блоков ответов бэкенда** и
   фиксируются ОДИН раз в существующем `finally` через
@@ -637,102 +576,58 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   эвристика `chars/4` из streaming.py остаётся только для trace-поля
   `input_tokens_estimated` клиента и в учёт не попадает. Гейт — тот же
   `ADAPTER_MODEL_USAGE_ENABLE`; запросы, не прошедшие strict-проверку
-  (HTTP 400), и служебные дымовые пробы эндпоинтов токенов не дают.
+  (HTTP 400), токенов не дают.
 - **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
   в корне WEBUI (= `ADAPTER_DEBUG_LOGPATH`, дефолт `./tmp/logs`); файл
   несёт версию формата (`version: 2`, строки — под ключом `models`). Точка
   синхронизации пути — `webserver.serve()` (`set_persist_path(root_dir)`;
   в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении
   к пустой таблице (`_ensure_loaded_locked` под `_TABLE_LOCK`): строки
-  нормализуются (`probing` всегда False, счётчики/токены — неотрицательные
-  int, незнакомые pname/ключи отбрасываются); битый файл/незнакомая версия
-  (> 2) игнорируются (таблица стартует пустой). **Файл `version: 1`**
-  (учёт в байтах) при загрузке НЕ игнорируется — миграция:
-  `calls`/`endpoints`/`errors`/`first_seen` сохраняются, байтовые поля
-  (`bytes_sent`/`bytes_recv`) отбрасываются (`_normalize_row` не находит их
-  в схеме), токены стартуют с 0; следующие сохранения пишут `version: 2`.
+  нормализуются (счётчики/токены — неотрицательные int, незнакомые ключи
+  отбрасываются); битый файл/незнакомая версия (> 2) игнорируются (таблица
+  стартует пустой). **Файл `version: 1`** (учёт в байтах) при загрузке НЕ
+  игнорируется — миграция: `calls`/`first_seen` сохраняются, байтовые поля
+  (`bytes_sent`/`bytes_recv`) и устаревшие поля проб (`endpoints`/`errors`/
+  `probing`) отбрасываются (`_normalize_row` не находит их в схеме), токены
+  стартуют с 0; следующие сохранения пишут `version: 2`.
   Сохранение «грязной» таблицы — не чаще раза в
   `config.ADAPTER_MODEL_USAGE_SAVE_INTERVAL` (сек, дефолт 300); создание
   строки, обнуление счётчиков строки (`reset_model`: calls/input_tokens/
   output_tokens → 0, строка НЕ удаляется), удаление строки (`delete_model`:
   `del _TABLE[model]` под `_TABLE_LOCK` + `_DIRTY=True`, файл
   перезаписывается без строки — в отличие от reset, строка уходит и из
-  памяти, и из YAML), завершение перепроверки
-  (`_save_table(force=True)`) и завершение работы (`flush_table`, в т.ч.
-  Ctrl-C) сохраняют сразу. Строки с `probing: True` на диск не попадают;
-  запись атомарная (tmp + `os.replace`). Загруженные строки не
-  перепроверяются — fast-path на повторных обращениях; «освежить» результаты
-  проб строки без сброса счётчиков — фоновая перепроверка
-  (`POST /api/model-usage/reprobe`, см. ниже). При загрузке found-эндпоинты
-  строк (для бэкендов из текущего `_BACKENDS`) синхронизируются в
-  `config._ENDPOINT_STATE` через `config.upsert_endpoint_state` — колонка
-  «Доступные API» бэкенда и экспортёр видят их сразу, без сети (контракт
-  «загруженные строки не перепробуются» сохраняется: синхронизация кэша —
-  не проба).
+  памяти, и из YAML) и завершение работы (`flush_table`, в т.ч. Ctrl-C)
+  сохраняют сразу; запись атомарная (tmp + `os.replace`). Загруженные строки
+  повторно не читаются с диска — источник правды после старта память.
 - **Мастер-флаг `ADAPTER_MODEL_USAGE_ENABLE`** (config.py, дефолт `1`):
-  `0` — пробы и накопление токенов отключены, учёт обращений остаётся
-  (колонки эндпоинтов «—», Input/Output — «0»). Пробы по модели НЕ зависят
-  от `ADAPTER_ENDPOINT_PROBE` (тот управляет только фоновой проверкой
-  бэкендов §6.4/§6.5). В runtime-пул `/config` флаг не входит;
-  персистентность работает независимо от мастер-флага.
+  `0` — накопление токенов отключено, учёт обращений остаётся (Input/Output
+  — «0»). В runtime-пул `/config` флаг не входит; персистентность работает
+  независимо от мастер-флага.
 - **Вывод** — секция «Models in use» на статус-странице `/` сразу под
   кнопкой проверки бэкендов 🔃 (подписи-абзаца перед ней нет; футер о
   проверке и кнопка — под таблицей бэкендов), рендер —
   `webui_status._usage_rows_html`, `model_usage.usage_snapshot()` — копии
   строк в порядке первого обращения; первый вызов после старта загружает
   таблицу из YAML. Колонки: Модель | Бэкенд | Вызовов | Input | Output |
-  Cost | **Endpoints** | Actions (8). Endpoints — одна колонка: только доступные
-  эндпоинты строки короткими именами через запятую (зелёным, порядок
-  `config.ENDPOINT_PROBES`; ничего доступного — серая «—»). Токеновые
+  Cost | Actions (7). Токеновые
   колонки рендерятся форматтером `_fmt_tokens` (точное число с неразрывным
-  пробелом-разделителем тысяч: «12 345»; «0» — usage в ответах не было).
+  пробелом-разделителем тысяч: «12 345»; «0» — usage в ответах не было).
   **Live-счётчики**: JS `usage_poll` (безусловный, в <head>) каждые ~5 с
   опрашивает GET `/api/model-usage/snapshot` (`UsageSnapshotEndpoint` →
   `usage_snapshot()`, из памяти, сети к бэкендам нет) и обновляет только
   ячейки Вызовов/Input/Output (data-атрибуты на td; позиционный матчинг со
   снимком); число строк изменилось (строка удалена/новая модель) —
   `location.reload()`.
-- **Перепроверка строки (reprobe)** — `POST /api/model-usage/reprobe?model=
-  <имя>` (`ModelUsageReprobeEndpoint`): повторная дымовая проба эндпоинтов
-  **именно этой моделью** (по политике «только явно указанные» из §6.4 —
-  только pname из `probe` бэкенда с непустой моделью) для строк с колонками
-  «—» (первый запрос давно / бэкенд ожил / модель появилась в `/v1/models`).
-  Запуск — в фоне:
-  `model_usage.start_reprobe` публикует снимок `_REPROBE` (client_model →
-  `started_at`) под `_REPROBE_LOCK` (отдельный от `_TABLE` и от
-  `config._REFRESH_JOB`; НЕ ставит `probing` строки — перепроверка не
-  выкидывает строку из сериализации) и стартует daemon-поток `_reprobe_worker`
-  → `reprobe_model(client_model)` (ядро: строка есть и не `probing` →
-  резолв + `_backend_has_model` + `_probe_model_endpoints` с таймаутом
-  `MODEL_USAGE_PROBE_TIMEOUT`; обновляет только `backend`/`endpoints`/
-  `errors`, `_DIRTY = True` + `_save_table(force=True)`; **calls и токены не
-  трогает** — проба служебная, не обращение агента; найденные эндпоинты
-  синхронизируются в `config._ENDPOINT_STATE` (§6.4); исключения ловятся).
-  Не-JSON (кнопки-иконки в колонке Actions: ⟳ «Перепроверить» / ↺
-  «Сбросить» / ✕ «Удалить» — три отдельные формы в одной ячейке,
-  `_actions_cell_html` по `_ACTIONS`; тексты-фразы в `title`/`aria-label`)
-  — 303 See Other на GET `/` (PRG); JSON — 202
-  «запущено», 404 «нет строки / уже идёт / первая проба ещё выполняется»,
-  400 «нет model». Пока перепроверка идёт: баннер «Перепроверка модели X…»,
-  в строке — серый «проверяется…» вместо кнопок; JS `reprobe_poll`
-  опрашивает GET `/api/model-usage/reprobe-state` (`ReprobeStateEndpoint`,
-  JSON из `model_usage.reprobe_state()`: running/model/started_at) каждые
-  ~2 с и делает `location.reload()` по завершении — состояние живёт в
-  `model_usage`, не в `config.refresh_state()`.
 - **Удаление строки (delete)** — `POST /api/model-usage/delete?model=<имя>`
   (`ModelUsageDeleteEndpoint`, по образцу reset): `model_usage.delete_model`
   — под `_TABLE_LOCK`: `_ensure_loaded_locked()` + `del _TABLE[model]` +
   `_DIRTY=True`; вне лока `_save_table(force=True)` (файл сразу без строки).
-  Чистка `config._ENDPOINT_STATE` НЕ требуется: кэш доступности эндпоинтов —
-  общий на бэкенд, не по моделям (стирание было бы гонкой с фоновой пробой).
-  Безопасен при идущей перепроверке строки (`reprobe_model` в finally
-  увидит `row is None` и не мутирует). Не-JSON (кнопка ✕) — 303 на GET `/`
+  Не-JSON (кнопка ✕) — 303 на GET `/`
   (PRG); JSON — 200 `{"ok": true, "model": ...}` при удалении, 404 «строки
   нет» (повторное удаление — строка уже ушла; delete НЕ идемпотентен, в
   отличие от reset), 400 «нет model». GET на префикс — 404. Сброс/удаление
   не совмещены: reset обнуляет счётчики и сохраняет строку, delete убирает
   строку целиком.
-
 ### 6.7 Health-эндпоинты (`webui_ops.py`, `/healthz` `/health` `/live` `/ready`)
 
 На общем WEBUI-слушателе (НЕ на порту адаптера и не на порту экспортёра)
@@ -780,8 +675,7 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
 - **По бэкенду** (label `name`, `base`): `backend_adapter_backend_up`
   (1/0 — есть ли имя бэкенда в `errors` снимка последней проверки),
   `backend_adapter_backend_models` (число моделей бэкенда в
-  `_MODEL_TO_BACKEND`), `backend_adapter_backend_endpoint{endpoint=pname}` —
-  по `config._ENDPOINT_STATE` (единый источник после синхронизации §6.4/§6.6);
+  `_MODEL_TO_BACKEND`);
 - **По использованной модели** (label `model`, `backend`):
   `backend_adapter_model_calls_total`, `backend_adapter_model_input_tokens_total`,
   `backend_adapter_model_output_tokens_total` из `model_usage.usage_snapshot()`
@@ -792,31 +686,24 @@ YAML-файл `model-usage.yaml` в корне WEBUI (см. ниже, «Перс
   страницы; экспортёр не должен ронять адаптер: OSError на bind → `None`
   + строка `[EXPORTER] Failed to bind ...`, остальное работает.
 
-### 6.9 JSON-результаты проверок в LOGPATH (`probe_json.py`, v0.9.0)
+### 6.9 JSON-результат опроса списка моделей в LOGPATH (`probe_json.py`, v0.9.0)
 
-Безусловный наблюдательный канал (как .err-файлы, см. §8): результаты
-проверок бэкендов пишутся плоскими JSON-файлами в корень
+Безусловный наблюдательный канал (как .err-файлы, см. §8): результат опроса
+бэкенда на список моделей пишется плоским JSON-файлом в корень
 `ADAPTER_DEBUG_LOGPATH`, рядом с `model-usage.yaml` и корнем WEBUI:
 
-- `<имя_бэкенда>.models.json` — проверка бэкенда на доступные модели
-  (`.models.json`): стартовый `_init_multi_backends` (config.py), фоновая
-  `refresh_models` (кнопка «⟳ Перепроверить»), reload-перечитывания;
-- `<имя_бэкенда>.<конверт.модель>.<pname>.json` — проверка эндпоинта модели
-  (config.py `probe_endpoints` — фоновая проба бэкенда; model_usage.py
-  `_probe_model_endpoints` — пер-модельные пробы usage-таблицы: первое
-  обращение модели и reprobe строки). `pname` — из `ENDPOINT_PROBES`:
-  `completions | messages | responses | embeddings`.
+- `<имя_бэкенда>.models.json` — результат опроса `GET /v1/models`: стартовый
+  `_init_multi_backends` (config.py), фоновая `refresh_models` (кнопка
+  «⟳ Перепроверить»), reload-перечитывания.
 
-Конвертация имени модели для файла: все `/` и `:` → `_`
-(`org/model:v1` → `org_model_v1`); остальные символы не трогаются.
 Каждый файл при каждой новой проверке ПЕРЕЗАПИСЫВАЕТСЯ целиком (атомарно:
 tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не гейтится
 `ADAPTER_DEBUG_ENABLE` / `ADAPTER_DEBUG_PARTS` / `ADAPTER_DEBUG_TRIM`;
 директория создаётся при записи. Секреты маскируются `redact()` по
 умолчанию (полные данные — при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`,
 живое чтение config); любая ошибка записи молча глотается — проверку не
-роняет. Модуль — лист DAG: импортируется config.py и model_usage.py
-(оба корня DAG), сам на верхнем уровне — stdlib only.
+роняет. Модуль — лист DAG: импортируется config.py (корень DAG), сам на
+верхнем уровне — stdlib only.
 
 ### 6.10 Таблица активных сессий агентов (`session_registry.py`, v0.9.2; страница `/sessions` — v0.9.5)
 
@@ -1167,7 +1054,7 @@ Long base64/hex strings may also be matched.
 - **`.err` is independent of `ADAPTER_SESSIONS_TABLE` (v0.9.7):** whether a
   request's error is written is decided by `_req_ctx.err_eligible` (input path
   recognised), not by a live sessions-table row. Covered: backend incidents
-  (4xx/5xx after retries), adapter-level errors (400/404/502 rejects, 501 model
+  (4xx/5xx after retries), adapter-level errors (400/404 rejects, 501 model
   list), unhandled `do_POST` exceptions (500), unsupported methods (501) and
   mid-stream aborts (`final_status=200`, `mid-stream abort: …`)
 - Timestamp frozen on first use per session (all traffic → same file)
@@ -1306,12 +1193,11 @@ ADAPTER_RETRY`) подъём не делается: повторять неку�
 ```
 backend-adapter.py
   ├── config.py          (no internal deps on the top level — stdlib only;
-  │                       writes probe JSON via probe_json — безусловный канал;
-  │                       probe_endpoints/_http_json: HTTP POSTs на бэкенды)
+  │                       writes the models-probe JSON via probe_json —
+  │                       безусловный канал; _fetch_models: GET /v1/models)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log,
   │                       convert, streaming, model_usage, routing, session_registry
-  ├── model_usage.py     → config, yaml, probe_json (used-models table, см. §6.6;
-  │                       пер-модельные пробы эндпоинтов пишут JSON-дампы в LOGPATH)
+  ├── model_usage.py     → config, yaml, probe_json (used-models table, см. §6.6)
   ├── session_registry.py → config (лист DAG: in-memory таблица сессий агентов
   │                       — строка = кортеж session+agent+model+backend+route,
   │                       страница "/sessions" — v0.9.2/v0.9.5)
@@ -1327,7 +1213,7 @@ backend-adapter.py
   ├── probe_json.py      (no internal deps on the top level — stdlib only;
   │                       config/redact читаются локально внутри записи)
   ├── routing.py         → config, session_settings (лист DAG по config: входные
-  │                       форматы, TARGET-реестр, decide по кэшу endpoint_support
+  │                       форматы, TARGET-реестр, decide по TARGET-переменной
   │                       + пер-сессионный TARGET — см. §4.2)
   ├── convert.py         → tracer, config
   ├── streaming.py       → tracer, config, logger
@@ -1344,8 +1230,7 @@ backend-adapter.py
   ├── session_viewer.py  → webserver (эндпойнт "/session"), artifact_tree
   ├── webui_status.py    → webserver (эндпоинты "/", "/api/refresh-state",
   │                       "/api/model-usage/snapshot", "/api/model-usage/reset",
-  │                       "/api/model-usage/delete", "/api/model-usage/reprobe",
-  │                       "/api/model-usage/reprobe-state"),
+  │                       "/api/model-usage/delete"),
   │                       config, model_usage
   ├── webui_sessions.py  → webserver (страница "/sessions" + эндпоинты
   │                       "/api/sessions/snapshot|reset|delete|settings",

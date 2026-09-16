@@ -222,7 +222,7 @@ def _flush_pending_error() -> None:
     (``_write_backend_error``), — пишем обобщённый ERROR-блок
     (``write_session_error``). Так .err покрывает ВЕСЬ ошибочный трафик
     сессии, а не только инциденты бэкенда: 400 валидации тела (Invalid JSON /
-    Missing model / strict-модель), 404 disabled-входа, 400/502 reject
+    Missing model / strict-модель), 404 disabled-входа, 400 reject
     маршрута.
 
     Запись отложена именно в finally, а не сделана сразу в
@@ -528,9 +528,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             # === Диспетчер входных эндпоинтов (v0.9.0) ===
             # Три входных POST-пути — /v1/messages, /v1/chat/completions,
-            # /v1/responses — по таблице routing.INPUT_PATHS (зеркало
-            # ENDPOINT_PROBES). Любой другой путь — не вход адаптера: 404
-            # с прежним текстом контракта (тест 404-контракта не меняется).
+            # /v1/responses — по статической таблице routing.INPUT_PATHS.
+            # Любой другой путь — не вход адаптера: 404 с прежним текстом
+            # контракта (тест 404-контракта не меняется).
             inp_fmt = routing.input_path_to_format(self.path)
             if inp_fmt is None:
                 self._send_json(404, {"error": "Expected /v1/messages"})
@@ -663,9 +663,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # action:
             #   disabled — вход выключен (TARGET=none) → 404 (ДО учёта usage,
             #              как 400-пути: запрос до бэкенда не дошёл);
-            #   reject   — маршрута нет (нереализованная пара / бэкенд
-            #              подтверждённо не поддерживает целевой формат) →
-            #              400|502, тоже до учёта;
+            #   reject   — маршрута нет (нереализованная пара) → 400, тоже
+            #              до учёта;
             #   passthrough — TARGET=passthrough: тело уходит бэкенду КАК ЕСТЬ
             #              на эндпойнт входного формата (E→E);
             #   convert  — прямое преобразование входа в формат-цель:
@@ -674,7 +673,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # v0.9.5: session_id передаётся в decide/target_for_input — TARGET
             # может быть переопределён ДЛЯ СЕССИИ (session_settings), не трогая
             # общую настройку приложения.
-            route = routing.decide(inp_fmt, backend_name, session_id)
+            route = routing.decide(inp_fmt, session_id)
             route_action, out_fmt, route_msg, route_status = route
             _dr(
                 req_id,
@@ -740,11 +739,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             is_passthrough = route_action == "passthrough"
 
             # Учёт использованной модели (таблица WEBUI «Использованные
-            # модели»): клиентское имя ДО маппинга; при первом обращении —
-            # синхронная проба эндпоинтов этой моделью (резолв внутри
-            # функции). Ставится ПОСЛЕ решения о маршруте — disabled/reject
-            # (запрос до бэкенда не дошёл) в счётчики не попадают, как
-            # 400-пути. Учёт не влияет на запрос: провал пробы не роняет его.
+            # модели»): клиентское имя ДО маппинга (резолв бэкенда внутри
+            # функции, без сети). Ставится ПОСЛЕ решения о маршруте —
+            # disabled/reject (запрос до бэкенда не дошёл) в счётчики не
+            # попадают, как 400-пути. Учёт не влияет на запрос.
             model_usage.record_model_usage(client_model)
             usage_active = True
 

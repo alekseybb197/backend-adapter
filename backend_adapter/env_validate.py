@@ -65,7 +65,6 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_STREAM_INCLUDE_USAGE": "bool",
     "ADAPTER_SENSITIVE_LOGGING_ENABLE": "bool",
     "ADAPTER_EXPORTER_ENABLE": "bool",
-    "ADAPTER_ENDPOINT_PROBE": "bool",
     "ADAPTER_MODEL_USAGE_ENABLE": "bool",
     # --- str (свободный текст) ---
     "ADAPTER_BACKEND_CONFIG": "str",

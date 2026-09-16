@@ -1,5 +1,5 @@
 """Configuration: env var reads, model mapping, multi-backend globals,
-backend probe, YAML parser, SSL context, utility functions.
+backend model polling, YAML parser, SSL context, utility functions.
 
 This is the heaviest module (root of the dependency DAG).
 """
@@ -16,7 +16,7 @@ import urllib.request
 
 from . import (
     env_validate,  # строгий разбор bool/int env (лист DAG, v0.9.6)
-    probe_json,  # JSON-дампы результатов проверок в LOGPATH (лист DAG)
+    probe_json,  # JSON-дампы опроса моделей в LOGPATH (лист DAG)
 )
 
 # ==================== НАСТРОЙКИ ====================
@@ -421,28 +421,11 @@ ADAPTER_MODELS_MAPPING = os.environ.get("ADAPTER_MODELS_MAPPING", "")
 
 # ==================== BACKEND CONFIG ====================
 ADAPTER_BACKEND_CONFIG = os.environ.get("ADAPTER_BACKEND_CONFIG", "")
-# Мастер-флаг «дымовой» пробы API-эндпойнтов бэкендов (config.refresh_models →
-# probe_endpoints): при 1 каждый refresh моделей дополнительно пробует у каждого
-# бэкенда известные эндпойнты API короткими запросами max_tokens:1 (результат —
-# на статус-странице WEBUI «Доступные API» и в консоли как [ENDPOINT_PROBE]).
-# 0 — автопроба отключена (колонка «не опрошено», сетевых POST-проб нет).
-# Кэш результатов — ENDPOINT_PROBE_TTL секунд (повторные заходы на страницу
-# в течение TTL не дублируют запросы к бэкенду).
-ADAPTER_ENDPOINT_PROBE = env_validate.parse_bool(
-    os.environ.get("ADAPTER_ENDPOINT_PROBE", "1"), True
-)
-
 # Таблица использованных моделей (см. backend_adapter/model_usage.py): учёт
 # клиентских моделей, прошедших strict-проверку (имя из BODY, до маппинга).
-# При ПЕРВОМ обращении к новой модели — синхронная дымовая проба 4 известных
-# эндпоинтов ИМЕННО этой моделью (первый запрос модели ждёт до 4×10 с);
-# повторные обращения не перепроверяют никогда. 1 — проба выполняется при
-# первом обращении ВСЕГДА, независимо от ADAPTER_ENDPOINT_PROBE (тот управляет
-# только фоновой пробой бэкендов refresh_models). 0 — пробы отключены, учёт
-# обращений остаётся (колонки эндпоинтов — «—»). Таблица персистентна:
-# сохраняется в YAML-файл model-usage.yaml в корне WEBUI (см.
-# ADAPTER_MODEL_USAGE_SAVE_INTERVAL ниже) и загружается при старте;
-# в RUNTIME_CONFIG_POOL не входит.
+# Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
+# WEBUI (см. ADAPTER_MODEL_USAGE_SAVE_INTERVAL ниже) и загружается при
+# старте; в RUNTIME_CONFIG_POOL не входит.
 ADAPTER_MODEL_USAGE_ENABLE = env_validate.parse_bool(
     os.environ.get("ADAPTER_MODEL_USAGE_ENABLE", "1"), True
 )
@@ -619,24 +602,14 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
           - name: AAA
             base: https://llm.service.example.com
             key: ADAPTER_BACKEND_KEY_AAA
-            probe:                    # НЕобязательно — см. ниже
-              - completions: qwen3.6
-              - messages:
-              - responses: gpt-5-sol
-              - embeddings: text-embedding-3-small
           - name: BBB
             base: https://llm.service.another.com
             key: ADAPTER_BACKEND_KEY_BBB
 
-    ``probe`` — необязательный ключ записи: какие API-эндпойнты бэкенда
-    пробовать и какой моделью (см. probe_endpoints). Список пар
-    ``<эндпойнт>: <модель>``. Политика «только явно указанные пробы»:
-    пробуется ТОЛЬКО эндпойнт, перечисленный с НЕПУСТОЙ моделью;
-    неперечисленные и пустые значения (``messages:``) НЕ пробуются.
-    Ключа ``probe`` нет — не пробуется ничего. Порядок пар сохраняется.
+    Читаются только ключи ``name``/``base``/``key``; любые другие ключи
+    записи (в т.ч. подблоки) молча игнорируются.
 
-    Возвращает список dict: {name, base, key} (+ probe, если задан) или
-    None при ошибке."""
+    Возвращает список dict: {name, base, key} или None при ошибке."""
     try:
         with open(path) as f:
             raw = f.read()
@@ -664,21 +637,12 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
                 blocks.append(current)
             current = {"name": m.group(1).strip().strip('"').strip("'")}
             continue
-        # Продолжение текущей записи: "    base: ...", "    key: ...",
-        # либо строка подблока "probe:" ("      - completions: qwen3.6").
+        # Продолжение текущей записи: "    base: ...", "    key: ...".
+        # Прочие ключи (в т.ч. подблоки) молча игнорируются.
         if current is not None:
             m2 = re.match(r"^\s+(\w+):\s*(.*)$", line)
             if m2 and m2.group(1) in ("name", "base", "key"):
                 current[m2.group(1)] = m2.group(2).strip().strip('"').strip("'")
-                continue
-            # Строка подблока probe: "      - <эндпойнт>: <модель>"
-            # (значение может быть пустым — «не пробовать»; имя эндпойнта —
-            # слово, возможно с дефисами).
-            mp = re.match(r"^\s+-\s+([\w-]+):\s*(.*)$", line)
-            if mp:
-                current.setdefault("probe", {})[mp.group(1)] = (
-                    mp.group(2).strip().strip('"').strip("'")
-                )
 
     if current is not None:
         blocks.append(current)
@@ -725,7 +689,7 @@ def _is_http_url(value: str) -> bool:
     return bool(m and m.group(1))
 
 
-# ==================== MULTI-BACKEND: PROBE & INIT ====================
+# ==================== MULTI-BACKEND: INIT ====================
 _AVAILABLE_MODELS: dict[str, dict] = {}
 
 
@@ -812,434 +776,6 @@ def _write_models_snapshot(
     probe_json.write_models_json(bname, payload)
 
 
-# ==================== MULTI-BACKEND: ENDPOINT PROBE ====================
-# «Дымовая» проба API-эндпойнтов бэкенда: короткий POST (max_tokens:1) на
-# каждый известный путь — определить, какие эндпойнты бэкенд реально
-# обслуживает, не тратя токены на содержательный ответ. Выполняется при
-# каждом refresh_models — а тот вызывается из фонового воркера проверки
-# (start_refresh: при старте адаптера, на первом GET "/" и по кнопке 🔃
-# «Перепроверить бэкенды»), не при каждой загрузке страницы; результат —
-# колонка «Доступные API» на странице и лог-строка [ENDPOINT_PROBE] в
-# консоли. Мастер-флаг — ADAPTER_ENDPOINT_PROBE (0 — автопроба отключена).
-#
-# Классификация по HTTP-коду ответа (см. tmp/plan-llm-endpoints.md):
-#   200                  — эндпоинт работает (found=True);
-#   прочие 4xx/5xx (вкл. 400/401/405/429) и 404 — эндпоинт НЕ работает
-#                         (found=False): тело/ключ не подошли, либо путь
-#                         не реализован — на странице такие не показываются;
-#   сеть/таймаут         — ошибка бэкенда целиком (found=False + текст).
-# Политика «только явно указанные пробы»: пробуется ТОЛЬКО эндпойнт,
-# перечисленный в ``probe`` записи backend с НЕПУСТОЙ моделью (этой
-# моделью). Неперечисленные эндпойнты, пустые значения (``messages:``)
-# и бэкенды без ключа ``probe`` вовсе НЕ пробуются — это штатное
-# состояние, а не ошибка (см. probe_endpoints). Модель из ``probe``, не
-# найденная среди моделей бэкенда в /v1/models, пропускается точечно.
-ENDPOINT_PROBES: tuple[tuple[str, str, dict], ...] = (
-    ("completions", "/v1/chat/completions", {"max_tokens": 1}),
-    ("messages", "/v1/messages", {"max_tokens": 1}),
-    ("responses", "/v1/responses", {"max_output_tokens": 1}),
-    ("embeddings", "/v1/embeddings", {}),
-)
-# TTL кэша результатов пробы: повторные заходы на статус-страницу в течение
-# этого окна НЕ дублируют запросы к бэкенду (кэш-хит отдаётся без сети).
-ENDPOINT_PROBE_TTL = 60.0
-
-# Кэш результатов пробы по бэкендам — мутируется на месте (как
-# _AVAILABLE_MODELS), потому что webui_status.py импортирует его по ссылке.
-# Ключ — имя бэкенда; значение: {"at": float(ts), "endpoints": {<путь>:
-# {"status": int|None, "found": bool}}, "errors": {...}}.
-_ENDPOINT_STATE: dict[str, dict] = {}
-
-
-def _http_json(
-    method: str,
-    url: str,
-    headers: dict[str, str],
-    body: dict,
-    timeout: float | None,
-) -> tuple[int | None, dict | None, str | None]:
-    """Низкоуровневый JSON-запрос к бэкенду (для дымовой пробы эндпойнтов).
-
-    Образец — ``_fetch_models`` (SSL_CTX, urllib.request); тот не
-    переписываем (его поведение покрыто тестами), общий шаблон запроса
-    вынесен сюда, чтобы не дублировать SSL/таймаут-логику.
-
-    Возвращает ``(status_code | None, json_data | None, err_str | None)``:
-    - ``(code, тело, None)`` — сервер ответил (в т.ч. HTTPError 4xx/5xx —
-      это НЕ исключение для дыма: код несёт информацию о статусе эндпоинта);
-    - ``(None, None, текст)`` — сетевая ошибка/таймаут/битый JSON."""
-    data = json.dumps(body).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": headers.get("Authorization", ""),
-            "Content-Type": "application/json",
-            "Connection": "keep-alive",
-            **headers,
-        },
-        method=method,
-    )
-    try:
-        resp = urllib.request.urlopen(
-            req, context=SSL_CTX, timeout=ADAPTER_TIMEOUT if timeout is None else timeout
-        )
-        code = resp.status
-        raw = resp.read()
-    except urllib.error.HTTPError as e:
-        code = e.code
-        raw = e.read()
-    except Exception as e:
-        return None, None, str(e)
-    try:
-        return code, json.loads(raw), None
-    except Exception:
-        return code, None, None
-
-
-def _probe_model(backend: dict, name: str) -> tuple[str | None, bool | None]:
-    """Модель, которой пробуется эндпойнт ``name`` бэкенда.
-
-    Политика «только явно указанные пробы» (см. probe_endpoints):
-    ``probe`` бэкенда задан и содержит ``name`` с непустой моделью, И эта
-    модель есть среди моделей бэкенда в /v1/models → она (model_is_valid
-    = True). Все прочие случаи НЕ пробуются:
-      - ``probe`` не задан / ``name`` в нём нет / значение пустое
-        (``messages:``) → ``(None, None)`` — штатный пропуск эндпойнта
-        (молча, без ошибки и WARN: бэкенд просто не перечисляет эту пробу);
-      - модель задана, но НЕ найдена среди моделей бэкенда → ``(None,
-        False)`` — эндпоинт пропускается ТОЧЕЧНО с текстом в errors
-        (валидация строгая: слать бэкенду несуществующую модель бессмысленно).
-
-    У бэкенда нет НИ ОДНОЙ модели в кэше (упал на /v1/models) — probe-модель
-    из YAML не с чем сверить: возвращается ``(specified, False)`` для
-    заданных проб (пропуск с текстом) и ``(None, None)`` для остальных;
-    весь бэкенд без моделей обрабатывается в probe_endpoints (см.
-    ``_backend``-ошибку)."""
-    probe = backend.get("probe")
-    if probe and name in probe and probe[name]:
-        specified = probe[name]
-        # Сверка с реальностью: модель задана в YAML, но её нет среди
-        # моделей бэкенда в /v1/models — эндпоинт НЕ пробуется (валидация
-        # строгая: слать бэкенду несуществующую модель бессмысленно).
-        if any(
-            _MODEL_TO_BACKEND[mid][0] == backend["name"] and mid == specified
-            for mid in _MODEL_TO_BACKEND
-        ):
-            return specified, True
-        return None, False
-    return None, None
-
-
-def _pname_for_path(path: str) -> str | None:
-    """Короткое имя эндпоинта ENDPOINT_PROBES по полному пути (или None)."""
-    for pname, ep_path, _tpl in ENDPOINT_PROBES:
-        if ep_path == path:
-            return pname
-    return None
-
-
-def _write_endpoint_snapshot(
-    bname: str,
-    model: str,
-    pname: str,
-    path: str,
-    status: int | None,
-    found: bool,
-    *,
-    error: str | None = None,
-) -> None:
-    """JSON-дамп результата пробы эндпоинта модели (v0.9.0).
-
-    Файл ``<бэкенд>.<конверт.модель>.<pname>.json`` в ADAPTER_DEBUG_LOGPATH
-    (конвертация модели — probe_json._convert_name). Безусловный
-    наблюдательный канал: пишется при каждой фактической пробе (фоновая
-    проверка бэкендов и пер-модельные пробы usage-таблицы), перезаписывая
-    файл целиком. ``status=None`` — сетевая ошибка/таймаут (found=False,
-    текст — в ``error``). Провал записи молча глотается в probe_json."""
-    payload = {
-        "backend": bname,
-        "model": model,
-        "endpoint": pname,
-        "path": path,
-        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "status": status,
-        "found": found,
-    }
-    if error is not None:
-        payload["error"] = error
-    probe_json.write_endpoint_json(bname, model, pname, payload)
-
-
-def probe_endpoints(timeout: float | None = None) -> dict:
-    """Дымовая проба API-эндпойнтов настроенных бэкендов.
-
-    Политика «только явно указанные пробы»: пробуется ТОЛЬКО эндпойнт,
-    перечисленный в ``probe`` записи backend с НЕПУСТОЙ моделью (этой
-    моделью, сверенной со свежим /v1/models). Неперечисленные эндпойнты,
-    пустые значения (``messages:``) и бэкенды без ключа ``probe`` вовсе
-    НЕ пробуются — штатное состояние (в results не попадают, в errors не
-    значатся, лог-строки не дают; у такого бэкенда состояние пробы просто
-    НЕ создаётся — колонка «Доступные API» страницы пуста).
-
-    Кэш: при ADAPTER_ENDPOINT_PROBE=0 или свежем результате (моложе
-    ENDPOINT_PROBE_TTL) сеть не трогается — возвращается _ENDPOINT_STATE
-    как есть (при первом вызове — пустой). Свежесть — по самому старому
-    элементу: бэкенд, добавленный позже, пробуется, остальные — из кэша.
-
-    Возвращает ``{"ok": bool, "endpoints": {имя: {путь: {...}}},
-    "errors": {имя: текст}}``. ``endpoints`` — только реально пробованные
-    пути (пропущенные — политикой или из-за отсутствующей probe-модели — в
-    результатах НЕ значатся; текст о непройденной сверке — в ``errors``).
-    ok=True — хотя бы один путь реально пробован (или отдан из кэша).
-    """
-    # --- Кэш: мастер-флаг выключен ИЛИ результат свежий (без сети) ---
-    if not ADAPTER_ENDPOINT_PROBE:
-        return {"ok": False, "endpoints": _ENDPOINT_STATE, "errors": {}}
-    cached = [
-        s
-        for s in _ENDPOINT_STATE.values()
-        if s.get("at") is not None and time.time() - s["at"] < ENDPOINT_PROBE_TTL
-    ]
-    if len(cached) == len(_ENDPOINT_STATE) and cached:
-        return {
-            "ok": True,
-            "endpoints": _ENDPOINT_STATE,
-            "errors": {
-                name: s["errors"]
-                for name, s in _ENDPOINT_STATE.items()
-                if s.get("at") is not None and time.time() - s["at"] < ENDPOINT_PROBE_TTL
-            },
-        }
-
-    # --- Проба: бэкенды из _BACKENDS (standalone — перечитать YAML) ---
-    backends = _BACKENDS
-    if not backends:
-        blocks = _parse_backend_yaml(ADAPTER_BACKEND_CONFIG)
-        if not blocks:
-            return {"ok": False, "endpoints": _ENDPOINT_STATE, "errors": {}}
-        backends = blocks
-
-    state = _ENDPOINT_STATE
-    errors_all: dict[str, str] = {}
-    ok_any = False
-    for b in backends:
-        bname = b["name"]
-        # Свежий результат этого бэкенда — из кэша, не пробуем повторно.
-        prev = state.get(bname)
-        if (
-            prev is not None
-            and prev.get("at") is not None
-            and time.time() - prev["at"] < ENDPOINT_PROBE_TTL
-        ):
-            ok_any = True
-            continue
-        # Собираем probes: модель на каждый эндпойнт из ENDPOINT_PROBES,
-        # ПЕРЕЧИСЛЕННЫЙ в probe бэкенда с непустой моделью (политика
-        # «только явно указанные пробы» — неперечисленные/пустые значения
-        # не пробуются вовсе, молча: для них _probe_model вернул (None, None)).
-        probes: dict[str, str] = {}
-        berrors: dict[str, str] = {}
-        for pname, path, _tpl in ENDPOINT_PROBES:
-            model, model_valid = _probe_model(b, pname)
-            if model is None:
-                if model_valid is False:
-                    # probe-модель задана в YAML, но НЕ найдена среди моделей
-                    # бэкенда в /v1/models — пропускается ТОЛЬКО этот эндпоинт
-                    # (остальные пробуются своими моделями); после следующего
-                    # refresh_models (модели могли обновиться) — пробуется снова.
-                    spec = (b.get("probe") or {}).get(pname, "")
-                    print(
-                        f"[WARN] Endpoint probe: model '{spec}' for '{pname}' "
-                        f"not found among models of backend '{bname}' — "
-                        f"skipping this endpoint only"
-                    )
-                    berrors[pname] = (
-                        f"probe model '{spec}' for {pname} not found among backend models"
-                    )
-                    continue
-                # model_valid is None — эндпойнт не перечислен в probe с непустой
-                # моделью: штатный пропуск политикой. Но если у бэкенда НЕТ НИ
-                # ОДНОЙ модели в кэше (упал на /v1/models), заданные probe-модели
-                # не с чем сверить — весь бэкенд в errors, эндпойнты не трогаем.
-                if any(_MODEL_TO_BACKEND[mid][0] == bname for mid in _MODEL_TO_BACKEND):
-                    continue  # модели есть — обычный политический пропуск
-                berrors["_backend"] = (
-                    "no models available (backend unreachable or empty /v1/models)"
-                )
-                break
-            probes[path] = model
-        if not probes:
-            # Бэкенд не перечислил ни одной пробы (нет ключа probe / все
-            # значения пустые) — штатно: проб не нужно, состояние НЕ
-            # создаётся (колонка «Доступные API» пуста), в errors бэкенд
-            # не попадает. Ошибочный пропуск — только когда весь бэкенд
-            # без моделей (berrors["_backend"]).
-            if berrors:
-                errors_all[bname] = "; ".join(f"{k}: {v}" for k, v in berrors.items())
-            continue
-        result = _probe_backend_endpoints(b, probes, timeout=timeout)
-        ok_any = True
-        if result["errors"]:
-            errors_all[bname] = "; ".join(f"{k}: {v}" for k, v in result["errors"].items())
-        elif berrors:
-            # Проба прошла без сетевых ошибок, но часть эндпойнтов была
-            # пропущена на этапе сбора (probe-модель не найдена) — их тексты
-            # живут в berrors и должны попасть в сводку errors бэкенда.
-            errors_all[bname] = "; ".join(f"{k}: {v}" for k, v in berrors.items())
-        state[bname] = {
-            "at": time.time(),
-            "endpoints": result["endpoints"],
-            "errors": result["errors"],
-        }
-        _log_probe(bname, b["base"], result["endpoints"], result["errors"])
-        # JSON-дампы результатов пробы эндпоинтов (v0.9.0): файл на каждый
-        # реально пробованный путь — <бэкенд>.<модель>.<pname>.json, где
-        # модель — та, которой эндпоинт пробовался (probes[path]). Пишутся
-        # при каждом фактическом прогоне (не из кэша), перезаписываясь
-        # целиком. (ep_name, а не pname: внешний pname-цикл выше имеет тип
-        # str, тут — str | None после _pname_for_path.)
-        for path, ep in result["endpoints"].items():
-            ep_name = _pname_for_path(path)
-            if ep_name is None:
-                continue  # путь вне ENDPOINT_PROBES — не наш (страховка)
-            _write_endpoint_snapshot(
-                bname,
-                probes[path],
-                ep_name,
-                path,
-                ep.get("status"),
-                bool(ep.get("found")),
-                error=result["errors"].get(ep_name),
-            )
-
-    return {
-        "ok": ok_any,
-        "endpoints": _ENDPOINT_STATE,
-        "errors": errors_all,
-    }
-
-
-def _probe_backend_endpoints(backend: dict, probes: dict[str, str], timeout: float | None) -> dict:
-    """Одна дымовая проба бэкенда: POST на каждый путь из ENDPOINT_PROBES.
-
-    ``probes`` — подготовленный словарь {путь: модель} (см. probe_endpoints:
-    модель на каждый эндпойнт, сверена с /v1/models бэкенда). Возвращает
-    ``{"endpoints": {путь: {"status": int|None, "found": bool}},
-    "errors": {короткое_имя: текст}}`` — endpoints только для реально
-    пробованных путей, классифицированы по HTTP-коду: found=True только
-    для 200; любой другой код (400/401/405/429, 5xx, 404) → found=False;
-    сеть/таймаут → found=False + текст ошибки в errors."""
-    base = backend["base"].rstrip("/")
-    key = backend.get("key", "")
-    endpoints: dict[str, dict] = {}
-    errors: dict[str, str] = {}
-    for pname, path, tpl in ENDPOINT_PROBES:
-        if path not in probes:
-            continue  # эндпоинт пропущен на этапе сбора (нет probe-модели)
-        model = probes[path]
-        headers = {"Authorization": f"Bearer {key}"}
-        body = dict(tpl)
-        if pname == "completions":
-            body["model"] = model
-            body["messages"] = [{"role": "user", "content": "ping"}]
-        elif pname == "messages":
-            # [AN]-совместимые бэкенды отвечают 400 даже на живом /v1/messages
-            # без заголовка версии — шлём его всегда.
-            headers["anthropic-version"] = "2023-06-01"
-            body["model"] = model
-            body["messages"] = [{"role": "user", "content": "ping"}]
-        elif pname in ("responses", "embeddings"):
-            body["model"] = model
-            body["input"] = "ping"
-        code, _json, err = _http_json("POST", base + path, headers, body, timeout)
-        if err is not None:
-            # Сетевая ошибка/таймаут — весь бэкенд недоступен: классифицируем
-            # как «не реализован» (found=False) и фиксируем текст ошибки.
-            endpoints[path] = {"status": None, "found": False}
-            errors[pname] = f"network error: {err}"
-            continue
-        assert code is not None
-        if code == 200:
-            endpoints[path] = {"status": code, "found": True}
-        else:
-            # Не-200 (404, 400/401/405/429, прочие 4xx/5xx): эндпоинт НЕ
-            # работает — тело/ключ не подошли либо путь не реализован.
-            # На странице такие не показываются (зелёный ✓ — только 200).
-            endpoints[path] = {"status": code, "found": False}
-    return {"endpoints": endpoints, "errors": errors}
-
-
-def _log_probe(bname: str, base: str, endpoints: dict[str, dict], errors: dict[str, str]) -> None:
-    """Консольный лог-блок [ENDPOINT_PROBE] — одна строка на фактическую
-    пробу бэкенда; формат един для лога и страницы (порядок — ENDPOINT_PROBES,
-    по коротким именам, сырые HTTP-коды). Кэш-хиты не логируются (спам при
-    частых проверках; страница показывает последний результат, лог даёт
-    историю фактических проб). Печатается БЕЗУСЛОВНО (консольные debug-логи
-    не гейтятся; см. v0.8.6). Содержимое ответов не пишется: дымовые
-    запросы, секретов нет."""
-    if errors:
-        print(f"[ENDPOINT_PROBE] backend '{bname}' ({base}): failed: {errors}")
-        return
-    parts = []
-    for pname, path, _tpl in ENDPOINT_PROBES:
-        if path not in endpoints:
-            continue
-        status = endpoints[path]["status"]
-        parts.append(f"{pname}={status if status is not None else 'err'}")
-    if parts:
-        print(f"[ENDPOINT_PROBE] backend '{bname}' ({base}): {' '.join(parts)}")
-
-
-def upsert_endpoint_state(backend_name: str, pname: str, status: int | None, found: bool) -> None:
-    """Записать результат пробы одного эндпоинта бэкенда в _ENDPOINT_STATE.
-
-    Синхронизация из model_usage (первое обращение к модели, «Перепроверить»
-    строки, загрузка model-usage.yaml): эндпоинт, найденный дымовой пробой
-    МОДЕЛИ (found=True ⇔ HTTP 200), должен быть виден колонке «Доступные API»
-    бэкенда и экспортёру, даже если фоновая проверка бэкенда его не пробовала.
-    Сети здесь нет — это перенос уже добытого результата (контракт
-    «загруженные строки не перепроверяются» не нарушается).
-
-    ``pname`` — короткое имя эндпоинта из ENDPOINT_PROBES (completions /
-    messages / responses / embeddings); неизвестное имя — no-op. Функция
-    идемпотентна: повторная запись того же эндпоинта перезаписывает
-    результат и освежает ``at`` (кэш TTL). Запись создаётся и для бэкенда,
-    отсутствующего в _BACKENDS (такое возможно лишь для осиротевших строк
-    usage-таблицы) — фильтр «только настроенные бэкенды» применяет вызывающий.
-    """
-    path = next((p for n, p, _t in ENDPOINT_PROBES if n == pname), None)
-    if path is None:
-        return
-    state = _ENDPOINT_STATE.setdefault(backend_name, {"at": 0.0, "endpoints": {}, "errors": {}})
-    state["endpoints"][path] = {"status": status, "found": found}
-    state["at"] = time.time()
-
-
-def endpoint_support(backend_name: str, pname: str) -> bool | None:
-    """Поддерживает ли бэкенд формат ``pname`` — ОТВЕТ ТОЛЬКО ПО КЭШУ ПРОБ.
-
-    Источник — _ENDPOINT_STATE (фоновая probe_endpoints + пер-модельные пробы
-    usage-таблицы через upsert_endpoint_state): ``found=True`` (HTTP 200) ⇔
-    поддержка. Сети здесь НЕТ — это чистый геттер кэша для роутинга
-    (routing.decide), который не делает синхронных проб во время запроса.
-
-    Возвращает:
-    - True — бэкенд подтверждённо поддерживает формат (found=True);
-    - False — пробовался, но не поддерживает (не-200);
-    - None — неизвестно: не пробовался / пробы выключены (ADAPTER_ENDPOINT_
-      PROBE=0 и пер-модельные пробы не наполняли кэш) / ``pname`` вне
-      ENDPOINT_PROBES. Зовущий (routing.decide) трактует None оптимистично —
-      «нет данных → маршрут выбирается, отказ только при found=False»."""
-    path = next((p for n, p, _t in ENDPOINT_PROBES if n == pname), None)
-    if path is None:
-        return None
-    ep = _ENDPOINT_STATE.get(backend_name, {}).get("endpoints", {}).get(path)
-    if ep is None:
-        return None
-    return bool(ep.get("found"))
-
-
 def _init_multi_backends(config_path: str) -> None:
     """Загрузить YAML-конфиг, пробовать модели, построить model → backend map.
 
@@ -1276,7 +812,7 @@ def _init_multi_backends(config_path: str) -> None:
         name, base = b["name"], b["base"]
         # Начало/завершение проверки КАЖДОГО бэкенда из настроек — в лог
         # (при старте адаптера; фоновая проверка WEBUI логируется своими
-        # [REFRESH]/[ENDPOINT_PROBE]-строками, см. refresh_models).
+        # [REFRESH]-строками, см. refresh_models).
         print(f"[INIT] Probing backend '{name}' at {base} ...")
         try:
             bmodels = _fetch_models(base, b["key"])
@@ -1356,16 +892,12 @@ def reload_backend_config() -> list[dict] | None:
     действиях — за вызывающим: start_refresh логирует [WARN] и продолжает
     фоновую проверку прежних бэкендов).
 
-    Меняет ТОЛЬКО бэкенды и probe-кэш:
+    Меняет ТОЛЬКО бэкенды:
       - ``_BACKENDS``/``_BACKEND_BY_NAME`` — мутируются НА МЕСТЕ (clear +
         extend/update, v0.9.8: импортированные ссылки обязаны остаться
         живыми, иначе точка входа и другие модули видят прежний список);
         ``_DEFAULT_BACKEND`` — скаляр, переприсваивается (читается как
         атрибут модуля);
-      - ``_ENDPOINT_STATE`` — stale-очистка: записи бэкендов, которых нет в
-        новом списке, удаляются (не висят результаты проб удалённых
-        бэкендов); свежие записи оставшихся сохраняются (кэш TTL 60 с не
-        сбрасывается без нужды);
       - модели/индексы (``_AVAILABLE_MODELS``/``_MODEL_TO_BACKEND``) НЕ
         трогаются — их пересоберёт refresh_models по новому списку бэкендов
         (in-place clear+update уже реализован там). Этот вызов — только про
@@ -1379,12 +911,6 @@ def reload_backend_config() -> list[dict] | None:
     _BACKEND_BY_NAME.clear()
     _BACKEND_BY_NAME.update({b["name"]: b for b in blocks})
     _DEFAULT_BACKEND = blocks[0]
-    # Stale-очистка probe-кэша: результаты проб бэкендов, которых больше нет
-    # в конфиге, удаляются (импортированная по ссылке _ENDPOINT_STATE
-    # мутируется на месте — переприсваивание недопустимо, см. её комментарий).
-    for name in list(_ENDPOINT_STATE):
-        if name not in _BACKEND_BY_NAME:
-            del _ENDPOINT_STATE[name]
     print(f"[BACKEND_CONFIG] Reloaded {len(blocks)} backend(s) from {ADAPTER_BACKEND_CONFIG}")
     return blocks
 
@@ -1393,15 +919,15 @@ def refresh_models(timeout: float | None = None) -> dict:
     """Пере-опросить бэкенды и обновить кэш моделей ``_AVAILABLE_MODELS`` /
     ``_MODEL_TO_BACKEND``.
 
-    Вызывается только по явному сигналу: при старте адаптера (существующий
-    init/probe), из фонового воркера проверки (config.start_refresh — старт
-    адаптера / первый GET "/" статус-страницы WEBUI / кнопка 🔃
-    «Перепроверить бэкенды»).
+    Вызывается только по явному сигналу: при старте адаптера (init), из
+    фонового воркера проверки (config.start_refresh — старт адаптера /
+    первый GET "/" статус-страницы WEBUI / кнопка 🔃 «Перепроверить
+    бэкенды»).
     Периодического фонового обновления НЕТ. Бэкенд может добавлять модели
     между стартами; refresh подхватывает их без перезапуска адаптера.
 
     ``timeout`` — таймаут на один бэкенд (None → ADAPTER_TIMEOUT). Страница
-    статуса передаёт короткий (PROBE_TIMEOUT), чтобы не висеть по 300 с.
+    статуса передаёт короткий (REFRESH_TIMEOUT), чтобы не висеть по 300 с.
 
     Основной путь — в процессе адаптера: ``_BACKENDS`` заполнен при старте;
     refresh опрашивает каждый бэкенд и пересобирает оба словаря.
@@ -1467,16 +993,12 @@ def refresh_models(timeout: float | None = None) -> dict:
     _MODEL_TO_BACKEND.update(model_to_backend)
     print(f"[REFRESH] Reloaded {len(_AVAILABLE_MODELS)} models from {len(backends)} backends")
     result = {"ok": True, "count": len(_AVAILABLE_MODELS), "errors": errors}
-    # Дымовая проба API-эндпойнтов — ПОСЛЕ обновления кэша моделей (модели из
-    # YAML-ключа probe сверяются со свежим /v1/models). Результат добавляется
-    # ключом "probe" — старые читатели полей ok/count/errors не ломаются.
-    result["probe"] = probe_endpoints(timeout=timeout)
     return result
 
 
 # ==================== MULTI-BACKEND: ФОНОВАЯ ПРОВЕРКА ====================
-# Статус-страница WEBUI запускает refresh_models (модели + дымовая проба
-# эндпоинтов) в фоновом потоке, чтобы HTTP-ответ "/" не висел, пока бэкенды
+# Статус-страница WEBUI запускает refresh_models (опрос списка моделей)
+# в фоновом потоке, чтобы HTTP-ответ "/" не висел, пока бэкенды
 # опрашиваются. Состояние проверки — модульный снимок-словарь _REFRESH_JOB,
 # заменяемый ЦЕЛИКОМ (никогда не мутируется после публикации): читатели
 # (webui_status) берут refresh_state() без лока — замена ссылки атомарна.
@@ -1507,7 +1029,7 @@ def _refresh_worker(timeout: float | None) -> None:
     """Тело фонового потока проверки: refresh_models + публикация результата.
 
     refresh_models сам мутирует конфиг-глобалы (_AVAILABLE_MODELS/
-    _MODEL_TO_BACKEND/_ENDPOINT_STATE) — это уже было при синхронном вызове
+    _MODEL_TO_BACKEND) — это уже было при синхронном вызове
     со страницы, отдельный Lock вокруг них не добавляем (чтение словарей из
     HTTP-потоков прокси при clear+update — существующий компромисс проекта).
 
@@ -1583,9 +1105,9 @@ def stop_refresh(timeout: float = 2.0) -> None:
 
     Вызывается при вежливом завершении адаптера (Ctrl-C/SIGTERM): если
     refresh_worker в процессе сетевого опроса, ждём его завершения, чтобы
-    снимок состояния (refresh_state) и кэши моделей/эндпоинтов были
-    консистентны на момент выхода, а консоль не обрывалась посреди
-    [REFRESH]/[ENDPOINT_PROBE]-строк. Поток daemon: если не успел за
+    снимок состояния (refresh_state) и кэш моделей были консистентны на
+    момент выхода, а консоль не обрывалась посреди [REFRESH]-строк. Поток
+    daemon: если не успел за
     timeout, выходим без ожидания — процесс завершится сам, воркер оборвётся.
     Никаких флагов остановки воркеру не передаётся (сеть ограничена
     таймаутами запросов; дождаться текущей итерации — достаточная

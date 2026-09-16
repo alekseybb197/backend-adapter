@@ -21,10 +21,7 @@ serve() перезаписал бы Handler.context/endpoints и открыл б
     config._AVAILABLE_MODELS);
   - по бэкенду: backend_up (1/0 — есть ли ошибка бэкенда в снимке
     config.refresh_state()["errors"], т.е. не смог отдать /v1/models),
-    число моделей бэкенда (из config._MODEL_TO_BACKEND), доступность
-    API-эндпоинтов (backend_adapter_backend_endpoint{endpoint=...} 1/0 по
-    config._ENDPOINT_STATE — единый источник после синхронизации
-    found-эндпоинтов модели, см. model_usage._sync_found_endpoints);
+    число моделей бэкенда (из config._MODEL_TO_BACKEND);
   - по использованной модели: счётчики calls/input_tokens/output_tokens из
     model_usage.usage_snapshot() (уже копирует таблицу под _TABLE_LOCK).
 
@@ -126,12 +123,8 @@ def _backend_metric_lines() -> list[str]:
     - backend_up: 1 — бэкенда нет в errors снимка config.refresh_state()
       (последний опрос /v1/models прошёл или проверок ещё не было); 0 — текст
       ошибки в снимке (как строка «недоступен» статус-страницы);
-    - backend_models: число моделей бэкенда в config._MODEL_TO_BACKEND;
-    - backend_endpoint{endpoint=pname}: 1/0 — found эндпоинта в
-      config._ENDPOINT_STATE[бэкенд] (единый источник: сюда же
-      синхронизируются found-эндпоинты проб модели). Не пробованный путь → 0."""
+    - backend_models: число моделей бэкенда в config._MODEL_TO_BACKEND."""
     lines: list[str] = []
-    state = config._ENDPOINT_STATE
     refresh_errors = config.refresh_state().get("errors") or {}
 
     for b in sorted(config._BACKENDS, key=lambda x: x["name"]):
@@ -157,22 +150,6 @@ def _backend_metric_lines() -> list[str]:
             [f"backend_adapter_backend_models{labels} {backend_models}"],
         )
 
-        ep_state = (state.get(b["name"]) or {}).get("endpoints", {})
-        samples = []
-        for pname, path, _tpl in config.ENDPOINT_PROBES:
-            entry = ep_state.get(path) or {}
-            found = 1 if entry.get("found") else 0
-            samples.append(
-                f'backend_adapter_backend_endpoint{{name="{name}",'
-                f'base="{base}",endpoint="{pname}"}} {found}'
-            )
-        _emit(
-            lines,
-            "backend_adapter_backend_endpoint",
-            "Whether the backend endpoint answered HTTP 200 to the smoke probe (1/0).",
-            "gauge",
-            samples,
-        )
     return lines
 
 
