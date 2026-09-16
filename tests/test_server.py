@@ -5,6 +5,7 @@ import socket
 import sys
 import threading
 import time
+from unittest import mock
 
 
 def _send_http(host, port, method, path, body=None, headers=None, timeout=3):
@@ -83,26 +84,23 @@ class ServerSetupMixin:
         server_mod._trace = lambda *a, **kw: None
         server_mod.write_debug_json = lambda *a, **kw: None
         # .err-канал (v0.9.0 инциденты + v0.9.1 WARN) безусловен (не зависит от
-        # ADAPTER_DEBUG_ENABLE) — в unit-контексте без LOGPATH его надо мокать,
-        # иначе записи уходят в дефолтный ./tmp/logs. Тесты самого .err ставят
-        # LOGPATH на tmp_path и вызывают _setup_adapter(mock_err=False), чтобы
+        # ADAPTER_DEBUG_ENABLE) — в unit-контексте без лог-папки его надо
+        # мокать, иначе записи уходят в дефолтный ./tmp/adapter/log. Тесты
+        # самого .err ставят путь на tmp_path и вызывают
+        # _setup_adapter(mock_err=False), чтобы
         # канал был живым (в т.ч. WARN «First message is NOT system»).
         if mock_err:
             server_mod.write_error_file = lambda *a, **kw: None
             server_mod.write_warn_file = lambda *a, **kw: None
             # v0.9.7: обобщённый .err-блок «ранней» ошибки (write_session_error)
-            # тоже безусловен — мокаем, иначе unit-тесты без LOGPATH пишут в
-            # дефолтный ./tmp/logs.
+            # тоже безусловен — мокаем, иначе unit-тесты без лог-папки пишут
+            # в дефолтный ./tmp/adapter/log.
             server_mod.write_session_error = lambda *a, **kw: None
 
-        # Used-models table: reset + mock the per-model endpoint probe so the
-        # server hook never fires real network requests; tests override the
-        # fake to assert probe counts.
+        # Used-models table: reset so tests start from an empty table (no
+        # network involved — v0.9.9 removed the per-model endpoint probe).
         from backend_adapter import model_usage as model_usage_mod
         model_usage_mod.reset_model_usage()
-        model_usage_mod._probe_model_endpoints = (
-            lambda backend, model: {"endpoints": {}, "errors": {}}
-        )
 
         # Disable SSL so the adapter can connect to the plain-HTTP fake backend.
         # `server.py` does `from .config import SSL_CTX` — patch both the
@@ -246,9 +244,6 @@ class TestServer(ServerSetupMixin):
                 assert rows[0]["model"] == "test-model"
                 assert rows[0]["calls"] == 1
                 assert rows[0]["backend"] == "test"
-                # проба мокнута в _setup_adapter → пустые эндпоинты, не «—»
-                assert rows[0]["endpoints"] == {}
-                assert rows[0]["probing"] is False
             finally:
                 server.shutdown()
 
@@ -386,36 +381,6 @@ class TestServer(ServerSetupMixin):
             finally:
                 server.shutdown()
 
-    def test_repeat_post_increments_no_reprobe(self, fake_backend):
-        """Second POST of the same model increments, does not re-probe."""
-        from backend_adapter import config as cfg
-        cfg.ADAPTER_MODEL_USAGE_ENABLE = True
-        fake_backend.models_response = {"data": [{"id": "test-model"}]}
-        fake_backend.completions_response = {
-            "id": "chat1", "model": "test-model",
-            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-        }
-        with fake_backend:
-            server = self._setup_adapter(fake_backend)
-            # recording fake probe to count invocations
-            from backend_adapter import model_usage as mu
-            calls = []
-            mu._probe_model_endpoints = (
-                lambda backend, model: calls.append(model) or {"endpoints": {}, "errors": {}}
-            )
-            try:
-                body = {"model": "test-model",
-                        "messages": [{"role": "user", "content": "Hi"}],
-                        "max_tokens": 100}
-                for _ in range(2):
-                    resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages", body=body)
-                    assert resp["status"] == 200
-                rows = mu.usage_snapshot()
-                assert rows[0]["calls"] == 2
-                assert calls == ["test-model"]  # проба только при первом обращении
-            finally:
-                server.shutdown()
-
     def test_strict_invalid_model_not_recorded(self, fake_backend):
         """Rejected model (400) must not be recorded in the usage table."""
         fake_backend.models_response = {"data": [{"id": "known-model"}]}
@@ -433,32 +398,32 @@ class TestServer(ServerSetupMixin):
             finally:
                 server.shutdown()
 
-    def test_flag_off_no_probe_but_recorded(self, fake_backend):
-        """ADAPTER_MODEL_USAGE_ENABLE=0 → row recorded, probe not fired."""
+    def test_flag_off_records_calls_no_tokens(self, fake_backend):
+        """ADAPTER_MODEL_USAGE_ENABLE=0 → счётчик обращений растёт, токены
+        не накапливаются (гейт add_usage_tokens): строка есть, calls==1,
+        input/output==0 даже при usage в ответе бэкенда."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_MODEL_USAGE_ENABLE = False
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "chat1", "model": "test-model",
             "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 34},
         }
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            from backend_adapter import model_usage as mu
-            calls = []
-            mu._probe_model_endpoints = (
-                lambda backend, model: calls.append(model) or {"endpoints": {}, "errors": {}}
-            )
             try:
                 resp = _send_http("127.0.0.1", server.port, "POST", "/v1/messages",
                                   body={"model": "test-model",
                                         "messages": [{"role": "user", "content": "Hi"}],
                                         "max_tokens": 100})
                 assert resp["status"] == 200
+                from backend_adapter import model_usage as mu
                 rows = mu.usage_snapshot()
                 assert len(rows) == 1
                 assert rows[0]["calls"] == 1
-                assert calls == []  # проба выключена флагом
+                assert rows[0]["input_tokens"] == 0
+                assert rows[0]["output_tokens"] == 0
             finally:
                 server.shutdown()
 
@@ -516,25 +481,17 @@ class TestServer(ServerSetupMixin):
 
 class TestInputEndpoints(ServerSetupMixin):
     """Новые входные POST-эндпоинты адаптера. TARGET-константы config
-    выставляются прямым присваиванием (как runtime), кэш проб
-    (_ENDPOINT_STATE) — через config.upsert_endpoint_state для бэкенда
-    'test' (в _setup_adapter имя бэкенда = "test"). Дефолты conftest —
-    zero-config: /v1/chat/completions и /v1/responses выключены (404),
-    /v1/messages конвертируется."""
+    выставляются прямым присваиванием (как runtime). Пробы эндпойнтов сняты
+    в v0.9.9: маршрут выбирается всегда (disabled только при TARGET=none),
+    запрос уходит в бэкенд. Дефолты conftest — zero-config:
+    /v1/chat/completions и /v1/responses выключены (404), /v1/messages
+    конвертируется."""
 
     def _enable(self, **targets: str) -> None:
         """Включить входы: установить TARGET-константы config."""
         from backend_adapter import config as cfg
         for var, value in targets.items():
             setattr(cfg, f"ADAPTER_{var.upper()}_TARGET", value)
-
-    def _support(self, path: str, found: bool) -> None:
-        """Наполнить кэш проб результатом для бэкенда 'test' (upsert)."""
-        from backend_adapter import config as cfg
-        state = cfg._ENDPOINT_STATE.setdefault(
-            "test", {"at": 0.0, "endpoints": {}, "errors": {}}
-        )
-        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
 
     # -- нулевой конфиг: новые входы выключены ----------------------------
 
@@ -590,7 +547,6 @@ class TestInputEndpoints(ServerSetupMixin):
         }
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/chat/completions",
@@ -631,7 +587,6 @@ class TestInputEndpoints(ServerSetupMixin):
         }
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/responses", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
@@ -667,7 +622,6 @@ class TestInputEndpoints(ServerSetupMixin):
         # конвертирован в /v1/chat/completions).
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             # /v1/messages на fake-бэкенде — 200 без тела через extra_post_paths
             fake_backend.extra_post_paths = {"/v1/messages": 200}
             try:
@@ -700,7 +654,6 @@ class TestInputEndpoints(ServerSetupMixin):
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             fake_backend.extra_post_paths = {"/v1/messages": 200}
             try:
                 resp = _send_http(
@@ -737,7 +690,6 @@ class TestInputEndpoints(ServerSetupMixin):
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             fake_backend.extra_post_paths = {"/v1/messages": 200}
             try:
                 body = {"model": "test-model",
@@ -767,7 +719,6 @@ class TestInputEndpoints(ServerSetupMixin):
         ]
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/messages",
@@ -799,7 +750,6 @@ class TestInputEndpoints(ServerSetupMixin):
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             fake_backend.extra_post_paths = {"/v1/messages": 200}
             try:
                 resp = _send_http(
@@ -827,24 +777,27 @@ class TestInputEndpoints(ServerSetupMixin):
             finally:
                 server.shutdown()
 
-    # -- 502 при подтверждённом отказе бэкенда ----------------------------
+    # -- маршрут всегда оптимистичен (v0.9.9: пробы сняты) ----------------
 
-    def test_completions_passthrough_rejected_502(self, fake_backend):
-        """Явный TARGET=passthrough, но бэкенд подтверждённо (found=False)
-        не поддерживает /v1/chat/completions → 502, запрос не уходит."""
+    def test_completions_passthrough_goes_to_backend(self, fake_backend):
+        """TARGET=passthrough: пробы нет — маршрут не проверяется заранее,
+        запрос уходит в бэкенд дословно. Неверный эндпойнт фиксируется по
+        факту: ошибка бэкенда отдаётся клиенту как есть, адаптер 502 не
+        синтезирует."""
         self._enable(completions="passthrough")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"message": "unknown endpoint"}}
+        fake_backend.completions_status = 404
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", False)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/chat/completions",
                     body={"model": "test-model", "messages": []},
                 )
-                assert resp["status"] == 502
-                assert "does not support completions" in resp["body"]
-                assert fake_backend.requests == []
+                assert resp["status"] == 404  # ответ бэкенда, не 502 адаптера
+                assert "unknown endpoint" in resp["body"]
+                assert len(fake_backend.requests) == 1  # запрос дошёл до бэкенда
             finally:
                 server.shutdown()
 
@@ -857,7 +810,6 @@ class TestInputEndpoints(ServerSetupMixin):
         fake_backend.models_response = {"data": [{"id": "known-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/chat/completions",
@@ -886,7 +838,6 @@ class TestInputEndpoints(ServerSetupMixin):
         ]
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/chat/completions",
@@ -921,7 +872,6 @@ class TestInputEndpoints(ServerSetupMixin):
         ]
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/responses", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
@@ -959,7 +909,6 @@ class TestInputEndpoints(ServerSetupMixin):
         }
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
@@ -1011,7 +960,6 @@ class TestInputEndpoints(ServerSetupMixin):
         ]
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
@@ -1052,7 +1000,6 @@ class TestInputEndpoints(ServerSetupMixin):
         }
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
@@ -1076,7 +1023,6 @@ class TestInputEndpoints(ServerSetupMixin):
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
@@ -1101,23 +1047,237 @@ class TestInputEndpoints(ServerSetupMixin):
                 session_settings.clear_session("sess-sw")
                 server.shutdown()
 
-    def test_responses_to_completions_rejected_502(self, fake_backend):
-        """TARGET=completions, но бэкенд подтверждённо (found=False) не
-        поддерживает /v1/chat/completions → 502, запрос не уходит."""
+    def test_responses_to_completions_goes_to_backend(self, fake_backend):
+        """TARGET=completions: пробы нет — конвертированный запрос уходит в
+        бэкенд, ошибка эндпойнта приходит от бэкенда как есть (не 502)."""
         self._enable(responses="completions")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"message": "unknown endpoint"}}
+        fake_backend.completions_status = 404
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/chat/completions", False)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/responses",
                     body={"model": "test-model",
                           "input": [{"role": "user", "content": "Hi"}]},
                 )
-                assert resp["status"] == 502
-                assert "does not support completions" in resp["body"]
-                assert fake_backend.requests == []
+                assert resp["status"] == 404  # ответ бэкенда, не 502 адаптера
+                assert "unknown endpoint" in resp["body"]
+                assert len(fake_backend.requests) == 1
+            finally:
+                server.shutdown()
+
+
+# ===========================================================================
+# Адаптивный ретрай при reasoning_budget_exhausted (v0.9.9)
+# ===========================================================================
+
+_REASONING_ERR = {
+    "error": {
+        "message": "весь заданный вами max_tokens ушёл на внутренние рассуждения",
+        "type": "reasoning_budget_exhausted",
+        "code": 502,
+    }
+}
+_OK_COMPLETIONS = {
+    "id": "chat1",
+    "model": "test-model",
+    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+    "usage": {"prompt_tokens": 3, "completion_tokens": 4},
+}
+
+
+class TestReasoningBudgetRetry(ServerSetupMixin):
+    """502 `reasoning_budget_exhausted` → подъём max_tokens и повтор БЕЗ
+    обычного backoff; счётчик подъёмов свой (ADAPTER_REASONING_RETRY)."""
+
+    def _enable(self, **targets: str) -> None:
+        from backend_adapter import config as cfg
+        for var, value in targets.items():
+            setattr(cfg, f"ADAPTER_{var.upper()}_TARGET", value)
+
+    @staticmethod
+    def _sent_bodies(fake_backend):
+        return [json.loads(body) for _p, _m, body in fake_backend.requests]
+
+    def test_bump_then_success(self, fake_backend):
+        """Первый ответ — reasoning_budget_exhausted, второй — 200: клиент
+        получает 200, а max_tokens второго запроса больше первого."""
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_statuses = [(502, _REASONING_ERR), (200, _OK_COMPLETIONS)]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                )
+                assert resp["status"] == 200
+                sent = self._sent_bodies(fake_backend)
+                assert len(sent) == 2
+                assert sent[0]["max_tokens"] == 100
+                # max(100 * 4, ADAPTER_REASONING_MIN_TOKENS=8192) = 8192
+                assert sent[1]["max_tokens"] == 8192
+            finally:
+                server.shutdown()
+
+    def test_exhausted_bumps_return_502(self, fake_backend):
+        """Все ответы — reasoning_budget_exhausted: число запросов ограничено
+        ADAPTER_RETRY (повтор идёт в том же цикле попыток), клиент — 502."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = _REASONING_ERR
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            with mock.patch.object(server_mod, "ADAPTER_REASONING_RETRY", 2):
+                with mock.patch.object(server_mod, "ADAPTER_RETRY", 3):
+                    try:
+                        resp = _send_http(
+                            "127.0.0.1", server.port, "POST", "/v1/messages",
+                            body={"model": "test-model",
+                                  "messages": [{"role": "user", "content": "Hi"}],
+                                  "max_tokens": 100},
+                        )
+                        assert resp["status"] == 502
+                        sent = self._sent_bodies(fake_backend)
+                        # 3 попытки: 1-я без подъёма, 2-я и 3-я с подъёмом
+                        # (счётчик < ADAPTER_REASONING_RETRY=2).
+                        assert len(sent) == 3
+                        assert [b["max_tokens"] for b in sent] == [100, 8192, 32768]
+                    finally:
+                        server.shutdown()
+
+    def test_no_bump_on_last_attempt(self, fake_backend, capsys):
+        """На последней попытке подъём не делается даже при свободном счётчике:
+        повторять некуда, а правка тела попала бы в `.err` как неотправленная."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = _REASONING_ERR
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            # Счётчика хватает на все попытки — ограничителем работает ровно
+            # страховка attempt < ADAPTER_RETRY.
+            with mock.patch.object(server_mod, "ADAPTER_REASONING_RETRY", 5):
+                with mock.patch.object(server_mod, "ADAPTER_RETRY", 2):
+                    try:
+                        resp = _send_http(
+                            "127.0.0.1", server.port, "POST", "/v1/messages",
+                            body={"model": "test-model",
+                                  "messages": [{"role": "user", "content": "Hi"}],
+                                  "max_tokens": 100},
+                        )
+                        assert resp["status"] == 502
+                        sent = self._sent_bodies(fake_backend)
+                        assert [b["max_tokens"] for b in sent] == [100, 8192]
+                        # Ровно один подъём (на 1-й попытке): на 2-й — страховка.
+                        bumps = [
+                            ln
+                            for ln in capsys.readouterr().out.splitlines()
+                            if "[RETRY] reasoning budget exhausted" in ln
+                        ]
+                        assert len(bumps) == 1
+                    finally:
+                        server.shutdown()
+
+    def test_disabled_by_zero(self, fake_backend):
+        """ADAPTER_REASONING_RETRY=0 — прежнее поведение: подъёма нет."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = _REASONING_ERR
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            with mock.patch.object(server_mod, "ADAPTER_REASONING_RETRY", 0):
+                with mock.patch.object(server_mod, "ADAPTER_RETRY", 1):
+                    try:
+                        resp = _send_http(
+                            "127.0.0.1", server.port, "POST", "/v1/messages",
+                            body={"model": "test-model",
+                                  "messages": [{"role": "user", "content": "Hi"}],
+                                  "max_tokens": 100},
+                        )
+                        assert resp["status"] == 502
+                        sent = self._sent_bodies(fake_backend)
+                        assert len(sent) == 1
+                        assert sent[0]["max_tokens"] == 100
+                    finally:
+                        server.shutdown()
+
+    def test_other_502_body_not_bumped(self, fake_backend):
+        """502 с ДРУГИМ телом (не reasoning_budget_exhausted) подъёма не даёт."""
+        from backend_adapter import server as server_mod
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {"error": {"type": "internal_error"}}
+        fake_backend.completions_status = 502
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            with mock.patch.object(server_mod, "ADAPTER_RETRY", 1):
+                try:
+                    resp = _send_http(
+                        "127.0.0.1", server.port, "POST", "/v1/messages",
+                        body={"model": "test-model",
+                              "messages": [{"role": "user", "content": "Hi"}],
+                              "max_tokens": 100},
+                    )
+                    assert resp["status"] == 502
+                    sent = self._sent_bodies(fake_backend)
+                    assert len(sent) == 1
+                    assert sent[0]["max_tokens"] == 100
+                finally:
+                    server.shutdown()
+
+    def test_passthrough_tract_bumps(self, fake_backend):
+        """Тот же механизм в passthrough-тракте (E→E): тело правится, второй
+        запрос уходит с поднятым max_tokens."""
+        self._enable(completions="passthrough")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_statuses = [(502, _REASONING_ERR), (200, _OK_COMPLETIONS)]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                )
+                assert resp["status"] == 200
+                sent = self._sent_bodies(fake_backend)
+                assert len(sent) == 2
+                assert sent[0]["max_tokens"] == 100
+                assert sent[1]["max_tokens"] == 8192
+            finally:
+                server.shutdown()
+
+    def test_responses_to_completions_tract_bumps(self, fake_backend):
+        """Механизм в тракте responses→completions.
+
+        Клиентский `max_tokens` в Responses-теле не используется (там
+        `max_output_tokens`), поэтому тело к бэкенду уходит с дефолтом
+        санитайзера 8192 — подъём идёт от него: 8192 -> 32768.
+        """
+        self._enable(responses="completions")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_statuses = [(502, _REASONING_ERR), (200, _OK_COMPLETIONS)]
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={"model": "test-model",
+                          "input": [{"role": "user", "content": "Hi"}],
+                          "max_output_tokens": 100},
+                )
+                assert resp["status"] == 200
+                sent = self._sent_bodies(fake_backend)
+                assert len(sent) == 2
+                assert sent[0]["max_tokens"] == 8192
+                assert sent[1]["max_tokens"] == 32768
             finally:
                 server.shutdown()
 
@@ -1139,13 +1299,6 @@ class TestSessionAccounting(ServerSetupMixin):
         for var, value in targets.items():
             setattr(cfg, f"ADAPTER_{var.upper()}_TARGET", value)
 
-    def _support(self, path: str, found: bool) -> None:
-        from backend_adapter import config as cfg
-        state = cfg._ENDPOINT_STATE.setdefault(
-            "test", {"at": 0.0, "endpoints": {}, "errors": {}}
-        )
-        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
-
     def _sessions(self):
         from backend_adapter import session_registry
         return session_registry.sessions_snapshot()
@@ -1158,7 +1311,6 @@ class TestSessionAccounting(ServerSetupMixin):
         fake_backend.extra_post_paths = {"/v1/messages": 200}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             try:
                 resp = _send_http(
                     "127.0.0.1", server.port, "POST", "/v1/messages",
@@ -1507,7 +1659,6 @@ class TestSessionAccounting(ServerSetupMixin):
         fake_backend.extra_post_paths = {"/v1/messages": 200}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
-            self._support("/v1/messages", True)
             try:
                 for _ in range(3):
                     resp = _send_http(
@@ -1537,7 +1688,6 @@ class TestSessionAccounting(ServerSetupMixin):
             server = self._setup_adapter(fake_backend)
             cfg._MODEL_TO_BACKEND["test-model-2"] = ("test", cfg._BACKENDS[0])
             cfg._AVAILABLE_MODELS["test-model-2"] = {"id": "test-model-2"}
-            self._support("/v1/messages", True)
             try:
                 for model in ("test-model", "test-model-2"):
                     resp = _send_http(
@@ -1568,7 +1718,6 @@ class TestSessionAccounting(ServerSetupMixin):
             server = self._setup_adapter(fake_backend)
             cfg._MODEL_TO_BACKEND["test-model-2"] = ("test", cfg._BACKENDS[0])
             cfg._AVAILABLE_MODELS["test-model-2"] = {"id": "test-model-2"}
-            self._support("/v1/messages", True)
             try:
                 for model in ("test-model", "test-model-2", "test-model"):
                     resp = _send_http(
@@ -1641,8 +1790,8 @@ class TestSessionAccounting(ServerSetupMixin):
 
 class TestErrFileProtocol(ServerSetupMixin):
     """Протокол .err-инцидентов (v0.9.0): финальный 4xx/5xx реального
-    прокси-запроса пишет session-<ts>-<safe8>.err в LOGPATH (безусловный
-    канал — вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). Тесты ставят LOGPATH на
+    прокси-запроса пишет session-<ts>-<safe8>.err в лог-папку (безусловный
+    канал — вне ADAPTER_DEBUG_ENABLE/PARTS/TRIM). Тесты ставят путь на
     tmp_path и НЕ мокают write_error_file (mock_err=False)."""
 
     def _setup(self, fake_backend, tmp_path, mock_logger=True):
@@ -1870,40 +2019,37 @@ class TestErrFileProtocol(ServerSetupMixin):
 
     # -- полнота канала (v0.9.7) -------------------------------------------
 
-    def _support(self, path, found):
-        """Наполнить кэш проб бэкенда 'test' результатом (для reject-502)."""
-        from backend_adapter import config as cfg
-        state = cfg._ENDPOINT_STATE.setdefault(
-            "test", {"at": 0.0, "endpoints": {}, "errors": {}}
-        )
-        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
+    def test_local_400_writes_err_without_sessions_table(self, fake_backend, tmp_path):
+        """Локальный 400 адаптера (strict-модель) при
+        ADAPTER_SESSIONS_TABLE=0: строки в таблице нет (счётчик не ведётся),
+        но .err пишется — канал не зависит от таблицы сессий (v0.9.7).
 
-    def test_reject_502_writes_err_without_sessions_table(self, fake_backend, tmp_path):
-        """reject-502 маршрута при ADAPTER_SESSIONS_TABLE=0: строки в таблице
-        нет (счётчик не ведётся), но .err пишется — канал не зависит от
-        таблицы сессий (v0.9.7)."""
+        Раньше полноту канала на этом пути проверял reject-502 маршрута; в
+        v0.9.9 маршрут всегда оптимистичен (502-отказа нет), поэтому проверка
+        идёт на ближайшем локальном 400 — strict-проверке модели."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_SESSIONS_TABLE = 0
-        cfg.ADAPTER_COMPLETIONS_TARGET = "passthrough"
-        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.models_response = {"data": [{"id": "known-model"}]}
+        fake_backend.completions_response = {}
         with fake_backend:
             server = self._setup(fake_backend, tmp_path)
-            self._support("/v1/chat/completions", False)
             try:
                 resp = _send_http(
-                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
-                    body={"model": "test-model", "messages": []},
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "unknown-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
                     headers={"X-Claude-Code-Session-Id": "sess-rej"},
                 )
-                assert resp["status"] == 502
+                assert resp["status"] == 400
             finally:
                 server.shutdown()
         errs = self._err_files(tmp_path)
         assert len(errs) == 1
         content = errs[0].read_text(encoding="utf-8")
-        assert "final_status=502" in content
+        assert "final_status=400" in content
         assert "[ADAPTER_ERROR]" in content
-        assert "does not support" in content
+        assert "is not available" in content
         # Таблица отключена — строк не появилось (счётчик «Ошибок» не ведётся)
         from backend_adapter import session_registry
         assert session_registry.sessions_snapshot() == []
@@ -1958,7 +2104,6 @@ class TestErrFileProtocol(ServerSetupMixin):
         fake_backend.sse_lines = ['data: {"choices": [{"delta": {"content": "Hi"}}]}\n\n']
         with fake_backend:
             server = self._setup(fake_backend, tmp_path)
-            self._support("/v1/chat/completions", True)
             from backend_adapter import server as server_mod
             orig_relay = server_mod.relay_sse
 

@@ -240,15 +240,16 @@ esac
 USE_SUDO=0
 
 # ── System service layout (Linux, --service) ───────────────────────────
-# Rooted at a single state directory that holds both configs and logs; the
-# service runs as a dedicated unprivileged system user. Overridable for tests
-# and non-standard layouts.
+# Rooted at a single state directory that holds the configs and the adapter
+# DATA ROOT (ADAPTER_DATA_ROOT: log/ + var/ subdirs); the service runs as a
+# dedicated unprivileged system user. Overridable for tests and non-standard
+# layouts.
 SERVICE_ROOT="${ADAPTER_SERVICE_ROOT:-/var/lib/backend-adapter}"
 SERVICE_USER="${ADAPTER_SERVICE_USER:-backend-adapter}"
 SERVICE_UNIT="/etc/systemd/system/backend-adapter.service"
 SERVICE_ENV="${SERVICE_ROOT}/adapter.env"
 SERVICE_YAML="${SERVICE_ROOT}/adapter.yaml"
-SERVICE_LOGS="${SERVICE_ROOT}/logs"
+SERVICE_DATA="${SERVICE_ROOT}/data"
 
 # macOS launchd agent layout (per-user). Kept here so both install_launchd and
 # update_install (which backs up and regenerates them) agree on the paths.
@@ -535,7 +536,7 @@ install_systemd() {
   ok "systemd system unit installed and started: ${SERVICE_UNIT}"
   info "Config:  ${SERVICE_YAML} (provider 'main', base ${SERVICE_BASE})"
   info "Env:     ${SERVICE_ENV} (token, mode 0600)"
-  info "Logs:    ${SERVICE_LOGS} (journal: journalctl -u backend-adapter -f)"
+  info "Data:    ${SERVICE_DATA} (log/ + var/; journal: journalctl -u backend-adapter -f)"
   info "Status:  systemctl status backend-adapter"
 }
 
@@ -543,7 +544,7 @@ install_systemd() {
 # Expects SERVICE_BASE / SERVICE_KEY to be set (fresh: collect_service_config;
 # update: read_old_config). Idempotent: safe to run over an existing layout.
 write_service_files() {
-  as_root mkdir -p "$SERVICE_ROOT" "$SERVICE_LOGS"
+  as_root mkdir -p "$SERVICE_ROOT" "$SERVICE_DATA"
 
   if ! id -u "$SERVICE_USER" &>/dev/null; then
     # --no-create-home: the state dir is SERVICE_ROOT, not a home directory.
@@ -572,14 +573,15 @@ ADAPTER_BACKEND_KEY_MAIN=${SERVICE_KEY}
 ADAPTER_PROXY_PORT=9999
 ADAPTER_ENDPOINT_HOST=127.0.0.1
 ADAPTER_DEBUG_ENABLE=0
-ADAPTER_DEBUG_LOGPATH=${SERVICE_LOGS}
+ADAPTER_DATA_ROOT=${SERVICE_DATA}
 ADAPTER_DETACH_ENABLE=0
 EOF
 
-  # Ownership: the service user owns its config and log dir; the env file with
-  # the token stays root-only (systemd reads EnvironmentFile as root, the
-  # process itself never needs it).
-  as_root chown "$SERVICE_USER:$SERVICE_USER" "$SERVICE_YAML" "$SERVICE_LOGS"
+  # Ownership: the service user owns its config and data root (the adapter
+  # creates log/ and var/ inside it at startup); the env file with the token
+  # stays root-only (systemd reads EnvironmentFile as root, the process itself
+  # never needs it).
+  as_root chown "$SERVICE_USER:$SERVICE_USER" "$SERVICE_YAML" "$SERVICE_DATA"
   as_root chmod 0640 "$SERVICE_YAML"
   as_root chown root:root "$SERVICE_ENV"
   as_root chmod 0600 "$SERVICE_ENV"
@@ -663,7 +665,7 @@ delete_install() {
     info "No systemd unit at ${SERVICE_UNIT} — skipped."
   fi
 
-  # 3. State directory (adapter.yaml, adapter.env with the token, logs).
+  # 3. State directory (adapter.yaml, adapter.env with the token, data root).
   if [[ -e "$SERVICE_ROOT" ]]; then
     as_root rm -rf "$SERVICE_ROOT"
     ok "Removed state directory: ${SERVICE_ROOT}"

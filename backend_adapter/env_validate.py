@@ -17,7 +17,7 @@
 Невалидное значение → ``[FATAL] <имя>=<знач>: ожидается <тип>`` в консоль и
 ``sys.exit(1)`` — адаптер не стартует (решение пользователя: невалидная env —
 это ошибка конфигурации, а не повод тихо работать на дефолтах; ср. FATAL на
-LOGPATH-файл и пустой ADAPTER_BACKEND_CONFIG в backend-adapter.py).
+корень-файл и пустой ADAPTER_BACKEND_CONFIG в backend-adapter.py).
 
 ``config.py`` при импорте продолжает читать env сам (обратная совместимость
 тестов, которые импортируют его без запуска скрипта), но парсит bool/int
@@ -54,6 +54,8 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_EXPORTER_PORT": "int",
     "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "int",
     "ADAPTER_SESSIONS_TABLE": "int",
+    "ADAPTER_REASONING_MIN_TOKENS": "int",
+    "ADAPTER_REASONING_RETRY": "int",
     # --- bool ---
     "ADAPTER_DEBUG_ENABLE": "bool",
     "ADAPTER_DEBUG_PARTS": "bool",
@@ -63,13 +65,12 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_STREAM_INCLUDE_USAGE": "bool",
     "ADAPTER_SENSITIVE_LOGGING_ENABLE": "bool",
     "ADAPTER_EXPORTER_ENABLE": "bool",
-    "ADAPTER_ENDPOINT_PROBE": "bool",
     "ADAPTER_MODEL_USAGE_ENABLE": "bool",
     # --- str (свободный текст) ---
     "ADAPTER_BACKEND_CONFIG": "str",
     "ADAPTER_ENDPOINT_HOST": "str",
     "ADAPTER_WEBUI_HOST": "str",
-    "ADAPTER_DEBUG_LOGPATH": "str",
+    "ADAPTER_DATA_ROOT": "str",
     "ADAPTER_PIDFILE": "str",
     "ADAPTER_STATE": "str",
     "ADAPTER_MODELS_MAPPING": "str",

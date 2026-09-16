@@ -1,7 +1,7 @@
 """Human-readable per-session debug logging (_d, _dr).
 
 Calls config redaction, writes to console and/or per-session file in the
-ADAPTER_DEBUG_LOGPATH directory (see session_log).
+ADAPTER_DATA_ROOT/log directory (see session_log).
 """
 
 import time

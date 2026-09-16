@@ -80,7 +80,7 @@ def _trace(session_id: str, req_id: str, event: str, **fields) -> None:
     # Мастер-выключатель ФАЙЛОВОГО трейса: при ADAPTER_DEBUG_ENABLE=0
     # трасса не пишется (у _trace нет консольного вывода — файловый JSONL
     # гейтится только этим флагом). Путь — всегда директория логов сессий
-    # (ADAPTER_DEBUG_LOGPATH, дефолт ./tmp/logs); запись — в per-session
+    # (ADAPTER_DATA_ROOT/log, дефолт ./tmp/adapter/log); запись — в per-session
     # JSONL-файл, single-file режим удалён.
     # Гейт файловой записи — ПЕР-СЕССИОННЫЙ (v0.9.5, session_log.logging_enabled
     # поверх session_settings.effective): сессия может вести свой trace, не

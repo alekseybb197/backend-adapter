@@ -31,11 +31,16 @@ This file provides guidance to [CC] () when working with code in this repository
 ## Ключевые факты
 
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
-  `changelog.md`. `__comment__` — **краткое фиксированное** резюме назначения
-  адаптера, при релизах не изменяется (нигде не парсится; версию читает
-  `webserver._detect_version()` из `__version__`). Пакет `backend_adapter/`
-  (layout и назначение каждого модуля — `docs/architecture.md` §2; группа
-  `artifact_tree*.py`, публичный API — `artifact_tree.generate()`).
+  `changelog.md`. `__comment__` — **КОНСТАНТНОЕ определение инструмента**
+  (`backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
+  backends for AI agents`): однострочная формулировка назначения, **не
+  перечисление возможностей**; та же строка открывает вводный blockquote
+  `README.md` (единый смысл, продублирован осознанно). При разработке и
+  релизах **не меняется** без отдельного указания пользователя; нигде не
+  парсится (версию читает `webserver._detect_version()` из `__version__`).
+  Пакет `backend_adapter/` (layout и назначение каждого модуля —
+  `docs/architecture.md` §2; группа `artifact_tree*.py`, публичный API —
+  `artifact_tree.generate()`).
 - **Python 3.10+** (аннотации `X | Y`); единственная внешняя зависимость —
   **PyYAML** (`requirements.txt`), всё остальное — стандартная библиотека.
 - Документация: `docs/install.md` (запуск/шаблоны продакшена),
@@ -48,11 +53,14 @@ This file provides guidance to [CC] () when working with code in this repository
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны
   и обрезаются до `ADAPTER_DEBUG_TRIM`; файловая запись гейтится
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
-  `*.parts` — дампы). Вне ENABLE/PARTS/TRIM в `ADAPTER_DEBUG_LOGPATH` живут
-  безусловные артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1),
-  JSON-результаты проверок бэкендов (`probe_json.py`), PID-файл (`daemon.py` —
+  `*.parts` — дампы). Корень данных — `ADAPTER_DATA_ROOT` (v0.9.9,
+  переименован из `ADAPTER_DEBUG_LOGPATH`, который больше не читается; дефолт
+  `./tmp/adapter`), внутри — две подпапки: `log/` (всё файловое о сессиях) и
+  `var/` (состояние). Вне ENABLE/PARTS/TRIM в `log/` живут безусловные
+  артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1); в `var/` —
+  JSON-результат опроса списка моделей (`probe_json.py`), PID-файл (`daemon.py` —
   пишется при ЛЮБОМ запуске, не только в detach; удаляется при штатном
-  завершении и через `atexit`).
+  завершении и через `atexit`), `model-usage.yaml`, `state.yaml`.
 
 ## Принципы
 
@@ -62,6 +70,10 @@ This file provides guidance to [CC] () when working with code in this repository
 - Все секреты в логах маскируются (`redact.py`); санитайзер включён по умолчанию.
 - Новые возможности покрываются флагами окружения (см. `docs/environment.md`),
   дефолты выбирают безопасное поведение.
+- **Определение инструмента — константа.** `__comment__` в `backend-adapter.py`
+  и первая строка вводного blockquote `README.md` — одна и та же фиксированная
+  формулировка назначения, а не список фич: при добавлении возможностей её
+  **не трогаем**, историю ведёт `changelog.md`.
 - Документация обновляется вместе с кодом, а не после.
 
 ## Архитектура (большая картина)
@@ -82,8 +94,9 @@ This file provides guidance to [CC] () when working with code in this repository
 образования сессии (`ensure_session`), дальше сессия живёт своими значениями,
 состояния `inherit` нет; глобальные `ADAPTER_DEBUG`/`ADAPTER_DEBUG_PARTS` —
 лишь шаблон для **новых** сессий (ничего не включают/выключают на ходу).
-TARGET-поля — **живое** наследование (три состояния: не задано / `inherit` /
-значение). Флаги логирования читаются через
+TARGET-поля — **живое** наследование (два состояния: не задано / значение;
+v0.9.9 — «вернуться к общему» = снять переопределение, а WEBUI снимает запись
+при выборе значения, равного текущему общему). Флаги логирования читаются через
 `session_log.logging_enabled`/`parts_enabled` (запрос без `session_id` или с
 `unknown` не пишет файлы вообще); TARGET — через `routing.decide`
 при непустом `session_id`. `.err` пишется для **любой** ошибки распознанного
@@ -93,7 +106,7 @@ TARGET-поля — **живое** наследование (три состоя
 `docs/logging.md`.
 
 **Персистентность runtime-пула (v0.9.6):** `state_store.py` хранит значения
-`RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, в `ADAPTER_DEBUG_LOGPATH`)
+`RUNTIME_CONFIG_POOL` в `state.yaml` (env `ADAPTER_STATE`, в `ADAPTER_DATA_ROOT/var`)
 — на старте файл применяется **поверх env** (`apply_on_startup`, вызывается из
 `backend-adapter.py` до `_init_multi_backends`), каждое изменение `/config`
 персистится через колбек `config.set_on_change` (config остаётся корнем DAG).
@@ -116,7 +129,8 @@ TARGET-поля — **живое** наследование (три состоя
 (реестр эндпоинтов, `serve()`) в daemon-потоке + модули-эндпоинты
 (`webui_status.py` `/`, `webui_sessions.py` `/sessions`, `webui_ops.py` health,
 `webui_config_api.py` `/config`, `session_viewer.py` `/session`); корень —
-`ADAPTER_DEBUG_LOGPATH`. Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) —
+`ADAPTER_DATA_ROOT` (подпапка `log/` несёт `*.parts` и `.err`, `var/` —
+`model-usage.yaml`). Prometheus-экспортёр (`ADAPTER_EXPORTER_ENABLE=1`) —
 отдельный слушатель, не эндпоинт WEBUI.
 Новый эндпоинт = модуль с `@webserver.register` + импорт в `webserver.serve()`.
 Поведение страниц и API — `docs/webui.md`.

@@ -1,7 +1,8 @@
 """Session-scoped log file management.
 
 Manages per-session debug/trace file handles with FIFO eviction.
-Reads ADAPTER_DEBUG_LOGPATH from env at import time.
+Reads ADAPTER_DATA_ROOT from env at import time; файлы ложатся в подпапку
+``log/`` (v0.9.9).
 """
 
 import contextlib
@@ -117,16 +118,16 @@ _debug_json_lock = threading.Lock()
 
 
 def _resolve_log_base():
-    """Прочитать env ADAPTER_DEBUG_LOGPATH и вернуть (debug_is_dir,
+    """Прочитать env ADAPTER_DATA_ROOT и вернуть (debug_is_dir,
     debug_path, trace_is_dir, trace_path).
 
     Путь всегда трактуется как ДИРЕКТОРИЯ логов сессий (debug-логи, trace,
-    *.parts дампы и корень веб-интерфейса — всё в одной папке). Режим
-    «один файл» удалён.
+    ``*.parts`` дампы и ``.err``-файлы инцидентов — всё в одной папке
+    ``ADAPTER_DATA_ROOT/log``, v0.9.9). Режим «один файл» удалён.
 
     Путь ВСЕГДА непуст: пустая / не заданная env-переменная → дефолт
-    "./tmp/logs" (тот же, что config.ADAPTER_DEBUG_LOGPATH; папка создаётся
-    на старте адаптера как корень WEBUI). Файлы в неё пишутся ТОЛЬКО при
+    ``./tmp/adapter/log`` (та же формула, что config.log_dir; папка создаётся
+    на старте адаптера). Файлы в неё пишутся ТОЛЬКО при
     ADAPTER_DEBUG_ENABLE=1 — гейт на уровне вызывающих (logger/tracer/
     write_debug_json), а не здесь.
 
@@ -134,7 +135,8 @@ def _resolve_log_base():
     на диске: отсутствие лечится os.makedirs(exist_ok=True) при записи
     (см. _open_session_file / _body_tags_parts_dir).
     """
-    p = os.environ.get("ADAPTER_DEBUG_LOGPATH", "").strip() or "./tmp/logs"
+    root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or "./tmp/adapter"
+    p = os.path.join(root, "log")
     return (True, p, True, p)
 
 
@@ -236,9 +238,8 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     декодируется как UTF-8.
 
     Файл пишется только если включён мастер-выключатель ADAPTER_DEBUG и флаг
-    ADAPTER_DEBUG_PARTS (лог-путь задан всегда — директория
-    ADAPTER_DEBUG_LOGPATH с дефолтом ./tmp/logs; папка создаётся при
-    необходимости). Для каждого тега пишутся парные файлы —
+    ADAPTER_DEBUG_PARTS (лог-путь задан всегда — папка ADAPTER_DATA_ROOT/log
+    с дефолтом ./tmp/adapter/log; папка создаётся при необходимости). Для каждого тега пишутся парные файлы —
     ``.json`` и ``.yaml``.
 
     v0.9.5: оба флага читаются ПЕР-СЕССИОННО (``logging_enabled``/
@@ -323,8 +324,9 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 #   - НЕ гейтится config.ADAPTER_DEBUG (ENABLE=0 — тоже пишется);
 #   - НЕ гейтится config.ADAPTER_DEBUG_PARTS;
 #   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и сообщение).
-# Гейтится только наличием лог-директории (ADAPTER_DEBUG_LOGPATH — всегда
-# непуста, дефолт ./tmp/logs; is_dir=True всегда — см. _resolve_log_base).
+# Гейтится только наличием лог-папки (ADAPTER_DATA_ROOT — всегда непуст,
+# дефолт ./tmp/adapter, лог-папка log/; is_dir=True всегда — см.
+# _resolve_log_base).
 # Санитайзер уважает ADAPTER_SENSITIVE_LOGGING_ENABLE (живое чтение config,
 # как в logger._write): по умолчанию секреты redact'ятся, при =1 пишутся
 # полные данные.

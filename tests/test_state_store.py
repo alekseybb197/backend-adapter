@@ -12,9 +12,9 @@ runtime-пула в ``state.yaml`` (v0.9.6).
 верхнеуровневая ссылка указывала бы на устаревший экземпляр (тот же паттерн,
 что tests/test_session_registry.py).
 
-Путь файла задаётся через tmp_path: ``config.ADAPTER_DEBUG_LOGPATH`` —
-директория, ``config.ADAPTER_STATE`` — имя (state_store.state_path читает их
-живьём).
+Путь файла задаётся через tmp_path: ``config.ADAPTER_DATA_ROOT`` —
+корень (state_store.state_path берёт из него ``var/``), ``config.ADAPTER_STATE``
+— имя (state_store.state_path читает их живьём).
 """
 
 import os
@@ -40,23 +40,28 @@ def cfg():
 
 
 def _point_at(cfg, tmp_path, name="state.yaml"):
-    """Направить state_store в tmp_path (LOGPATH=dir, STATE=имя файла)."""
-    cfg.ADAPTER_DEBUG_LOGPATH = str(tmp_path)
+    """Направить state_store в tmp_path (DATA_ROOT=dir, STATE=имя файла).
+
+    Папка состояния ``var/`` создаётся сразу — тесты пишут в файл напрямую
+    (в проде её создаёт старт backend-adapter.py)."""
+    cfg.ADAPTER_DATA_ROOT = str(tmp_path)
     cfg.ADAPTER_STATE = name
-    return os.path.join(str(tmp_path), name)
+    var_dir = os.path.join(str(tmp_path), "var")
+    os.makedirs(var_dir, exist_ok=True)
+    return os.path.join(var_dir, name)
 
 
 class TestStatePath:
-    def test_joins_logpath_and_name(self, store, cfg, tmp_path):
-        cfg.ADAPTER_DEBUG_LOGPATH = str(tmp_path)
+    def test_joins_var_dir_and_name(self, store, cfg, tmp_path):
+        cfg.ADAPTER_DATA_ROOT = str(tmp_path)
         cfg.ADAPTER_STATE = "custom.yaml"
-        assert store.state_path() == os.path.join(str(tmp_path), "custom.yaml")
+        assert store.state_path() == os.path.join(str(tmp_path), "var", "custom.yaml")
 
     def test_reads_config_live(self, store, cfg, tmp_path):
-        cfg.ADAPTER_DEBUG_LOGPATH = str(tmp_path / "a")
+        cfg.ADAPTER_DATA_ROOT = str(tmp_path / "a")
         cfg.ADAPTER_STATE = "s.yaml"
         first = store.state_path()
-        cfg.ADAPTER_DEBUG_LOGPATH = str(tmp_path / "b")
+        cfg.ADAPTER_DATA_ROOT = str(tmp_path / "b")
         assert store.state_path() != first
 
 
@@ -116,10 +121,10 @@ class TestSave:
         assert data == {"ADAPTER_DEBUG": True}
 
     def test_creates_missing_directory(self, store, cfg, tmp_path):
-        cfg.ADAPTER_DEBUG_LOGPATH = str(tmp_path / "deep" / "logs")
+        cfg.ADAPTER_DATA_ROOT = str(tmp_path / "deep" / "data")
         cfg.ADAPTER_STATE = "state.yaml"
         store.save({"ADAPTER_DEBUG": True})
-        assert os.path.isfile(os.path.join(cfg.ADAPTER_DEBUG_LOGPATH, "state.yaml"))
+        assert os.path.isfile(os.path.join(cfg.var_dir(), "state.yaml"))
 
     def test_atomic_no_tmp_left(self, store, cfg, tmp_path):
         path = _point_at(cfg, tmp_path)
@@ -151,7 +156,7 @@ class TestSave:
         # исключение наружу не выходит (канал наблюдательный).
         blocker = tmp_path / "blocker"
         blocker.write_text("x")
-        cfg.ADAPTER_DEBUG_LOGPATH = str(blocker)
+        cfg.ADAPTER_DATA_ROOT = str(blocker)
         cfg.ADAPTER_STATE = "state.yaml"
         store.save({"ADAPTER_DEBUG": True})
         assert "[WARN]" in capsys.readouterr().out

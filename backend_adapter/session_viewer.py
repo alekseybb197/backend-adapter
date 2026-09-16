@@ -3,8 +3,9 @@
 session_viewer.py — эндпойнт "/session" общего веб-сервера WEBUI:
 просмотр сессий адаптера (директории *.parts) в браузере.
 
-Что делает эндпойнт: сканирует корневую папку (WebContext.root_dir) на
-вложенные *.parts-директории сессий (session-XXXX.parts). Для каждой:
+Что делает эндпойнт: сканирует лог-папку (WebContext.log_dir =
+ADAPTER_DATA_ROOT/log, v0.9.9) на вложенные *.parts-директории сессий
+(session-XXXX.parts). Для каждой:
   - если в ней уже есть artefacts/tree.html и он НЕ устарел — используется
     как есть;
   - если tree.html нет, или он есть, но появились более новые part-файлы
@@ -306,10 +307,10 @@ class SessionEndpoint(webserver.Endpoint):
         self.context = context
 
     def GET(self, handler, remainder: str):
-        sessions = find_or_generate_sessions(self.context.root_dir, verbose=self.context.verbose)
+        sessions = find_or_generate_sessions(self.context.log_dir, verbose=self.context.verbose)
         if not remainder:
             # "/session" — страница с вкладками всех сессий
-            body = render_shell(sessions, self.context.root_dir)
+            body = render_shell(sessions, self.context.log_dir)
             handler._write(200, "text/html; charset=utf-8", body.encode("utf-8"))
             return
 

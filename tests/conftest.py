@@ -29,7 +29,7 @@ def fresh_env(monkeypatch):
     Usage::
 
         config = fresh_env(ADAPTER_DEBUG_ENABLE="0",
-                           ADAPTER_DEBUG_LOGPATH="",
+                           ADAPTER_DATA_ROOT="",
                            ADAPTER_BACKEND_CONFIG="/tmp/x.yaml")
 
     After the call ``config`` is the *reloaded* module; all downstream
@@ -38,6 +38,10 @@ def fresh_env(monkeypatch):
     """
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
+        "ADAPTER_DATA_ROOT": "",
+        # Старое имя корня (v0.9.9 переименовано в ADAPTER_DATA_ROOT) —
+        # гасим унаследованное из шелла значение: непустое при пустом новом
+        # даёт [WARN] о переименовании на импорте config.
         "ADAPTER_DEBUG_LOGPATH": "",
         # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
         # Сам файл в тестах не создаётся — apply_on_startup вызывает только
@@ -53,15 +57,10 @@ def fresh_env(monkeypatch):
         "ADAPTER_STREAM_INCLUDE_USAGE": "1",
         "ADAPTER_MODELS_MAPPING": "",
         "ADAPTER_BACKEND_CONFIG": "",
-        # Endpoint probe off by default in tests: probe tests opt in via
-        # _setup(probe_enabled=True); without this, refresh_models would fire
-        # real network smoke-probes in unrelated tests.
-        "ADAPTER_ENDPOINT_PROBE": "0",
-        # Used-models table: endpoint probes off by default (first use of a
-        # model would fire real HTTP POSTs). Accounting itself stays on — the
-        # flag only gates probes; tests enable it explicitly.
+        # Used-models table: off by default in tests (accounting is a no-op
+        # until a test opts in explicitly).
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
-        # Persistence of the used-models table: sane default for tests (probe
+        # Persistence of the used-models table: sane default for tests (parse
         # of the interval value happens on config import).
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         # Tariffs file for the Cost column: empty by default (no tariffs — the
@@ -110,6 +109,10 @@ def _default_config():
     """Re-import config with defaults (called by tests that need defaults)."""
     defaults = {
         "ADAPTER_DEBUG_ENABLE": "0",
+        "ADAPTER_DATA_ROOT": "",
+        # Старое имя корня (v0.9.9 переименовано в ADAPTER_DATA_ROOT) —
+        # гасим унаследованное из шелла значение: непустое при пустом новом
+        # даёт [WARN] о переименовании на импорте config.
         "ADAPTER_DEBUG_LOGPATH": "",
         # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
         # Сам файл в тестах не создаётся — apply_on_startup вызывает только
@@ -125,11 +128,7 @@ def _default_config():
         "ADAPTER_STREAM_INCLUDE_USAGE": "1",
         "ADAPTER_MODELS_MAPPING": "",
         "ADAPTER_BACKEND_CONFIG": "",
-        # Endpoint probe off by default in tests: probe tests opt in via
-        # _setup(probe_enabled=True); without this, refresh_models would fire
-        # real network smoke-probes in unrelated tests.
-        "ADAPTER_ENDPOINT_PROBE": "0",
-        # Used-models table: endpoint probes off by default (see fresh_env).
+        # Used-models table: off by default in tests (see fresh_env).
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         "ADAPTER_MODELS_TARIFFS": "",
@@ -204,7 +203,6 @@ def isolate_logs(fresh_env):
     config._BACKEND_BY_NAME.clear()
     config._MODEL_TO_BACKEND.clear()
     config._DEFAULT_BACKEND = None
-    config._ENDPOINT_STATE.clear()
     config._REFRESH_JOB = None
 
     # Reset sessions table (session_registry keeps its own module global —
@@ -262,11 +260,20 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
     models_delay = 0.0
     completions_response = None
     completions_status = 200
+    # Последовательность ответов /v1/chat/completions по порядку запросов
+    # (v0.9.9, тесты адаптивного ретрая): список, из которого на каждый запрос
+    # берётся ПЕРВЫЙ элемент (pop(0)). Элемент — либо int (статус; тело берётся
+    # из completions_response), либо пара (status, body) для разнотелых
+    # сценариев (502 с ошибкой → 200 с результатом). Пусто/None — обычное
+    # поведение по completions_status/completions_response.
+    completions_statuses = None
     # Responses API (v0.9.0): тело/статус для POST /v1/responses (passthrough
     # E→E на новых входных эндпоинтах адаптера).
     responses_response = None
     responses_status = 200
-    extra_post_paths = {}  # {path: status} — для endpoint-probe тестов
+    # {path: status} — POST-пути сверх /v1/chat/completions и /v1/responses
+    # (например /v1/messages), отвечающие настроенным статусом без тела.
+    extra_post_paths = {}
     # SSE-стрим (v0.9.0): если задан список строк — ответ text/event-stream
     # для /v1/chat/completions (построчно, как настоящий стрим), иначе —
     # обычный JSON completions_response.
@@ -314,16 +321,27 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/v1/chat/completions":
-            self.send_response(FakeBackendHandler.completions_status)
+            status = FakeBackendHandler.completions_status
+            resp_body = FakeBackendHandler.completions_response
+            seq = FakeBackendHandler.completions_statuses
+            if seq:
+                # Очередь ответов по порядку запросов (v0.9.9): элемент — int
+                # (статус) либо (status, body).
+                item = seq.pop(0)
+                if isinstance(item, tuple):
+                    status, resp_body = item
+                else:
+                    status = item
+            self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            if FakeBackendHandler.completions_status == 200 and FakeBackendHandler.completions_response:
-                self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
-            elif FakeBackendHandler.completions_response:
+            if status == 200 and resp_body:
+                self.wfile.write(json.dumps(resp_body).encode())
+            elif resp_body:
                 # Любой не-200 статус с настроенным телом — пишем его как тело
                 # ошибки (v0.9.0: .err-тесты проверяют ПОЛНОЕ сообщение бэкенда).
-                self.wfile.write(json.dumps(FakeBackendHandler.completions_response).encode())
-            elif FakeBackendHandler.completions_status in (429, 502, 503, 504):
+                self.wfile.write(json.dumps(resp_body).encode())
+            elif status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path == "/v1/responses":
             self.send_response(FakeBackendHandler.responses_status)
@@ -338,8 +356,8 @@ class FakeBackendHandler(BaseHTTPRequestHandler):
             elif FakeBackendHandler.responses_status in (429, 502, 503, 504):
                 self.wfile.write(json.dumps({"error": "backend error"}).encode())
         elif self.path in FakeBackendHandler.extra_post_paths:
-            # Дымовые пробы остальных эндпоинтов: /v1/messages, /v1/responses,
-            # /v1/embeddings — отвечаем настроенным статусом без тела.
+            # Прочие POST-пути (например /v1/messages) — отвечаем настроенным
+            # статусом без тела.
             self.send_response(FakeBackendHandler.extra_post_paths[self.path])
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -406,6 +424,14 @@ class FakeBackend:
     @completions_status.setter
     def completions_status(self, value):
         FakeBackendHandler.completions_status = value
+
+    @property
+    def completions_statuses(self):
+        return FakeBackendHandler.completions_statuses
+
+    @completions_statuses.setter
+    def completions_statuses(self, value):
+        FakeBackendHandler.completions_statuses = value
 
     @property
     def responses_response(self):
@@ -479,6 +505,7 @@ def fake_backend():
     FakeBackendHandler.models_delay = 0.0
     FakeBackendHandler.completions_response = None
     FakeBackendHandler.completions_status = 200
+    FakeBackendHandler.completions_statuses = None
     FakeBackendHandler.responses_response = None
     FakeBackendHandler.responses_status = 200
     FakeBackendHandler.extra_post_paths = {}

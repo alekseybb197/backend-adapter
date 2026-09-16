@@ -26,7 +26,7 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
     сессию не трогают. Parts активен только при включённом Log: при Log=off
     его селект заблокирован (v0.9.6);
   - «TARGET» — селект TARGET-переменной входного эндпойнта строки
-    (inherit + домен config.TARGET_ALLOWED_VALUES);
+    (домен config.TARGET_ALLOWED_VALUES);
   - «C»/«E» — счётчики Вызовов/Ошибок (заголовки укорочены в v0.9.6);
     у «E» при наличии .err-файла сессии число становится ссылкой на него
     (/logs/<имя>, открывается в НОВОМ окне браузера);
@@ -36,10 +36,11 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
 
 Все селекты и кнопки — обычные HTML-формы (PRG через 303 на GET /sessions),
 без JS: изменение селекта отправляет форму сразу (onchange="this.form.submit()").
-У TARGET метка варианта «inherit» несёт действующее значение общей настройки
-приложения — видно, к чему вернётся сессия (задача 4: дефолт сессии —
-общие настройки); у Log/Parts этого варианта нет — их дефолт материализуется
-в момент образования сессии и дальше не отслеживает общий тумблер.
+У TARGET при отсутствии переопределения показано действующее значение общей
+настройки приложения (v0.9.9: состояния «inherit» нет); выбор значения,
+совпадающего с общим, снимает переопределение и возвращает сессию к живому
+наследованию — тот же дефолт, что у новой сессии. У Log/Parts наследования
+нет вовсе — их снимок материализуется в момент образования сессии.
 
 Вся наблюдаемая часть строки обновляется без перезагрузки: безусловный JS
 sessions_poll каждые 5 с опрашивает /api/sessions/snapshot и правит ячейки
@@ -49,8 +50,8 @@ HTML — числом или ссылкой, как cost_html у таблицы 
 переставляет строки в порядок снимка. Строки сопоставляются по data-key
 (JSON-строка кортежа): одна сессия может занимать НЕСКОЛЬКО строк.
 
-Раздача .err-файлов: GET /logs/<имя> отдаёт файл из корня WEBUI
-(WebContext.root_dir = ADAPTER_DEBUG_LOGPATH) как text/plain. Имя
+Раздача .err-файлов: GET /logs/<имя> отдаёт файл из лог-папки
+(WebContext.log_dir = ADAPTER_DATA_ROOT/log, v0.9.9) как text/plain. Имя
 ограничено строгим шаблоном session-<дата>-<время>-<safe8>.err — ни слэшей,
 ни «..» в нём быть не может, поэтому обход каталога исключён структурно.
 Тем же шаблоном валидируется и превью-эндпойнт /errors/<имя>
@@ -106,14 +107,15 @@ def _bool_options(name: str) -> tuple[tuple[str, str], ...]:
 
 
 def _target_options(name: str) -> tuple[tuple[str, str], ...]:
-    """Варианты селекта TARGET: inherit + домен config.TARGET_ALLOWED_VALUES.
+    """Варианты селекта TARGET: домен config.TARGET_ALLOWED_VALUES.
 
-    «inherit» — тоже полноценное хранимое значение (см. session_settings):
-    метка несёт общую настройку приложения."""
-    inherited = getattr(config, name, "none")
-    options = [("inherit", f"inherit ({inherited})")]
-    options.extend((value, value) for value in config.TARGET_ALLOWED_VALUES)
-    return tuple(options)
+    v0.9.9: состояния «inherit» больше нет — тот же домен, что у глобальной
+    настройки. «Вернуться к общему» = выбрать значение, совпадающее с текущим
+    общим: форма снимает переопределение (см. _apply_setting), и сессия снова
+    живо наследует config.X.
+
+    Аргумент ``name`` сохранён: подпись общая с ``_bool_options``."""
+    return tuple((value, value) for value in config.TARGET_ALLOWED_VALUES)
 
 
 def _stored_bool(session_id: str, name: str) -> str:
@@ -326,9 +328,13 @@ def _target_cell_html(row: dict) -> str:
     if inp not in routing.INPUT_PATHS:
         return '<span style="color:#aaa">—</span>'
     name = routing.target_env_name(inp)
-    stored = session_settings.override(str(row.get("session", "")), name)
-    selected = "inherit" if stored is None else str(stored)
-    return _select_form_html(str(row.get("session", "")), name, _target_options(name), selected)
+    sid = str(row.get("session", ""))
+    stored = session_settings.override(sid, name)
+    # Переопределения нет — показываем ДЕЙСТВУЮЩЕЕ (общее) значение: состояния
+    # «inherit» у TARGET больше нет (v0.9.9), а «вернуться к общему» пользователь
+    # выражает выбором именно этого значения.
+    selected = str(stored) if stored is not None else str(session_settings.effective(sid, name))
+    return _select_form_html(sid, name, _target_options(name), selected)
 
 
 def _render_sessions_page(context) -> bytes:
@@ -366,8 +372,10 @@ def _render_sessions_page(context) -> bytes:
   берутся из общих настроек приложения и дальше не зависят от них (общие
   флаги влияют только на новые сессии). <b>Parts</b> работает только при
   включённом <b>Log</b>: при Log=off его селект заблокирован, а включение
-  Parts само включает Log. У <b>TARGET</b> вариант «inherit» означает «взять
-  общую настройку приложения» (её значение показано в скобках).
+  Parts само включает Log. У <b>TARGET</b> состояние сессии — либо собственное
+  значение, либо наследование общей настройки приложения: если переопределения
+  нет, показано её действующее значение, а выбор значения, совпадающего с
+  общим, снимает переопределение (сессия снова следует за <code>/config</code>).
 </p>
 <table>
   <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Входной эндпойнт</th><th>Маршрут</th><th>Последнее обращение</th><th>C</th><th>E</th><th>Log</th><th>Parts</th><th>TARGET</th><th>Actions</th></tr>
@@ -468,7 +476,13 @@ def _apply_setting(session_id: str, name: str, raw) -> bool:
     Строка "inherit", пришедшая от старой формы или скрипта, трактуется как
     «сбросить к общему значению» — это ``clear``, который у снимка означает
     свежий снимок текущего общего тумблера (см. session_settings.set_config).
-    У enum (TARGET) «inherit» остаётся полноценным значением домена."""
+
+    v0.9.9: у TARGET состояния «inherit» тоже нет — домен равен
+    ``config.TARGET_ALLOWED_VALUES``. «Вернуться к общему» выражается выбором
+    значения, СОВПАДАЮЩЕГО с текущей общей настройкой: переопределение при
+    этом СНИМАЕТСЯ (``clear``), и сессия снова живо наследует ``config.X``.
+    Правило — только для не-bool полей: у Log/Parts наследования нет вовсе,
+    и любое присланное значение принадлежит сессии."""
     if not session_id or name not in config.SESSION_CONFIG_POOL:
         return False
     expected = config._SESSION_CONFIG_TYPES[name]
@@ -478,8 +492,11 @@ def _apply_setting(session_id: str, name: str, raw) -> bool:
             if expected is bool:
                 session_settings.set_config(session_id, clear=(name,))
                 return True
-            raw = "inherit"
-        elif expected is bool:
+            # TARGET: "inherit" доменом больше не принимается — трактуем как
+            # «снять переопределение» (обратная совместимость старых скриптов).
+            session_settings.set_config(session_id, clear=(name,))
+            return True
+        if expected is bool:
             if low in ("1", "true", "on", "yes"):
                 raw = True
             elif low in ("0", "false", "off", "no"):
@@ -488,6 +505,11 @@ def _apply_setting(session_id: str, name: str, raw) -> bool:
                 return False
     if not config.accepts_value(expected, raw):
         return False
+    if expected is not bool and raw == getattr(config, name, None):
+        # Выбрано значение, равное общему, — это «вернуться к общему»:
+        # запись снимается, живое наследование восстанавливается.
+        session_settings.set_config(session_id, clear=(name,))
+        return True
     session_settings.set_config(session_id, {name: raw})
     return True
 
@@ -662,13 +684,15 @@ class SessionSettingsEndpoint(webserver.Endpoint):
 
     Адресует переопределения сессии (session_settings): логирование
     (ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS) и TARGET-роутинг входов
-    (ADAPTER_{MESSAGES,COMPLETIONS,RESPONSES}_TARGET). Значение "inherit"
-    у bool-настройки снимает переопределение, у TARGET — записывается явно.
+    (ADAPTER_{MESSAGES,COMPLETIONS,RESPONSES}_TARGET). У bool-настройки
+    значение "inherit" снимает переопределение (у снимка это его сброс); у
+    TARGET выбор значения, равного текущей общей настройке, тоже снимает
+    переопределение — «вернуться к общему» (v0.9.9, состояния «inherit» нет).
 
     Два клиента:
       - HTML-форма селекта строки (form method=post): query ``session``+
         ``name`` (имя настройки = env-переменная пула), тело — поле ``value``
-        (строка: "1"/"0"/"inherit"/значение домена). Ответ — PRG 303 на GET
+        (строка: "1"/"0"/значение домена). Ответ — PRG 303 на GET
         /sessions; битые имя/значение молча игнорируются (в норме их не
         бывает — селект собран сервером из домена).
       - JSON-клиент (Content-Type: application/json): либо {"session", "name",
@@ -757,10 +781,10 @@ class SessionLogFileEndpoint(webserver.Endpoint):
 
     Ссылка-счётчик «Ошибок» в таблице Sessions открывает файл инцидентов
     сессии в НОВОМ окне браузера (text/plain — браузер показывает его
-    построчно). Файлы лежат в корне WEBUI (WebContext.root_dir =
-    ADAPTER_DEBUG_LOGPATH). Имя проверяется строгим шаблоном _ERR_NAME_RE —
-    в допустимом имени нет ни слэшей, ни «..», поэтому обход каталога
-    невозможен структурно (отдельная realpath-проверка не нужна)."""
+    построчно). Файлы лежат в лог-папке (WebContext.log_dir =
+    ADAPTER_DATA_ROOT/log, v0.9.9). Имя проверяется строгим шаблоном
+    _ERR_NAME_RE — в допустимом имени нет ни слэшей, ни «..», поэтому обход
+    каталога невозможен структурно (отдельная realpath-проверка не нужна)."""
 
     prefix = "/logs"
 
@@ -772,7 +796,7 @@ class SessionLogFileEndpoint(webserver.Endpoint):
         if not name or not _ERR_NAME_RE.match(name):
             handler.send_error(404, "Not found")
             return
-        path = os.path.join(handler.context.root_dir, name)
+        path = os.path.join(handler.context.log_dir, name)
         if not os.path.isfile(path):
             handler.send_error(404, "File not found")
             return

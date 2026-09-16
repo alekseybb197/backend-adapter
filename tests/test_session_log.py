@@ -149,7 +149,7 @@ class TestWriteDebugJson:
         assert len(files) == 0
 
     def test_no_dir_no_files(self, tmp_path):
-        """When ADAPTER_DEBUG_LOGPATH is not set / not a directory, no dumps are written."""
+        """When the log dir is not set / not a directory, no dumps are written."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -278,7 +278,7 @@ class TestOpenSessionFile:
         assert fd is not None
 
     def test_no_logpath_no_file(self, tmp_path):
-        """Пустой ADAPTER_DEBUG_LOGPATH → дефолт ./tmp/logs (v0.8.6), а не
+        """Пустой ADAPTER_DATA_ROOT → дефолт ./tmp/adapter/log (v0.9.9), а не
         отсутствие путей: is_dir-флаги True всегда. Файл не пишется только
         когда путь выключен вручную (как isolate_logs) — тогда
         _open_session_file() возвращает None и ничего не создаёт на диске."""
@@ -287,12 +287,12 @@ class TestOpenSessionFile:
         for n in to_remove:
             del sys.modules[n]
         from backend_adapter import session_log
-        # Import-time defaults: env LOGPATH пуст → дефолт ./tmp/logs
+        # Import-time defaults: env ADAPTER_DATA_ROOT пуст → дефолт ./tmp/adapter/log
         assert session_log._DEBUG_IS_DIR is True
         assert session_log._TRACE_IS_DIR is True
-        assert session_log._DEBUG_PATH == "./tmp/logs"
-        assert session_log._TRACE_PATH == "./tmp/logs"
-        # Не пишем в реальную ./tmp/logs — выключаем путь, как isolate_logs
+        assert session_log._DEBUG_PATH == os.path.join("./tmp/adapter", "log")
+        assert session_log._TRACE_PATH == os.path.join("./tmp/adapter", "log")
+        # Не пишем в реальную ./tmp/adapter/log — выключаем путь, как isolate_logs
         session_log._DEBUG_IS_DIR = False
         session_log._DEBUG_PATH = ""
         fd = session_log._open_session_file("debug", "sess1")
@@ -307,7 +307,7 @@ class TestWriteErrorFile:
     """Tests for write_error_file() — безусловный .err-канал (v0.9.0)."""
 
     def _fresh(self):
-        """Перезагрузить модули, указать LOGPATH на tmp_path."""
+        """Перезагрузить модули, указать лог-папку на tmp_path."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -318,7 +318,7 @@ class TestWriteErrorFile:
         return session_log
 
     def test_writes_err_file(self, tmp_path):
-        """write_error_file пишет файл session-<ts>-<safe8>.err в LOGPATH."""
+        """write_error_file пишет файл session-<ts>-<safe8>.err в лог-папку."""
         import os
         session_log = self._fresh()
         session_log._DEBUG_PATH = str(tmp_path)
@@ -454,7 +454,7 @@ class TestWriteWarnFile:
     но БЕЗ final_status: предупреждение наблюдается и на успешном 200."""
 
     def _fresh(self):
-        """Перезагрузить модули, указать LOGPATH на tmp_path."""
+        """Перезагрузить модули, указать лог-папку на tmp_path."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:

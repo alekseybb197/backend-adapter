@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.8) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v0.9.9) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -193,7 +193,7 @@ backend-adapter/
 ├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
-│   ├── routing.py             # Входные эндпоинты/TARGET: decide() по кэшу проб
+│   ├── routing.py             # Входные эндпоинты/TARGET: decide() по TARGET
 │   ├── convert.py             # Anthropic ↔ [OI] конвертация
 │   ├── streaming.py           # SSE streaming passthrough
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
@@ -212,7 +212,7 @@ backend-adapter/
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
 │   ├── session_viewer.py      # WEBUI-эндпойнт "/session": просмотр *.parts сессий
 │   ├── model_usage.py         # Персистентный учёт использованных моделей, тарифы
-│   ├── probe_json.py          # JSON-результаты проверок бэкендов в LOGPATH
+│   ├── probe_json.py          # JSON-результат опроса списка моделей в var/
 │   ├── cli.py                 # Консольный entry point пакета
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
@@ -319,7 +319,7 @@ curl -fsSL https://raw.githubusercontent.com/alekseybb197/backend-adapter/main/i
 - `/var/lib/backend-adapter/adapter.env` — минимально достаточный набор
   (`ADAPTER_BACKEND_CONFIG`, `ADAPTER_BACKEND_KEY_MAIN`, `ADAPTER_PROXY_PORT`,
   `ADAPTER_ENDPOINT_HOST`, `ADAPTER_DEBUG_ENABLE`,
-  `ADAPTER_DEBUG_LOGPATH`, `ADAPTER_DETACH_ENABLE=0`), права `0600`,
+  `ADAPTER_DATA_ROOT`, `ADAPTER_DETACH_ENABLE=0`), права `0600`,
   владелец `root` (токен; systemd читает `EnvironmentFile` от root).
 
 Адрес бэкенда и токен установщик **запрашивает в диалоге** (URL — обычным
@@ -484,7 +484,7 @@ foreground; для работы в фоне используйте фонову�
 консоли. Остальные переменные работают одинаково на всех платформах.
 
 Дефолты не отличаются от исходников (zero-config): debug-блоки видны в консоли,
-на диск ничего не пишется, пока не задан `ADAPTER_DEBUG_LOGPATH`, статус-страница
+файловая запись выключена (`ADAPTER_DEBUG_ENABLE=0`), статус-страница
 WEBUI доступна на `http://127.0.0.1:8765/`. Руководство по страницам и
 JSON-эндпоинтам (включая таблицу использованных моделей и файл
 `model-usage.yaml`) — `docs/webui.md`.
@@ -654,35 +654,38 @@ export ADAPTER_MODELS_MAPPING="claude-sonnet-4-20250514:k2-05,claude-opus-4-2025
 # безусловны и от флага не зависят). Дефолт 0.
 export ADAPTER_DEBUG_ENABLE=0
 
-# Директория логов сессий и корень WEBUI: debug-логи (session-*.log),
-# trace-логи (session-*.jsonl), *.parts дампы, model-usage.yaml. Путь всегда
-# непуст — при незаданной/пустой env дефолт ./tmp/logs (создаётся при старте);
-# файлы в неё пишутся только при ADAPTER_DEBUG_ENABLE=1. Исключение — файлы
-# инцидентов session-*.err (v0.9.0): пишутся в ту же директорию БЕЗУСЛОВНО при
-# финальном ответе клиенту 4xx/5xx реального прокси-запроса (полные запрос и
-# ошибка, без обрезки по TRIM; redact по умолчанию, полные данные при
-# ADAPTER_SENSITIVE_LOGGING_ENABLE=1).
-# export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
+# Корень данных: корень WEBUI + две подпапки с фиксированными ролями
+# (создаются при старте). log/ — debug-логи (session-*.log), trace-логи
+# (session-*.jsonl), *.parts дампы и файлы инцидентов session-*.err;
+# var/ — adapter.pid, model-usage.yaml, state.yaml, <бэкенд>.models.json.
+# Путь всегда непуст — при незаданной/пустой env дефолт ./tmp/adapter.
+# Файлы в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1. Исключение — файлы
+# инцидентов session-*.err (v0.9.0) и JSON-дампы опроса списка моделей:
+# пишутся БЕЗУСЛОВНО при финальном ответе клиенту 4xx/5xx реального
+# прокси-запроса (полные запрос и ошибка, без обрезки по TRIM; redact по
+# умолчанию, полные данные при ADAPTER_SENSITIVE_LOGGING_ENABLE=1).
+# v0.9.9: старое имя ADAPTER_DEBUG_LOGPATH больше НЕ читается.
+# export ADAPTER_DATA_ROOT="/tmp/adapter-data"
 
 # Максимальная длина КОНСОЛЬНЫХ debug-строк (символы; 0 — без обрезки).
 # Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1) trim НЕ использует —
 # пишет полные строки (v0.8.6-реформа)
 # export ADAPTER_DEBUG_TRIM=3000
 
-# Имя PID-файла: кладётся в ADAPTER_DEBUG_LOGPATH (basename значения;
+# Имя PID-файла: кладётся в ADAPTER_DATA_ROOT/var (basename значения;
 # дефолт — adapter.pid). Пишется при ЛЮБОМ запуске (v0.9.5) и удаляется
 # при штатном завершении — управление процессом без консоли.
 # export ADAPTER_PIDFILE="adapter.pid"
 
 # JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
 # TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE — .json и .yaml парой;
-# требуют ADAPTER_DEBUG_ENABLE=1 и директорию ADAPTER_DEBUG_LOGPATH)
+# требуют ADAPTER_DEBUG_ENABLE=1; ложатся в ADAPTER_DATA_ROOT/log)
 # export ADAPTER_DEBUG_PARTS=1
 
 # Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий.
 # Поднимается ВСЕГДА (v0.8.6; флага ADAPTER_WEBUI_ENABLE больше нет) на 127.0.0.1:8765 —
-# статус-страница доступна сразу; корень — ADAPTER_DEBUG_LOGPATH (дефолт ./tmp/logs,
-# там *.parts сессии и model-usage.yaml — таблица использованных моделей).
+# статус-страница доступна сразу; корень — ADAPTER_DATA_ROOT (дефолт ./tmp/adapter;
+# *.parts сессий — в подпапке log/, model-usage.yaml — в подпапке var/).
 # Health-check для оркестрации: /healthz, /health, /live, /ready
 # (см. docs/webui.md). Руководство по страницам и API — docs/webui.md.
 # export ADAPTER_WEBUI_PORT=8765
@@ -704,7 +707,7 @@ export ADAPTER_DEBUG_ENABLE=0
 **Трассировка (trace)** — структурированный JSONL-лог для каждого tool call и ответа:
 
 ```bash
-# Trace-логи (session-*.jsonl) пишутся в ту же директорию ADAPTER_DEBUG_LOGPATH,
+# Trace-логи (session-*.jsonl) пишутся в ту же папку ADAPTER_DATA_ROOT/log,
 # что и debug-логи; включаются тем же мастер-выключателем файловой записи
 # ADAPTER_DEBUG_ENABLE=1. Отдельной переменной пути нет.
 
@@ -796,7 +799,7 @@ export ADAPTER_MESSAGES_TARGET=completions
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
-# export ADAPTER_DEBUG_LOGPATH="./tmp/logs"   # директория логов и корень WEBUI (дефолт ./tmp/logs)
+# export ADAPTER_DATA_ROOT="./tmp/adapter"   # корень данных (лог-папка log/ + состояние var/) и корень WEBUI
 # export ADAPTER_DEBUG_PARTS=1    # per-session дампы .json+.yaml всех логгируемых частей
 # (ADAPTER_DEBUG_TRIM=3000 — лимит консольных строк; 0 — без обрезки; файл всегда полный)
 
@@ -836,7 +839,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v0.9.8
+Backend-Adapter v0.9.9
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -845,7 +848,7 @@ Streaming:  enabled (SSE passthrough)
 Backends:   1 configured:
   - home: http://127.0.0.1:8002  (12 models) [default]
 TARGET:     messages=completions  completions=none  responses=none
-[WEBUI] http://127.0.0.1:8765/ (root: ./tmp/logs)
+[WEBUI] http://127.0.0.1:8765/ (root: ./tmp/adapter)
 [EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================
 ```
@@ -877,13 +880,13 @@ Detach-режим (double fork UNIX-daemon pattern):
 
 - Родительский процесс завершается немедленно
 - stdio/stderr перенаправлены в `/dev/null`
-- PID-файл пишется в `ADAPTER_DEBUG_LOGPATH`: имя — `adapter.pid`
+- PID-файл пишется в `ADAPTER_DATA_ROOT/var`: имя — `adapter.pid`
   или `basename(ADAPTER_PIDFILE)`
-- Логи идут в директорию `ADAPTER_DEBUG_LOGPATH`, если задана
-  (пусто — файловая запись выключена, только консоль)
+- Логи идут в `ADAPTER_DATA_ROOT/log`, если включена файловая запись
+  (`ADAPTER_DEBUG_ENABLE=1`; иначе только консоль)
 
 > **PID-файл — не только для detach.** Он пишется при **любом** запуске
-> (v0.9.5): путь — `ADAPTER_DEBUG_LOGPATH/adapter.pid`, в консоль печатается
+> (v0.9.5): путь — `ADAPTER_DATA_ROOT/var/adapter.pid`, в консоль печатается
 > строка `[PID] <pid> → <путь>`. Это позволяет управлять процессом без
 > консоли — в контейнере или в составе службы. При штатном завершении
 > (`SIGINT`/`SIGTERM`) и на обычном выходе (ранний `[FATAL]`, необработанное
@@ -893,8 +896,8 @@ Detach-режим (double fork UNIX-daemon pattern):
 Управление:
 
 ```bash
-cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid"   # прочитать PID
-kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")   # остановить (SIGTERM)
+cat "$ADAPTER_DATA_ROOT/var/adapter.pid"   # прочитать PID
+kill $(cat "$ADAPTER_DATA_ROOT/var/adapter.pid")   # остановить (SIGTERM)
 ```
 
 > **Важно:** detach-режим не предназначен для продакшен-использования.
@@ -970,7 +973,7 @@ ADAPTER_PROXY_PORT=9998 python3 backend-adapter.py
 ```bash
 # Консольные debug-логи видны всегда; направить их копию в директорию на диск:
 # export ADAPTER_DEBUG_ENABLE=1
-# export ADAPTER_DEBUG_LOGPATH="/tmp/adapter-logs"
+# export ADAPTER_DATA_ROOT="/tmp/adapter-data"
 
 # Проверить соединение с бэкендом напрямую
 curl -s https://llm.service.example.com/v1/models
@@ -1024,7 +1027,7 @@ Adapter cannot start. Exiting.
 | `ADAPTER_BACKEND_CONFIG` | путь к YAML | Подключение к бэкенду (пример — `docs/samples/sample.adapter.yaml`) |
 | `ADAPTER_PROXY_PORT` | `9999` | Порт, на котором слушает адаптер |
 | `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` | Адрес, на котором слушает адаптер (только локально; `0.0.0.0` — все интерфейсы) |
-| `ADAPTER_DEBUG_ENABLE` | `0` | Файловая запись логов (консоль — всегда; `1` — писать debug/trace на диск в `ADAPTER_DEBUG_LOGPATH`) |
+| `ADAPTER_DEBUG_ENABLE` | `0` | Файловая запись логов (консоль — всегда; `1` — писать debug/trace на диск в `ADAPTER_DATA_ROOT/log`) |
 | `ADAPTER_DETACH_ENABLE` | `0` | **Важно:** не включаем detach при systemd |
 
 > **Важно:** `ADAPTER_DETACH_ENABLE=0` при работе через systemd — systemd сам следит за процессом.
@@ -1032,11 +1035,11 @@ Adapter cannot start. Exiting.
 > двойной форк отделит процесс от управления systemd, и `Restart=on-failure` не сработает.
 
 > **PID-файл.** При `Type=simple` systemd знает PID сам, и файл ему не нужен —
-> но адаптер всё равно пишет `ADAPTER_DEBUG_LOGPATH/adapter.pid` (v0.9.5) и
+> но адаптер всё равно пишет `ADAPTER_DATA_ROOT/var/adapter.pid` (v0.9.5) и
 > снимает его при остановке. Если нужен `Type=forking`, укажите в юните
-> `PIDFile=<ADAPTER_DEBUG_LOGPATH>/adapter.pid` — путь совпадает с тем, куда
+> `PIDFile=<ADAPTER_DATA_ROOT>/var/adapter.pid` — путь совпадает с тем, куда
 > пишет адаптер. В контейнере (без systemd) это единственный способ адресовать
-> процесс: `kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid")`.
+> процесс: `kill $(cat "$ADAPTER_DATA_ROOT/var/adapter.pid")`.
 
 **Установка:**
 

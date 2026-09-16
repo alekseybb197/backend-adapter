@@ -324,12 +324,12 @@ class TestConfigHTTPPost:
         """/config POST ignores keys outside RUNTIME_CONFIG_POOL."""
         _reload_config()
         from backend_adapter import config
-        before_logpath = config.ADAPTER_DEBUG_LOGPATH
+        before_root = config.ADAPTER_DATA_ROOT
 
         httpd, port = _start_server(str(tmp_path))
         try:
             body = json.dumps({
-                "ADAPTER_DEBUG_LOGPATH": "/tmp/other",  # outside pool
+                "ADAPTER_DATA_ROOT": "/tmp/other",  # outside pool
                 "ADAPTER_DEBUG": True,
             }).encode()
             status, response_body = _http_post(
@@ -337,8 +337,8 @@ class TestConfigHTTPPost:
             )
             assert status == 200
 
-            # LOGPATH (точка хранения) should NOT change
-            assert config.ADAPTER_DEBUG_LOGPATH == before_logpath
+            # DATA_ROOT (точка хранения) should NOT change
+            assert config.ADAPTER_DATA_ROOT == before_root
         finally:
             httpd.shutdown()
             httpd.server_close()

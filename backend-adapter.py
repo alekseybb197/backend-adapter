@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.8
+"""[CC] <-> [OI]-backend adapter v0.9.9
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.8"
+__version__ = "0.9.9"
+# КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
+# от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
+# Формулировка дублируется в README.md первой строкой вводного blockquote;
+# при разработке и релизах НЕ меняется без отдельного указания (CLAUDE.md).
 __comment__ = (
-    "Anthropic API <-> [OI]-backend proxy: двунаправленная конвертация "
-    "сообщений/инструментов (Messages <-> Chat Completions/Responses), "
-    "стриминг SSE, multi-backend YAML, per-session Log/Parts/TARGET, "
-    "перманентный runtime-пул (state.yaml), WEBUI и Prometheus-экспортёр. "
-    "История изменений — changelog.md; версия — __version__."
+    "backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible backends for AI agents"
 )
 
 import atexit
@@ -33,7 +33,7 @@ from backend_adapter.config import (
     PROXY_PORT,
     ADAPTER_ENDPOINT_HOST,
     ADAPTER_DEBUG,
-    ADAPTER_DEBUG_LOGPATH,
+    ADAPTER_DATA_ROOT,
     ADAPTER_DETACH,
     ADAPTER_TIMEOUT,
     ADAPTER_RETRY,
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     print(f"Backend-Adapter v{__version__}")
     print(f"Listening:  http://{ADAPTER_ENDPOINT_HOST}:{PROXY_PORT}")
     if ADAPTER_DEBUG:
-        log_status = f"{ADAPTER_DEBUG_LOGPATH} (диск, ADAPTER_DEBUG_ENABLE=1)"
+        log_status = f"{ADAPTER_DATA_ROOT} (диск, ADAPTER_DEBUG_ENABLE=1)"
     else:
         log_status = "file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on"
     print(f"Logs:       {log_status}")
@@ -121,25 +121,32 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
-    # === Log directory (ADAPTER_DEBUG_LOGPATH) ===
-    # Единая директория логов сессий (debug/trace/*.parts дампы) И корень
-    # веб-интерфейса (WEBUI + model-usage.yaml). LOGPATH всегда непуст
-    # (дефолт ./tmp/logs в config): папка создаётся как корень WEBUI всегда,
-    # лог-ФАЙЛЫ в неё пишутся только при ADAPTER_DEBUG_ENABLE=1 (см. config).
+    # === Data root (ADAPTER_DATA_ROOT) и подпапки log/ + var/ ===
+    # Корень данных (v0.9.9, переименован из ADAPTER_DEBUG_LOGPATH): корень
+    # веб-интерфейса WEBUI, внутри — log/ (сессии: debug/trace/*.parts/.err)
+    # и var/ (состояние: PID, model-usage.yaml, state.yaml, *.models.json).
+    # Корень всегда непуст (дефолт ./tmp/adapter в config); обе подпапки
+    # создаются сразу, лог-ФАЙЛЫ в log/ пишутся только при
+    # ADAPTER_DEBUG_ENABLE=1 (см. config).
     # Путь всегда директория: проверяем, что это не файл — путь-файл сломал
     # бы корень WEBUI даже при выключенной файловой записи.
-    # Идёт ДО стартовой проверки бэкендов: PID-файл ниже кладётся в LOGPATH,
+    # Идёт ДО стартовой проверки бэкендов: PID-файл ниже кладётся в var/,
     # а сама проверка — сетевой опрос (может быть долгим), в течение которого
     # процесс уже должен быть адресуемым.
-    log_path = ADAPTER_DEBUG_LOGPATH
-    if os.path.isfile(log_path):
+    data_root = ADAPTER_DATA_ROOT
+    if os.path.isfile(data_root):
         print(
-            f"[FATAL] ADAPTER_DEBUG_LOGPATH указывает на файл, а нужна директория: "
-            f"{log_path!r}. Логи сессий и трейсов, *.parts дампы и корень "
-            "веб-интерфейса живут в одной папке — задайте путь к директории."
+            f"[FATAL] ADAPTER_DATA_ROOT указывает на файл, а нужна директория: "
+            f"{data_root!r}. Логи/трейсы/*.parts сессий живут в log/, состояние "
+            "(PID, model-usage.yaml, state.yaml) — в var/ — задайте путь к "
+            "директории."
         )
         sys.exit(1)
+    os.makedirs(data_root, exist_ok=True)
+    log_path = os.path.join(data_root, "log")
+    var_path = os.path.join(data_root, "var")
     os.makedirs(log_path, exist_ok=True)
+    os.makedirs(var_path, exist_ok=True)
 
     # === Перманентное состояние runtime-пула (state.yaml, v0.9.6) ===
     # Файл есть → его значения применяются ПОВЕРХ env (файл отражает последнее
@@ -151,14 +158,15 @@ if __name__ == "__main__":
     state_store.apply_on_startup()
 
     # === PID-файл (при ЛЮБОМ запуске, не только в detach) ===
-    # Путь — LOGPATH + basename(ADAPTER_PIDFILE) (см. daemon._pidfile_path).
-    # Без консоли (контейнер, служба) это единственный способ адресовать
-    # процесс: kill $(cat "$ADAPTER_DEBUG_LOGPATH/adapter.pid").
+    # Путь — ADAPTER_DATA_ROOT/var + basename(ADAPTER_PIDFILE) (см.
+    # daemon._pidfile_path). Без консоли (контейнер, служба) это единственный
+    # способ адресовать процесс:
+    # kill $(cat "$ADAPTER_DATA_ROOT/var/adapter.pid").
     # Место записи — ДО стартовой проверки бэкендов (сетевой опрос
     # GET /v1/models по каждому бэкенду): файл существует уже во время
     # проверки, поэтому процесс можно найти/остановить, не дожидаясь её.
     # Выше остались только мгновенные FATAL-проверки (пустой
-    # ADAPTER_BACKEND_CONFIG, LOGPATH-файл) — на них процесс не оставляет
+    # ADAPTER_BACKEND_CONFIG, корень-файл) — на них процесс не оставляет
     # файла. Если же проверка бэкендов уронит старт ([FATAL] Failed to
     # initialize backends), файл снимет atexit (зарегистрирован ниже).
     # Существующий файл перезаписывается своим PID (stale-PID не
@@ -214,11 +222,11 @@ if __name__ == "__main__":
     # таймауту. Это и есть основной источник BrokenPipeError в логе.
     # Веб-интерфейс WEBUI (webserver.py — общее ядро; эндпойнты:
     # session_viewer.py "/session" + webui_status.py "/" + webui_ops.py
-    # health-эндпоинты) поднимается ВСЕГДА — отдельный daemon-поток внутри
-    # процесса адаптера. Корень — директория ADAPTER_DEBUG_LOGPATH (всегда
-    # непуст, дефолт ./tmp/logs): там лежат *.parts папки сессий, корень
-    # WEBUI и model-usage.yaml.
-    webui_root = ADAPTER_DEBUG_LOGPATH
+    # health-эндпойнты) поднимается ВСЕГДА — отдельный daemon-поток внутри
+    # процесса адаптера. Корень — директория ADAPTER_DATA_ROOT (всегда
+    # непуст, дефолт ./tmp/adapter): внутри log/ лежат *.parts папки сессий и
+    # .err-файлы, внутри var/ — model-usage.yaml и прочее состояние.
+    webui_root = ADAPTER_DATA_ROOT
     os.makedirs(webui_root, exist_ok=True)
     from backend_adapter.webserver import serve as webui_serve
 
@@ -233,17 +241,17 @@ if __name__ == "__main__":
     if webui:
         threading.Thread(target=webui.serve_forever, daemon=True).start()
         print(f"[WEBUI] http://{ADAPTER_WEBUI_HOST}:{ADAPTER_WEBUI_PORT}/ (root: {webui_root})")
-        # Стартовая фоновая проверка бэкендов (модели + дымовая проба
-        # API-эндпойнтов): первый GET "/" сразу показывает свежие данные,
-        # а не пустую колонку Endpoints. Дублирует стартовый опрос
-        # _init_multi_backends — приемлемо: один раз, фоново, с таймаутом
-        # PROBE_TIMEOUT (10 с на эндпоинт), не ADAPTER_TIMEOUT (300 с).
+        # Стартовая фоновая проверка бэкендов (опрос списка моделей
+        # GET /v1/models): первый GET "/" сразу показывает свежие данные.
+        # Дублирует стартовый опрос _init_multi_backends — приемлемо: один
+        # раз, фоново, с таймаутом REFRESH_TIMEOUT (10 с на бэкенд), не
+        # ADAPTER_TIMEOUT (300 с).
         # Локальные импорты: скрипт не импортирует webui_status; config
         # связан только именами (не модулем).
         from backend_adapter import config as _cfg
-        from backend_adapter.webui_status import PROBE_TIMEOUT
+        from backend_adapter.webui_status import REFRESH_TIMEOUT
 
-        _cfg.start_refresh(timeout=PROBE_TIMEOUT)
+        _cfg.start_refresh(timeout=REFRESH_TIMEOUT)
         # Prometheus-экспортёр — отдельный лёгкий слушатель на
         # ADAPTER_EXPORTER_PORT (текст метрик /metrics, text exposition
         # 0.0.4 без библиотек): настройки/статус приложения, таблица

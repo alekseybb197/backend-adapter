@@ -18,6 +18,7 @@ from . import config, model_usage, routing, session_log, session_registry, sessi
 from .config import (
     _AVAILABLE_MODELS,
     _MAP,
+    ADAPTER_REASONING_RETRY,
     ADAPTER_RETRY,
     ADAPTER_TIMEOUT,
     SSL_CTX,
@@ -25,6 +26,7 @@ from .config import (
     _resolve_backend,
 )
 from .convert import (
+    bump_reasoning_budget,
     convert_messages_anthropic_to_openai,
     convert_openai_completions_to_responses,
     convert_openai_to_anthropic,
@@ -220,7 +222,7 @@ def _flush_pending_error() -> None:
     (``_write_backend_error``), — пишем обобщённый ERROR-блок
     (``write_session_error``). Так .err покрывает ВЕСЬ ошибочный трафик
     сессии, а не только инциденты бэкенда: 400 валидации тела (Invalid JSON /
-    Missing model / strict-модель), 404 disabled-входа, 400/502 reject
+    Missing model / strict-модель), 404 disabled-входа, 400 reject
     маршрута.
 
     Запись отложена именно в finally, а не сделана сразу в
@@ -526,9 +528,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
             # === Диспетчер входных эндпоинтов (v0.9.0) ===
             # Три входных POST-пути — /v1/messages, /v1/chat/completions,
-            # /v1/responses — по таблице routing.INPUT_PATHS (зеркало
-            # ENDPOINT_PROBES). Любой другой путь — не вход адаптера: 404
-            # с прежним текстом контракта (тест 404-контракта не меняется).
+            # /v1/responses — по статической таблице routing.INPUT_PATHS.
+            # Любой другой путь — не вход адаптера: 404 с прежним текстом
+            # контракта (тест 404-контракта не меняется).
             inp_fmt = routing.input_path_to_format(self.path)
             if inp_fmt is None:
                 self._send_json(404, {"error": "Expected /v1/messages"})
@@ -661,9 +663,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # action:
             #   disabled — вход выключен (TARGET=none) → 404 (ДО учёта usage,
             #              как 400-пути: запрос до бэкенда не дошёл);
-            #   reject   — маршрута нет (нереализованная пара / бэкенд
-            #              подтверждённо не поддерживает целевой формат) →
-            #              400|502, тоже до учёта;
+            #   reject   — маршрута нет (нереализованная пара) → 400, тоже
+            #              до учёта;
             #   passthrough — TARGET=passthrough: тело уходит бэкенду КАК ЕСТЬ
             #              на эндпойнт входного формата (E→E);
             #   convert  — прямое преобразование входа в формат-цель:
@@ -672,7 +673,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # v0.9.5: session_id передаётся в decide/target_for_input — TARGET
             # может быть переопределён ДЛЯ СЕССИИ (session_settings), не трогая
             # общую настройку приложения.
-            route = routing.decide(inp_fmt, backend_name, session_id)
+            route = routing.decide(inp_fmt, session_id)
             route_action, out_fmt, route_msg, route_status = route
             _dr(
                 req_id,
@@ -738,11 +739,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             is_passthrough = route_action == "passthrough"
 
             # Учёт использованной модели (таблица WEBUI «Использованные
-            # модели»): клиентское имя ДО маппинга; при первом обращении —
-            # синхронная проба эндпоинтов этой моделью (резолв внутри
-            # функции). Ставится ПОСЛЕ решения о маршруте — disabled/reject
-            # (запрос до бэкенда не дошёл) в счётчики не попадают, как
-            # 400-пути. Учёт не влияет на запрос: провал пробы не роняет его.
+            # модели»): клиентское имя ДО маппинга (резолв бэкенда внутри
+            # функции, без сети). Ставится ПОСЛЕ решения о маршруте —
+            # disabled/reject (запрос до бэкенда не дошёл) в счётчики не
+            # попадают, как 400-пути. Учёт не влияет на запрос.
             model_usage.record_model_usage(client_model)
             usage_active = True
 
@@ -870,6 +870,11 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                     # int) и не ругаться на последующие строковые маркеры.
                     pt_stream_error: tuple[int | str, str] | None = None
                     pt_started = False
+                    # Счётчик подъёмов max_tokens под reasoning_budget_exhausted
+                    # (v0.9.9): повтор идёт в том же цикле попыток (слот
+                    # ADAPTER_RETRY расходуется), но подъёмов не больше
+                    # ADAPTER_REASONING_RETRY — см. комментарий в config.
+                    pt_reasoning_bumps = 0
                     for attempt in range(1, ADAPTER_RETRY + 1):
                         try:
                             _dr(
@@ -953,6 +958,29 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 error=error_value,
                             )
                             pt_stream_error = (e.code, err)
+                            # Адаптивный ретрай по типу ошибки (v0.9.9):
+                            # reasoning-модель исчерпала бюджет на внутренних
+                            # рассуждениях — поднимаем max_tokens и повторяем
+                            # БЕЗ sleep (тело изменилось, а не сеть подвела).
+                            # Условия проверяются ДО вызова: `attempt <
+                            # ADAPTER_RETRY` — есть куда повторять (подъём
+                            # расходует слот общего бюджета), счётчик — не
+                            # больше ADAPTER_REASONING_RETRY. При невыполнении
+                            # тело не трогаем, чтобы .err не зафиксировал
+                            # правку неотправленной попытки. Страховка
+                            # not pt_started: после _start_sse откат невозможен.
+                            if (
+                                attempt < ADAPTER_RETRY
+                                and pt_reasoning_bumps < ADAPTER_REASONING_RETRY
+                                and not pt_started
+                                and bump_reasoning_budget(anthropic_req, err, req_id) is not None
+                            ):
+                                pt_reasoning_bumps += 1
+                                # out_body обновляем — .err зафиксирует тело
+                                # последней попытки.
+                                out_body = json.dumps(anthropic_req, ensure_ascii=False).encode()
+                                req.data = out_body
+                                continue
                             # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
                             if e.code not in (429, 502, 503, 504):
                                 break
@@ -1132,6 +1160,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 # сузил переменную по первому присваиванию (паттерн
                 # convert-ветки ниже).
                 pt_last_error: tuple[int | str, str] | None = None
+                # Счётчик подъёмов max_tokens под reasoning_budget_exhausted
+                # (v0.9.9): отдельный от ADAPTER_RETRY (см. комментарий в config).
+                pt_reasoning_bumps = 0
                 for attempt in range(1, ADAPTER_RETRY + 1):
                     try:
                         _dr(
@@ -1230,6 +1261,17 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             error=error_value,
                         )
                         pt_last_error = (e.code, err)
+                        # Адаптивный ретрай max_tokens при reasoning_budget_exhausted
+                        # (v0.9.9) — см. подробный комментарий в passthrough-стрим ветке.
+                        if (
+                            attempt < ADAPTER_RETRY
+                            and pt_reasoning_bumps < ADAPTER_REASONING_RETRY
+                            and bump_reasoning_budget(anthropic_req, err, req_id) is not None
+                        ):
+                            pt_reasoning_bumps += 1
+                            out_body = json.dumps(anthropic_req, ensure_ascii=False).encode()
+                            req.data = out_body
+                            continue
                         # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
                         if e.code not in (429, 502, 503, 504):
                             break
@@ -1432,6 +1474,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 if r_stream_requested:
                     r_last_error: tuple[int | str, str] | None = None
                     r_started = False
+                    # Счётчик подъёмов max_tokens под reasoning_budget_exhausted
+                    # (v0.9.9), отдельный от ADAPTER_RETRY.
+                    r_reasoning_bumps = 0
                     for attempt in range(1, ADAPTER_RETRY + 1):
                         try:
                             _dr(
@@ -1515,6 +1560,19 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                                 error=error_value,
                             )
                             r_last_error = (e.code, err)
+                            # Адаптивный ретрай max_tokens при reasoning_budget_exhausted
+                            # (v0.9.9) — без sleep. Страховка not r_started: после
+                            # _start_sse откат невозможен.
+                            if (
+                                attempt < ADAPTER_RETRY
+                                and r_reasoning_bumps < ADAPTER_REASONING_RETRY
+                                and not r_started
+                                and bump_reasoning_budget(r_openai_body, err, req_id) is not None
+                            ):
+                                r_reasoning_bumps += 1
+                                r_out_body = json.dumps(r_openai_body, ensure_ascii=False).encode()
+                                r_req.data = r_out_body
+                                continue
                             if e.code not in (429, 502, 503, 504):
                                 break
                             if attempt < ADAPTER_RETRY:
@@ -1652,6 +1710,8 @@ class Adapter(http.server.BaseHTTPRequestHandler):
 
                 # === Нестриминговая ветка responses→completions ===
                 r_last_error = None
+                # Счётчик подъёмов max_tokens (v0.9.9), отдельный от ADAPTER_RETRY.
+                r_reasoning_bumps = 0
                 for attempt in range(1, ADAPTER_RETRY + 1):
                     try:
                         _dr(
@@ -1729,6 +1789,17 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             error=error_value,
                         )
                         r_last_error = (e.code, err)
+                        # Адаптивный ретрай max_tokens при reasoning_budget_exhausted
+                        # (v0.9.9) — без sleep.
+                        if (
+                            attempt < ADAPTER_RETRY
+                            and r_reasoning_bumps < ADAPTER_REASONING_RETRY
+                            and bump_reasoning_budget(r_openai_body, err, req_id) is not None
+                        ):
+                            r_reasoning_bumps += 1
+                            r_out_body = json.dumps(r_openai_body, ensure_ascii=False).encode()
+                            r_req.data = r_out_body
+                            continue
                         if e.code not in (429, 502, 503, 504):
                             break
                         if attempt < ADAPTER_RETRY:
@@ -2048,6 +2119,9 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 # int) и не ругался на последующие строковые маркеры.
                 last_error: tuple[int | str, str] | None = None
                 started = False
+                # Счётчик подъёмов max_tokens под reasoning_budget_exhausted
+                # (v0.9.9), отдельный от ADAPTER_RETRY.
+                reasoning_bumps = 0
                 for attempt in range(1, ADAPTER_RETRY + 1):
                     try:
                         _dr(
@@ -2135,6 +2209,19 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                             error=error_value,
                         )
                         last_error = (e.code, err)
+                        # Адаптивный ретрай max_tokens при reasoning_budget_exhausted
+                        # (v0.9.9) — без sleep. Страховка not started: после
+                        # _start_sse откат невозможен.
+                        if (
+                            attempt < ADAPTER_RETRY
+                            and reasoning_bumps < ADAPTER_REASONING_RETRY
+                            and not started
+                            and bump_reasoning_budget(openai_body, err, req_id) is not None
+                        ):
+                            reasoning_bumps += 1
+                            out_body = json.dumps(openai_body, ensure_ascii=False).encode()
+                            req.data = out_body
+                            continue
                         if e.code not in (429, 502, 503, 504):
                             break
                         if attempt < ADAPTER_RETRY:
@@ -2299,6 +2386,10 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # действует на всю функцию) -- здесь только присваивание, без
             # повторной аннотации: mypy счёл бы её переопределением (no-redef).
             last_error = None
+            # Счётчик подъёмов max_tokens под reasoning_budget_exhausted
+            # (v0.9.9), отдельный от ADAPTER_RETRY (без аннотации — переменная
+            # уже объявлена в стрим-ветке выше, повторная была бы no-redef).
+            reasoning_bumps = 0
             for attempt in range(1, ADAPTER_RETRY + 1):
                 try:
                     _dr(
@@ -2383,6 +2474,17 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         error=error_value,
                     )
                     last_error = (e.code, err)
+                    # Адаптивный ретрай max_tokens при reasoning_budget_exhausted
+                    # (v0.9.9) — без sleep.
+                    if (
+                        attempt < ADAPTER_RETRY
+                        and reasoning_bumps < ADAPTER_REASONING_RETRY
+                        and bump_reasoning_budget(openai_body, err, req_id) is not None
+                    ):
+                        reasoning_bumps += 1
+                        out_body = json.dumps(openai_body, ensure_ascii=False).encode()
+                        req.data = out_body
+                        continue
                     # HTTP-ошибки (4xx) retry не делаем, кроме 429/503/504
                     if e.code not in (429, 502, 503, 504):
                         break

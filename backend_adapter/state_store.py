@@ -3,9 +3,10 @@
 Хранит на диске значения настроек, которые можно менять на лету через WEBUI
 ``/config`` — то есть ровно ключи ``config.RUNTIME_CONFIG_POOL`` (объём
 логирования/трейсов, рубильники стриминга, TARGET-маршрутизация входов,
-маппинг моделей). Файл лежит в корне WEBUI рядом с ``model-usage.yaml``:
-имя — ``config.ADAPTER_STATE`` (env ``ADAPTER_STATE``, дефолт ``state.yaml``),
-директория — ``config.ADAPTER_DEBUG_LOGPATH`` (см. ``state_path``).
+маппинг моделей). Файл лежит в папке состояния ``ADAPTER_DATA_ROOT/var``
+рядом с ``model-usage.yaml`` и PID-файлом: имя — ``config.ADAPTER_STATE``
+(env ``ADAPTER_STATE``, дефолт ``state.yaml``), директория —
+``config.var_dir()`` (см. ``state_path``).
 
 Зачем: настройки, выставленные через ``/config``, раньше жили только в
 памяти процесса и терялись при перезапуске — приходилось снова править env.
@@ -53,12 +54,13 @@ _LOCK = threading.Lock()
 
 
 def state_path() -> str:
-    """Путь к файлу состояния: LOGPATH (живое чтение) + имя ADAPTER_STATE.
+    """Путь к файлу состояния: ADAPTER_DATA_ROOT/var (живое чтение) + имя
+    ADAPTER_STATE.
 
     Читает атрибуты config на каждый вызов, а не снимок при импорте: тесты и
     смена точки хранения должны видеть актуальный путь.
     """
-    return os.path.join(config.ADAPTER_DEBUG_LOGPATH, config.ADAPTER_STATE)
+    return os.path.join(config.var_dir(), config.ADAPTER_STATE)
 
 
 def load() -> dict:

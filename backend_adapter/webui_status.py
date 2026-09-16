@@ -5,26 +5,19 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
 Показывает на одной странице:
   - версию кода (из WebContext.version — в адаптере это __version__ из
     backend-adapter.py, единственный источник);
-  - каждый настроенный LLM-эндпойнт: доступность, список моделей и
-    колонку «Доступные API» — какие известные API-эндпойнты бэкенд реально
-    обслуживает (результат дымовой пробы config.probe_endpoints, см. ниже);
+  - каждый настроенный LLM-эндпойнт: доступность и список моделей
+    (результат опроса GET /v1/models при проверке бэкендов);
   - таблицу «Models in use» — модели, к которым агент обращался
     (см. model_usage.py): счётчик обращений, токены из usage-блоков ответов
     бэкенда (input_tokens/output_tokens — prompt_tokens/completion_tokens;
-    ответы без usage не считаются) и какие API-эндпоинты доступны именно
-    для каждой модели (результат дымовой пробы этой моделью при первом
-    обращении; колонка Endpoints перечисляет только доступные).
+    ответы без usage не считаются) и стоимость накопленных токенов (Cost).
+    Колонки «Endpoints» здесь нет (v0.9.9): пробы эндпойнтов сняты вместе
+    со всем их функционалом, неверный выбор эндпойнта агентом фиксируется
+    по факту ошибки (.err-канал).
     Таблица персистентна: сохраняется в YAML-файл model-usage.yaml в корне
     WEBUI и переживает перезапуски адаптера; кнопка «Сбросить» в строке
     таблицы обнуляет счётчики строки (calls/input_tokens/output_tokens →
-    0; строка с результатами пробы эндпоинтов остаётся — POST
-    /api/model-usage/reset, см. ModelUsageResetEndpoint). Кнопка «Перепроверить» (POST
-    /api/model-usage/reprobe, см. ModelUsageReprobeEndpoint) запускает
-    фоновую повторную дымовую пробу эндпоинтов именно этой моделью — для
-    строк с «—» в колонке Endpoints; проба не трогает счётчики и токены
-    строки. Пока перепроверка идёт, страница показывает баннер и ячейку
-    «проверяется…» и авто-обновляется по завершении (JS → /api/model-usage/
-    reprobe-state, см. ReprobeStateEndpoint).
+    0 — POST /api/model-usage/reset, см. ModelUsageResetEndpoint).
   - Счётчики строки (Вызовов/Input/Output) обновляются БЕЗ перезагрузки
     страницы: JS usage_poll каждые ~5 с опрашивает лёгкий JSON-эндпоинт
     /api/model-usage/snapshot (UsageSnapshotEndpoint → model_usage.
@@ -39,10 +32,10 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
 Откуда данные:
   - Проверка бэкендов запускается:
       * при старте адаптера (backend-adapter.py запускает config.
-        start_refresh(timeout=PROBE_TIMEOUT) после поднятия WEBUI) и
+        start_refresh(timeout=REFRESH_TIMEOUT) после поднятия WEBUI) и
       * по кнопке 🔃 (POST "/", прежняя «⟳ Перепроверить») — работает по
         PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(
-        timeout=PROBE_TIMEOUT) (см. config._refresh_worker) и отвечает
+        timeout=REFRESH_TIMEOUT) (см. config._refresh_worker) и отвечает
         303 See Other на GET "/" — браузер переходит на страницу
         GET-навигацией, HTTP-запрос не ждёт завершения проверки.
         Поэтому обновление/авто-релоад страницы никогда не повторяет
@@ -71,20 +64,9 @@ webui_status.py — эндпойнт "/" общего веб-сервера WEBU
     полном провале старый список моделей сохраняется и показывается на
     странице вместе с текстом ошибки; при частичном успехе страница
     показывает свежий список ответивших бэкендов и тексты ошибок упавших.
-  - Дымовая проба API: refresh_models дополнительно несёт "probe" —
-    результат config.probe_endpoints(): какие из известных эндпойнтов
-    (/v1/chat/completions, /v1/messages, /v1/responses, /v1/embeddings)
-    бэкенд обслуживает. Политика пробы — «только явно указанные»:
-    эндпойнт пробуется ТОЛЬКО если он перечислен в ключе probe YAML-записи
-    бэкенда с НЕПУСТОЙ моделью; неперечисленные и пустые значения (а также
-    отсутствие ключа probe вовсе) — НЕ пробуются (для бэкенда без probe
-    состояние не создаётся, колонка «Доступные API» пуста). Проба —
-    короткие POST с max_tokens:1 (моделью, заданной в probe), результат
-    кэшируется ~60 с (ENDPOINT_PROBE_TTL) и отключается флагом
-    ADAPTER_ENDPOINT_PROBE=0. Для каждого бэкенда колонка «Доступные API»
-    показывает зелёным ✓ только реально работающие пути (HTTP 200);
-    непрошедшие проверку пути на странице не показываются (из
-    config._ENDPOINT_STATE).
+  - Проверка бэкендов — только опрос списка моделей (GET /v1/models,
+    config.refresh_models): дымовых проб эндпойнтов больше нет (v0.9.9),
+    ключ probe в YAML молча игнорируется.
 
 САМОСТОЯТЕЛЬНЫЙ ЗАПУСК (standalone — python -m backend_adapter.webserver
 вне процесса адаптера): конфиг-глобалы адаптера пусты (нет YAML-конфига),
@@ -109,7 +91,7 @@ from . import config, model_usage, webserver
 
 logger = logging.getLogger("webui_status")
 
-PROBE_TIMEOUT = 10.0  # жёсткий таймаут живой пробы одного эндпойнта, сек
+REFRESH_TIMEOUT = 10.0  # жёсткий таймаут опроса списка моделей одного бэкенда, сек
 
 
 # ==================== ЧИСТАЯ ЛОГИКА ====================
@@ -118,34 +100,23 @@ PROBE_TIMEOUT = 10.0  # жёсткий таймаут живой пробы од
 def _collect_endpoints() -> list[dict]:
     """Список настроенных LLM-эндпойнтов из конфиг-глобалов адаптера.
 
-    Каждый элемент: {"name", "base", "key", "models": [model_id, ...],
-    "api": {"путь_без_/v1": {"found": bool, "status": int|None}} | None}.
+    Каждый элемент: {"name", "base", "key", "models": [model_id, ...]}.
     models — модели, успешно опрошенные на старте адаптера (из
     _MODEL_TO_BACKEND, сгруппированные по бэкенду; это ровно те модели,
-    что адаптер реально принимает в запросах). key — токен для живой
-    пробы (в HTML не выводится). api — результат дымовой пробы эндпойнтов
-    из config._ENDPOINT_STATE (нормализован: ключи без префикса "/v1/",
-    в порядке config.ENDPOINT_PROBES); None — бэкенд ещё не пробован
-    (standalone: refresh не делался; ADAPTER_ENDPOINT_PROBE=0).
+    что адаптер реально принимает в запросах). key — токен бэкенда (в HTML
+    не выводится).
 
     Режимы:
       - multi-backend в процессе адаптера (_BACKENDS заполнен при старте);
       - standalone (viewer вне адаптера): эндпойнты не опрошены, но если
         окружение задаёт ADAPTER_BACKEND_CONFIG с YAML-файлом — они
         показываются пустыми, чтобы кнопка 🔃 (проверка бэкендов) могла
-        выполнить живую пробу."""
+        выполнить опрос списка моделей."""
     endpoints = []
 
     if config._BACKENDS:
         # Бэкенды из YAML, загружен адаптером при старте
         for b in config._BACKENDS:
-            api = None
-            ep_state = config._ENDPOINT_STATE.get(b["name"])
-            if ep_state and ep_state.get("endpoints"):
-                # Ключи результата — полные пути ("/v1/chat/completions");
-                # нормализуем до "chat/completions" (без "/v1/") — рендер
-                # сам восстановит порядок из ENDPOINT_PROBES.
-                api = {path[len("/v1/") :]: ep for path, ep in ep_state["endpoints"].items()}
             endpoints.append(
                 {
                     "name": b["name"],
@@ -156,14 +127,13 @@ def _collect_endpoints() -> list[dict]:
                         for mid, (bname, _) in config._MODEL_TO_BACKEND.items()
                         if bname == b["name"]
                     ),
-                    "api": api,
                 }
             )
         return endpoints
 
     # ADAPTER_BACKEND_CONFIG задан, но _BACKENDS пуст — адаптер в этом
     # процессе не стартовал (standalone, либо упал до инициализации).
-    # Перечитываем YAML только ради списка эндпойнтов для живой пробы
+    # Перечитываем YAML только ради списка эндпойнтов для проверки
     # (парсер config._parse_backend_yaml — тот же, что у адаптера;
     # модели всё равно не опрошены — статус будет «не опрошен»).
     cfg_path = config.ADAPTER_BACKEND_CONFIG or os.environ.get("ADAPTER_BACKEND_CONFIG", "")
@@ -176,7 +146,6 @@ def _collect_endpoints() -> list[dict]:
                     "base": b["base"],
                     "key": b["key"],
                     "models": [],
-                    "api": None,
                 }
             )
     return endpoints
@@ -188,8 +157,8 @@ def _config_snapshot() -> dict:
     Возвращает {"mode": str, "endpoints": [{"name","base","key","models",
     "status"}], "note": str|None}. status — "ok" (на старте опрошен, есть
     модели) или "не опрошен" (бэкенд есть в конфиге, но моделей нет — в
-    multi-режиме это бэкенд, чья проба не удалась; в standalone — любой
-    бэкенд из конфига, т.к. проб никто не делал). Пустой список
+    multi-режиме это бэкенд, чей опрос моделей не удался; в standalone —
+    любой бэкенд из конфига, т.к. опроса никто не делал). Пустой список
     эндпойнтов — режим standalone без конфига: страница показывает
     подсказку."""
     endpoints = _collect_endpoints()
@@ -263,35 +232,6 @@ def _models_html(models: list[str], status: str) -> str:
     )
 
 
-def _api_html(api: dict | None) -> str:
-    """HTML ячейки «Доступные API» для одного бэкенда.
-
-    ``api`` — результат дымовой пробы из _collect_endpoints()
-    ({короткий_путь: {"found": bool, "status": int|None}}), None — бэкенд
-    ещё не пробован (standalone / ADAPTER_ENDPOINT_PROBE=0). Зелёным с ✓
-    показываются ТОЛЬКО реально работающие эндпоинты (found=True ⇔ HTTP
-    200, см. классификацию в config._probe_backend_endpoints); непрошедшие
-    (любой не-200 код, сетевая ошибка) и пропущенные (нет probe-модели —
-    в api не значатся) на странице НЕ показываются вовсе. Проба была
-    (api не None), но ни один эндпоинт не ответил 200 — ячейка показывает
-    один серый «—» с пояснением вместо пустого места. Порядок —
-    config.ENDPOINT_PROBES (тот же, что у самой пробы)."""
-    if api is None:
-        return '<span style="color:#999">не опрошено</span>'
-    parts = []
-    for _pname, path, _tpl in config.ENDPOINT_PROBES:
-        label = path[len("/v1/") :]
-        ep = api.get(label)
-        if ep is not None and ep["found"]:
-            # found=True гарантированно значит HTTP 200 (см. config.py)
-            parts.append(f'<span style="color:#1a7f37">{label} ✓</span>')
-    if not parts:
-        parts.append(
-            '<span style="color:#aaa" title="ни один эндпоинт не ответил HTTP 200">—</span>'
-        )
-    return "<br>".join(parts)
-
-
 def _cost_cell_html(row: dict) -> str:
     """HTML ячейки «Cost» строки таблицы Models in use.
 
@@ -322,26 +262,6 @@ def _cost_cell_html(row: dict) -> str:
         # Нулевая цена (бесплатная модель) — «—», как «нет тарифа/токенов».
         return '<span style="color:#aaa">—</span>'
     return _fmt_cost(cost, tariff["currency"])
-
-
-def _endpoints_cell_html(row: dict) -> str:
-    """HTML ячейки «Endpoints» строки таблицы Models in use.
-
-    Перечисляет ТОЛЬКО доступные эндпоинты (found=True ⇔ HTTP 200, см.
-    классификацию в config._probe_backend_endpoints): короткие имена через
-    запятую, зелёным, в порядке config.ENDPOINT_PROBES (том же, что у пробы).
-    Непрошедшие/непробованные пути (не-200, probing, ADAPTER_MODEL_USAGE_
-    ENABLE=0, модели нет у бэкенда) не показываются; если доступных нет —
-    один серый «—» вместо пустой ячейки."""
-    parts = []
-    endpoints = row.get("endpoints") or {}
-    for pname, _path, _tpl in config.ENDPOINT_PROBES:
-        ep = endpoints.get(pname)
-        if ep is not None and ep["found"]:
-            parts.append(f'<span style="color:#1a7f37">{pname}</span>')
-    if not parts:
-        return '<span style="color:#aaa">—</span>'
-    return ", ".join(parts)
 
 
 def _fmt_tokens(n: int) -> str:
@@ -386,33 +306,22 @@ def _fmt_cost(cost: float, currency: str) -> str:
 
 
 _ACTIONS = (
-    ("reprobe", "🔄", "Перепроверить эндпоинты модели", "#555"),
     ("reset", "⏪", "Сбросить счётчики модели", "#555"),
     ("delete", "🗑", "Удалить строку модели", "#c0392b"),
 )
 
 
-def _actions_cell_html(model: str, reprobing: bool = False) -> str:
+def _actions_cell_html(model: str) -> str:
     """HTML ячейки действий (колонка Actions) строки таблицы использованных моделей.
 
-    Три form-кнопки целиком внутри своего <td> (валидный HTML — без
+    Две form-кнопки целиком внутри своего <td> (валидный HTML — без
     вложенных форм и JS), тексты-фразы заменены символьными иконками с
-    title/aria-label-подписями: 🔄 (reprobe — фоновая перепроба эндпоинтов
-    строки, POST /api/model-usage/reprobe?model=…), ⏪ (reset — обнуление
-    счётчиков строки, POST /api/model-usage/reset?model=…), 🗑 (delete —
-    удаление строки модели из таблицы и YAML-файла, POST
-    /api/model-usage/delete?model=…). Все три эндпоинта по PRG отвечают 303
-    на GET "/". При reprobing=True (перепроверка этой модели уже идёт) вместо
-    кнопок — серый текст «проверяется…»: повторный запуск невозможен,
-    страница авто-обновится по завершении. Имя модели кодируется quote(safe="")
-    для query-параметра и html.escape — для атрибута action."""
+    title/aria-label-подписями: ⏪ (reset — обнуление счётчиков строки,
+    POST /api/model-usage/reset?model=…), 🗑 (delete — удаление строки
+    модели из таблицы и YAML-файла, POST /api/model-usage/delete?model=…).
+    Оба эндпоинта по PRG отвечают 303 на GET "/". Имя модели кодируется
+    quote(safe="") для query-параметра и html.escape — для атрибута action."""
     q = quote(str(model), safe="")
-    if reprobing:
-        return (
-            '<td style="color:#888">'
-            '<span title="перепроверка эндпоинтов модели выполняется">'
-            "проверяется…</span></td>"
-        )
     forms = []
     for i, (name, glyph, label, color) in enumerate(_ACTIONS):
         pad = "padding:0 6px 0 0;" if i < len(_ACTIONS) - 1 else "padding:0;"
@@ -427,13 +336,11 @@ def _actions_cell_html(model: str, reprobing: bool = False) -> str:
     return "<td>" + "".join(forms) + "</td>"
 
 
-def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
+def _usage_rows_html(rows: list[dict]) -> str:
     """HTML строк таблицы Models in use (по строке на модель).
 
     ``rows`` — model_usage.usage_snapshot() (порядок первого обращения).
-    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Endpoints |
-    Actions. Колонка Endpoints перечисляет только доступные эндпоинты
-    (found=True) короткими именами через запятую (см. _endpoints_cell_html).
+    Колонки: Модель | Бэкенд | Вызовов | Input | Output | Cost | Actions.
     input_tokens/output_tokens — токены из usage-блоков ответов бэкенда (см.
     _fmt_tokens); поля отсутствуют у мигрировавших/старых сидов → 0.
     Колонка Cost — стоимость накопленных токенов по тарифу модели на момент
@@ -441,14 +348,11 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
     тарифах, бесплатная модель или токенов ещё нет). Ячейки счётчиков несут
     data-атрибуты (data-calls/data-input/data-output) с ТОЧНЫМИ значениями —
     JS usage_poll обновляет их textContent по /api/model-usage/snapshot без
-    перезагрузки страницы (см. usage_poll в _render_status_page). ``reprobing``
-    — карта client_model → True: у строки идёт фоновая перепроверка (баннер +
-    авто-релоад); в ячейке Actions вместо кнопок — «проверяется…».
-    Модель/бэкенд — html.escape; иконки-действия (🔄/⏪/🗑) — отдельные формы
+    перезагрузки страницы (см. usage_poll в _render_status_page).
+    Модель/бэкенд — html.escape; иконки-действия (⏪/🗑) — отдельные формы
     в последнем <td> (см. _actions_cell_html)."""
     body = []
     for i, r in enumerate(rows):
-        reprobing_row = bool(reprobing and reprobing.get(r["model"]))
         calls = r.get("calls", 0)
         input_tokens = r.get("input_tokens", 0)
         output_tokens = r.get("output_tokens", 0)
@@ -460,13 +364,12 @@ def _usage_rows_html(rows: list[dict], reprobing: dict | None = None) -> str:
             f'<td data-input="{input_tokens}">{_compact_number(input_tokens)}</td>'
             f'<td data-output="{output_tokens}">{_compact_number(output_tokens)}</td>'
             f"<td>{_cost_cell_html(r)}</td>"
-            f"<td>{_endpoints_cell_html(r)}</td>"
-            f"{_actions_cell_html(r['model'], reprobing_row)}"
+            f"{_actions_cell_html(r['model'])}"
             "</tr>"
         )
     if not body:
         body.append(
-            '<tr><td colspan="8" style="color:#888">пока нет данных — '
+            '<tr><td colspan="7" style="color:#888">пока нет данных — '
             "таблица заполняется при первых запросах к моделям</td></tr>"
         )
     return "".join(body)
@@ -489,9 +392,7 @@ def _render_status_page(
     refresh["errors"] — строка показывает «недоступен (текст ошибки)».
     Модели — из обновлённых конфиг-глобалов: при полном провале refresh
     кэш не тронут (показывается прежний список), при частичном — упавший
-    бэкенд честно без моделей. Колонка «Доступные API» рендерится из
-    config._ENDPOINT_STATE через _collect_endpoints (сама проба выполняется
-    внутри refresh_models; refresh["probe"] отдельно не рендерится).
+    бэкенд честно без моделей.
     Шапка страницы — «Backend-Adapter Version <x.x.x>» ({context.version});
     второй строкой — иконки-навигация: 🔃 (кнопка POST "/" — проверка
     бэкендов с перечитыванием конфига, прежняя «⟳ Перепроверить», PRG/303),
@@ -506,12 +407,7 @@ def _render_status_page(
     перечитывания конфига, M = count моделей).
     Секция «Models in use» рендерится из model_usage.usage_snapshot() (см.
     _usage_rows_html) — таблица заполняется запросами агента в этом процессе
-    независимо от проверок бэкендов; колонка Endpoints перечисляет только
-    доступные эндпоинты строки. Перепроверка строки (кнопка «Перепроверить»,
-    model_usage.reprobe_state()) — отдельный фоновый процесс (см.
-    ModelUsageReprobeEndpoint): пока идёт, страница показывает свой баннер
-    и авто-обновляется по завершении (JS reprobe_poll → /api/model-usage/
-    reprobe-state → location.reload()).
+    независимо от проверок бэкендов.
     Счётчики строк секции «Models in use» обновляются без перезагрузки:
     безусловный JS usage_poll (usage_poll_script в <head>) каждые 5 с
     опрашивает /api/model-usage/snapshot (см. UsageSnapshotEndpoint) и
@@ -520,9 +416,7 @@ def _render_status_page(
     HTML — см. _cost_cell_html; рендер и поллинг используют один
     форматтер). Строки сопоставляются позиционно: снимок идёт в порядке
     первого обращения, как и рендер. Число строк изменилось (сброс/новая
-    модель) — location.reload() перерисует таблицу; эндпоинты строк в этом
-    поллинге не трогаются (их меняет только reprobe, у которого свой
-    авто-релоад)."""
+    модель) — location.reload() перерисует таблицу."""
     # Колонка Cost строк Models in use считается по тарифу на момент
     # отображения: каждый полноценный рендер страницы (GET "/", перезагрузка)
     # перечитывает маленький файл тарифов с диска (model_usage.
@@ -558,21 +452,19 @@ def _render_status_page(
         <td>{html.escape(ep["name"])}</td>
         <td><code>{html.escape(ep["base"])}</code></td>
         <td>{status_cell}</td>
-        <td>{_api_html(ep.get("api"))}</td>
         <td>{models_cell}</td>
       </tr>""")
 
     if not endpoints:
         rows.append("""
-      <tr><td colspan="5" style="color:#888">нет данных (см. примечание ниже)</td></tr>""")
+      <tr><td colspan="4" style="color:#888">нет данных (см. примечание ниже)</td></tr>""")
 
     if refresh is None:
         footer = (
-            '<p style="color:#888">Список провайдеров и API-эндпойнты бэкендов '
-            "проверяются по кнопке 🔃 (прежняя «⟳ Перепроверить»; перечитывание "
-            "ADAPTER_BACKEND_CONFIG + GET /v1/models + дымовые POST "
-            "max_tokens:1, таймаут 10 с на эндпойнт; проба кэшируется 60 с, "
-            "ADAPTER_ENDPOINT_PROBE=0 — отключить). Первый заход на страницу "
+            '<p style="color:#888">Список провайдеров '
+            "проверяется по кнопке 🔃 (прежняя «⟳ Перепроверить»; перечитывание "
+            "ADAPTER_BACKEND_CONFIG + GET /v1/models, таймаут 10 с на бэкенд). "
+            "Первый заход на страницу "
             "запускает первую проверку автоматически; повторные — только по "
             "кнопке.</p>"
         )
@@ -616,7 +508,7 @@ def _render_status_page(
             '<p style="background:#fff8e1;border:1px solid #e0c060;'
             f'padding:8px 12px;color:#8a6d1a">⟳ Проверка выполняется'
             f"{(' (запущена в ' + started + ')') if started else ''}… "
-            "модели и API-эндпойнты пере-проверяются в фоне, страница "
+            "список моделей пере-проверяется в фоне, страница "
             "обновится автоматически по завершении.</p>"
         )
         poll_script = """
@@ -634,47 +526,6 @@ def _render_status_page(
 </script>
 """
 
-    # Баннер «перепроверка строки идёт» + JS поллинга /api/model-usage/
-    # reprobe-state. По образцу баннера проверки бэкендов выше, но состояние
-    # живёт в model_usage (reprobe_state), а не в config.refresh_state():
-    # перепроверка запускается кнопкой «Перепроверить» строки таблицы
-    # использованных моделей, когда её колонки эндпоинтов «—». Пока идёт —
-    # ячейка действий строки показывает «проверяется…» (см. _actions_cell_html)
-    # и JS перезагружает страницу по завершении.
-    reprobe = model_usage.reprobe_state()
-    reprobing = None
-    reprobe_banner_html = ""
-    reprobe_poll_script = ""
-    if reprobe.get("running"):
-        reprobing = {reprobe.get("model"): True}
-        started = (
-            time.strftime("%H:%M:%S", time.localtime(reprobe["started_at"]))
-            if reprobe.get("started_at")
-            else ""
-        )
-        model_txt = html.escape(str(reprobe.get("model") or ""))
-        reprobe_banner_html = (
-            '<p style="background:#eef4fb;border:1px solid #9db8d9;'
-            f'padding:8px 12px;color:#34506e">⟳ Перепроверка модели '
-            f"<code>{model_txt}</code>{(' (запущена в ' + started + ')') if started else ''}… "
-            "эндпоинты пере-проверяются этой моделью в фоне, страница "
-            "обновится автоматически по завершении.</p>"
-        )
-        reprobe_poll_script = """
-<script>
-  function reprobe_poll() {{
-    fetch("/api/model-usage/reprobe-state")
-      .then(function (r) {{ return r.json(); }})
-      .then(function (s) {{
-        if (!s.running) {{ location.reload(); }}
-        else {{ setTimeout(reprobe_poll, 2000); }}
-      }})
-      .catch(function () {{ setTimeout(reprobe_poll, 2000); }});
-  }}
-  window.addEventListener("load", reprobe_poll);
-</script>
-"""
-
     # Live-счётчики секции Models in use: JS usage_poll каждые 5 с опрашивает
     # лёгкий /api/model-usage/snapshot (model_usage.usage_snapshot() — копии
     # строк из памяти, сети к бэкендам нет) и обновляет ячейки счётчиков
@@ -687,8 +538,8 @@ def _render_status_page(
     # обращения (usage_snapshot), поэтому экранирование имён не мешает.
     # Число строк изменилось (строка сброшена/добавлена) либо в таблице
     # вообще нет строк — location.reload() перерисует таблицу целиком
-    # (редкое событие; reprobe перерисовывает страницу сам через reprobe_poll).
-    # Скрипт безусловный (в отличие от status_poll/reprobe_poll): поллинг
+    # (редкое событие).
+    # Скрипт безусловный (в отличие от status_poll): поллинг
     # нужен всегда, когда на странице есть таблица. Оверхед — один маленький
     # JSON-ответ раз в 5 с на открытую вкладку; при скрытой вкладке браузер
     # сам троттлит setTimeout (≥1/мин) — трафика нет.
@@ -717,6 +568,7 @@ def _render_status_page(
           var row = rows[i];
           var cells = trs[i].getElementsByTagName("td");
           // Колонки: 0 Модель, 1 Бэкенд, 2 Вызовов, 3 Input, 4 Output,
+          // 5 Cost, 6 Actions.
           // 5 Cost (cost_html — готовый HTML с сервера: токены × тариф
           // на текущий момент; пересчитывается в каждом снимке).
           // Счётчики (2-4) — текст через textContent. Cost (5) — HTML с
@@ -775,7 +627,6 @@ def _render_status_page(
   }}
 </script>
 {poll_script}
-{reprobe_poll_script}
 {usage_poll_script}
 </head>
 <body>
@@ -791,16 +642,15 @@ def _render_status_page(
 </p>
 {note_html}
 {banner_html}
-{reprobe_banner_html}
 <table>
-  <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Endpoints</th><th>Models</th></tr>
+  <tr><th>Backend</th><th>Base URL</th><th>Status</th><th>Models</th></tr>
   {"".join(rows)}
 </table>
 {footer}
 <h3 style="margin-top:24px">Models in use</h3>
 <table>
-  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Endpoints</th><th>Actions</th></tr>
-  {_usage_rows_html(model_usage.usage_snapshot(), reprobing)}
+  <tr><th>Модель</th><th>Бэкенд</th><th>Вызовов</th><th>Input</th><th>Output</th><th>Cost</th><th>Actions</th></tr>
+  {_usage_rows_html(model_usage.usage_snapshot())}
 </table>
 <p style="color:#888;margin-top:12px;font-size:13px">
   <a href="https://github.com/alekseybb197/backend-adapter" target="_blank" rel="noopener">backend-adapter на GitHub</a>
@@ -816,7 +666,7 @@ def _render_status_page(
 
 @webserver.register
 class StatusEndpoint(webserver.Endpoint):
-    """Эндпойнт "/": статус-страница (версия, эндпойнты LLM, API, модели).
+    """Эндпойнт "/": статус-страница (версия, эндпойнты LLM, модели).
 
     Шапка — «Backend-Adapter Version <x.x.x>»; навигация-иконки второй
     строкой: 🔃 (кнопка POST "/" — проверка бэкендов, подпись
@@ -824,7 +674,7 @@ class StatusEndpoint(webserver.Endpoint):
     Проверка бэкендов — по кнопке 🔃 (POST "/") и при автостарте (первый
     GET, см. _autostart_first_check). POST работает по
     PRG-паттерну: запускает ФОНОВУЮ проверку config.start_refresh(timeout=
-    PROBE_TIMEOUT) и отвечает 303 See Other на GET "/" (HTTP не ждёт её
+    REFRESH_TIMEOUT) и отвечает 303 See Other на GET "/" (HTTP не ждёт её
     завершения; браузер переходит на страницу GET-навигацией, поэтому
     авто-релоад не повторяет POST). Кнопка ПЕРЕЧИТЫВАЕТ ADAPTER_BACKEND_CONFIG
     (start_refresh(reload=True) → config.reload_backend_config): бэкенды
@@ -875,7 +725,7 @@ class StatusEndpoint(webserver.Endpoint):
         # GET, который отрендерит баннер. В standalone без настроенных
         # эндпойнтов проверять нечего — не запускаем (GET покажет подсказку).
         if _collect_endpoints():
-            config.start_refresh(timeout=PROBE_TIMEOUT)
+            config.start_refresh(timeout=REFRESH_TIMEOUT)
         handler._redirect("/")
 
 
@@ -948,8 +798,8 @@ class ModelUsageDeleteEndpoint(webserver.Endpoint):
     (запись обновлённой таблицы без строки; см. model_usage.delete_model).
     Кнопка «🗑» в колонке Actions таблицы (form method=post) работает по
     PRG-паттерну: удаление + 303 See Other на GET "/" — страница
-    показывается GET-навигацией, обновление не повторяет POST (как у кнопок
-    «Сбросить»/«Перепроверить»). JSON-клиент (Content-Type:
+    показывается GET-навигацией, обновление не повторяет POST (как у кнопки
+    «Сбросить»). JSON-клиент (Content-Type:
     application/json) получает 200 {"ok": true, "model": ...} при успехе,
     404 {"error": ...} — строки нет (повторное удаление/неизвестная модель;
     в отличие от reset, delete не идемпотентен — строка после успеха
@@ -986,81 +836,12 @@ class ModelUsageDeleteEndpoint(webserver.Endpoint):
 
 
 @webserver.register
-class ModelUsageReprobeEndpoint(webserver.Endpoint):
-    """POST /api/model-usage/reprobe?model=<имя> — фоновая перепроверка
-    эндпоинтов строки модели.
-
-    Кнопка «Перепроверить» в таблице использованных моделей (form
-    method=post) работает по PRG-паттерну: старт + 303 See Other на GET "/"
-    — страница показывается GET-навигацией, обновление не повторяет POST.
-    Проба идёт в фоновом потоке (model_usage.start_reprobe) — статус-страница
-    отвечает мгновенно; пока перепроверка выполняется, строка показывает
-    «проверяется…» и страница авто-обновляется по завершении (JS опрашивает
-    /api/model-usage/reprobe-state). JSON-клиент (Content-Type:
-    application/json) получает 202 {"ok": true, "model": ...} при запуске,
-    404 {"error": ...} — строки нет / уже перепроверяется / идёт первичная
-    проба, 400 {"error": ...} — нет query-параметра model (единый формат
-    ошибки, как у reset). 202 — «запущено в фоне» (в отличие от 200-«готово»
-    у reset). GET на префикс — 404 дефолтом Endpoint."""
-
-    prefix = "/api/model-usage/reprobe"
-
-    def __init__(self, context):
-        self.context = context
-
-    def POST(self, handler, remainder: str):
-        parsed = urlparse(handler.path)
-        model = parse_qs(parsed.query).get("model", [""])[0].strip()
-        ct = handler.headers.get("Content-Type", "")
-        if "application/json" not in ct:
-            # HTML-форма кнопки (application/x-www-form-urlencoded): PRG.
-            if not model:
-                handler._redirect("/")  # кнопка без model невозможна в норме
-                return
-            model_usage.start_reprobe(model)  # строка есть на живой странице
-            handler._redirect("/")  # 303 → GET "/" (PRG)
-            return
-        if not model:
-            body = b'{"error": "missing \'model\' query parameter"}'
-            handler._write(400, "application/json; charset=utf-8", body)
-            return
-        if not model_usage.start_reprobe(model):
-            body = json.dumps(
-                {"error": f"model '{model}' not in usage table or already reprobing"}
-            ).encode()
-            handler._write(404, "application/json; charset=utf-8", body)
-            return
-        body = json.dumps({"ok": True, "model": model}).encode("utf-8")
-        handler._write(202, "application/json; charset=utf-8", body)
-
-
-@webserver.register
-class ReprobeStateEndpoint(webserver.Endpoint):
-    """Эндпойнт "/api/model-usage/reprobe-state": состояние перепроверки (JSON).
-
-    Лёгкий ответ для JS status_poll на статус-странице:
-    model_usage.reprobe_state() — {"running", "model", "started_at"}. GET
-    перепроверку не запускает и ничего не мутирует — безопасно опрашивать
-    каждые 2 с (по образцу /api/refresh-state, но состояние живёт в
-    model_usage, а не в config)."""
-
-    prefix = "/api/model-usage/reprobe-state"
-
-    def __init__(self, context):
-        self.context = context
-
-    def GET(self, handler, remainder: str):
-        body = json.dumps(model_usage.reprobe_state()).encode("utf-8")
-        handler._write(200, "application/json; charset=utf-8", body)
-
-
-@webserver.register
 class UsageSnapshotEndpoint(webserver.Endpoint):
     """Эндпойнт "/api/model-usage/snapshot": снимок таблицы Models in use (JSON).
 
     Лёгкий ответ для JS usage_poll на статус-странице:
     model_usage.usage_snapshot() — список строк таблицы (calls/input_tokens/
-    output_tokens/endpoints/…) в порядке первого обращения, каждая строка
+    output_tokens/…) в порядке первого обращения, каждая строка
     дополнена полем cost_html — готовым HTML ячейки Cost на ТЕКУЩИЙ момент
     (см. _cost_cell_html: токены строки × тариф на лету): поллинг обновляет
     и ячейку Cost, а не только счётчики — значение меняется синхронно с
@@ -1107,7 +888,8 @@ def _autostart_first_check() -> bool:
       - standalone (python -m backend_adapter.webserver) с YAML в
         ADAPTER_BACKEND_CONFIG: _BACKENDS пуст (адаптер не стартовал), но
         _collect_endpoints() вернёт список из YAML — первый GET запускает
-        проверку, чтобы колонка Endpoints и модели заполнились без клика;
+        проверку, чтобы колонки бэкендов (статус, модели) заполнились
+        без клика;
       - в процессе адаптера стартовую проверку уже запустил
         backend-adapter.py (running=True) — повторно не гоним;
       - проверка уже завершалась (done_at есть) — не гоним повторно:
@@ -1119,17 +901,15 @@ def _autostart_first_check() -> bool:
         return False  # уже идёт (стартовая адаптера / по кнопке)
     if state.get("done_at") is not None:
         return False  # проверка уже завершалась — не гоним повторно
-    return config.start_refresh(timeout=PROBE_TIMEOUT)
+    return config.start_refresh(timeout=REFRESH_TIMEOUT)
 
 
 __all__ = [
-    "PROBE_TIMEOUT",
+    "REFRESH_TIMEOUT",
     "MODEL_LINES",
     "_collect_endpoints",
     "_config_snapshot",
     "_models_html",
-    "_api_html",
-    "_endpoints_cell_html",
     "_cost_cell_html",
     "_usage_rows_html",
     "_actions_cell_html",
@@ -1141,8 +921,6 @@ __all__ = [
     "RefreshStateEndpoint",
     "ModelUsageResetEndpoint",
     "ModelUsageDeleteEndpoint",
-    "ModelUsageReprobeEndpoint",
-    "ReprobeStateEndpoint",
     "UsageSnapshotEndpoint",
     "_last_result",
     "_autostart_first_check",

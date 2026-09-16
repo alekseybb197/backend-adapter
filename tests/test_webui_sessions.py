@@ -188,6 +188,16 @@ def _row(session, agent="claude-cli/2.1.236", model="m-a", backend="AAA",
     return row
 
 
+def _log_dir(tmp_path) -> str:
+    """Лог-папка WEBUI-корня — ``<root>/log`` (v0.9.9).
+
+    /logs/<имя> и /errors/<имя> раздают .err из WebContext.log_dir, поэтому
+    HTTP-тесты кладут файлы сюда, а корнем сервера остаётся сам tmp_path."""
+    d = os.path.join(str(tmp_path), "log")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def _ctx():
     return mock.Mock(version="0.0.0-test")
 
@@ -204,13 +214,13 @@ class TestSessionSelectHelpers:
         assert ws._bool_options("ADAPTER_DEBUG") == (("1", "on"), ("0", "off"))
         assert ws._bool_options("ADAPTER_DEBUG_PARTS") == (("1", "on"), ("0", "off"))
 
-    def test_target_options_include_domain(self):
+    def test_target_options_are_plain_domain(self):
+        # v0.9.9: у TARGET нет состояния «inherit» — селект несёт ровно домен
+        # общей настройки (значение = метка).
         config, ws = _fresh_modules()
-        config.ADAPTER_MESSAGES_TARGET = "completions"
         opts = ws._target_options("ADAPTER_MESSAGES_TARGET")
-        assert opts[0] == ("inherit", "inherit (completions)")
-        values = [v for v, _ in opts]
-        assert values == ["inherit", *config.TARGET_ALLOWED_VALUES]
+        assert [v for v, _ in opts] == list(config.TARGET_ALLOWED_VALUES)
+        assert [label for _, label in opts] == list(config.TARGET_ALLOWED_VALUES)
 
     def test_stored_bool_states(self):
         config, ws = _fresh_modules()
@@ -289,7 +299,9 @@ class TestSessionSelectHelpers:
         html = ws._target_cell_html(_row("s-1", input="messages"))
         # Селект адресует ИМЕННО переменную входа строки.
         assert "name=ADAPTER_MESSAGES_TARGET" in html
-        assert 'value="inherit"' in html
+        # Переопределения нет — выбрано ДЕЙСТВУЮЩЕЕ (общее) значение.
+        assert '<option value="completions" selected>' in html
+        assert '<option value="inherit"' not in html
         assert "—" in ws._target_cell_html(_row("s-1", input="bogus"))
 
     def test_target_cell_reflects_override(self):
@@ -787,8 +799,28 @@ class TestSessionSettingsAPI:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_form_sets_target_inherit_explicit(self, tmp_path):
-        # У TARGET "inherit" — хранимое значение (не снятие записи).
+    def test_form_target_matching_global_clears_override(self, tmp_path):
+        # v0.9.9: выбор значения, совпадающего с общим, — это «вернуться к
+        # общему»: переопределение снимается, сессия живо наследует config.
+        config, ws = _fresh_modules()
+        from backend_adapter import session_settings
+        config.ADAPTER_MESSAGES_TARGET = "completions"
+        session_settings.set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            _http_post_body(
+                port,
+                "/api/sessions/settings?session=s-1&name=ADAPTER_MESSAGES_TARGET",
+                b"value=completions", "application/x-www-form-urlencoded",
+            )
+            assert session_settings.override("s-1", "ADAPTER_MESSAGES_TARGET") is None
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_form_target_inherit_legacy_clears(self, tmp_path):
+        # Старый скрипт/закладка со значением "inherit" доменом больше не
+        # принимается — трактуется как снятие переопределения.
         config, ws = _fresh_modules()
         from backend_adapter import session_settings
         session_settings.set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
@@ -799,7 +831,7 @@ class TestSessionSettingsAPI:
                 "/api/sessions/settings?session=s-1&name=ADAPTER_MESSAGES_TARGET",
                 b"value=inherit", "application/x-www-form-urlencoded",
             )
-            assert session_settings.override("s-1", "ADAPTER_MESSAGES_TARGET") == "inherit"
+            assert session_settings.override("s-1", "ADAPTER_MESSAGES_TARGET") is None
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -934,7 +966,9 @@ class TestSessionLogFileEndpoint:
     def test_serves_err_file_as_text(self, tmp_path):
         config, ws = _fresh_modules()
         name = "session-20260912-101010-abcd1234.err"
-        (tmp_path / name).write_text("ERROR block\n", encoding="utf-8")
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, name), "w", encoding="utf-8") as f:
+            f.write("ERROR block\n")
         httpd, port = _start_server(str(tmp_path))
         try:
             status, headers, body = _http_raw(port, "GET", "/logs/" + name)
@@ -960,11 +994,16 @@ class TestSessionLogFileEndpoint:
     def test_rejects_bad_names(self, tmp_path):
         # Строгий шаблон имени: слэши, «..» и посторонние файлы не отдаются.
         config, ws = _fresh_modules()
-        # посторонний файл в корне — не .err сессии
-        (tmp_path / "secret.err").write_text("secret", encoding="utf-8")
-        (tmp_path / "session-20260912-101010-abcd1234.txt").write_text(
-            "x", encoding="utf-8"
-        )
+        # посторонний файл в лог-папке — не .err сессии
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, "secret.err"), "w", encoding="utf-8") as f:
+            f.write("secret")
+        with open(
+            os.path.join(log_dir, "session-20260912-101010-abcd1234.txt"),
+            "w",
+            encoding="utf-8",
+        ) as f:
+            f.write("x")
         httpd, port = _start_server(str(tmp_path))
         try:
             for bad in (
@@ -981,9 +1020,11 @@ class TestSessionLogFileEndpoint:
             httpd.server_close()
 
     def test_traversal_via_dotdot_is_404(self, tmp_path):
-        # ../ не выходит за корень: после unquote остаются слэши → 404.
+        # ../ не выходит за лог-папку: после unquote остаются слэши → 404.
+        # Мишень лежит в самом корне (уровнем выше log/) — не должна отдаваться.
         config, ws = _fresh_modules()
-        outer = tmp_path.parent / "outside.err"
+        _log_dir(tmp_path)
+        outer = tmp_path / "outside.err"
         outer.write_text("nope", encoding="utf-8")
         httpd, port = _start_server(str(tmp_path))
         try:
@@ -1028,7 +1069,9 @@ class TestErrorsPreviewEndpoint:
     def _serve_with(self, tmp_path, body=_ERR_SAMPLE):
         config, ws = _fresh_modules()
         name = "session-20260912-101010-abcd1234.err"
-        (tmp_path / name).write_text(body, encoding="utf-8")
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, name), "w", encoding="utf-8") as f:
+            f.write(body)
         httpd, port = _start_server(str(tmp_path))
         return name, httpd, port
 
@@ -1094,7 +1137,9 @@ class TestErrorsPreviewEndpoint:
 
     def test_rejects_bad_names(self, tmp_path):
         config, ws = _fresh_modules()
-        (tmp_path / "secret.err").write_text("secret", encoding="utf-8")
+        log_dir = _log_dir(tmp_path)
+        with open(os.path.join(log_dir, "secret.err"), "w", encoding="utf-8") as f:
+            f.write("secret")
         httpd, port = _start_server(str(tmp_path))
         try:
             for bad in (

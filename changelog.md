@@ -1,6 +1,129 @@
 # backend-adapter — history / changelog
 
 
+## v0.9.9 — снятие проб эндпойнтов; `ADAPTER_DATA_ROOT` вместо `ADAPTER_DEBUG_LOGPATH` с подпапками `log/` и `var/`; TARGET без `inherit`; адаптивный ретрай `reasoning_budget_exhausted`; константный `__comment__`; минус колонка Endpoints
+
+### 2026-09-16 Саммари ветки v0.9.9 (6 коммитов между merge PR #21 (v0.9.8) и снятием WIP)
+
+**Цель:** упростить адаптер и привести его внутренние модели в соответствие
+с реальностью — отказаться от активного зондирования бэкендов (единственная
+проверка — опрос списка моделей), назвать каталог данных по фактической роли
+и разложить его содержимое по двум подпапкам, свести наследование
+TARGET-полей к одному принципу, а также закрыть два эксплуатационных
+раздражителя: 502 при исчерпании reasoning-бюджета и разросшееся перечисление
+возможностей в `__comment__`.
+
+**Решение:**
+- **TARGET без `inherit`** (коммит 1) — модель наследования TARGET-полей
+  сведена к одному принципу: «не задано = живое наследование общей настройки»,
+  а «вернуться к общему» — выбор значения, совпадающего с текущим общим
+  (переопределение снимается). Константа
+  `config.SESSION_TARGET_VALUES = ("inherit", *TARGET_ALLOWED_VALUES)` убрана,
+  три TARGET-записи `_SESSION_CONFIG_TYPES` переведены на общий домен
+  `TARGET_ALLOWED_VALUES`; `session_settings.effective` трактует TARGET ровно
+  как «не задано = общее» (`if value is None`), механизм снятия
+  (`set_config(..., clear=True)` → `row.pop(name, None)`) переиспользован;
+  WEBUI (`webui_sessions._apply_setting`) снимает запись, когда выбранное
+  значение равно текущему общему, а строка `"inherit"` от старой формы
+  по-прежнему означает «снять переопределение» (мягкая совместимость).
+  Тесты и документация приведены к двум состояниям (`docs/routing.md`,
+  `docs/webui.md`, `docs/environment.md`, `docs/logging.md`,
+  `docs/architecture.md`, `CLAUDE.md`);
+- **Адаптивный ретрай `reasoning_budget_exhausted`** (коммит 2) — клиенту
+  больше не отдаётся HTTP 502, когда reasoning-модель потратила весь
+  `max_tokens` на внутренние рассуждения: бэкенд в теле ошибки сам пишет
+  рецепт «Увеличьте max_tokens», и адаптер делает это автоматически.
+  `convert.is_reasoning_budget_error` распознаёт ошибку (сначала JSON —
+  `error.type`, плюс вложенные `detail`/`message`; затем грубый фолбэк по
+  подстроке — бэкенд может отдать не-JSON), `convert.bump_reasoning_budget`
+  поднимает бюджет до `max(текущее × 4, ADAPTER_REASONING_MIN_TOKENS)` (правит
+  `max_tokens`, а при его отсутствии — `max_output_tokens` тела Responses API;
+  потолок `sanitize_max_tokens` намеренно **не** применяется — причина ошибки
+  «слишком мало», а не «слишком много»), и запрос немедленно повторяется
+  **без sleep** в существующей петле попыток — во всех трактах, где правится
+  `max_tokens`: passthrough (E→E), `responses→completions`,
+  `messages→completions`, включая стрим-ветки (там повтор возможен только до
+  `_start_sse()`; добавлены страховки `not started` / `not pt_started` /
+  `not r_started`). Подъём расходует слот `ADAPTER_RETRY_COUNT`, но ограничен
+  своим счётчиком `ADAPTER_REASONING_RETRY` (дефолт 2, `0` выключает механизм
+  целиком); на последней попытке подъём не делается (`attempt < ADAPTER_RETRY`)
+  — повторять некуда, а `.err` не должен фиксировать правку неотправленного
+  тела. Новые env-переменные — `ADAPTER_REASONING_RETRY`,
+  `ADAPTER_REASONING_MIN_TOKENS` (строгая int-валидация `env_validate.py`).
+  Тесты — `tests/test_convert.py` (`TestIsReasoningBudgetError`,
+  `TestBumpReasoningBudget`), `tests/test_server.py`
+  (`TestReasoningBudgetRetry`); доки — `docs/environment.md`,
+  `docs/logging.md`, `docs/architecture.md` §9.5;
+- **Константное определение инструмента** (коммит 3) — `__comment__` в
+  `backend-adapter.py` стал однострочной **константой** (`backend router and
+  endpoint adapter: [AN] Messages <-> [OI]-compatible backends for AI
+  agents`) вместо перечня возможностей, расходившегося с реальностью при
+  каждой фиче; та же формулировка открывает вводный blockquote `README.md`
+  (единый смысл, продублирован осознанно). Политика зафиксирована в
+  `CLAUDE.md` (буллет «Ключевые факты» + принцип «Определение инструмента —
+  константа»). Значение ничем не парсится: `install.sh` берёт версию из
+  баннера бинаря, `webserver._detect_version()` читает `__version__`
+  регэкспом, флагов `--version`/`--help` нет;
+- **Колонка Endpoints из Models in use** (коммит 4) —
+  `webui_status._endpoints_cell_html` удалена вместе с ячейкой строки и
+  `<th>Endpoints</th>` (заглушка пустой таблицы — `colspan="7"`); индексы
+  live-поллинга не сместились — колонка шла после Cost, поэтому `set(2..4)`
+  (Вызовов/Input/Output) и `setHtml(5)` (Cost) указывают верно и после
+  удаления. Дублирование снято: какие API доступны, показывает колонка
+  «Доступные API» таблицы бэкендов;
+- **Снятие проб эндпойнтов** (коммит 5) — удалён весь функционал активного
+  зондирования бэкендов: дымовые POST-запросы (`max_tokens:1`) на четыре пути,
+  кэш результатов, YAML-ключ `probe:`, колонка «Доступные API», кнопка 🔄
+  reprobe, HTTP-эндпойнты `/api/model-usage/reprobe` и `/reprobe-state`,
+  метрика Prometheus `backend_adapter_backend_endpoint`, поля
+  `endpoints`/`errors`/`probing` строк usage-таблицы и переменная
+  `ADAPTER_ENDPOINT_PROBE`. Единственная проверка бэкенда — опрос списка
+  моделей `GET /v1/models`. `routing.decide` стал **всегда оптимистичен**:
+  ветки 502 и `ERROR_UNSUPPORTED` сняты, так что неверный выбор эндпойнта
+  агентом фиксируется по факту ошибки через `.err`-канал, а не предугадывается
+  пробой; статические таблицы роутинга `INPUT_PATHS`/`IMPLEMENTED_CONVERSIONS`
+  сохранены. **Побочный эффект — улучшение:** первый запрос к новой модели
+  больше не ждёт до 4×10 с на синхронные пробы. YAML-ключ `probe:` молча
+  игнорируется (парсер читает только `name`/`base`/`key`). Тесты, документация,
+  `docs/samples/sample.adapter.yaml` и `.github/workflows/ci.yml` приведены в
+  соответствие; добавлен тест «`decide` больше не отдаёт 502»;
+- **`ADAPTER_DEBUG_LOGPATH` → `ADAPTER_DATA_ROOT`** (коммит 6) — каталог
+  перестал быть «логпапой»: внутри `ADAPTER_DATA_ROOT` теперь две подпапки с
+  фиксированными ролями — `log/` (`session-*.log`, `session-*.jsonl`,
+  `*.parts`, `.err`, WARN-файлы) и `var/` (`adapter.pid`, `model-usage.yaml`,
+  `state.yaml`, `<бэкенд>.models.json`); корень WEBUI остаётся в корне.
+  Переименование **жёсткое**: читается только `ADAPTER_DATA_ROOT`, при заданном
+  старом имени без нового печатается `[WARN]` с подсказкой (fallback нет),
+  существующие данные в старом каталоге не мигрируются — старт просто создаёт
+  `log/` и `var/`. Дефолт — `./tmp/adapter`; `config.log_dir()`/`var_dir()` —
+  функции от модульного глобала (живое чтение), листы DAG
+  (`daemon._pidfile_path`, `probe_json._logpath`, `session_log._resolve_log_base`)
+  читают env напрямую и добавляют свою подпапку; `WebContext` получил
+  `log_dir`/`var_dir` (`webserver.serve()` считает `join(root_dir, "log")` /
+  `join(root_dir, "var")` и привязывает `model-usage.yaml` к `var_dir`);
+  `PROBE_TIMEOUT` переименован в `REFRESH_TIMEOUT` (это таймаут опроса списка
+  моделей, не пробы); `install.sh` — `SERVICE_DATA="${SERVICE_ROOT}/data"`.
+  Новые тесты — `TestDataRootLayout` (дефолт/явное значение, живое чтение
+  подпапок, `[WARN]` при старом имени, молчание при заданном новом) и
+  manual-проверки раскладки файлов по подпапкам.
+
+**Следствия:** адаптер больше не предугадывает возможности бэкенда — маршрут
+выбирается всегда, а неверный выбор эндпойнта агентом виден по факту ошибки в
+`.err`-канале; первый запрос к новой модели не блокируется пробами. Каталог
+данных назван по роли и разложен по двум подпапкам (`log/` — всё файловое о
+сессиях, `var/` — состояние), старое имя переменной даёт `[WARN]` и не
+читается. TARGET-поля имеют ровно два состояния (не задано / значение),
+Log/Parts — снимок (v0.9.8). Reasoning-модель, исчерпавшая бюджет рассуждений,
+получает автоматический повтор с поднятым `max_tokens` вместо 502.
+`__comment__` — константа. Версия v0.9.9 публикуется (снятие WIP). Рабочее
+дерево чистое — ветка готова к проверке и отправке в удалённый репозиторий.
+
+Детали — `docs/architecture.md` (§6.9, §9.5, §10), `docs/environment.md`
+(`ADAPTER_DATA_ROOT`, `ADAPTER_REASONING_RETRY`, `ADAPTER_REASONING_MIN_TOKENS`),
+`docs/logging.md`, `docs/webui.md`, `docs/routing.md` §2.4, `docs/install.md`,
+`docs/samples/sample.adapter.yaml`.
+
+
 ## v0.9.8 — снимок Log/Parts при образовании сессии; санитайзер `max_tokens`; превью `.err` в WEBUI; информативный баннер бэкендов; гайд Codex CLI; актуализация рекомендованных настроек [CC]
 
 ### 2026-09-15 Саммари ветки v0.9.8 (9 коммитов между merge PR #20 (v0.9.7) и снятием WIP)

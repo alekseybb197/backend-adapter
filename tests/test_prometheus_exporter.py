@@ -4,9 +4,8 @@
 Отдельный слушатель на ADAPTER_EXPORTER_PORT: GET /metrics (и /) отдаёт
 текст text exposition 0.0.4 из живых конфиг-глобалов — настройки/статус
 приложения (info/build/uptime/backends_configured/models_available),
-по бэкенду backend_up/backend_models/backend_endpoint (из
-config._ENDPOINT_STATE — единый источник после синхронизации found-эндпоинтов
-модели), по использованной модели счётчики calls/input_tokens/output_tokens
+по бэкенду backend_up/backend_models, по использованной модели счётчики
+calls/input_tokens/output_tokens
 из model_usage.usage_snapshot(). Прочие пути — 404; label-значения
 экранируются (\\, ", перевод строки).
 """
@@ -35,7 +34,7 @@ def _backend(name: str = "AAA", base: str = "http://aaa.local") -> dict:
 
 
 def _seed_state(config):
-    """Засеять бэкенды/модели/пробы/usage-таблицу (без сети)."""
+    """Засеять бэкенды/модели/usage-таблицу (без сети)."""
     b1 = _backend("AAA", "http://aaa.local")
     b2 = _backend('BB"B', 'http://bb"b.local')
     config._BACKENDS = [b1, b2]
@@ -46,12 +45,6 @@ def _seed_state(config):
         "m3": (b2["name"], b2),
     }
     config._AVAILABLE_MODELS = {"m1": {"id": "m1"}, "m2": {"id": "m2"}, "m3": {"id": "m3"}}
-    # Проба эндпоинтов: у AAA — completions 200 (found), у BB"B — ничего.
-    config._ENDPOINT_STATE["AAA"] = {
-        "at": 1.0,
-        "endpoints": {"/v1/chat/completions": {"status": 200, "found": True}},
-        "errors": {},
-    }
     # Последняя проверка бэкендов: AAA упал на /v1/models (есть в errors).
     config._REFRESH_JOB = {
         "running": False,
@@ -75,10 +68,7 @@ def _seed_usage(model_usage):
         "calls": 7,
         "input_tokens": 300,
         "output_tokens": 500,
-        "endpoints": {},
-        "errors": {},
         "first_seen": now,
-        "probing": False,
     }
     model_usage._TABLE['weird"model'] = {
         "model": 'weird"model',
@@ -86,10 +76,7 @@ def _seed_usage(model_usage):
         "calls": 1,
         "input_tokens": 10,
         "output_tokens": 20,
-        "endpoints": {},
-        "errors": {},
         "first_seen": now,
-        "probing": False,
     }
     model_usage._DIRTY = True
 
@@ -168,8 +155,8 @@ class TestRenderMetrics:
         assert 'backend_adapter_models_available 3' in text
 
     def test_backend_metrics_with_state(self):
-        """По бэкенду: backend_up (1/0 по refresh-errors), backend_models,
-        backend_endpoint по _ENDPOINT_STATE (непробованные пути → 0)."""
+        """По бэкенду: backend_up (1/0 по refresh-errors), backend_models.
+        Метрика backend_endpoint удалена в v0.9.9 вместе с пробами."""
         config, mu = _fresh()
         _seed_state(config)
         from backend_adapter import prometheus_exporter as pe
@@ -179,15 +166,7 @@ class TestRenderMetrics:
         assert 'backend_adapter_backend_up{name="AAA",base="http://aaa.local"} 0' in text
         assert 'backend_adapter_backend_up{name="BB\\"B",base="http://bb\\"b.local"} 1' in text
         assert 'backend_adapter_backend_models{name="AAA",base="http://aaa.local"} 2' in text
-        # endpoint completions у AAA — found (1); остальные непробованные → 0.
-        assert (
-            'backend_adapter_backend_endpoint{name="AAA",base="http://aaa.local",'
-            'endpoint="completions"} 1' in text
-        )
-        assert (
-            'backend_adapter_backend_endpoint{name="AAA",base="http://aaa.local",'
-            'endpoint="embeddings"} 0' in text
-        )
+        assert "backend_adapter_backend_endpoint" not in text
 
     def test_usage_model_counter_metrics(self):
         """Счётчики моделей из usage-таблицы (calls/input/output), с label

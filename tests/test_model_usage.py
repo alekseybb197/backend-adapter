@@ -2,39 +2,31 @@
 """Unit tests for backend_adapter.model_usage — used-models table.
 
 Tests cover:
-  - record: first call creates row + increments; repeats never reprobe
-  - probe model selection: resolved name used for all 4 ENDPOINT_PROBES;
-    collision prefix stripped; model not on backend → no probe; resolve/probe
-    exceptions swallowed (record kept)
-  - flag off: accounting kept, no probe
-  - concurrency: two first calls to one model → one probe; distinct models
-    both recorded
+  - record: first call creates row + increments, backend resolved once;
+    resolve exception swallowed (row kept)
+  - flag off: accounting kept
+  - concurrency: two first calls to one model → one row, calls==2; distinct
+    models both recorded
   - add_usage_tokens: accumulates input/output usage tokens (input_tokens /
     output_tokens), flag off / zero / missing row → no-op
   - snapshot is a copy in insertion order; reset clears
-  - persistence (YAML in the WEBUI root, on tmp_path): disabled ("") does no
-    file I/O; auto path = ADAPTER_DEBUG_LOGPATH; record writes the file with
-    {"version": 2, "models": ...} in insertion order; probing rows never hit
-    disk; dirty file is normalized on load; v1 files (byte counters) migrate —
-    calls/endpoints/errors/first_seen survive, tokens start at 0; unknown
-    version (> 2) ignored; loaded rows are never reprobed; usage_snapshot
-    triggers the load; broken YAML → empty table without an exception and is
+  - persistence (YAML in the state dir, on tmp_path): disabled ("") does no
+    file I/O; auto path = ADAPTER_DATA_ROOT/var; record writes the file with
+    {"version": 2, "models": ...} in insertion order; dirty file is normalized
+    on load; v1 files (byte counters) migrate — calls/first_seen survive,
+    tokens start at 0; unknown version (> 2) ignored; usage_snapshot triggers
+    the load; broken YAML → empty table without an exception and is
     overwritten by the next save; reset_model zeroes the row's counters
     (calls/input_tokens/output_tokens → 0) and keeps the row in memory and in
     the file; flush_table and the save interval gate periodic saves
-  - reprobe («Перепроверить»): a background re-probe of a row's endpoints
-    updates only endpoints/errors (calls/tokens untouched, file saved on
-    persist); missing row / first probe in flight (probing) → False;
-    start_reprobe spawns the daemon worker and rejects a second run while one
-    is in flight; reprobe_state mirrors running/model
+
+v0.9.9: endpoint probes (and the reprobe button) are gone — no probe fields,
+no probing flag, no per-model JSON dumps.
 """
 import os
-import json
 import threading
-import time
 from unittest import mock
 
-import pytest
 import yaml
 
 
@@ -65,61 +57,33 @@ def _persist(tmp_path, config, mu):
 
 class TestRecordBasic:
     def test_first_call_creates_row_and_increments(self):
-        """record twice: row exists, calls==2, probe fired once."""
+        """record twice: row exists, calls==2, backend resolved once."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = True
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
         config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ) as m_probe:
-                mu.record_model_usage("m")
-                mu.record_model_usage("m")
+        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")) as m_resolve:
+            mu.record_model_usage("m")
+            mu.record_model_usage("m")
         rows = mu.usage_snapshot()
         assert len(rows) == 1
         assert rows[0]["model"] == "m"
         assert rows[0]["calls"] == 2
         assert rows[0]["backend"] == "AAA"
-        assert m_probe.call_count == 1
+        assert m_resolve.call_count == 1  # только при создании строки
 
-    def test_repeat_never_reprobes(self):
-        """5 calls → probe called exactly once."""
+    def test_resolve_raises_record_kept(self):
+        """_resolve_backend raises RuntimeError → row kept, nothing escapes."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ) as m_probe:
-                for _ in range(5):
-                    mu.record_model_usage("m")
-        assert m_probe.call_count == 1
-        assert mu.usage_snapshot()[0]["calls"] == 5
-
-    def test_flag_off_records_without_probe(self):
-        """ADAPTER_MODEL_USAGE_ENABLE=False → row kept, backend resolved, no probe."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = False
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")) as m_resolve:
-            with mock.patch.object(mu, "_probe_model_endpoints") as m_probe:
-                mu.record_model_usage("m")
-                mu.record_model_usage("m")
-        assert m_resolve.call_count == 1  # только при создании строки
-        assert m_probe.call_count == 0
+        with mock.patch.object(
+            config, "_resolve_backend", side_effect=RuntimeError("no backend")
+        ):
+            mu.record_model_usage("m")  # must not raise
         rows = mu.usage_snapshot()
         assert len(rows) == 1
-        assert rows[0]["calls"] == 2
-        assert rows[0]["input_tokens"] == 0
-        assert rows[0]["output_tokens"] == 0
-        assert rows[0]["backend"] == "AAA"
-        assert rows[0]["endpoints"] == {}
-        assert rows[0]["probing"] is False
+        assert rows[0]["model"] == "m"
+        assert rows[0]["backend"] == ""
 
 
 class TestAddUsageTokens:
@@ -134,11 +98,7 @@ class TestAddUsageTokens:
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
         config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
         with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ):
-                mu.record_model_usage("m")
+            mu.record_model_usage("m")
         mu.add_usage_tokens("m", 100, 50)
         mu.add_usage_tokens("m", 20, 5)
         rows = mu.usage_snapshot()
@@ -153,11 +113,7 @@ class TestAddUsageTokens:
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
         config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
         with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ):
-                mu.record_model_usage("m")
+            mu.record_model_usage("m")
         mu.add_usage_tokens("m", 0, 7)
         rows = mu.usage_snapshot()
         assert rows[0]["input_tokens"] == 0
@@ -170,11 +126,7 @@ class TestAddUsageTokens:
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
         config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
         with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ):
-                mu.record_model_usage("m")
+            mu.record_model_usage("m")
         mu.add_usage_tokens("m", 0, 0)
         rows = mu.usage_snapshot()
         assert rows[0]["input_tokens"] == 0
@@ -187,11 +139,7 @@ class TestAddUsageTokens:
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
         config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
         with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ):
-                mu.record_model_usage("m")
+            mu.record_model_usage("m")
         mu.add_usage_tokens("m", 100, 50)
         rows = mu.usage_snapshot()
         assert rows[0]["input_tokens"] == 0
@@ -205,354 +153,25 @@ class TestAddUsageTokens:
         assert mu.usage_snapshot() == []
 
 
-class TestRecordProbeModel:
-    def test_plain_model_probes_resolved(self):
-        """probe receives resolved name + all 4 ENDPOINT_PROBES paths."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        captured = {}
-
-        def recording_probe(backend, model):
-            captured["backend"] = backend
-            captured["model"] = model
-            return {"endpoints": {}, "errors": {}}
-
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints", side_effect=recording_probe):
-                mu.record_model_usage("m")
-        assert captured == {"backend": backend_cfg, "model": "m"}
-
-    def test_collision_prefix_resolved_stripped(self):
-        """client 'AAA.m' resolves to 'm' → probe uses stripped name 'm'."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        captured = {}
-
-        def recording_probe(backend, model):
-            captured["model"] = model
-            return {"endpoints": {}, "errors": {}}
-
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints", side_effect=recording_probe):
-                mu.record_model_usage("AAA.m")
-        assert captured["model"] == "m"
-
-    def test_model_not_on_backend_no_probe(self):
-        """resolved not among backend models → no probe, endpoints stay empty."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        config._MODEL_TO_BACKEND = {"other": ("AAA", backend_cfg)}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints") as m_probe:
-                mu.record_model_usage("m")
-        assert m_probe.call_count == 0
-        rows = mu.usage_snapshot()
-        assert rows[0]["endpoints"] == {}
-
-    def test_resolve_raises_record_kept(self):
-        """_resolve_backend raises RuntimeError → row kept, nothing escapes."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        with mock.patch.object(
-            config, "_resolve_backend", side_effect=RuntimeError("no backend")
-        ):
-            mu.record_model_usage("m")  # must not raise
-        rows = mu.usage_snapshot()
-        assert len(rows) == 1
-        assert rows[0]["model"] == "m"
-        assert rows[0]["probing"] is False
-
-
-class TestEndpointSync:
-    """Синхронизация found-эндпоинтов в config._ENDPOINT_STATE (v0.8.5,
-    задача 2): найденные пробой модели эндпоинты переносятся в кэш бэкенда
-    (колонка «Доступные API» и экспортёр видят их), только found=True и
-    только для бэкендов из числа настроенных (config._BACKEND_BY_NAME)."""
-
-    def _config(self):
-        _reload_config()
-        from backend_adapter import config
-        return config
-
-    def _backend(self, name="AAA"):
-        return {"name": name, "base": f"http://{name.lower()}.local", "key": "k"}
-
-    def _probe_result(self):
-        """Результат _probe_model_endpoints: два found + один не-found."""
-        return {
-            "endpoints": {
-                "completions": {"status": 200, "found": True},
-                "responses": {"status": 200, "found": True},
-                "embeddings": {"status": 500, "found": False},
-            },
-            "errors": {"embeddings": "HTTP 500"},
-        }
-
-    def test_record_syncs_found_endpoints_to_backend_state(self):
-        """Первая проба модели: found-эндпоинты видны в _ENDPOINT_STATE
-        бэкенда; не-found — не переносятся (синхронизируются ТОЛЬКО
-        находки, found=True ⇔ HTTP 200)."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = self._backend()
-        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
-        config._BACKENDS = [backend_cfg]
-        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints",
-                                   return_value=self._probe_result()):
-                mu.record_model_usage("m")
-        entry = config._ENDPOINT_STATE.get("AAA")
-        assert entry is not None
-        found = {p: v["found"] for p, v in entry["endpoints"].items()}
-        assert found == {
-            "/v1/chat/completions": True,
-            "/v1/responses": True,
-        }
-        # embeddings (found=False) в кэш бэкенда не синхронизирован.
-        assert "/v1/embeddings" not in entry["endpoints"]
-        assert entry["at"] > 0
-
-    def test_record_orphaned_backend_not_synced(self):
-        """Бэкенд вне _BACKEND_BY_NAME (удалён из YAML — строка-история):
-        синхронизации в кэш НЕТ."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = self._backend("GONE")
-        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
-        # В _BACKEND_BY_NAME бэкенда нет — как после удаления из YAML.
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints",
-                                   return_value=self._probe_result()):
-                mu.record_model_usage("m")
-        assert "GONE" not in config._ENDPOINT_STATE
-        # Строка usage-таблицы осталась как история.
-        rows = mu.usage_snapshot()
-        assert rows[0]["model"] == "m"
-        assert rows[0]["backend"] == "GONE"
-
-    def test_record_probe_returns_empty_no_sync(self):
-        """Проба без эндпоинтов (политика — ничего не перечислено) →
-        синхронизировать нечего, запись бэкенда не создаётся."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = self._backend()
-        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
-        config._BACKENDS = [backend_cfg]
-        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints",
-                                   return_value={"endpoints": {}, "errors": {}}):
-                mu.record_model_usage("m")
-        assert config._ENDPOINT_STATE == {}
-
-    def test_reprobe_syncs_found_endpoints(self):
-        """«Перепроверить» строки (reprobe_model): перепробованные found —
-        в кэш бэкенда."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = False
-        config._BACKENDS = [self._backend()]
-        config._BACKEND_BY_NAME = {"AAA": self._backend()}
-        mu.reset_model_usage()
-        mu._TABLE["m"] = {
-            "model": "m", "backend": "AAA", "calls": 5,
-            "input_tokens": 0, "output_tokens": 0,
-            "endpoints": {}, "errors": {},
-            "first_seen": "10:00:00", "probing": False,
-        }
-        with mock.patch.object(config, "_resolve_backend",
-                               return_value=({"name": "AAA"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=True):
-                with mock.patch.object(mu, "_probe_model_endpoints",
-                                       return_value=self._probe_result()):
-                    assert mu.reprobe_model("m") is True
-        entry = config._ENDPOINT_STATE.get("AAA")
-        assert entry is not None
-        assert entry["endpoints"]["/v1/chat/completions"] == {"status": 200, "found": True}
-        # Не-found эндпоинты (embeddings, status 500) в кэш не синхронизируются.
-        assert "/v1/embeddings" not in entry["endpoints"]
-
-    def test_load_syncs_found_endpoints_from_file(self, tmp_path):
-        """Загрузка model-usage.yaml: found-эндпоинты загруженных строк для
-        настроенных бэкендов переносятся в кэш; строки НЕ перепробуются."""
-        config, mu = _fresh()
-        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
-        mu.set_persist_path(persist_file)
-        backend_cfg = self._backend()
-        config._MODEL_TO_BACKEND = {"m": (backend_cfg["name"], backend_cfg)}
-        config._BACKENDS = [backend_cfg]
-        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
-        with open(persist_file, "w", encoding="utf-8") as f:
-            yaml.safe_dump({
-                "version": 2,
-                "models": {
-                    "m": {
-                        "model": "m", "backend": "AAA", "calls": 3,
-                        "input_tokens": 0, "output_tokens": 0,
-                        "endpoints": {
-                            "completions": {"status": 200, "found": True},
-                            "embeddings": {"status": 500, "found": False},
-                        },
-                        "errors": {}, "first_seen": "10:00:00", "probing": False,
-                    }
-                },
-            }, f)
-        with mock.patch.object(mu, "_probe_model_endpoints") as m_probe:
-            rows = mu.usage_snapshot()  # лениво читает файл
-        assert len(rows) == 1
-        m_probe.assert_not_called()  # контракт: загруженные строки не перепробуются
-        entry = config._ENDPOINT_STATE.get("AAA")
-        assert entry is not None
-        assert entry["endpoints"]["/v1/chat/completions"] == {"status": 200, "found": True}
-
-    def test_load_orphaned_backend_not_synced(self, tmp_path):
-        """Загруженная строка бэкенда, которого нет в настройках, кэш НЕ
-        пополняет (строка остаётся историей в usage-таблице)."""
-        config, mu = _fresh()
-        persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
-        mu.set_persist_path(persist_file)
-        with open(persist_file, "w", encoding="utf-8") as f:
-            yaml.safe_dump({
-                "version": 2,
-                "models": {
-                    "m": {
-                        "model": "m", "backend": "GONE", "calls": 1,
-                        "endpoints": {
-                            "completions": {"status": 200, "found": True},
-                        },
-                        "errors": {}, "first_seen": "10:00:00", "probing": False,
-                    }
-                },
-            }, f)
-        rows = mu.usage_snapshot()
-        assert rows[0]["backend"] == "GONE"
-        assert config._ENDPOINT_STATE == {}
-
-    def test_sync_helper_calls_upsert_for_found_only(self):
-        """_sync_found_endpoints: upsert зовётся только для found-эндпоинтов,
-        с (name, pname, status, True); осиротевший бэкенд — ни одного вызова."""
-        config, mu = _fresh()
-        backend_cfg = self._backend()
-        config._BACKEND_BY_NAME = {backend_cfg["name"]: backend_cfg}
-        source = {
-            "endpoints": {
-                "completions": {"status": 200, "found": True},
-                "embeddings": {"status": 500, "found": False},
-            }
-        }
-        with mock.patch.object(config, "upsert_endpoint_state") as m_upsert:
-            mu._sync_found_endpoints("AAA", source)
-        assert m_upsert.call_args_list == [
-            mock.call("AAA", "completions", 200, True),
-        ]
-        m_upsert.reset_mock()
-        with mock.patch.object(config, "upsert_endpoint_state") as m_upsert2:
-            mu._sync_found_endpoints("GONE", source)
-        m_upsert2.assert_not_called()
-
-    def test_probe_exception_swallowed(self):
-        """probe raises → row kept, nothing escapes."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints", side_effect=RuntimeError("boom")
-            ):
-                mu.record_model_usage("m")  # must not raise
-        rows = mu.usage_snapshot()
-        assert rows[0]["endpoints"] == {}
-        assert rows[0]["probing"] is False
-
-
-class TestProbeModelEndpointsPolicy:
-    """Прямые тесты model_usage._probe_model_endpoints под политику «только
-    явно указанные пробы» (v0.8.5): эндпоинт пробуется ТОЛЬКО если он
-    перечислен в probe-ключе бэкенда с непустой моделью; пробуем resolved
-    (моделью запроса), а не probe-модель."""
-
-    def test_only_listed_endpoints_probed(self):
-        config, mu = _fresh()
-        backend_cfg = {
-            "name": "AAA", "base": "http://aaa.local", "key": "k",
-            "probe": {"completions": "some-model", "responses": "another"},
-        }
-        captured = {}
-
-        def recording_probe(backend, probes, timeout=None):
-            captured["probes"] = probes
-            return {"endpoints": {}, "errors": {}}
-
-        with mock.patch.object(config, "_probe_backend_endpoints",
-                               side_effect=recording_probe):
-            result = mu._probe_model_endpoints(backend_cfg, "resolved-m")
-        # Пробуются только пути, перечисленные в probe; модели — resolved
-        assert captured["probes"] == {
-            "/v1/chat/completions": "resolved-m",
-            "/v1/responses": "resolved-m",
-        }
-        assert result == {"endpoints": {}, "errors": {}}
-
-    def test_no_probe_key_returns_empty(self):
-        """Ключа probe нет вовсе → проб нет: пустой результат, сеть не ходила."""
-        config, mu = _fresh()
-        backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
-        with mock.patch.object(config, "_probe_backend_endpoints") as m_probe:
-            result = mu._probe_model_endpoints(backend_cfg, "m")
-        m_probe.assert_not_called()
-        assert result == {"endpoints": {}, "errors": {}}
-
-    def test_empty_probe_values_not_probed(self):
-        """Пустые значения (messages:) — не пробуются (только непустые)."""
-        config, mu = _fresh()
-        backend_cfg = {
-            "name": "AAA", "base": "http://aaa.local", "key": "k",
-            "probe": {"completions": "m", "messages": ""},
-        }
-        captured = {}
-
-        def recording_probe(backend, probes, timeout=None):
-            captured["probes"] = probes
-            return {"endpoints": {}, "errors": {}}
-
-        with mock.patch.object(config, "_probe_backend_endpoints",
-                               side_effect=recording_probe):
-            mu._probe_model_endpoints(backend_cfg, "m")
-        assert set(captured["probes"]) == {"/v1/chat/completions"}
-
-
 class TestRecordConcurrency:
-    def test_concurrent_first_calls_probe_once(self):
-        """Two threads, same model: probe called once, calls==2."""
+    def test_concurrent_first_calls_one_row(self):
+        """Two threads, same model: one row, calls==2, resolve raced safely."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = True
         backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
         config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
-        barrier = threading.Barrier(2)
-
-        def slow_probe(_backend, _model):
-            barrier.wait(timeout=5)  # обе нити доходят до пробы
-            time.sleep(0.05)
-            return {"endpoints": {}, "errors": {}}
-
         with mock.patch.object(config, "_resolve_backend", return_value=(backend_cfg, "m")):
-            with mock.patch.object(mu, "_probe_model_endpoints", side_effect=slow_probe) as m_probe:
-                threads = [
-                    threading.Thread(target=mu.record_model_usage, args=("m",)),
-                    threading.Thread(target=mu.record_model_usage, args=("m",)),
-                ]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join(timeout=10)
-        assert m_probe.call_count == 1
-        assert mu.usage_snapshot()[0]["calls"] == 2
+            threads = [
+                threading.Thread(target=mu.record_model_usage, args=("m",)),
+                threading.Thread(target=mu.record_model_usage, args=("m",)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+        rows = mu.usage_snapshot()
+        assert len(rows) == 1
+        assert rows[0]["calls"] == 2
 
     def test_concurrent_distinct_models_both_recorded(self):
         """Two threads, distinct models → both rows present."""
@@ -563,18 +182,14 @@ class TestRecordConcurrency:
         with mock.patch.object(
             config, "_resolve_backend", side_effect=lambda m: (backend_cfg, m)
         ):
-            with mock.patch.object(
-                mu, "_probe_model_endpoints",
-                return_value={"endpoints": {}, "errors": {}},
-            ):
-                threads = [
-                    threading.Thread(target=mu.record_model_usage, args=("m1",)),
-                    threading.Thread(target=mu.record_model_usage, args=("m2",)),
-                ]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join(timeout=10)
+            threads = [
+                threading.Thread(target=mu.record_model_usage, args=("m1",)),
+                threading.Thread(target=mu.record_model_usage, args=("m2",)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
         rows = {r["model"] for r in mu.usage_snapshot()}
         assert rows == {"m1", "m2"}
 
@@ -589,9 +204,9 @@ class TestSnapshot:
         snap = mu.usage_snapshot()
         assert [r["model"] for r in snap] == ["m1", "m2"]
         snap[0]["calls"] = 999
-        snap[0]["endpoints"]["completions"] = {"status": 200, "found": True}
+        snap[0]["backend"] = "HACKED"
         assert mu.usage_snapshot()[0]["calls"] == 1
-        assert mu.usage_snapshot()[0]["endpoints"] == {}
+        assert mu.usage_snapshot()[0]["backend"] == ""
 
     def test_reset_clears(self):
         """reset_model_usage empties the table."""
@@ -607,21 +222,12 @@ class TestSnapshot:
 # ---------------------------------------------------------------------------
 
 def _persist_setup(config, mu, tmp_path):
-    """Настроить один бэкенд (AAA, модель m, проба-мок) и персистентность
-    на tmp_path. Возвращает (persist_file)."""
+    """Настроить один бэкенд (AAA, модель m) и персистентность на tmp_path.
+    Возвращает (persist_file)."""
     persist_file = _persist(tmp_path, config, mu)
     backend_cfg = {"name": "AAA", "base": "http://aaa.local", "key": "k"}
     config._MODEL_TO_BACKEND = {"m": ("AAA", backend_cfg)}
     return persist_file
-
-
-def _with_probe_mock(mu, fn):
-    """Запустить fn с мокнутой _probe_model_endpoints (без сети)."""
-    with mock.patch.object(
-        mu, "_probe_model_endpoints",
-        return_value={"endpoints": {}, "errors": {}},
-    ):
-        fn()
 
 
 class TestPersistPath:
@@ -634,14 +240,18 @@ class TestPersistPath:
         root = tmp_path / "webui"
         assert not (root / "model-usage.yaml").exists()
 
-    def test_auto_root_uses_logpath_default(self, tmp_path):
-        """No explicit path → ADAPTER_DEBUG_LOGPATH (v0.8.6: default ./tmp/logs,
-        no independent ./tmp/webui anymore)."""
+    def test_auto_root_uses_data_root_var(self, tmp_path):
+        """No explicit path → ADAPTER_DATA_ROOT/var (v0.9.9: дефолт
+        ./tmp/adapter, папка состояния var/)."""
         config, mu = _fresh()
         mu.set_persist_path(None)  # авто-режим (прод): _fresh оставил "" (тесты)
-        assert mu.usage_persist_file() == os.path.join("./tmp/logs", mu.MODEL_USAGE_FILE)
-        config.ADAPTER_DEBUG_LOGPATH = str(tmp_path / "logs")
-        assert mu.usage_persist_file() == str(tmp_path / "logs" / mu.MODEL_USAGE_FILE)
+        assert mu.usage_persist_file() == os.path.join(
+            "./tmp/adapter", "var", mu.MODEL_USAGE_FILE
+        )
+        config.ADAPTER_DATA_ROOT = str(tmp_path / "data")
+        assert mu.usage_persist_file() == str(
+            tmp_path / "data" / "var" / mu.MODEL_USAGE_FILE
+        )
 
     def test_explicit_path_wins(self, tmp_path):
         """Explicit persist path is returned as-is (abspath not required)."""
@@ -672,8 +282,8 @@ class TestPersistPath:
 
 class TestPersistSave:
     def test_record_writes_versioned_yaml(self, tmp_path):
-        """record → file exists: {"version": 2, "models": ...}, probing False,
-        insertion order preserved, token fields present."""
+        """record → file exists: {"version": 2, "models": ...}, insertion order
+        preserved, token fields present, no probe fields."""
         config, mu = _fresh()
         config.ADAPTER_MODEL_USAGE_ENABLE = False
         persist_file = _persist_setup(config, mu, tmp_path)
@@ -684,39 +294,14 @@ class TestPersistSave:
             data = yaml.safe_load(f)
         assert data["version"] == 2
         assert list(data["models"].keys()) == ["m1", "m2"]
-        assert data["models"]["m1"]["probing"] is False
         assert data["models"]["m1"]["calls"] == 1
         assert data["models"]["m1"]["input_tokens"] == 0
         assert data["models"]["m1"]["output_tokens"] == 0
+        assert "endpoints" not in data["models"]["m1"]
+        assert "errors" not in data["models"]["m1"]
+        assert "probing" not in data["models"]["m1"]
         assert "bytes_sent" not in data["models"]["m1"]
         assert "bytes_recv" not in data["models"]["m1"]
-
-    def test_probing_row_not_serialized(self, tmp_path):
-        """A row with probing=True (first call, probe in flight) never hits disk.
-
-        Through record_model_usage the flag is always cleared (finally) before
-        the forced save, so the probe-in-flight state is simulated directly:
-        a probing=True row in the table must not be serialized by a save."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = False
-        persist_file = _persist_setup(config, mu, tmp_path)
-        with mu._TABLE_LOCK:
-            mu._TABLE["m"] = {
-                "model": "m",
-                "backend": "",
-                "calls": 1,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "endpoints": {},
-                "errors": {},
-                "first_seen": "12:00:00",
-                "probing": True,
-            }
-            mu._DIRTY = True
-        mu.flush_table()
-        with open(persist_file, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        assert "m" not in data["models"]
 
     def test_save_interval_gates_periodic_save(self, tmp_path):
         """_save_table(False): before the interval elapses — no write; after —
@@ -753,8 +338,7 @@ class TestPersistLoad:
         assert rows[0]["model"] == "m"
 
     def test_dirty_file_normalized_on_load(self, tmp_path):
-        """Bad values in the file are normalized; probing forced False; unknown
-        pnames dropped."""
+        """Bad values in the file are normalized; probe fields dropped."""
         config, mu = _fresh()
         persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
         mu.set_persist_path(persist_file)
@@ -784,15 +368,13 @@ class TestPersistLoad:
         assert len(rows) == 1
         r = rows[0]
         assert r["calls"] == 0 and r["input_tokens"] == 0 and r["output_tokens"] == 3
-        assert r["endpoints"] == {"completions": {"status": 200, "found": True}}
-        assert r["errors"] == {"completions": "boom"}
-        assert r["probing"] is False
+        assert "endpoints" not in r and "errors" not in r and "probing" not in r
         assert "extra" not in r
         assert r["first_seen"]  # непустая строка (сейчас — текущее время)
 
     def test_v1_file_migrates_tokens_start_at_zero(self, tmp_path):
-        """version: 1 (byte counters) loads: calls/endpoints/errors/first_seen
-        survive, bytes dropped, tokens start at 0."""
+        """version: 1 (byte counters) loads: calls/backend/first_seen survive,
+        bytes and probe fields dropped, tokens start at 0."""
         config, mu = _fresh()
         persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
         mu.set_persist_path(persist_file)
@@ -824,8 +406,7 @@ class TestPersistLoad:
         assert r["output_tokens"] == 0
         assert "bytes_sent" not in r
         assert "bytes_recv" not in r
-        assert r["endpoints"] == {"completions": {"status": 200, "found": True}}
-        assert r["errors"] == {}
+        assert "endpoints" not in r and "errors" not in r and "probing" not in r
         assert r["first_seen"] == "14:32:05"
         # Следующее сохранение переписывает файл в v2 без байтовых полей.
         mu.record_model_usage("m1")   # fast-path: строка из файла
@@ -872,8 +453,8 @@ class TestPersistLoad:
             yaml.safe_dump(raw, f)
         assert mu.usage_snapshot() == []
 
-    def test_loaded_rows_not_reprobed(self, tmp_path):
-        """Loaded rows take the fast path — probe never fires, calls grow."""
+    def test_loaded_rows_accumulate(self, tmp_path):
+        """Loaded rows take the fast path — calls grow without re-resolving."""
         config, mu = _fresh()
         persist_file = str(tmp_path / mu.MODEL_USAGE_FILE)
         mu.set_persist_path(persist_file)
@@ -882,10 +463,10 @@ class TestPersistLoad:
                 {"models": {"m1": {"model": "m1", "calls": 1, "backend": ""}}},
                 f,
             )
-        with mock.patch.object(mu, "_probe_model_endpoints") as m_probe:
+        with mock.patch.object(config, "_resolve_backend") as m_resolve:
             mu.record_model_usage("m1")
             mu.record_model_usage("m1")
-        assert m_probe.call_count == 0
+        m_resolve.assert_not_called()
         assert mu.usage_snapshot()[0]["calls"] == 3
 
     def test_broken_yaml_ignored_then_overwritten(self, tmp_path):
@@ -918,7 +499,7 @@ class TestResetModel:
         assert rows[0]["calls"] == 0
         assert rows[0]["input_tokens"] == 0
         assert rows[0]["output_tokens"] == 0
-        # Бэкенд/endpoints первой пробы не тронуты (строка целиком на месте)
+        # Бэкенд первой записи не тронут (строка целиком на месте)
         with open(persist_file, encoding="utf-8") as f:
             saved = yaml.safe_load(f)["models"]["m"]
         assert saved["calls"] == 0 and saved["input_tokens"] == 0
@@ -953,8 +534,7 @@ class TestResetModel:
         # файл и снимает _DIRTY) — контролируем флаг вручную.
         mu._TABLE["m1"] = {
             "model": "m1", "backend": "AAA", "calls": 7,
-            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
+            "input_tokens": 0, "output_tokens": 0, "first_seen": "10:00:00",
         }
         mu._DIRTY = True
         with mock.patch.object(mu, "_save_table", side_effect=KeyboardInterrupt):
@@ -974,8 +554,7 @@ class TestResetModel:
         persist_file = _persist_setup(config, mu, tmp_path)
         mu._TABLE["m1"] = {
             "model": "m1", "backend": "AAA", "calls": 3,
-            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
+            "input_tokens": 0, "output_tokens": 0, "first_seen": "10:00:00",
         }
         mu._DIRTY = True
         # _atomic_write_yaml падает ДО os.replace — файл не обновлён,
@@ -1026,165 +605,6 @@ class TestDeleteModel:
         assert mu.usage_snapshot() == []
         assert mu.delete_model("m") is False
 
-
-class TestReprobe:
-    """Фоновая перепроверка эндпоинтов строки (кнопка «Перепроверить»).
-
-    Ядро reprobe_model: endpoints/errors строки обновляются результатом
-    новой пробы, calls/токены НЕ растут; строки нет / идёт первичная проба
-    (probing=True) → False. start_reprobe: запуск daemon-потока, повторный
-    при идущем reprobe → False; reprobe_state — снимок running/model."""
-
-    def _seed_row(self, mu, model="m", backend="AAA", calls=5, probing=False,
-                  endpoints=None, input_tokens=10, output_tokens=20):
-        mu.reset_model_usage()
-        mu._TABLE[model] = {
-            "model": model,
-            "backend": backend,
-            "calls": calls,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "endpoints": endpoints if endpoints is not None else {},
-            "errors": {},
-            "first_seen": "10:00:00",
-            "probing": probing,
-        }
-
-    def test_reprobe_updates_endpoints_only(self):
-        """Проба возвращает endpoints/errors — строка обновляется ими, calls
-        и токены НЕ трогаются; файл сохраняется (force)."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = False
-        self._seed_row(mu, calls=5, input_tokens=10, output_tokens=20)
-        result = {
-            "endpoints": {"completions": {"status": 200, "found": True}},
-            "errors": {},
-        }
-        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=True):
-                with mock.patch.object(mu, "_probe_model_endpoints", return_value=result) as m_probe:
-                    assert mu.reprobe_model("m") is True
-        assert m_probe.call_count == 1
-        row = mu.usage_snapshot()[0]
-        assert row["endpoints"] == {"completions": {"status": 200, "found": True}}
-        assert row["calls"] == 5      # счётчик не вырос
-        assert row["input_tokens"] == 10   # токены не выросли
-        assert row["output_tokens"] == 20
-        assert row["probing"] is False
-
-    def test_reprobe_updates_backend_name_on_resolve(self):
-        """Резолв сменился (бэкенд BBB) → backend строки обновляется."""
-        config, mu = _fresh()
-        self._seed_row(mu, backend="AAA")
-        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "BBB"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=False):
-                assert mu.reprobe_model("m") is True
-        assert mu.usage_snapshot()[0]["backend"] == "BBB"
-        # модели нет на бэкенде — пробу не делаем, endpoints не трогаем
-
-    def test_reprobe_no_row_false(self):
-        """Строки нет в таблице → False, исключений нет."""
-        config, mu = _fresh()
-        mu.reset_model_usage()
-        assert mu.reprobe_model("m") is False
-
-    def test_reprobe_probing_row_false(self):
-        """Идёт первичная (первая) проба строки (probing=True) → False."""
-        config, mu = _fresh()
-        self._seed_row(mu, probing=True)
-        assert mu.reprobe_model("m") is False
-
-    def test_reprobe_exception_swallowed(self):
-        """Исключение в пробе → лог, строка цела, endpoints не тронуты."""
-        config, mu = _fresh()
-        self._seed_row(mu)
-        with mock.patch.object(config, "_resolve_backend", side_effect=RuntimeError("boom")):
-            assert mu.reprobe_model("m") is True  # исключение поймано внутри
-        row = mu.usage_snapshot()[0]
-        assert row["calls"] == 5
-
-    def test_reprobe_writes_file_on_persist(self, tmp_path):
-        """При persist-пути результат reprobe сохраняется в файл сразу."""
-        config, mu = _fresh()
-        config.ADAPTER_MODEL_USAGE_ENABLE = False
-        persist_file = _persist(tmp_path, config, mu)
-        self._seed_row(mu)
-        result = {
-            "endpoints": {"completions": {"status": 200, "found": True}},
-            "errors": {},
-        }
-        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=True):
-                with mock.patch.object(mu, "_probe_model_endpoints", return_value=result):
-                    mu.reprobe_model("m")
-        with open(persist_file, encoding="utf-8") as f:
-            saved = yaml.safe_load(f)
-        assert saved["version"] == 2
-        assert saved["models"]["m"]["endpoints"]["completions"]["found"] is True
-
-    def test_start_reprobe_launches_worker(self):
-        """start_reprobe: строка есть → True, снимок running; воркер
-        (reprobe_model) отрабатывает и очищает снимок в finally."""
-        config, mu = _fresh()
-        self._seed_row(mu)
-        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=True):
-                with mock.patch.object(
-                    mu, "_probe_model_endpoints",
-                    return_value={"endpoints": {}, "errors": {}},
-                ):
-                    assert mu.start_reprobe("m") is True
-        state = mu.reprobe_state()
-        assert state["running"] is False  # воркер уже отработал и очистил
-        assert state["model"] is None
-
-    def test_start_reprobe_no_row_or_probing_false(self):
-        """start_reprobe: строки нет / probing-строка → False (без потока)."""
-        config, mu = _fresh()
-        mu.reset_model_usage()
-        assert mu.start_reprobe("m") is False
-        self._seed_row(mu, probing=True)
-        assert mu.start_reprobe("m") is False
-        assert mu.reprobe_state()["running"] is False
-
-    def test_start_reprobe_second_while_running_false(self):
-        """Повторный start_reprobe при уже идущем reprobe → False."""
-        config, mu = _fresh()
-        self._seed_row(mu)
-        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=True):
-                with mock.patch.object(
-                    mu, "_probe_model_endpoints",
-                    side_effect=lambda *a: time.sleep(0.15) or {"endpoints": {}, "errors": {}},
-                ) as m_probe:
-                    assert mu.start_reprobe("m") is True   # первый — запущен
-                    assert mu.start_reprobe("m") is False  # второй — уже идёт
-                    # дать воркеру завершиться и очистить снимок
-                    deadline = time.time() + 3
-                    while mu.reprobe_state()["running"] and time.time() < deadline:
-                        time.sleep(0.02)
-                    assert m_probe.call_count == 1
-        assert mu.reprobe_state()["running"] is False
-
-    def test_reprobe_state_snapshot(self):
-        """reprobe_state при идущем reprobe: running/model/started_at."""
-        config, mu = _fresh()
-        self._seed_row(mu)
-        with mock.patch.object(config, "_resolve_backend", return_value=({"name": "AAA"}, "m")):
-            with mock.patch.object(mu, "_backend_has_model", return_value=True):
-                with mock.patch.object(
-                    mu, "_probe_model_endpoints",
-                    side_effect=lambda *a: time.sleep(0.3) or {"endpoints": {}, "errors": {}},
-                ):
-                    assert mu.start_reprobe("m") is True
-                    state = mu.reprobe_state()
-                    assert state["running"] is True
-                    assert state["model"] == "m"
-                    assert state["started_at"] is not None
-                    deadline = time.time() + 3
-                    while mu.reprobe_state()["running"] and time.time() < deadline:
-                        time.sleep(0.02)
-        assert mu.reprobe_state()["running"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1386,137 +806,3 @@ class TestTariffs:
         rows = mu.usage_snapshot()
         assert len(rows) == 1
         assert mu.lookup_tariff("m1", "AAA") is not None
-
-
-class TestProbeModelEndpointJsonDumps:
-    """Пер-модельные пробы пишут <бэкенд>.<модель>.<pname>.json в LOGPATH
-    (v0.9.0): единая точка _probe_model_endpoints покрывает и первое
-    обращение модели (record_model_usage), и reprobe строки. Реальная
-    _probe_model_endpoints с моком низкоуровневой сети config._probe_backend_endpoints:
-    JSON-дампы идут от фактического результата пробы."""
-
-    def _setup(self, tmp_path, backend=None, model="m", probe=None):
-        os.environ["ADAPTER_DEBUG_LOGPATH"] = str(tmp_path)
-        config, mu = _fresh()
-        if backend is None:
-            backend = {
-                "name": "AAA", "base": "http://aaa.local", "key": "k",
-                "probe": probe or {"completions": "m"},
-            }
-        config.ADAPTER_MODEL_USAGE_ENABLE = True
-        config._BACKEND_BY_NAME = {backend["name"]: backend}
-        config._BACKENDS = [backend]
-        config._MODEL_TO_BACKEND = {model: (backend["name"], backend)}
-        return config, mu, backend
-
-    def test_record_model_usage_writes_endpoint_json(self, tmp_path):
-        """Первое обращение модели (record) — файл <бэкенд>.<модель>.<pname>.json
-        с результатом пробы (модель файла — resolved, эндпоинт — pname)."""
-        config, mu, backend = self._setup(tmp_path)
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
-            with mock.patch.object(
-                config, "_probe_backend_endpoints",
-                return_value={
-                    "endpoints": {
-                        "/v1/chat/completions": {"status": 200, "found": True},
-                    },
-                    "errors": {},
-                },
-            ):
-                mu.record_model_usage("m")
-        path = tmp_path / "AAA.m.completions.json"
-        assert path.exists()
-        payload = json.loads(path.read_text())
-        assert payload["backend"] == "AAA"
-        assert payload["model"] == "m"
-        assert payload["endpoint"] == "completions"
-        assert payload["path"] == "/v1/chat/completions"
-        assert payload["status"] == 200
-        assert payload["found"] is True
-
-    def test_probe_network_error_writes_error_json(self, tmp_path):
-        """Сетевая ошибка пробы — файл с found=False, status=None и текстом
-        ошибки в error (дамп — безусловный наблюдательный канал)."""
-        config, mu, backend = self._setup(
-            tmp_path,
-            probe={"completions": "m", "messages": "m",
-                   "responses": "m", "embeddings": "m"},
-        )
-        result = {
-            "endpoints": {
-                "/v1/chat/completions": {"status": None, "found": False},
-                "/v1/messages": {"status": None, "found": False},
-                "/v1/responses": {"status": None, "found": False},
-                "/v1/embeddings": {"status": None, "found": False},
-            },
-            "errors": {"completions": "network error: Connection refused by test"},
-        }
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
-            with mock.patch.object(config, "_probe_backend_endpoints", return_value=result):
-                mu.record_model_usage("m")
-        payload = json.loads((tmp_path / "AAA.m.completions.json").read_text())
-        assert payload["status"] is None
-        assert payload["found"] is False
-        assert "Connection refused by test" in payload["error"]
-
-    def test_reprobe_writes_endpoint_json(self, tmp_path):
-        """Reprobe строки (кнопка 🔄) — та же единая точка: файлы
-        перезаписываются результатом перепробы."""
-        config, mu, backend = self._setup(tmp_path)
-        mu._TABLE["m"] = {
-            "backend": "AAA", "calls": 3, "probing": False,
-            "endpoints": {}, "errors": {}, "first_seen": 0.0,
-            "input_tokens": 0, "output_tokens": 0,
-        }
-        mu.set_persist_path("")   # _save_table(force=True) в reprobe — без файла
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
-            with mock.patch.object(
-                config, "_probe_backend_endpoints",
-                return_value={
-                    "endpoints": {
-                        "/v1/chat/completions": {"status": 200, "found": True},
-                    },
-                    "errors": {},
-                },
-            ):
-                ok = mu.reprobe_model("m")
-        assert ok is True
-        payload = json.loads((tmp_path / "AAA.m.completions.json").read_text())
-        assert payload["found"] is True
-
-    def test_written_when_debug_enable_off(self, tmp_path):
-        """Канал безусловный: файл пишется при ADAPTER_DEBUG_ENABLE=0."""
-        os.environ["ADAPTER_DEBUG_ENABLE"] = "0"
-        config, mu, backend = self._setup(tmp_path)
-        config.ADAPTER_DEBUG = False
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "m")):
-            with mock.patch.object(
-                config, "_probe_backend_endpoints",
-                return_value={
-                    "endpoints": {
-                        "/v1/chat/completions": {"status": 200, "found": True},
-                    },
-                    "errors": {},
-                },
-            ):
-                mu.record_model_usage("m")
-        assert (tmp_path / "AAA.m.completions.json").exists()
-
-    def test_model_name_conversion_in_filename(self, tmp_path):
-        """Конвертация имени модели в имени файла: '/' и ':' → '_'
-        (probe_json._convert_name); точки/тире остаются."""
-        config, mu, backend = self._setup(
-            tmp_path, model="org/model:v1", probe={"completions": "org/model:v1"},
-        )
-        with mock.patch.object(config, "_resolve_backend", return_value=(backend, "org/model:v1")):
-            with mock.patch.object(
-                config, "_probe_backend_endpoints",
-                return_value={
-                    "endpoints": {
-                        "/v1/chat/completions": {"status": 200, "found": True},
-                    },
-                    "errors": {},
-                },
-            ):
-                mu.record_model_usage("org/model:v1")
-        assert (tmp_path / "AAA.org_model_v1.completions.json").exists()

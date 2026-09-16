@@ -243,7 +243,7 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      - name: Serve WEBUI and probe endpoints
+      - name: Serve WEBUI and check backends
         run: |
           mkdir -p smoke-log-dir
           python -m backend_adapter.webserver smoke-log-dir --port 8799 &

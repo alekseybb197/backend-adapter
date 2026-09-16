@@ -2,8 +2,14 @@
 
 Три входных POST-эндпоинта (/v1/messages, /v1/chat/completions, /v1/responses)
 управляются тремя TARGET-переменными (config.ADAPTER_*_TARGET). Модуль
-routing — чистая логика решений по кэшу проб (config.endpoint_support):
-сети в decide НЕТ, что здесь и проверяется.
+routing — чистая логика решений по значению TARGET: сети в decide НЕТ,
+что здесь и проверяется.
+
+v0.9.9: активные пробы эндпойнтов удалены — маршрут выбирается ВСЕГДА, а
+неверный выбор эндпойнта агентом фиксируется по факту ошибки бэкенда.
+Поэтому ветки «reject 502 (бэкенд подтверждённо не поддерживает)» здесь
+больше нет: остались 200 (passthrough/convert), 400 (пары нет в адаптере)
+и 404 (вход выключен).
 
 Каждый тест получает свежие модули: autouse-фикстура isolate_logs
 (→ fresh_env) пересоздаёт backend_adapter-модули из env-дефолтов conftest
@@ -29,7 +35,7 @@ def _reload_modules():
 
 
 class _RouteCase:
-    """Base: per-test fresh modules + helpers to manipulate TARGET/кэш проб."""
+    """Base: per-test fresh modules + helper to manipulate TARGET."""
 
     def setup_method(self):
         self.config, self.routing = _reload_modules()
@@ -39,23 +45,6 @@ class _RouteCase:
         for var, value in targets.items():
             assert var in ("messages", "completions", "responses"), var
             setattr(self.config, f"ADAPTER_{var.upper()}_TARGET", value)
-
-    def _support(self, backend: str, pname: str, found: bool | None) -> None:
-        """Наполнить config._ENDPOINT_STATE результатом пробы (как фоновая
-        probe_endpoints / пер-модельные пробы usage-таблицы).
-
-        found=None — «не пробовано»: кэш не трогаем (endpoint_support
-        вернёт None → routing трактует оптимистично: маршрут выбирается)."""
-        if found is None:
-            return
-        path = next(
-            (p for n, p, _t in self.config.ENDPOINT_PROBES if n == pname), None
-        )
-        assert path is not None, pname
-        state = self.config._ENDPOINT_STATE.setdefault(
-            backend, {"at": 0.0, "endpoints": {}, "errors": {}}
-        )
-        state["endpoints"][path] = {"status": 200 if found else 404, "found": found}
 
 
 # ---------------------------------------------------------------------------
@@ -98,13 +87,12 @@ class TestTargetConfig(_RouteCase):
         assert self.config.ADAPTER_COMPLETIONS_TARGET == "none"
         assert self.config.ADAPTER_RESPONSES_TARGET == "none"
 
-    def test_input_paths_mirror_endpoint_probes(self):
-        # INPUT_PATHS — зеркало ENDPOINT_PROBES для трёх форматов роутинга.
+    def test_input_paths_cover_all_formats(self):
+        # INPUT_PATHS — статическая таблица входных путей адаптера (v0.9.9:
+        # зеркалить ENDPOINT_PROBES больше нечего — пробы удалены).
+        assert set(self.routing.INPUT_PATHS) == {"messages", "completions", "responses"}
         for fmt, path in self.routing.INPUT_PATHS.items():
-            ep = next(
-                (p for n, p, _t in self.config.ENDPOINT_PROBES if n == fmt), None
-            )
-            assert ep == path
+            assert self.routing.input_path_to_format(path) == fmt
 
     @pytest.mark.parametrize(
         "raw,expected",
@@ -205,19 +193,21 @@ class TestPerSessionTarget(_RouteCase):
         # Общая настройка — passthrough, сессия переопределена в none:
         # запрос этой сессии выключается, общая настройка не тронута.
         self._set_target(messages="passthrough")
-        self._support("test", "messages", True)
         self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "none"})
         assert self.routing.target_for_input("messages", "s-1") == "none"
         assert self.routing.target_for_input("messages") == "passthrough"
-        action, _out, msg, status = self.routing.decide("messages", "test", "s-1")
+        action, _out, msg, status = self.routing.decide("messages", "s-1")
         assert action == "disabled"
         assert status == 404
         assert "ADAPTER_MESSAGES_TARGET=none" in msg
 
-    def test_inherit_falls_back_to_config(self):
-        # "inherit" — запись есть, но трактуется как «взять общее».
+    def test_cleared_override_falls_back_to_config(self):
+        # v0.9.9: «вернуться к общему» — переопределение СНИМАЕТСЯ (clear),
+        # сессия снова живо наследует общую настройку.
         self._set_target(messages="passthrough")
-        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "inherit"})
+        self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "none"})
+        assert self.routing.target_for_input("messages", "s-1") == "none"
+        self._settings().set_config("s-1", clear=("ADAPTER_MESSAGES_TARGET",))
         assert self.routing.target_for_input("messages", "s-1") == "passthrough"
 
     def test_unset_session_uses_config(self):
@@ -237,21 +227,19 @@ class TestPerSessionTarget(_RouteCase):
         # Сессия уходит на другой маршрут, чем общая настройка: общая —
         # messages→completions, сессия — passthrough messages.
         self._set_target(messages="completions")
-        self._support("test", "messages", True)
-        self._support("test", "completions", True)
         self._settings().set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
-        action, out, _msg, status = self.routing.decide("messages", "test", "s-1")
+        action, out, _msg, status = self.routing.decide("messages", "s-1")
         assert action == "passthrough"
         assert out == "messages"
         assert status == 200
         # Без session_id — прежний маршрут (convert).
-        action, out, _msg, _status = self.routing.decide("messages", "test")
+        action, out, _msg, _status = self.routing.decide("messages")
         assert action == "convert"
         assert out == "completions"
 
 
 # ---------------------------------------------------------------------------
-# decide — таблица решений (все — ТОЛЬКО по кэшу, без сети)
+# decide — таблица решений (все — ТОЛЬКО по значению TARGET, без сети)
 # ---------------------------------------------------------------------------
 
 class TestDecideDisabled(_RouteCase):
@@ -260,58 +248,32 @@ class TestDecideDisabled(_RouteCase):
         # именем своей env-переменной в тексте и HTTP-статусом 404.
         # Сравнение — ТОЧНОЕ равенство: substring-ассерт пропускал бы
         # дублирование префикса («ADAPTER_ADAPTER_…» содержит «ADAPTER_…»).
-        action, out, msg, status = self.routing.decide("completions", "test")
+        action, out, msg, status = self.routing.decide("completions")
         assert action == "disabled"
         assert out is None
         assert status == 404
         assert msg == "endpoint is disabled (ADAPTER_COMPLETIONS_TARGET=none)"
 
-        action, out, msg, status = self.routing.decide("responses", "test")
+        action, out, msg, status = self.routing.decide("responses")
         assert action == "disabled"
         assert status == 404
         assert msg == "endpoint is disabled (ADAPTER_RESPONSES_TARGET=none)"
 
     def test_input_explicitly_disabled(self):
         self._set_target(messages="none")
-        action, out, msg, status = self.routing.decide("messages", "test")
+        action, out, msg, status = self.routing.decide("messages")
         assert action == "disabled"
         assert out is None
         assert status == 404
         assert msg == "endpoint is disabled (ADAPTER_MESSAGES_TARGET=none)"
-        # disabled не зависит от кэша проб.
-        self._support("test", "messages", True)
-        action, _out, _msg, _status = self.routing.decide("messages", "test")
-        assert action == "disabled"
 
 
 class TestDecidePassthrough(_RouteCase):
     """TARGET=passthrough: дословная передача на эндпойнт входного формата."""
 
-    def test_messages_passthrough_when_backend_supports(self):
+    def test_messages_passthrough(self):
         self._set_target(messages="passthrough")
-        self._support("test", "messages", True)
-        action, out, msg, status = self.routing.decide("messages", "test")
-        assert action == "passthrough"
-        assert out == "messages"
-        assert msg == ""
-        assert status == 200
-
-    def test_reject_when_backend_does_not_support(self):
-        self._set_target(messages="passthrough")
-        self._support("test", "messages", False)
-        action, out, msg, status = self.routing.decide("messages", "test")
-        assert action == "reject"
-        assert out is None
-        assert status == 502  # подтверждённый отказ бэкенда — 502
-        assert "does not support messages" in msg
-
-    def test_optimistic_when_never_probed(self):
-        # None (не пробовано / пробы выключены) не блокирует: «нет данных» →
-        # оптимистичный passthrough (как вёл бы себя адаптер без роутинга).
-        # Отказ (502) — только при подтверждённом found=False.
-        self._set_target(messages="passthrough")
-        self._support("test", "messages", None)
-        action, out, msg, status = self.routing.decide("messages", "test")
+        action, out, msg, status = self.routing.decide("messages")
         assert action == "passthrough"
         assert out == "messages"
         assert msg == ""
@@ -319,8 +281,7 @@ class TestDecidePassthrough(_RouteCase):
 
     def test_completions_passthrough(self):
         self._set_target(completions="passthrough")
-        self._support("test", "completions", True)
-        action, out, msg, status = self.routing.decide("completions", "test")
+        action, out, msg, status = self.routing.decide("completions")
         assert action == "passthrough"
         assert out == "completions"
         assert msg == ""
@@ -328,19 +289,25 @@ class TestDecidePassthrough(_RouteCase):
 
     def test_responses_passthrough(self):
         self._set_target(responses="passthrough")
-        self._support("test", "responses", True)
-        action, out, msg, status = self.routing.decide("responses", "test")
+        action, out, msg, status = self.routing.decide("responses")
         assert action == "passthrough"
         assert out == "responses"
         assert msg == ""
         assert status == 200
 
+    def test_passthrough_optimistic_without_probes(self):
+        # v0.9.9: пробы удалены — passthrough не блокируется «отсутствием
+        # данных» или «подтверждённым отказом»: маршрут выбирается всегда,
+        # отказ придёт от бэкенда как обычная ошибка (фиксируется в .err).
+        self._set_target(messages="passthrough")
+        action, out, msg, status = self.routing.decide("messages")
+        assert (action, out, msg, status) == ("passthrough", "messages", "", 200)
+
     def test_concrete_format_equal_to_input_is_conversion_not_passthrough(self):
         # TARGET=messages — это ПРЕОБРАЗОВАНИЕ messages→messages (сортировка
         # system), а НЕ дословная передача; дословная — только 'passthrough'.
         self._set_target(messages="messages")
-        self._support("test", "messages", True)
-        action, out, _msg, status = self.routing.decide("messages", "test")
+        action, out, _msg, status = self.routing.decide("messages")
         assert action == "convert"
         assert out == "messages"
         assert status == 200
@@ -349,66 +316,20 @@ class TestDecidePassthrough(_RouteCase):
 class TestDecideExplicitConvert(_RouteCase):
     def test_messages_to_completions(self):
         # Дефолт messages-входа: конверсия messages → completions.
-        self._support("test", "completions", True)
-        action, out, msg, status = self.routing.decide("messages", "test")
+        action, out, msg, status = self.routing.decide("messages")
         assert action == "convert"
         assert out == "completions"
         assert msg == ""
         assert status == 200
-
-    def test_messages_to_completions_backend_unsupported(self):
-        self._support("test", "completions", False)
-        action, out, msg, status = self.routing.decide("messages", "test")
-        assert action == "reject"
-        assert out is None
-        assert status == 502  # подтверждённый отказ бэкенда — 502
-        assert "does not support completions" in msg
-
-    def test_messages_to_completions_optimistic_when_never_probed(self):
-        # None (не пробовано) → оптимистичный convert: дефолтный messages-путь
-        # не должен ломаться на холодном кэше (как сегодня — запрос уходит).
-        self._support("test", "completions", None)
-        action, out, msg, status = self.routing.decide("messages", "test")
-        assert action == "convert"
-        assert out == "completions"
-        assert msg == ""
-        assert status == 200
-
-    def test_convert_requires_backend_support_of_target(self):
-        # Convert в явном режиме при None оптимистичен: поддержка входного
-        # (messages) роли не играет, цели (completions) нет данных → пробуем.
-        self._set_target(messages="completions")
-        self._support("test", "messages", True)
-        self._support("test", "completions", None)
-        action, _out, _msg, status = self.routing.decide("messages", "test")
-        assert action == "convert"
-        assert status == 200
-
-    def test_convert_rejected_when_target_confirmed_unsupported(self):
-        self._set_target(messages="completions")
-        self._support("test", "messages", True)
-        self._support("test", "completions", False)
-        action, _out, _msg, status = self.routing.decide("messages", "test")
-        assert action == "reject"
-        assert status == 502
 
     def test_messages_to_messages_is_convert(self):
         # messages→messages — реализованная пара (сортировка system в начало).
         self._set_target(messages="messages")
-        self._support("test", "messages", True)
-        action, out, msg, status = self.routing.decide("messages", "test")
+        action, out, msg, status = self.routing.decide("messages")
         assert action == "convert"
         assert out == "messages"
         assert msg == ""
         assert status == 200
-
-    def test_messages_to_messages_rejected_when_unsupported(self):
-        self._set_target(messages="messages")
-        self._support("test", "messages", False)
-        action, _out, msg, status = self.routing.decide("messages", "test")
-        assert action == "reject"
-        assert status == 502
-        assert "does not support messages" in msg
 
     def test_responses_to_responses_is_convert(self):
         # responses→responses — реализованная пара (v0.9.6): «внутренний
@@ -416,58 +337,22 @@ class TestDecideExplicitConvert(_RouteCase):
         # responses на входе responses даёт convert (не passthrough, не
         # reject), выходной формат — responses.
         self._set_target(responses="responses")
-        self._support("test", "responses", True)
-        action, out, msg, status = self.routing.decide("responses", "test")
+        action, out, msg, status = self.routing.decide("responses")
         assert action == "convert"
         assert out == "responses"
         assert msg == ""
         assert status == 200
-
-    def test_responses_to_responses_optimistic_when_never_probed(self):
-        # None (не пробовано) → оптимистичный convert, как у messages→messages.
-        self._set_target(responses="responses")
-        self._support("test", "responses", None)
-        action, out, _msg, status = self.routing.decide("responses", "test")
-        assert action == "convert"
-        assert out == "responses"
-        assert status == 200
-
-    def test_responses_to_responses_rejected_when_unsupported(self):
-        self._set_target(responses="responses")
-        self._support("test", "responses", False)
-        action, _out, msg, status = self.routing.decide("responses", "test")
-        assert action == "reject"
-        assert status == 502
-        assert "does not support responses" in msg
 
     def test_responses_to_completions_is_convert(self):
         # responses→completions — реализованная пара (v0.9.7): полный
         # кросс-форматный конвертер + /model. TARGET completions на входе
         # responses даёт convert (не reject), выходной формат — completions.
         self._set_target(responses="completions")
-        self._support("test", "completions", True)
-        action, out, msg, status = self.routing.decide("responses", "test")
+        action, out, msg, status = self.routing.decide("responses")
         assert action == "convert"
         assert out == "completions"
         assert msg == ""
         assert status == 200
-
-    def test_responses_to_completions_optimistic_when_never_probed(self):
-        # None (не пробовано) → оптимистичный convert, как у прочих пар.
-        self._set_target(responses="completions")
-        self._support("test", "completions", None)
-        action, out, _msg, status = self.routing.decide("responses", "test")
-        assert action == "convert"
-        assert out == "completions"
-        assert status == 200
-
-    def test_responses_to_completions_rejected_when_unsupported(self):
-        self._set_target(responses="completions")
-        self._support("test", "completions", False)
-        action, _out, msg, status = self.routing.decide("responses", "test")
-        assert action == "reject"
-        assert status == 502
-        assert "does not support completions" in msg
 
 
 class TestDecideUnimplemented(_RouteCase):
@@ -491,67 +376,61 @@ class TestDecideUnimplemented(_RouteCase):
             completions=target if inp == "completions" else "none",
             responses=target if inp == "responses" else "none",
         )
-        # Поддержка целевого формата есть, но конвертера нет — реестр False →
-        # reject «not implemented» 400 (не 502: дело не в бэкенде).
-        self._support("test", target, True)
-        action, out, msg, status = self.routing.decide(inp, "test")  # type: ignore[arg-type]
+        # Конвертера нет — реестр False → reject «not implemented» 400
+        # (дело не в бэкенде, а в отсутствии пары в адаптере).
+        action, out, msg, status = self.routing.decide(inp)  # type: ignore[arg-type]
         assert action == "reject"
         assert out is None
         assert status == 400
         assert self.routing.IMPLEMENTED_CONVERSIONS[pair] is False
         assert f"conversion '{pair[0]}' -> '{pair[1]}' is not implemented" in msg
 
+
+class TestDecideNeverRejectsWith502(_RouteCase):
+    """v0.9.9: пробы эндпойнтов удалены — маршрут выбирается ВСЕГДА.
+
+    Решение не зависит от поддержки эндпойнта бэкендом: статус исхода —
+    только 200 (passthrough/convert), 400 (пары нет в реестре) или 404
+    (вход выключен). 502 «бэкенд подтверждённо не поддерживает» исчез
+    вместе с пробами.
+    """
+
+    @pytest.mark.parametrize("inp", ["messages", "completions", "responses"])
     @pytest.mark.parametrize(
-        "inp,target",
-        [
-            ("completions", "messages"),
-            ("messages", "responses"),
-            ("responses", "messages"),
-        ],
+        "target", ["messages", "completions", "responses", "passthrough", "none"]
     )
-    def test_unimplemented_pair_rejected_even_without_data(self, inp, target):
-        # Нереализованная пара — reject 400 независимо от данных пробы
-        # (None тоже): конвертера нет в принципе, оптимизм ни при чём.
+    def test_status_never_502(self, inp, target):
         self._set_target(
             messages=target if inp == "messages" else "completions",
             completions=target if inp == "completions" else "none",
             responses=target if inp == "responses" else "none",
         )
-        self._support("test", target, None)
-        action, _out, msg, status = self.routing.decide(inp, "test")  # type: ignore[arg-type]
-        assert action == "reject"
-        assert status == 400
-        assert "is not implemented" in msg
+        _action, _out, _msg, status = self.routing.decide(inp)  # type: ignore[arg-type]
+        assert status in (200, 400, 404), (inp, target, status)
 
 
 class TestDecideNoNetwork(_RouteCase):
     def test_decide_makes_no_http_calls(self):
-        # Решения — только по кэшу (config.endpoint_support): ни urlopen, ни
-        # _http_json во время decide не вызываются ни при каком раскладе.
-        # Мок urlopen падал бы на любом сетевом обращении.
+        # Решения — только по значению TARGET: ни urlopen, ни синхронных
+        # запросов к бэкенду во время decide не происходит ни при каком
+        # раскладе (v0.9.9: активные пробы эндпойнтов удалены). Мок urlopen
+        # падал бы на любом сетевом обращении.
         self._set_target(messages="passthrough", completions="completions",
                          responses="none")
-        self._support("test", "messages", True)
-        self._support("test", "completions", True)
-        with mock.patch.object(
-            self.config, "_http_json",
-            side_effect=AssertionError("network in decide"),
-        ), mock.patch(
+        with mock.patch(
             "urllib.request.urlopen",
             side_effect=AssertionError("network in decide"),
         ):
             for inp in ("messages", "completions", "responses"):
-                action, _out, _msg, status = self.routing.decide(inp, "test")  # type: ignore[arg-type]
+                action, _out, _msg, status = self.routing.decide(inp)  # type: ignore[arg-type]
                 assert action in ("passthrough", "convert", "reject", "disabled")
                 assert isinstance(status, int)
-        # endpoint_support ходит только в _ENDPOINT_STATE (память).
 
-    def test_endpoint_support_returns_none_for_unknown(self):
-        # Неизвестное имя эндпоинта / незнакомый бэкенд → None (не исключение).
-        assert self.config.endpoint_support("test", "bogus") is None
-        assert self.config.endpoint_support("nope", "completions") is None
-        self._support("test", "completions", True)
-        assert self.config.endpoint_support("test", "completions") is True
-        assert self.config.endpoint_support("other", "completions") is None
-        self._support("test", "completions", False)
-        assert self.config.endpoint_support("test", "completions") is False
+    def test_no_probe_api_left(self):
+        # Следы пробы эндпойнтов сняты из обоих модулей (v0.9.9).
+        for name in (
+            "endpoint_support", "probe_endpoints", "_ENDPOINT_STATE",
+            "ENDPOINT_PROBES", "ADAPTER_ENDPOINT_PROBE",
+        ):
+            assert not hasattr(self.config, name), name
+        assert not hasattr(self.routing, "ERROR_UNSUPPORTED")

@@ -334,7 +334,7 @@ class ErrorsEndpoint(webserver.Endpoint):
         if not name or not _ERR_NAME_RE.match(name):
             handler.send_error(404, "Not found")
             return
-        path = os.path.join(handler.context.root_dir, name)
+        path = os.path.join(handler.context.log_dir, name)
         if not os.path.isfile(path):
             handler.send_error(404, "File not found")
             return

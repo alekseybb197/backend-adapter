@@ -2,17 +2,14 @@
 """Unit + HTTP tests for backend_adapter.webui_status — status page at "/".
 
 Tests cover: _config_snapshot() mode detection (multi-backend / standalone),
-_collect_endpoints() grouping, the «Доступные API» column (rendered from
-config._ENDPOINT_STATE — result of the smoke probe run inside
-refresh_models; a green ✓ is shown only for endpoints that answered HTTP
-200 — failed probes are hidden), the background-check contract: GET "/"
+_collect_endpoints() grouping, the background-check contract: GET "/"
 renders the current state from config.refresh_state() (seeded as
 _REFRESH_JOB here); the first GET — if no check has ever completed and
-there is something to probe — auto-starts the FIRST check
+there is something to check — auto-starts the FIRST check
 (_autostart_first_check: adapter start / first GET / button); POST "/"
-(the 🔃 «Перепроверить бэкенды» button (ex-«⟳ Проверить сейчас»)
+(the 🔃 «Перепроверить бэкенды» button (ex-«⟳ Проверить сейчас»))
 launches
-config.start_refresh(timeout=PROBE_TIMEOUT) and answers 303 See Other →
+config.start_refresh(timeout=REFRESH_TIMEOUT) and answers 303 See Other →
 GET "/" (PRG pattern: the page is shown via a plain GET, so reloads never
 repeat the POST and no «resubmit» dialog appears); while a check is running
 the page shows the «Проверка выполняется…» banner plus the status_poll JS
@@ -21,22 +18,17 @@ model list, failure keeps the old cache and shows the error text, standalone
 (no endpoints) renders the notice and does not start any check. The Models
 cell (_models_html) is capped at MODEL_LINES rows with an expand/collapse
 button (JS models_toggle on the page) — see TestModelsCell. The Models in use
-table (single Endpoints column — available endpoints only, comma-separated;
-footer sits right under the backends table, before the section; the 🔃
-refresh button lives in the page header — v0.9.0 (no standalone button
-under the table); the header shows "Backend-Adapter Version <ver>" with
-🔃/📋/🔧 icons) — see TestUsageSection. Its Actions cell holds
-three PRG forms with symbol-icon buttons (🔄 «Перепроверить» POST
-/api/model-usage/reprobe, ⏪ «Сбросить» POST /api/model-usage/reset, 🗑
-«Удалить» POST /api/model-usage/delete) and renders «проверяется…» (no
-forms) while that row is being re-probed; /reprobe answers 202 on launch /
-404 / 400 for JSON clients and 303 for the HTML form; /delete answers 200 /
-404 / 400 for JSON clients and 303 for the HTML form; /api/model-usage/
-reprobe-state serves the reprobe snapshot for the page's reprobe_poll JS
-(banner + auto-reload while running) — see TestModelUsageReprobeAPI /
-TestModelUsageDeleteAPI / TestReprobeStateAPI. Live counters (Вызовов/Input/Output): usage rows carry
-id="usage-row-<i>" and data-calls/data-input/data-output (exact values), and
-the page embeds an unconditional usage_poll JS polling the lightweight
+table (no Endpoints column since v0.9.9 — endpoint probes are gone; footer
+sits right under the backends table, before the section; the 🔃 refresh
+button lives in the page header — v0.9.0 (no standalone button under the
+table); the header shows "Backend-Adapter Version <ver>" with 🔃/📋/🔧
+icons) — see TestUsageSection. Its Actions cell holds two PRG forms with
+symbol-icon buttons (⏪ «Сбросить» POST /api/model-usage/reset, 🗑 «Удалить»
+POST /api/model-usage/delete); /delete answers 200 / 404 / 400 for JSON
+clients and 303 for the HTML form — see TestModelUsageDeleteAPI. Live
+counters (Вызовов/Input/Output): usage rows carry id="usage-row-<i>" and
+data-calls/data-input/data-output (exact values), and the page embeds an
+unconditional usage_poll JS polling the lightweight
 /api/model-usage/snapshot every 5 s and updating only the counter cells
 (no location.reload, no network to backends, no start_refresh); the Cost
 cell is set via innerHTML (setHtml — cost_html arrives as ready-made HTML
@@ -214,18 +206,6 @@ def _seed_job(config, job: dict):
     config._REFRESH_JOB = job
 
 
-def _seed_endpoint_state(config, backend_name: str, paths: dict):
-    """Заполнить config._ENDPOINT_STATE результатом пробы (пути без /v1/).
-
-    ``paths`` — {короткий_путь: {"found": bool, "status": int|None}}; путь
-    отдаётся как есть (рендер сравнивает по коротким именам)."""
-    config._ENDPOINT_STATE[backend_name] = {
-        "at": 1.0,
-        "endpoints": {f"/v1/{p}": v for p, v in paths.items()},
-        "errors": {},
-    }
-
-
 # ---------------------------------------------------------------------------
 # TestConfigSnapshot — режимы: multi / standalone
 # ---------------------------------------------------------------------------
@@ -305,142 +285,6 @@ class TestConfigSnapshot:
         config._MODEL_TO_BACKEND = {"m1": ("AAA", config._BACKENDS[0])}
         endpoints = ws._collect_endpoints()
         assert endpoints[0]["key"] == "secret-aaa"
-
-
-# ---------------------------------------------------------------------------
-# Колонка «Доступные API»: из config._ENDPOINT_STATE (результат пробы)
-# ---------------------------------------------------------------------------
-
-class TestApiColumn:
-    def _ctx(self):
-        return mock.Mock(version="0.0.0-test")
-
-    def _seed(self, config, ws, found=None, api_state=None, refresh=None):
-        """Общий посев: бэкенд AAA, модели, проба-состояние и refresh."""
-        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
-        config._BACKENDS = [backend]
-        config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
-        if api_state is not None:
-            config._ENDPOINT_STATE["AAA"] = api_state
-        if refresh is None:
-            refresh = _done_job(True, 1)
-        return ws._render_status_page(self._ctx(), refresh=refresh).decode()
-
-    def test_collect_endpoints_reads_probe_state(self):
-        # api берётся из config._ENDPOINT_STATE и нормализуется (пути без
-        # "/v1/"-префикса, порядок значений неважен — рендер восстановит).
-        config, ws = _fresh_modules()
-        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
-        config._BACKENDS = [backend]
-        config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
-        config._ENDPOINT_STATE["AAA"] = {
-            "at": 1.0,
-            "endpoints": {
-                "/v1/chat/completions": {"found": True, "status": 200},
-                "/v1/messages": {"found": False, "status": 404},
-            },
-            "errors": {},
-        }
-        ep = ws._collect_endpoints()[0]
-        assert ep["api"] == {
-            "chat/completions": {"found": True, "status": 200},
-            "messages": {"found": False, "status": 404},
-        }
-
-    def test_collect_endpoints_no_state_means_none(self):
-        # Бэкенд без записи в _ENDPOINT_STATE — api None (не пробован:
-        # standalone / проба выключена).
-        config, ws = _fresh_modules()
-        backend = {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"}
-        config._BACKENDS = [backend]
-        config._MODEL_TO_BACKEND = {"m-a": ("AAA", backend)}
-        assert ws._collect_endpoints()[0]["api"] is None
-
-    def test_render_shows_found_and_hides_not_found(self):
-        # Работающий путь (200) — зелёным с ✓; непрошедший (404) не показывается.
-        config, ws = _fresh_modules()
-        _seed_endpoint_state(config, "AAA", {
-            "chat/completions": {"found": True, "status": 200},
-            "messages": {"found": False, "status": 404},
-        })
-        body = self._seed(config, ws)
-        assert "chat/completions ✓" in body
-        # непрошедший путь не рендерится в КОЛОНКЕ «Доступные API» — в теле
-        # не должно быть ячейки «messages —»/«messages ✓»; слово messages
-        # допустимо лишь в шапке секции Models in use
-        assert ">messages ✓</span>" not in body
-        assert ">messages —</span>" not in body
-        assert "chat/completions ✓</span>" in body
-
-    def test_render_status_400_hidden(self):
-        # 400 — эндпоинт не прошёл проверку (found=False): в колонке его нет.
-        config, ws = _fresh_modules()
-        _seed_endpoint_state(config, "AAA", {
-            "messages": {"found": False, "status": 400},
-        })
-        body = self._seed(config, ws)
-        assert ">messages ✓</span>" not in body
-        assert ">messages —</span>" not in body
-        assert "✓</span>" not in body
-
-    def test_render_unprobed_shows_not_probed(self):
-        # Бэкенд вообще не пробован (нет записи в _ENDPOINT_STATE) — «не опрошено».
-        config, ws = _fresh_modules()
-        body = self._seed(config, ws)
-        assert "не опрошено" in body
-
-    def test_render_missing_endpoint_hidden(self):
-        # Пропущенный эндпоинт (probe-модель не найдена → в результат не попал):
-        # в ячейке «Доступные API» не показывается; виден только 200-путь.
-        config, ws = _fresh_modules()
-        _seed_endpoint_state(config, "AAA", {
-            "chat/completions": {"found": True, "status": 200},
-        })
-        body = self._seed(config, ws)
-        assert "chat/completions ✓" in body
-        # пропущенные пути не рисуются как ячейки-«—» в колонке API
-        assert ">messages —</span>" not in body
-        assert ">responses —</span>" not in body
-        assert ">embeddings —</span>" not in body
-
-    def test_render_all_unavailable_shows_placeholder(self):
-        # Проба была, но ни один эндпоинт не ответил 200 — серая «—» вместо
-        # пустой ячейки (никаких зелёных ✓).
-        config, ws = _fresh_modules()
-        _seed_endpoint_state(config, "AAA", {
-            "chat/completions": {"found": False, "status": 404},
-            "messages": {"found": False, "status": 501},
-            "responses": {"found": False, "status": 400},
-            "embeddings": {"found": False, "status": None},
-        })
-        body = self._seed(config, ws)
-        assert "ни один эндпоинт не ответил HTTP 200" in body
-        assert "✓" not in body
-
-    def test_header_and_api_cell_present(self):
-        config, ws = _fresh_modules()
-        body = self._seed(config, ws)
-        # Заголовки колонок — английские: Backend/Base URL/Status/Endpoints/Models
-        assert "Backend" in body and "Endpoints" in body and "Models" in body
-        assert "<th>Backend</th>" in body
-        assert "<th>Base URL</th>" in body
-        assert "<th>Status</th>" in body
-        assert "<th>Endpoints</th>" in body
-        assert "<th>Models</th>" in body
-
-    def test_standalone_renders_unprobed_without_refresh(self):
-        # Standalone: refresh не делался — ячейки «не опрошено», никакой сети.
-        config, ws = _fresh_modules()
-        config.ADAPTER_BACKEND_CONFIG = ""
-        body = ws._render_status_page(self._ctx()).decode()
-        assert "нет данных" in body  # нет строк вообще
-
-    def test_render_page_footer_mentions_api_check(self):
-        # refresh is None (standalone без эндпойнтов) — футер про авто-проверку.
-        config, ws = _fresh_modules()
-        config.ADAPTER_BACKEND_CONFIG = ""
-        body = ws._render_status_page(self._ctx()).decode()
-        assert "API-эндпойнтов" in body or "max_tokens" in body
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +419,7 @@ class TestUsageSection:
             _seed_usage_rows(model_usage, usage_rows)
         return ws._render_status_page(self._ctx(), refresh=_done_job(True, 1)).decode()
 
-    def _row(self, model, backend="AAA", calls=1, endpoints=None,
+    def _row(self, model, backend="AAA", calls=1,
              input_tokens=0, output_tokens=0):
         return {
             "model": model,
@@ -583,15 +427,12 @@ class TestUsageSection:
             "calls": calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "endpoints": endpoints or {},
-            "errors": {},
             "first_seen": "10:00:00",
-            "probing": False,
         }
 
     def test_section_present_with_headers(self):
-        # Заголовок секции + 8 колонок (Модель|Бэкенд|Вызовов|Input|
-        # Output|Cost|Endpoints|Actions).
+        # Заголовок секции + 7 колонок (Модель|Бэкенд|Вызовов|Input|
+        # Output|Cost|Actions) — колонки Endpoints нет с v0.9.9.
         config, ws = _fresh_modules()
         body = self._seed(config, ws)
         assert "<h3 style=\"margin-top:24px\">Models in use</h3>" in body
@@ -602,12 +443,16 @@ class TestUsageSection:
         assert "<th>Input</th>" in body
         assert "<th>Output</th>" in body
         assert "<th>Cost</th>" in body
-        assert "<th>Endpoints</th>" in body
-        assert "<th>completions</th>" not in body
-        assert "<th>messages</th>" not in body
-        assert "<th>responses</th>" not in body
-        assert "<th>embeddings</th>" not in body
-        assert "<th>Actions</th>" in body
+        # Колонки Endpoints в usage-таблице нет (v0.9.9); одноимённая колонка
+        # таблицы бэкендов выше — сохраняется, поэтому проверяем срез от
+        # заголовка «Models in use».
+        usage = body[body.index("Models in use"):]
+        assert "<th>Endpoints</th>" not in usage
+        assert "<th>completions</th>" not in usage
+        assert "<th>messages</th>" not in usage
+        assert "<th>responses</th>" not in usage
+        assert "<th>embeddings</th>" not in usage
+        assert "<th>Actions</th>" in usage
 
     def test_empty_table_shows_placeholder(self):
         # Пустая таблица → строка «пока нет данных», никаких строк моделей.
@@ -616,26 +461,15 @@ class TestUsageSection:
         assert "пока нет данных" in body
         assert "таблица заполняется при первых запросах к моделям" in body
 
-    def test_row_renders_endpoints_cell_and_counters(self):
-        # Колонка Endpoints перечисляет только доступные (found=True): m-ok —
-        # «completions», у m-none (доступных нет) — серая «—».
+    def test_row_renders_counters(self):
+        # Строка несёт счётчики из сида; «—» остаются только в Cost
+        # (колонка Endpoints удалена в v0.9.9).
         config, ws = _fresh_modules()
-        rows = [
-            self._row("m-ok", endpoints={
-                "completions": {"status": 200, "found": True},
-                "messages": {"status": 404, "found": False},
-                # responses/embeddings не пробованы — нет ключей
-            }),
-            self._row("m-none", endpoints={}),
-        ]
+        rows = [self._row("m-ok"), self._row("m-none")]
         body = self._seed(config, ws, usage_rows=rows)
         assert "m-ok" in body and "m-none" in body
-        # доступные эндпоинты — зелёным именем (одно на обе строки)
-        assert body.count('style="color:#1a7f37">completions</span>') == 1
-        # серых «—» ровно три: Cost у m-ok (токены 0), Cost у m-none (токены 0)
-        # и Endpoints у m-none (доступных нет) — колонка Cost не добавляет
-        # четвёртую: у m-ok она «—» по нулевым токенам, а не по Endpoints.
-        assert body.count('style="color:#aaa">—</span>') == 3
+        # серых «—» ровно две: Cost у m-ok и Cost у m-none (токены 0)
+        assert body.count('style="color:#aaa">—</span>') == 2
         # строка m-none: Вызовов == 1 (счётчик из сида), токены 0/0
         assert ">m-none</td>" in body
         assert 'data-calls="1">1</td>' in body  # calls строки m-none
@@ -674,46 +508,17 @@ class TestUsageSection:
         assert 'title="Перепроверить бэкенды"' in body
         assert 'action="/"' in body
 
-    def test_endpoints_cell_lists_only_found(self):
-        # _endpoints_cell_html: доступные (found=True) — имена через запятую
-        # в порядке ENDPOINT_PROBES; не-200/непробованные не показываются.
-        config, ws = _fresh_modules()
-        cell = ws._endpoints_cell_html(self._row("m", endpoints={
-            "messages": {"status": 404, "found": False},
-            "completions": {"status": 200, "found": True},
-            "responses": {"status": 200, "found": True},
-        }))
-        # порядок — ENDPOINT_PROBES: completions раньше responses
-        assert cell.index("completions") < cell.index("responses")
-        assert 'style="color:#1a7f37">completions</span>' in cell
-        assert 'style="color:#1a7f37">responses</span>' in cell
-        assert "messages" not in cell
-
-    def test_endpoints_cell_none_available_placeholder(self):
-        # Пусто/все found=False — один серый «—» (никаких имён).
-        config, ws = _fresh_modules()
-        assert ws._endpoints_cell_html(self._row("m-a", endpoints={})) == (
-            '<span style="color:#aaa">—</span>'
-        )
-        assert ws._endpoints_cell_html(self._row("m-b", endpoints={
-            "completions": {"status": 404, "found": False},
-        })) == '<span style="color:#aaa">—</span>'
-
     def test_usage_rows_unit_empty_and_nonempty(self):
-        # _usage_rows_html: одна ячейка Cost/Endpoints на строку + плейсхолдер
-        # пустого.
+        # _usage_rows_html: одна ячейка Cost на строку + плейсхолдер пустого.
         config, ws = _fresh_modules()
         html = ws._usage_rows_html([])
-        assert "пока нет данных" in html and "<td colspan=\"8\"" in html
-        row = self._row("m", endpoints={
-            "completions": {"status": 200, "found": True},
-        })
-        html = ws._usage_rows_html([row])
-        # модель+бэкенд+вызовов+input+output+Cost+Endpoints+Действия = 8 ячеек
-        assert html.count("<td") == 8
+        assert "пока нет данных" in html and 'colspan="7"' in html
+        html = ws._usage_rows_html([self._row("m")])
+        # модель+бэкенд+вызовов+input+output+Cost+Действия = 7 ячеек
+        assert html.count("<td") == 7
         assert 'id="usage-row-0"' in html
         assert 'data-calls="1"' in html
-        assert "completions" in html  # доступный эндпоинт — в ячейке Endpoints
+        assert "completions" not in html  # колонки Endpoints нет (v0.9.9)
 
     def test_row_renders_formatted_tokens(self):
         # input_tokens/output_tokens форматируются _fmt_tokens (с разделителем).
@@ -757,25 +562,22 @@ class TestUsageSection:
         empty = self._seed(config, ws, usage_rows=[])
         assert "function compact_fmt" in empty
 
-    def test_row_has_actions_three_forms(self):
-        # Каждая строка модели несёт три form-кнопки-иконки: 🔄 «Перепроверить»
-        # (POST /api/model-usage/reprobe?model=<имя>), ⏪ «Сбросить» (POST
-        # /api/model-usage/reset?model=<имя>), 🗑 «Удалить» (POST
+    def test_row_has_actions_two_forms(self):
+        # Каждая строка модели несёт две form-кнопки-иконки: ⏪ «Сбросить»
+        # (POST /api/model-usage/reset?model=<имя>), 🗑 «Удалить» (POST
         # /api/model-usage/delete?model=<имя>) — без JS, PRG через 303.
-        # Тексты-фразы — в title/aria-label кнопок, глифы в body.
+        # Кнопка 🔄 «Перепроверить» (reprobe) удалена в v0.9.9 вместе с
+        # пробами эндпойнтов. Тексты-фразы — в title/aria-label кнопок,
+        # глифы в body.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[self._row("m-reset")])
-        assert "Перепроверить" in body  # title/aria-label иконки 🔄
         assert "Сбросить" in body  # title/aria-label иконки ⏪
         assert "Удалить" in body  # title/aria-label иконки 🗑
-        for glyph in ("🔄", "⏪", "🗑"):
+        for glyph in ("⏪", "🗑"):
             assert glyph in body
+        assert "🔄" not in body  # reprobe-кнопки нет (v0.9.9)
         assert (
             '<form method="post" action="/api/model-usage/reset?model=m-reset">'
-            in body
-        )
-        assert (
-            '<form method="post" action="/api/model-usage/reprobe?model=m-reset">'
             in body
         )
         assert (
@@ -784,12 +586,12 @@ class TestUsageSection:
         )
         assert "color:#c0392b" in body  # красная иконка 🗑 (деструктивное действие)
         assert 'title="Удалить строку модели"' in body
-        # все три формы — в одной ячейке <td> (открывающий td ровно один на строку)
+        # обе формы — в одной ячейке <td> (открывающий td ровно один на строку)
         row_html = ws._usage_rows_html([self._row("m-reset")])
-        assert row_html.count("<td") == 8  # в т.ч. ячейка действий — одна
+        assert row_html.count("<td") == 7  # в т.ч. ячейка действий — одна
 
     def test_row_actions_escapes_special_model_name(self):
-        # Имя модели со спецсимволами во всех трёх формах: quote(safe="") +
+        # Имя модели со спецсимволами в обеих формах: quote(safe="") +
         # html.escape, спецсимволы не ломают query/атрибут.
         config, ws = _fresh_modules()
         row = self._row('m & "x"/у=1')
@@ -797,41 +599,16 @@ class TestUsageSection:
         from urllib.parse import quote as _quote
         q = _quote('m & "x"/у=1', safe="")
         assert f'action="/api/model-usage/reset?model={q}"' in html
-        assert f'action="/api/model-usage/reprobe?model={q}"' in html
         assert f'action="/api/model-usage/delete?model={q}"' in html
         assert 'model=m & "' not in html  # сырые спецсимволы в action не выходят
 
-    def test_row_actions_hidden_while_reprobing(self):
-        # У строки с идущей перепроверкой (reprobing=True) вместо кнопок —
-        # серый текст «проверяется…» и НЕТ форм (повторный запуск невозможен).
-        config, ws = _fresh_modules()
-        html = ws._usage_rows_html([self._row("m-re")], reprobing={"m-re": True})
-        assert "проверяется…" in html
-        assert "Перепроверить" not in html
-        assert "Сбросить" not in html
-        assert "Удалить" not in html
-        assert "form method=\"post\"" not in html
-
-    def test_row_actions_normal_when_other_reprobing(self):
-        # Перепроверяется ДРУГАЯ модель — у строки обычные кнопки-иконки.
-        config, ws = _fresh_modules()
-        html = ws._usage_rows_html(
-            [self._row("m-a"), self._row("m-b")],
-            reprobing={"m-b": True},
-        )
-        # m-a — обычная ячейка действий с кнопками, m-b — «проверяется…»
-        assert "Перепроверить" in html and "Сбросить" in html
-        assert "проверяется…" in html
-        assert html.index("m-a") < html.index("проверяется…")
-
     def test_empty_table_no_action_forms(self):
-        # У пустой таблицы (заглушка colspan=8) форм действий нет.
+        # У пустой таблицы (заглушка colspan=7) форм действий нет.
         config, ws = _fresh_modules()
         body = self._seed(config, ws, usage_rows=[])
         assert 'form method="post" action="/api/model-usage/reset' not in body
-        assert 'form method="post" action="/api/model-usage/reprobe' not in body
         assert 'form method="post" action="/api/model-usage/delete' not in body
-        assert "colspan=\"8\"" in body
+        assert 'colspan="7"' in body
 
     def test_page_header_is_backend_adapter(self):
         # Заголовок страницы — Backend-Adapter (не [CC]-adapter); внизу —
@@ -957,7 +734,7 @@ class TestCostCell:
         row = self._row("frac", input_tokens=1000, output_tokens=0)
         assert "22,00 USD" in ws._cost_cell_html(row)
 
-    def _row(self, model, backend="AAA", calls=1, endpoints=None,
+    def _row(self, model, backend="AAA", calls=1,
              input_tokens=0, output_tokens=0):
         return {
             "model": model,
@@ -965,10 +742,7 @@ class TestCostCell:
             "calls": calls,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
-            "endpoints": endpoints or {},
-            "errors": {},
             "first_seen": "10:00:00",
-            "probing": False,
         }
 
 
@@ -1047,7 +821,7 @@ class TestAutoStartFirstCheck:
         with mock.patch.object(config, "start_refresh", return_value=True) as m_start:
             assert ws._autostart_first_check() is True
         assert m_start.call_count == 1
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_running_does_not_start_second(self):
         # Проверка уже идёт (running=True): второй запуск не создаём.
@@ -1227,7 +1001,7 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 1
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_get_root_running_state_does_not_start_check(self, tmp_path):
         # Проверка уже ИДЁТ (running=True в состоянии): GET "/" новую не
@@ -1272,7 +1046,7 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 1
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_get_root_multi_lists_backends_and_models(self, tmp_path):
         config, _ = _fresh_modules()
@@ -1337,37 +1111,9 @@ class TestStatusHTTP:
                 httpd.server_close()
         assert m_start.call_count == 0
 
-    def test_get_root_shows_api_column_from_state(self, tmp_path):
-        # Полный путь: GET "/" рендерит колонку «Доступные API» из
-        # config._ENDPOINT_STATE (в проде туда пишет probe_endpoints,
-        # выполняющийся внутри refresh_models фоновой проверки).
-        config, ws = _fresh_modules()
-        config._BACKENDS = [
-            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
-        ]
-        config._MODEL_TO_BACKEND = {"m-alpha": ("AAA", config._BACKENDS[0])}
-        _seed_endpoint_state(config, "AAA", {
-            "chat/completions": {"found": True, "status": 200},
-            "messages": {"found": False, "status": 404},
-        })
-        _seed_job(config, _done_job(True, 1))
-        with mock.patch.object(config, "start_refresh", return_value=False):
-            httpd, port = _start_server(str(tmp_path))
-            try:
-                status, body = _http_get(port, "/")
-                assert status == 200
-                assert "<th>Endpoints</th>" in body  # заголовок колонки API
-                assert "chat/completions ✓" in body
-                # 404-путь в колонке API не рисуется (слово messages остаётся
-                # только в шапке секции Models in use)
-                assert ">messages —</span>" not in body
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-
     def test_post_starts_background_check_and_redirects(self, tmp_path):
         # POST "/" (кнопка): PRG — вызывает start_refresh(timeout=
-        # PROBE_TIMEOUT), отвечает 303 See Other с Location "/"; следующий
+        # REFRESH_TIMEOUT), отвечает 303 See Other с Location "/"; следующий
         # GET (куда уводит браузер) — обычная загрузка страницы, POST не
         # повторяется. side_effect публикует running-снимок, как настоящий
         # start_refresh: GET видит идущую проверку и вторую не запускает.
@@ -1396,7 +1142,7 @@ class TestStatusHTTP:
                 httpd.shutdown()
                 httpd.server_close()
         assert m_start.call_count == 1  # GET вторую проверку не запустил
-        assert m_start.call_args.kwargs.get("timeout") == ws.PROBE_TIMEOUT
+        assert m_start.call_args.kwargs.get("timeout") == ws.REFRESH_TIMEOUT
 
     def test_post_when_check_running_redirects_then_banner(self, tmp_path):
         # Проверка уже идёт (running=True в состоянии): POST — 303; GET после
@@ -1476,8 +1222,7 @@ class TestModelUsageResetAPI:
         _seed_usage_rows(model_usage, [{
             "model": model, "backend": "AAA", "calls": calls,
             "input_tokens": input_tokens, "output_tokens": output_tokens,
-            "endpoints": {}, "errors": {}, "first_seen": "10:00:00",
-            "probing": False,
+            "first_seen": "10:00:00",
         }])
 
     def test_post_form_resets_and_redirects(self, tmp_path):
@@ -1509,7 +1254,7 @@ class TestModelUsageResetAPI:
 
     def test_post_form_reset_zeroes_counters_in_file(self, tmp_path):
         # Сброс формы обнуляет счётчики и в YAML-файле; строка остаётся
-        # (serve включил persist на root_dir=tmp_path).
+        # (serve включил persist на root_dir/var, v0.9.9).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1519,8 +1264,8 @@ class TestModelUsageResetAPI:
         from backend_adapter import model_usage
         _seed_usage_rows(model_usage, [{
             "model": "m-reset", "backend": "AAA", "calls": 5,
-            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
+            "input_tokens": 0, "output_tokens": 0,
+            "first_seen": "10:00:00",
         }])
         httpd, port = _start_server(str(tmp_path))
         try:
@@ -1532,7 +1277,10 @@ class TestModelUsageResetAPI:
                 "application/x-www-form-urlencoded",
             )
             import yaml
-            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+            # Файл учёта живёт в папке состояния <root>/var (v0.9.9).
+            with open(
+                str(tmp_path / "var" / model_usage.MODEL_USAGE_FILE), encoding="utf-8"
+            ) as f:
                 data = yaml.safe_load(f)
             row = (data or {}).get("models", {}).get("m-reset")
             assert row is not None        # строка осталась в файле
@@ -1635,8 +1383,7 @@ class TestModelUsageDeleteAPI:
         _seed_usage_rows(model_usage, [{
             "model": model, "backend": "AAA", "calls": calls,
             "input_tokens": input_tokens, "output_tokens": output_tokens,
-            "endpoints": {}, "errors": {}, "first_seen": "10:00:00",
-            "probing": False,
+            "first_seen": "10:00:00",
         }])
 
     def test_post_form_deletes_and_redirects(self, tmp_path):
@@ -1669,7 +1416,7 @@ class TestModelUsageDeleteAPI:
 
     def test_post_form_delete_removes_from_file(self, tmp_path):
         # Удаление формы перезаписывает YAML-файл без строки (serve включил
-        # persist на root_dir=tmp_path).
+        # persist на root_dir/var, v0.9.9).
         config, ws = _fresh_modules()
         config._BACKENDS = [
             {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
@@ -1679,8 +1426,8 @@ class TestModelUsageDeleteAPI:
         from backend_adapter import model_usage
         _seed_usage_rows(model_usage, [{
             "model": "m-del", "backend": "AAA", "calls": 5,
-            "input_tokens": 0, "output_tokens": 0, "endpoints": {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
+            "input_tokens": 0, "output_tokens": 0,
+            "first_seen": "10:00:00",
         }])
         httpd, port = _start_server(str(tmp_path))
         try:
@@ -1692,7 +1439,10 @@ class TestModelUsageDeleteAPI:
                 "application/x-www-form-urlencoded",
             )
             import yaml
-            with open(str(tmp_path / model_usage.MODEL_USAGE_FILE), encoding="utf-8") as f:
+            # Файл учёта живёт в папке состояния <root>/var (v0.9.9).
+            with open(
+                str(tmp_path / "var" / model_usage.MODEL_USAGE_FILE), encoding="utf-8"
+            ) as f:
                 data = yaml.safe_load(f)
             assert "m-del" not in (data or {}).get("models", {})
         finally:
@@ -1777,212 +1527,6 @@ class TestModelUsageDeleteAPI:
         finally:
             httpd.shutdown()
             httpd.server_close()
-
-
-# ---------------------------------------------------------------------------
-# /api/model-usage/reprobe: POST — фоновая перепроверка эндпоинтов строки
-# ---------------------------------------------------------------------------
-
-class TestModelUsageReprobeAPI:
-    def _seed_row(self, model="m-re", endpoints=None):
-        from backend_adapter import model_usage
-        _seed_usage_rows(model_usage, [{
-            "model": model, "backend": "AAA", "calls": 5,
-            "input_tokens": 0, "output_tokens": 0,
-            "endpoints": endpoints if endpoints is not None else {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
-        }])
-        return model_usage
-
-    def test_post_form_starts_and_redirects(self, tmp_path):
-        # HTML-кнопка (без JSON Content-Type): POST ?model=m → 303 See Other
-        # с Location "/" (PRG); старт реально вызван (start_reprobe → True).
-        config, ws = _fresh_modules()
-        from backend_adapter import model_usage
-        self._seed_row()
-        with mock.patch.object(model_usage, "start_reprobe", return_value=True) as m_start:
-            httpd, port = _start_server(str(tmp_path))
-            try:
-                status, headers, body = _http_post_body(
-                    port, "/api/model-usage/reprobe?model=m-re", b"",
-                    "application/x-www-form-urlencoded",
-                )
-                assert status == 303
-                assert headers.get("location") == "/"
-                assert body == ""
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-        assert m_start.call_count == 1
-        assert m_start.call_args.args == ("m-re",)
-
-    def test_post_json_202_ok(self, tmp_path):
-        # JSON-клиент: 202 {"ok": true, ...} — «запущено в фоне».
-        config, ws = _fresh_modules()
-        from backend_adapter import model_usage
-        self._seed_row()
-        with mock.patch.object(model_usage, "start_reprobe", return_value=True):
-            httpd, port = _start_server(str(tmp_path))
-            try:
-                status, _, body = _http_post_body(
-                    port, "/api/model-usage/reprobe?model=m-re", b"",
-                    "application/json",
-                )
-                assert status == 202
-                import json
-                assert json.loads(body) == {"ok": True, "model": "m-re"}
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-
-    def test_post_json_404_when_no_row_or_already_running(self, tmp_path):
-        # Строки нет (или уже перепроверяется) — start_reprobe False → 404.
-        config, ws = _fresh_modules()
-        from backend_adapter import model_usage
-        self._seed_row()
-        with mock.patch.object(model_usage, "start_reprobe", return_value=False):
-            httpd, port = _start_server(str(tmp_path))
-            try:
-                status, _, body = _http_post_body(
-                    port, "/api/model-usage/reprobe?model=m-re", b"",
-                    "application/json",
-                )
-                assert status == 404
-                import json
-                assert "error" in json.loads(body)
-            finally:
-                httpd.shutdown()
-                httpd.server_close()
-
-    def test_post_json_missing_model_400(self, tmp_path):
-        # Без query-параметра model — 400 {"error": ...} (JSON-клиент).
-        config, ws = _fresh_modules()
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, _, body = _http_post_body(
-                port, "/api/model-usage/reprobe", b"",
-                "application/json",
-            )
-            assert status == 400
-            import json
-            assert "error" in json.loads(body)
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-
-    def test_post_form_without_model_redirects(self, tmp_path):
-        # HTML-форма без model — 303 на "/" (в норме невозможно: кнопка
-        # всегда несёт model).
-        config, ws = _fresh_modules()
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, headers, body = _http_post_body(
-                port, "/api/model-usage/reprobe", b"",
-                "application/x-www-form-urlencoded",
-            )
-            assert status == 303
-            assert headers.get("location") == "/"
-            assert body == ""
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-
-    def test_get_returns_404(self, tmp_path):
-        # GET на префикс перепроверки — 404 (дефолт Endpoint; только POST).
-        config, ws = _fresh_modules()
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, _ = _http_get(port, "/api/model-usage/reprobe?model=m")
-            assert status == 404
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-
-    def test_page_shows_banner_and_checking_cell_while_running(self, tmp_path):
-        # Живой reprobe (сид _REPROBE): GET "/" показывает баннер
-        # «Перепроверка … выполняется…», JS-поллинг /api/model-usage/
-        # reprobe-state и ячейку «проверяется…» у строки — без форм.
-        config, ws = _fresh_modules()
-        config._BACKENDS = [
-            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
-        ]
-        config._MODEL_TO_BACKEND = {"m-re": ("AAA", config._BACKENDS[0])}
-        _seed_job(config, _done_job(True, 1))
-        from backend_adapter import model_usage
-        self._seed_row("m-re")
-        model_usage._REPROBE = {"m-re": {"started_at": 1000.0}}
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/")
-            assert status == 200
-            assert "Перепроверка модели" in body
-            assert "выполняется" in body
-            assert "проверяется…" in body
-            assert "form method=\"post\"" not in body  # кнопок строки нет
-            assert 'title="Перепроверить эндпоинты модели"' not in body
-            assert "fetch(\"/api/model-usage/reprobe-state\")" in body
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-            model_usage._REPROBE = None
-
-    def test_page_idle_no_reprobe_banner(self, tmp_path):
-        # Reprobe не идёт — баннера «Перепроверка» и reprobe-поллинга нет
-        # (кнопки «Перепроверить» на месте).
-        config, ws = _fresh_modules()
-        config._BACKENDS = [
-            {"name": "AAA", "base": "http://aaa.local", "key": "k-aaa"},
-        ]
-        config._MODEL_TO_BACKEND = {"m-re": ("AAA", config._BACKENDS[0])}
-        _seed_job(config, _done_job(True, 1))
-        self._seed_row("m-re")
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/")
-            assert status == 200
-            assert "Перепроверка модели" not in body
-            assert "fetch(\"/api/model-usage/reprobe-state\")" not in body
-            assert 'title="Перепроверить эндпоинты модели"' in body  # 🔄 на месте
-            assert 'title="Удалить строку модели"' in body
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-
-
-class TestReprobeStateAPI:
-    def test_returns_idle_json(self, tmp_path):
-        # Reprobe не идёт — дефолт {"running": false, ...}.
-        config, ws = _fresh_modules()
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/api/model-usage/reprobe-state")
-            assert status == 200
-            import json
-            assert json.loads(body) == {
-                "running": False, "model": None, "started_at": None,
-            }
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-
-    def test_returns_running_json(self, tmp_path):
-        # Живой reprobe — снимок с моделью и временем старта.
-        config, ws = _fresh_modules()
-        from backend_adapter import model_usage
-        model_usage._REPROBE = {"m-re": {"started_at": 1000.0}}
-        httpd, port = _start_server(str(tmp_path))
-        try:
-            status, body = _http_get(port, "/api/model-usage/reprobe-state")
-            assert status == 200
-            import json
-            state = json.loads(body)
-            assert state["running"] is True
-            assert state["model"] == "m-re"
-            assert state["started_at"] == 1000.0
-        finally:
-            httpd.shutdown()
-            httpd.server_close()
-            model_usage._REPROBE = None
 
 
 # ---------------------------------------------------------------------------
@@ -2105,13 +1649,12 @@ class TestRefreshStateAPI:
 
 class TestUsageSnapshotAPI:
     def _seed_row(self, model="m-snap", calls=5, input_tokens=1000,
-                  output_tokens=250, endpoints=None):
+                  output_tokens=250):
         from backend_adapter import model_usage
         _seed_usage_rows(model_usage, [{
             "model": model, "backend": "AAA", "calls": calls,
             "input_tokens": input_tokens, "output_tokens": output_tokens,
-            "endpoints": endpoints if endpoints is not None else {},
-            "errors": {}, "first_seen": "10:00:00", "probing": False,
+            "first_seen": "10:00:00",
         }])
         return model_usage
 
@@ -2119,8 +1662,7 @@ class TestUsageSnapshotAPI:
         # GET /api/model-usage/snapshot → 200 application/json, тело — список
         # строк таблицы с точными счётчиками (как отдаёт usage_snapshot).
         config, ws = _fresh_modules()
-        self._seed_row("m-snap", calls=7, input_tokens=1536, output_tokens=12345,
-                       endpoints={"completions": {"status": 200, "found": True}})
+        self._seed_row("m-snap", calls=7, input_tokens=1536, output_tokens=12345)
         httpd, port = _start_server(str(tmp_path))
         try:
             status, body = _http_get(port, "/api/model-usage/snapshot")
@@ -2133,7 +1675,6 @@ class TestUsageSnapshotAPI:
             assert row["calls"] == 7
             assert row["input_tokens"] == 1536
             assert row["output_tokens"] == 12345
-            assert row["endpoints"]["completions"]["found"] is True
             assert row["backend"] == "AAA"
         finally:
             httpd.shutdown()
