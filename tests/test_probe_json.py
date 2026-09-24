@@ -78,10 +78,9 @@ class TestWriteFiles:
 class TestUnconditionalChannel:
     def test_written_when_debug_enable_off(self, tmp_path):
         """Файлы пишутся при ADAPTER_DEBUG_ENABLE=0 (канал .err: гейт — только
-        наличие корня данных; вне ENABLE/PARTS/TRIM)."""
+        наличие корня данных; вне ENABLE/TRIM)."""
         os.environ["ADAPTER_DATA_ROOT"] = str(tmp_path)
         os.environ["ADAPTER_DEBUG_ENABLE"] = "0"
-        os.environ["ADAPTER_DEBUG_PARTS"] = "0"
         os.environ["ADAPTER_DEBUG_TRIM"] = "0"
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
@@ -92,9 +91,10 @@ class TestUnconditionalChannel:
         запуска). Проверяем на подменённом cwd, чтобы не писать в репозиторий."""
         monkeypatch.chdir(tmp_path)
         os.environ.pop("ADAPTER_DATA_ROOT", None)
-        # Старое имя (если экспортировано в окружении) дало бы [WARN] на
-        # импорте — канал должен быть тихим, поэтому убираем и его.
+        # Старые имена (если экспортированы в окружении) дали бы [WARN] на
+        # импорте — канал должен быть тихим, поэтому убираем и их.
         os.environ.pop("ADAPTER_DEBUG_LOGPATH", None)
+        os.environ.pop("ADAPTER_DEBUG_PARTS", None)
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
         assert (tmp_path / "tmp" / "adapter" / "var" / "llm.models.json").exists()

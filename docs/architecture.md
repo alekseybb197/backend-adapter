@@ -52,7 +52,7 @@ backend_adapter/
 │                             кортежу), плюс input/last_seen/calls/errors; БЕЗ
 │                             персистентности; лист DAG — импортирует config
 ├── session_settings.py     ← пер-сессионные переопределения (v0.9.5): in-memory
-│                             dict session_id → {ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS,
+│                             dict session_id → {ADAPTER_DEBUG,
 │                             ADAPTER_*_TARGET}; у TARGET два состояния (не задано /
 │                             значение, v0.9.9); API override/effective/set_config;
 │                             лист DAG — импортирует config
@@ -66,7 +66,7 @@ backend_adapter/
 │                             задача 1): endpoints "/api/sessions/snapshot|reset|
 │                             delete|settings" + "/logs/<имя>" (раздача .err);
 │                             колонки «Входной эндпойнт», «Ошибок»-ссылка на .err,
-│                             пер-сессионные Log/Parts/TARGET — см. §6.10
+│                             пер-сессионные Log/TARGET — см. §6.10
 ├── webui_errors.py         ← WEBUI endpoint "/errors/<имя>" (v0.9.8, §6.12):
 │                             превью .err-файла сессии — таблица секций с
 │                             обрезанными строками; "?section=N" — сырой вид
@@ -91,6 +91,9 @@ backend_adapter/
 ├── env_validate.py         ← строгая валидация env при старте (v0.9.6, §6.14):
 │                             невалидный int/bool → [FATAL] + sys.exit(1);
 │                             лист DAG — stdlib only, вызывается ДО импорта config
+├── artifact_refresh.py     ← фоновая дебаунсная отрисовка артефактов (v0.9.10, §8.5):
+│                             notify(parts_dir) из write_debug_json; лист DAG —
+│                             импортирует config, artifact_tree — внутри функций
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
     artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
     artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
@@ -704,7 +707,7 @@ GET `/` и по кнопке:
 
 Каждый файл при каждой новой проверке ПЕРЕЗАПИСЫВАЕТСЯ целиком (атомарно:
 tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не гейтится
-`ADAPTER_DEBUG_ENABLE` / `ADAPTER_DEBUG_PARTS` / `ADAPTER_DEBUG_TRIM`;
+`ADAPTER_DEBUG_ENABLE` / `ADAPTER_DEBUG_TRIM`;
 директория создаётся при записи. Секреты маскируются `redact()` по
 умолчанию (полные данные — при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`,
 живое чтение config); любая ошибка записи молча глотается — проверку не
@@ -769,25 +772,25 @@ In-memory реестр переопределений «сессия → нас�
 dict[session_id, dict[name, value]]` + lock). Сессия — единица управления:
 для отдельного `session_id` можно переопределить флаги логирования и TARGET,
 не трогая общую настройку приложения. Пул — `config.SESSION_CONFIG_POOL`
-(`ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS`, `ADAPTER_MESSAGES_TARGET`,
+(`ADAPTER_DEBUG`, `ADAPTER_MESSAGES_TARGET`,
 `ADAPTER_COMPLETIONS_TARGET`, `ADAPTER_RESPONSES_TARGET`), типы —
-`config._SESSION_CONFIG_TYPES` (bool ×2, enum ×3 с общим доменом
+`config._SESSION_CONFIG_TYPES` (bool ×1, enum ×3 с общим доменом
 `TARGET_ALLOWED_VALUES`).
 
 **Две модели наследования (v0.9.8).** Пул делится на два вида, и это деление
 принципиально:
 
-- **Log/Parts (`_SNAPSHOT_NAMES`) — СНИМОК.** `ensure_session(session_id)`
+- **Log (`_SNAPSHOT_NAMES`) — СНИМОК.** `ensure_session(session_id)`
   (идемпотентный, вызывается на каждом обращении к `session_id`) при **первой
-  встрече** копирует текущие общие `config.ADAPTER_DEBUG`/
-  `ADAPTER_DEBUG_PARTS` в строку сессии (`_SEEDED` — множество уже
-  образованных). Дальше сессия живёт своими значениями, а общие тумблеры
-  служат лишь шаблоном для НОВЫХ сессий: их последующая смена через `/config`
-  уже существующие сессии не трогает. Состояния `"inherit"` у этих полей нет;
-  `clear` = свежий снимок текущего общего тумблера (сессия «как новая»),
-  удалять запись нельзя — иначе `effective` снова читал бы `config` живьём.
-  Согласованность «Parts ⊆ Log» обеспечивает не снимок (он — точная копия
-  пары, включая env-пару PARTS=1/DEBUG=0), а гейт `session_log.parts_enabled`.
+  встрече** копирует текущий общий `config.ADAPTER_DEBUG` в строку сессии
+  (`_SEEDED` — множество уже образованных). Дальше сессия живёт своим
+  значением, а общий тумблер служит лишь шаблоном для НОВЫХ сессий: его
+  последующая смена через `/config` уже существующие сессии не трогает.
+  Состояния `"inherit"` у этого поля нет; `clear` = свежий снимок текущего
+  общего тумблера (сессия «как новая»), удалять запись нельзя — иначе
+  `effective` снова читал бы `config` живьём. Отдельного флага частей
+  (`ADAPTER_DEBUG_PARTS`) и согласования «Parts ⊆ Log» больше нет (v0.9.10):
+  части — часть файловой записи, гейт один — `session_log.logging_enabled`.
 - **TARGET-поля — ЖИВОЕ НАСЛЕДОВАНИЕ.** Два состояния (v0.9.9, см. таблицу
   ниже).
 
@@ -801,15 +804,15 @@ dict[session_id, dict[name, value]]` + lock). Сессия — единица у
 после чего сессия снова живо наследует `config.<name>`.
 
 - API: `ensure_session(session_id) -> bool` (образование сессии: снимок
-  Log/Parts; no-op для пустого id), `override(session_id, name) -> Any|None`
+  Log; no-op для пустого id), `override(session_id, name) -> Any|None`
   (сырое значение или None), `effective(session_id, name) -> Any`
   (переопределение либо `config.<name>`, `None`-безопасно),
   `session_overrides(session_id) -> dict`,
   `set_config(session_id, values=None, clear=()) -> dict|None` (валидация по
   `_SESSION_CONFIG_TYPES`, невалидное/внепуловое молча игнорируется;
-  `clear` у Log/Parts = свежий снимок, у TARGET = удаление записи),
+  `clear` у Log = свежий снимок, у TARGET = удаление записи),
   `clear_session(session_id) -> bool`, `reset()` (для тестов).
-- Потребители — `session_log.logging_enabled`/`parts_enabled` (флаги
+- Потребители — `session_log.logging_enabled` (флаг
   логирования) и `routing.decide`/`target_for_input` (пер-сессионный TARGET,
   непустой `session_id`; пустой → общая настройка) — см. §4.2 и
   `docs/routing.md` §2.4. Образование сессии вызывается в самой ранней точке
@@ -829,16 +832,16 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 
 | Эндпойнт | Назначение |
 |---|---|
-| GET `/sessions` | страница с таблицей сессий (13 колонок) + JS-поллинг счётчиков |
+| GET `/sessions` | страница с таблицей сессий (12 колонок) + JS-поллинг счётчиков |
 | GET `/api/sessions/snapshot` | снимок строк (JSON; `errors_html`, `input`, `key`) |
 | POST `/api/sessions/reset` | обнуление счётчиков **одной строки-кортежа** (⏪) |
 | POST `/api/sessions/delete` | удаление строки-кортежа (🗑) |
-| POST `/api/sessions/settings` | пер-сессионные Log / Parts / TARGET (JSON или форма) |
+| POST `/api/sessions/settings` | пер-сессионные Log / TARGET (JSON или форма) |
 | GET `/logs/<имя>` | раздача `.err`-файла сессии целиком (имя — по `_ERR_NAME_RE`) |
 
 Колонки, отличающие v0.9.5: **«Входной эндпойнт»** (`input` строки —
 константен, задаётся агентом, `routing.INPUT_PATHS`), **«Ошибок»** (число —
-ссылка на `.err`-файл сессии, `target="_blank"`, задача 7), **«Log» / «Parts» /
+ссылка на `.err`-файл сессии, `target="_blank"`, задача 7), **«Log» /
 «TARGET»** (выпадающие списки — пер-сессионные переопределения; у TARGET
 незаданное поле показывает действующее общее значение, а выбор значения,
 совпадающего с общим, снимает переопределение — v0.9.9), **«Actions»**
@@ -850,9 +853,10 @@ WEBUI-модуль-эндпойнт (`@webserver.register`, импортируе
 
 **v0.9.6 (задачи 5–6):** форма **🗑** переехала из «Actions» в **первую
 ячейку**, перед `<code>`-id сессии (в «Actions» остался только ⏪); заголовки
-счётчиков укорочены до **`C`** / **`E`**. Селект **Parts** при выключенном Log
-сессии отрендерен как `off` и `disabled` (`_parts_cell_html` — источник
-истины серверный каскад, см. §6.11 и `docs/webui.md` §4).
+счётчиков укорочены до **`C`** / **`E`**.
+
+**v0.9.10:** колонка и селект **Parts** удалены — части собираются вместе с
+логами по одному флагу Log (12 колонок вместо 13).
 
 **v0.9.8:** ссылка-счётчик **«Ошибок»** ведёт на превью **`/errors/<имя>`**
 (`webui_errors.py`, §6.12) вместо сырого файла: `/logs/<имя>` остался
@@ -981,20 +985,20 @@ Debug flags (runtime pool):
 
 | Flag | Purpose |
 |---|---|
-| `ADAPTER_DEBUG` | File logging master switch (full parts, no trim) |
-| `ADAPTER_DEBUG_PARTS` | Per-session `.json`+`.yaml` dumps of all logged protocol parts |
+| `ADAPTER_DEBUG` | File logging master switch (full parts, no trim); since v0.9.10 it also covers per-session `.json`+`.yaml` protocol-part dumps |
 | `ADAPTER_DEBUG_TRIM` | Console trim limit in chars (0 = no trim; default 3000) |
 | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | Disables the redaction sanitizer (1 = raw secrets) |
 
-`ADAPTER_DEBUG` and `ADAPTER_DEBUG_PARTS` are additionally **per-session
-overridable** (v0.9.5, §6.11): `session_log.logging_enabled(session_id)` /
-`parts_enabled(session_id)` read the session value via
+`ADAPTER_DEBUG` is additionally **per-session overridable** (v0.9.5, §6.11):
+`session_log.logging_enabled(session_id)` reads the session value via
 `session_settings.effective`. **v0.9.8:** that value is a **snapshot** of the
-app-wide flags taken when the session is first seen (`ensure_session`) — the
-global switches are a template for **new** sessions only and neither enable nor
-disable anything for running ones. A request with no session id writes no files
+app-wide flag taken when the session is first seen (`ensure_session`) — the
+global switch is a template for **new** sessions only and neither enables nor
+disables anything for running ones. A request with no session id writes no files
 at all (empty/`unknown` → `False`).
 `ADAPTER_DEBUG_TRIM` and the sanitizer stay app-wide only.
+**v0.9.10:** the old `ADAPTER_DEBUG_PARTS` flag and its `parts_enabled` gate are
+gone — «Parts ⊆ Log» is an identity, one gate remains.
 
 ### 8.2 Structured trace (`tracer.py`)
 
@@ -1068,29 +1072,30 @@ Long base64/hex strings may also be matched.
 - The log directory `ADAPTER_DATA_ROOT/log` is created on demand (adapter
   startup creates it unconditionally, and/or at first write); its parent
   `ADAPTER_DATA_ROOT` is always non-empty (default `./tmp/adapter`)
-- **Per-session gates (v0.9.5, snapshot — v0.9.8):** `logging_enabled(session_id)`
-  / `parts_enabled(session_id)` read the session value (`session_settings.
-  effective`) — a **snapshot** of `config.ADAPTER_DEBUG` / `ADAPTER_DEBUG_PARTS`
+- **Per-session gate (v0.9.5, snapshot — v0.9.8):** `logging_enabled(session_id)`
+  reads the session value (`session_settings.
+  effective`) — a **snapshot** of `config.ADAPTER_DEBUG`
   taken when the session is first seen. Empty `session_id` and `unknown` →
-  `False` (no files for an unidentified session); the global switches are a
+  `False` (no files for an unidentified session); the global switch is a
   template for new sessions only. The unconditional `.err`/WARN channels are
-  **not** gated by these — see `docs/logging.md`
+  **not** gated by it — see `docs/logging.md`
 
-### 8.5 Per-session protocol dumps — `ADAPTER_DEBUG_PARTS` (`.json` + `.yaml` pairs)
+### 8.5 Per-session protocol dumps (`.json` + `.yaml` pairs)
 
-`ADAPTER_DEBUG_PARTS=1` (plus the master switch `ADAPTER_DEBUG_ENABLE=1`) enables
-per-session dumps of **all** logged protocol parts — there is no fixed tag list
-anymore (the old `ADAPTER_DEBUG_TAGS_FULL` / `ADAPTER_DEBUG_TAGS_OUT_ALL`
-selectors were removed in the v0.8.6 logging reform).
+Parts are collected **together with the logs** by the single master switch
+`ADAPTER_DEBUG_ENABLE=1` (v0.9.10; the old `ADAPTER_DEBUG_PARTS` flag and its
+`parts_enabled` gate are gone). Per-session dumps cover **all** logged protocol
+parts — there is no fixed tag list anymore (the old `ADAPTER_DEBUG_TAGS_FULL` /
+`ADAPTER_DEBUG_TAGS_OUT_ALL` selectors were removed in the v0.8.6 logging
+reform).
 
-- Only activates when `ADAPTER_DEBUG_ENABLE=1` (master switch for file writes);
+- Only activates when the per-session gate `logging_enabled(session_id)` is on;
   the log directory `ADAPTER_DATA_ROOT/log` is created on demand
-- **v0.9.8:** the gate at every dump call site is the **per-session**
-  `parts_enabled(session_id)`, not `config.ADAPTER_DEBUG_PARTS` — so a session
-  can collect parts while the global flag is off (and vice versa); the global
-  flag only seeds the snapshot of a new session. Dumps are written
-  **incrementally**, a pair per part as it arrives — there is no post-hoc parse
-  of `session-*.log`
+- The gate at every dump call site is the **per-session** `logging_enabled`,
+  not a global read — a session can collect parts while the global flag is off
+  (and vice versa); the global flag only seeds the snapshot of a new session.
+  Dumps are written **incrementally**, a pair per part as it arrives — there is
+  no post-hoc parse of `session-*.log`
 - Creates `session-<datetime>-<sessid8>.parts/` directory next to the session log files
 - Writes a **pair** of files per logged part — `.json` (machine-readable,
   `json.dumps(indent=2)`) and `.yaml` (human-readable) — via
@@ -1101,6 +1106,19 @@ selectors were removed in the v0.8.6 logging reform).
 - Thread-safe: uses `threading.Lock` on the per-session counter
 - Full lines also land in `session-*.log` (`.parts` dumps are the machine-readable
   twin of the debug blocks)
+- **Artifact trees are built in the background, on the same switch** (v0.9.10):
+  after each successfully written part, `session_log.write_debug_json` calls
+  `artifact_refresh.notify(parts_dir)` (inside `contextlib.suppress`), which
+  merely marks the directory as dirty and lazily starts a single daemon thread.
+  That thread polls once a second and runs `artifact_tree.generate(parts_dir,
+  verbose=False)` for a directory once `config.ADAPTER_ARTIFACT_DEBOUNCE`
+  seconds (default 20) have passed since its **last** part write — a burst of
+  parts from one turn yields one re-render. Rendering therefore never blocks a
+  proxy request, and generation errors are logged as WARNING without touching
+  either the worker or the part write. The lazy `/session` path in
+  `session_viewer.find_or_generate_sessions()` remains a safety net (adapter
+  restarted, worker has not seen the directory yet) and the standalone CLI path
+  (`python -m backend_adapter.artifact_tree`) is unchanged.
 
 ### 8.6 Runtime config pool + WEBUI endpoint `/config` (`webui_config_api.py`)
 
@@ -1110,7 +1128,7 @@ and strict-models switches), flip-able without restarting the adapter:
 
 | Type | Variables |
 |---|---|
-| bool | `ADAPTER_DEBUG`, `ADAPTER_DEBUG_PARTS` |
+| bool | `ADAPTER_DEBUG` (logs and parts — one switch since v0.9.10) |
 | bool | `ADAPTER_SENSITIVE_LOGGING_ENABLE`, `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS` |
 | int | `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS` |
 | *(none)* | no string members — the old detail selectors were removed (v0.8.6) |
@@ -1208,7 +1226,7 @@ backend-adapter.py
   │                       — строка = кортеж session+agent+model+backend+route,
   │                       страница "/sessions" — v0.9.2/v0.9.5)
   ├── session_settings.py → config (лист DAG: пер-сессионные переопределения
-  │                       ADAPTER_DEBUG/PARTS/TARGET — v0.9.5; служебный
+  │                       ADAPTER_DEBUG/TARGET — v0.9.5; служебный
   │                       оверрайд модели сессии — v0.9.6; потребители —
   │                       session_log, routing, webui_sessions, server)
   ├── state_store.py     → config, yaml (лист DAG: перманентный state.yaml
@@ -1227,8 +1245,11 @@ backend-adapter.py
   ├── logger.py          → config, redact, session_log
   ├── redact.py          (no internal deps — stdlib only)
   ├── session_log.py     (no internal deps — PyYAML; session_settings читается
-  │                       локально внутри logging_enabled/parts_enabled)
+  │                       локально внутри logging_enabled)
   ├── daemon.py          (no internal deps — stdlib only)
+  ├── artifact_refresh.py → config (лист DAG; artifact_tree импортирует
+  │                       внутри функций — разрыв цикла session_log →
+  │                       artifact_refresh → artifact_tree)
   ├── webserver.py       → session_viewer, webui_status, webui_sessions,
   │                       webui_errors, webui_config_api, webui_ops
   │                       (WEBUI core: serve() импортирует встроенные
@@ -1277,5 +1298,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.9** (see `backend-adapter.py`).
+Current: **v0.9.10** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

@@ -66,7 +66,7 @@ def fresh_env(monkeypatch):
         # Tariffs file for the Cost column: empty by default (no tariffs — the
         # Cost column renders "—"); tariff tests point it at a tmp file.
         "ADAPTER_MODELS_TARIFFS": "",
-        "ADAPTER_DEBUG_PARTS": "0",
+        "ADAPTER_ARTIFACT_DEBOUNCE": "20",
         "ADAPTER_WEBUI_PORT": "8765",
         "ADAPTER_DEBUG_TRIM": "3000",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "0",
@@ -132,7 +132,7 @@ def _default_config():
         "ADAPTER_MODEL_USAGE_ENABLE": "0",
         "ADAPTER_MODEL_USAGE_SAVE_INTERVAL": "300",
         "ADAPTER_MODELS_TARIFFS": "",
-        "ADAPTER_DEBUG_PARTS": "0",
+        "ADAPTER_ARTIFACT_DEBOUNCE": "20",
         "ADAPTER_WEBUI_PORT": "8765",
         "ADAPTER_DEBUG_TRIM": "3000",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "0",

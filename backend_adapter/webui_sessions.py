@@ -7,24 +7,23 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
 НАБЛЮДЕНИЕМ. Теперь она — отдельная страница (ссылка 🗂 со статус-страницы,
 обратно — «Статус 📊») и единица УПРАВЛЕНИЯ: каждая строка позволяет, не
 трогая общие настройки приложения, включить/выключить для своей сессии
-файловые логи и parts-дампы и переназначить TARGET-маршрутизацию входного
-эндпойнта (см. session_settings).
+файловые логи (вместе с parts-дампами, v0.9.10) и переназначить
+TARGET-маршрутизацию входного эндпойнта (см. session_settings).
 
-Колонки строки (13):
+Колонки строки (12):
 
     Сессия | Агент | Модель | Бэкенд | Входной эндпойнт | Маршрут |
-    Последнее обращение | C | E | Log | Parts | TARGET | Actions
+    Последнее обращение | C | E | Log | TARGET | Actions
 
   - «Входной эндпойнт» — константа строки: путь запроса выбирает АГЕНТ
     (messages|completions|responses), адаптер его не меняет. Это же значение
     выбирает, какая TARGET-переменная адресуется селектом строки;
   - «Маршрут» — КУДА адаптер решил отправить (passthrough/convert/reject/
     disabled): производная от TARGET на момент обращения;
-  - «Log»/«Parts» — селекты ADAPTER_DEBUG/ADAPTER_DEBUG_PARTS (on/off, v0.9.8):
-    объём файловой записи для сессии. Значения принадлежат СЕССИИ: при её
-    образовании берётся снимок общих настроек приложения, дальше общие флаги
-    сессию не трогают. Parts активен только при включённом Log: при Log=off
-    его селект заблокирован (v0.9.6);
+  - «Log» — селект ADAPTER_DEBUG (on/off, v0.9.8): объём файловой записи для
+    сессии — логи, трейсы и дампы частей протокола (``*.parts``, v0.9.10).
+    Значение принадлежит СЕССИИ: при её образовании берётся снимок общей
+    настройки приложения, дальше общий флаг сессию не трогает.
   - «TARGET» — селект TARGET-переменной входного эндпойнта строки
     (домен config.TARGET_ALLOWED_VALUES);
   - «C»/«E» — счётчики Вызовов/Ошибок (заголовки укорочены в v0.9.6);
@@ -39,8 +38,8 @@ webui_sessions.py — эндпойнт "/sessions" общего веб-серв�
 У TARGET при отсутствии переопределения показано действующее значение общей
 настройки приложения (v0.9.9: состояния «inherit» нет); выбор значения,
 совпадающего с общим, снимает переопределение и возвращает сессию к живому
-наследованию — тот же дефолт, что у новой сессии. У Log/Parts наследования
-нет вовсе — их снимок материализуется в момент образования сессии.
+наследованию — тот же дефолт, что у новой сессии. У Log наследования
+нет вовсе — его снимок материализуется в момент образования сессии.
 
 Вся наблюдаемая часть строки обновляется без перезагрузки: безусловный JS
 sessions_poll каждые 5 с опрашивает /api/sessions/snapshot и правит ячейки
@@ -86,7 +85,7 @@ logger = logging.getLogger("webui_sessions")
 _ERR_NAME_RE = re.compile(r"^session-[0-9]{8}-[0-9]{6}-[A-Za-z0-9._-]{1,8}\.err$")
 
 # Колонок в таблице сессий (для colspan пустого плейсхолдера).
-_COLUMNS = 13
+_COLUMNS = 12
 
 
 # ==================== ЧИСТАЯ ЛОГИКА ====================
@@ -95,11 +94,11 @@ _COLUMNS = 13
 def _bool_options(name: str) -> tuple[tuple[str, str], ...]:
     """Варианты селекта bool-настройки: on/off.
 
-    v0.9.8: варианта «inherit» у Log/Parts больше нет. Их значения — СНИМОК
-    общих тумблеров, взятый при образовании сессии, и дальше сессия живёт
-    своими on/off: глобальные флаги не управляют функционалом, а лишь
-    инициализируют новые сессии. Показывать «inherit» было бы враньём —
-    живой связи с общей настройкой у этих полей не существует.
+    v0.9.8: варианта «inherit» у Log больше нет. Его значение — СНИМОК
+    общего тумблера, взятый при образовании сессии, и дальше сессия живёт
+    своим on/off: глобальный флаг не управляет функционалом, а лишь
+    инициализирует новые сессии. Показывать «inherit» было бы враньём —
+    живой связи с общей настройкой у этого поля не существует.
 
     Аргумент ``name`` сохранён: подпись общая с ``_target_options``, и
     вызывающий код передаёт имя настройки единообразно."""
@@ -122,7 +121,7 @@ def _stored_bool(session_id: str, name: str) -> str:
     """Значение bool-настройки сессии как положение селекта ("1"/"0").
 
     v0.9.8: состояния «inherit» нет — значение сессии всегда существует
-    (снимок общих флагов, взятый при образовании сессии), поэтому None здесь
+    (снимок общего флага, взятый при образовании сессии), поэтому None здесь
     недостижим в рабочем тракте. Оставшаяся ветка — страховка для сессии,
     которой ещё не коснулся ``ensure_session`` (прямые вызовы в тестах):
     показываем действующее значение, а не несуществующий inherit."""
@@ -132,20 +131,13 @@ def _stored_bool(session_id: str, name: str) -> str:
     return "1" if value else "0"
 
 
-def _select_form_html(
-    session_id: str, name: str, options, selected: str, *, disabled: bool = False
-) -> str:
+def _select_form_html(session_id: str, name: str, options, selected: str) -> str:
     """HTML ячейки настройки: форма + выпадающий список, отправляющийся сразу.
 
     POST уходит на /api/sessions/settings с query ``session``+``name``
     (имя настройки — ровно env-переменная пула, напр. ADAPTER_DEBUG), а
     значение — поле ``value``. ``onchange="this.form.submit()"`` отправляет
-    форму без отдельной кнопки (одно поле — одно действие).
-
-    ``disabled`` (v0.9.6) — селект заблокирован: сейчас так рендерится Parts
-    при выключенном Log (Parts не может быть активен без Log, см. каскад в
-    session_settings). Заблокированный select не отправляет значение —
-    «залипшего» включения Parts форма не создаст."""
+    форму без отдельной кнопки (одно поле — одно действие)."""
     opts = "".join(
         f'<option value="{html.escape(value)}"'
         f"{' selected' if value == selected else ''}>"
@@ -153,37 +145,11 @@ def _select_form_html(
         for value, label in options
     )
     qs = f"session={quote(str(session_id), safe='')}&name={quote(str(name), safe='')}"
-    dis = " disabled" if disabled else ""
     return (
         f'<form method="post" action="/api/sessions/settings?{qs}" style="margin:0">'
-        f'<select name="value" onchange="this.form.submit()"{dis} '
+        f'<select name="value" onchange="this.form.submit()" '
         f'style="font:inherit;max-width:170px">{opts}</select>'
         "</form>"
-    )
-
-
-def _parts_cell_html(session_id: str) -> str:
-    """HTML ячейки «Parts»: селект ADAPTER_DEBUG_PARTS, заблокированный при
-    выключенном Log (v0.9.6).
-
-    Parts — подробная запись ПОВЕРХ обычных логов: при Log=off он не может
-    быть активен (см. каскад в config.set_runtime_config/session_settings),
-    поэтому селект показывается выключенным («off») и disabled — снять
-    блокировку можно только включением Log в соседней ячейке."""
-    log_on = bool(session_settings.effective(session_id, "ADAPTER_DEBUG"))
-    if not log_on:
-        return _select_form_html(
-            session_id,
-            "ADAPTER_DEBUG_PARTS",
-            _bool_options("ADAPTER_DEBUG_PARTS"),
-            "0",
-            disabled=True,
-        )
-    return _select_form_html(
-        session_id,
-        "ADAPTER_DEBUG_PARTS",
-        _bool_options("ADAPTER_DEBUG_PARTS"),
-        _stored_bool(session_id, "ADAPTER_DEBUG_PARTS"),
     )
 
 
@@ -304,7 +270,6 @@ def _sessions_rows_html(rows: list[dict]) -> str:
             f'<td data-calls="{row.get("calls", 0)}">{row.get("calls", 0)}</td>'
             f'<td data-errors="{row.get("errors", 0)}">{_errors_cell_html(row)}</td>'
             f"<td>{_select_form_html(session, 'ADAPTER_DEBUG', _bool_options('ADAPTER_DEBUG'), _stored_bool(session, 'ADAPTER_DEBUG'))}</td>"
-            f"<td>{_parts_cell_html(session)}</td>"
             f"<td>{_target_cell_html(row)}</td>"
             f"{_actions_cell_html(row)}"
             "</tr>"
@@ -365,20 +330,19 @@ def _render_sessions_page(context) -> bytes:
 <p><a href="/">Статус 📊</a> &nbsp;·&nbsp; <a href="/session">Обзор сессий 📋</a> &nbsp;·&nbsp; <a href="/config">Runtime config 🔧</a></p>
 <p style="color:#666;font-size:13px;max-width:1100px">
   Строка — кортеж <code>session+agent+model+backend+route</code>: смена модели
-  или обработчика даёт новую строку. Колонки <b>Log</b>/<b>Parts</b> и
+  или обработчика даёт новую строку. Колонки <b>Log</b> и
   <b>TARGET</b> управляют настройками <b>только для этой сессии</b>. Изменение
   применяется сразу и действует на последующие запросы.
-  <b>Log</b>/<b>Parts</b> — свои значения сессии: при её образовании они
-  берутся из общих настроек приложения и дальше не зависят от них (общие
-  флаги влияют только на новые сессии). <b>Parts</b> работает только при
-  включённом <b>Log</b>: при Log=off его селект заблокирован, а включение
-  Parts само включает Log. У <b>TARGET</b> состояние сессии — либо собственное
-  значение, либо наследование общей настройки приложения: если переопределения
-  нет, показано её действующее значение, а выбор значения, совпадающего с
-  общим, снимает переопределение (сессия снова следует за <code>/config</code>).
+  <b>Log</b> — своё значение сессии: при её образовании оно
+  берётся из общей настройки приложения и дальше не зависит от неё (общий
+  флаг влияет только на новые сессии). У <b>TARGET</b> состояние сессии — либо
+  собственное значение, либо наследование общей настройки приложения: если
+  переопределения нет, показано её действующее значение, а выбор значения,
+  совпадающего с общим, снимает переопределение (сессия снова следует за
+  <code>/config</code>).
 </p>
 <table>
-  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Входной эндпойнт</th><th>Маршрут</th><th>Последнее обращение</th><th>C</th><th>E</th><th>Log</th><th>Parts</th><th>TARGET</th><th>Actions</th></tr>
+  <tr><th>Сессия</th><th>Агент</th><th>Модель</th><th>Бэкенд</th><th>Входной эндпойнт</th><th>Маршрут</th><th>Последнее обращение</th><th>C</th><th>E</th><th>Log</th><th>TARGET</th><th>Actions</th></tr>
   {_sessions_rows_html(rows)}
 </table>
 </body>
@@ -471,8 +435,8 @@ def _apply_setting(session_id: str, name: str, raw) -> bool:
     либо строка формы ("1"/"0"/значение домена). Возвращает False, если имя
     вне пула или значение не прошло валидацию (в таблицу ничего не попало).
 
-    v0.9.8: у bool-настроек (Log/Parts) варианта «inherit» больше нет — их
-    значения принадлежат сессии (снимок общих флагов при её образовании).
+    v0.9.8: у bool-настройки Log варианта «inherit» больше нет — её
+    значение принадлежит сессии (снимок общего флага при её образовании).
     Строка "inherit", пришедшая от старой формы или скрипта, трактуется как
     «сбросить к общему значению» — это ``clear``, который у снимка означает
     свежий снимок текущего общего тумблера (см. session_settings.set_config).
@@ -481,7 +445,7 @@ def _apply_setting(session_id: str, name: str, raw) -> bool:
     ``config.TARGET_ALLOWED_VALUES``. «Вернуться к общему» выражается выбором
     значения, СОВПАДАЮЩЕГО с текущей общей настройкой: переопределение при
     этом СНИМАЕТСЯ (``clear``), и сессия снова живо наследует ``config.X``.
-    Правило — только для не-bool полей: у Log/Parts наследования нет вовсе,
+    Правило — только для не-bool полей: у Log наследования нет вовсе,
     и любое присланное значение принадлежит сессии."""
     if not session_id or name not in config.SESSION_CONFIG_POOL:
         return False
@@ -683,7 +647,7 @@ class SessionSettingsEndpoint(webserver.Endpoint):
     """POST /api/sessions/settings — пер-сессионные настройки (v0.9.5).
 
     Адресует переопределения сессии (session_settings): логирование
-    (ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS) и TARGET-роутинг входов
+    (ADAPTER_DEBUG) и TARGET-роутинг входов
     (ADAPTER_{MESSAGES,COMPLETIONS,RESPONSES}_TARGET). У bool-настройки
     значение "inherit" снимает переопределение (у снимка это его сброс); у
     TARGET выбор значения, равного текущей общей настройке, тоже снимает
@@ -818,7 +782,6 @@ __all__ = [
     "_input_cell_html",
     "_errors_cell_html",
     "_target_cell_html",
-    "_parts_cell_html",
     "_session_cell_html",
     "_actions_cell_html",
     "_sessions_rows_html",

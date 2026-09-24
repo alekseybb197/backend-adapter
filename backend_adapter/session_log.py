@@ -110,7 +110,7 @@ _last_log_session_id: str = ""  # глобальный fallback для _d()
 _parts_dir: dict[str, str] = {}
 _parts_dir_ts: dict[str, str] = {}  # session_id → stable timestamp (first-use)
 
-# ==================== ADAPTER_DEBUG_PARTS ====================
+# ==================== части протокола (*.parts) ====================
 # Глобальный счётчик для JSON-файлов тегированных блоков.
 # Формат имени: <session[:8]>-<seq:04d>-<tag_lower>.json
 _debug_json_seq = 0
@@ -200,7 +200,7 @@ def _close_session_file(session_id: str) -> None:
                 f.close()
 
 
-# ==================== ADAPTER_DEBUG_PARTS ====================
+# ==================== части протокола (*.parts) ====================
 
 
 def _body_tags_parts_dir(session_id: str) -> str | None:
@@ -237,21 +237,17 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     ``data`` — dict, str, list или bytearray/bytes. При bytes/bytearray
     декодируется как UTF-8.
 
-    Файл пишется только если включён мастер-выключатель ADAPTER_DEBUG и флаг
-    ADAPTER_DEBUG_PARTS (лог-путь задан всегда — папка ADAPTER_DATA_ROOT/log
-    с дефолтом ./tmp/adapter/log; папка создаётся при необходимости). Для каждого тега пишутся парные файлы —
-    ``.json`` и ``.yaml``.
+    Файл пишется, только если включён мастер-выключатель логирования
+    ADAPTER_DEBUG (лог-путь задан всегда — папка ADAPTER_DATA_ROOT/log
+    с дефолтом ./tmp/adapter/log; папка создаётся при необходимости). Для
+    каждого тега пишутся парные файлы — ``.json`` и ``.yaml``.
 
-    v0.9.5: оба флага читаются ПЕР-СЕССИОННО (``logging_enabled``/
-    ``parts_enabled`` поверх session_settings) — сессия может включить
-    подробности, не включая их для остальных. Мастер-выключатель проверяется
-    здесь (быстрый выход), действующий parts-флаг — через parts_enabled.
-    v0.9.6: parts_enabled сам гейтится на logging_enabled — Parts без Log
-    невозможен (проверка logging_enabled ниже остаётся как быстрый выход).
+    v0.9.5: флаг читается ПЕР-СЕССИОННО (``logging_enabled`` поверх
+    session_settings) — сессия может включить подробности, не включая их для
+    остальных. v0.9.10: отдельного флага Parts больше нет — дампы частей
+    пишутся ВСЕГДА при включённом логировании (см. logging_enabled).
     """
     if not logging_enabled(session_id):
-        return
-    if not parts_enabled(session_id):
         return
     if not _DEBUG_IS_DIR or not _DEBUG_PATH:
         return
@@ -309,6 +305,15 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write(yaml_text)
 
+    # Пометить директорию частей для фоновой отрисовки артефактов (v0.9.10).
+    # Импорт внутри функции — разрыв цикла: artifact_refresh импортирует
+    # config, а artifact_tree — только внутри своих функций. Ошибка пометки
+    # не влияет на запись части: канал наблюдательный.
+    with contextlib.suppress(Exception):
+        from . import artifact_refresh
+
+        artifact_refresh.notify(parts_path)
+
 
 # ==================== .err-файлы инцидентов и WARN-событий ====================
 # Безусловный канал сессии (v0.9.0 — инциденты бэкенда, v0.9.1 —
@@ -322,7 +327,6 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 # [USAGE_WARN] стрима без usage — пишет WARNING-блок.
 # Файл принципиально НЕ гейтится флагами подробности:
 #   - НЕ гейтится config.ADAPTER_DEBUG (ENABLE=0 — тоже пишется);
-#   - НЕ гейтится config.ADAPTER_DEBUG_PARTS;
 #   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и сообщение).
 # Гейтится только наличием лог-папки (ADAPTER_DATA_ROOT — всегда непуст,
 # дефолт ./tmp/adapter, лог-папка log/; is_dir=True всегда — см.
@@ -497,10 +501,12 @@ def _session_flags_enabled(session_id: str) -> bool:
 def logging_enabled(session_id: str) -> bool:
     """Действующий флаг файловой записи debug-логов для сессии (v0.9.5).
 
-    Значение — СНИМОК общих флагов, взятый при образовании сессии (v0.9.8):
+    Значение — СНИМОК общего флага, взятый при образовании сессии (v0.9.8):
     ``session_settings.ensure_session`` копирует ``config.ADAPTER_DEBUG`` в
     сессию при первой встрече, дальше сессия живёт своим значением, а общий
-    тумблер служит шаблоном только для НОВЫХ сессий.
+    тумблер служит шаблоном только для НОВЫХ сессий. v0.9.10: это же значение
+    гейтит и дампы частей протокола (``*.parts``) — отдельного флага Parts
+    больше нет.
 
     Пустой ``session_id`` и ``UNKNOWN_SESSION_ID`` → False (не сессия —
     файлов не создаём, см. ``_session_flags_enabled``)."""
@@ -514,32 +520,6 @@ def logging_enabled(session_id: str) -> bool:
         from .config import ADAPTER_DEBUG
 
         return bool(ADAPTER_DEBUG)
-
-
-def parts_enabled(session_id: str) -> bool:
-    """Действующий флаг ADAPTER_DEBUG_PARTS для сессии (v0.9.5).
-
-    Смысл — как у ``logging_enabled``: снимок значения, взятого при
-    образовании сессии (v0.9.8). Глобальный ``config.ADAPTER_DEBUG_PARTS``
-    функционал НЕ включает: он лишь попадает в снимок новой сессии. Раньше
-    внешние гейты вызовов ``write_debug_json`` читали его напрямую — из-за
-    этого сессионный флаг не мог включить сбор, а глобальный включал его
-    всем сессиям; v0.9.8 убрала эти гейты.
-
-    v0.9.6 (задача 6): Parts — подробная запись ПОВЕРХ обычных логов, без
-    активного Log он не работает. Гейт ``logging_enabled`` встроен сюда, а не
-    оставлен вызывающему (write_debug_json), чтобы инвариант «Parts ⊆ Log»
-    соблюдался у ЛЮБОГО потребителя (в т.ч. прямых вызовов в тестах)."""
-    if not logging_enabled(session_id):
-        return False
-    try:
-        from . import session_settings
-
-        return bool(session_settings.effective(session_id, "ADAPTER_DEBUG_PARTS"))
-    except Exception:
-        from .config import ADAPTER_DEBUG_PARTS
-
-        return bool(ADAPTER_DEBUG_PARTS)
 
 
 def write_warn_file(
@@ -556,7 +536,7 @@ def write_warn_file(
     Тот же безусловный канал, что и инциденты (write_error_file): файл
     session-<ts>-<safe8>.err, общий _session_file_ts сессии, полные запрос и
     текст события без обрезки по ADAPTER_DEBUG_TRIM, вне
-    ADAPTER_DEBUG_ENABLE/PARTS. В отличие от ERROR-блока у WARN нет
+    ADAPTER_DEBUG_ENABLE. В отличие от ERROR-блока у WARN нет
     final_status — событие-предупреждение наблюдается и на успешном ответе
     (200): сюда пишутся диагностические проверки адаптера —
     [WARN] First message is NOT system: <role> (server.py, инвариант

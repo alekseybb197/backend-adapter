@@ -53,10 +53,11 @@ This file provides guidance to [CC] () when working with code in this repository
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны
   и обрезаются до `ADAPTER_DEBUG_TRIM`; файловая запись гейтится
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
-  `*.parts` — дампы). Корень данных — `ADAPTER_DATA_ROOT` (v0.9.9,
+  `*.parts` — дампы; все три — одним флагом, v0.9.10). Корень данных —
+  `ADAPTER_DATA_ROOT` (v0.9.9,
   переименован из `ADAPTER_DEBUG_LOGPATH`, который больше не читается; дефолт
   `./tmp/adapter`), внутри — две подпапки: `log/` (всё файловое о сессиях) и
-  `var/` (состояние). Вне ENABLE/PARTS/TRIM в `log/` живут безусловные
+  `var/` (состояние). Вне ENABLE/TRIM в `log/` живут безусловные
   артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1); в `var/` —
   JSON-результат опроса списка моделей (`probe_json.py`), PID-файл (`daemon.py` —
   пишется при ЛЮБОМ запуске, не только в detach; удаляется при штатном
@@ -89,15 +90,15 @@ This file provides guidance to [CC] () when working with code in this repository
 
 **Сессия — единица управления (v0.9.5):** `session_registry.py` ведёт таблицу
 сессий (страница `/sessions`), `session_settings.py` хранит пер-сессионные
-переопределения Log/Parts/TARGET (живут в памяти процесса). **Две модели
-наследования (v0.9.8):** Log/Parts — **снимок** общих флагов в момент
-образования сессии (`ensure_session`), дальше сессия живёт своими значениями,
-состояния `inherit` нет; глобальные `ADAPTER_DEBUG`/`ADAPTER_DEBUG_PARTS` —
+переопределения Log/TARGET (живут в памяти процесса). **Две модели
+наследования (v0.9.8):** Log — **снимок** общего флага в момент
+образования сессии (`ensure_session`), дальше сессия живёт своим значением,
+состояния `inherit` нет; глобальный `ADAPTER_DEBUG` —
 лишь шаблон для **новых** сессий (ничего не включают/выключают на ходу).
 TARGET-поля — **живое** наследование (два состояния: не задано / значение;
 v0.9.9 — «вернуться к общему» = снять переопределение, а WEBUI снимает запись
-при выборе значения, равного текущему общему). Флаги логирования читаются через
-`session_log.logging_enabled`/`parts_enabled` (запрос без `session_id` или с
+при выборе значения, равного текущему общему). Флаг логирования читается через
+`session_log.logging_enabled` (запрос без `session_id` или с
 `unknown` не пишет файлы вообще); TARGET — через `routing.decide`
 при непустом `session_id`. `.err` пишется для **любой** ошибки распознанного
 входного пути (`_req_ctx.err_eligible`) и **не** зависит от
@@ -110,11 +111,9 @@ v0.9.9 — «вернуться к общему» = снять переопре�
 — на старте файл применяется **поверх env** (`apply_on_startup`, вызывается из
 `backend-adapter.py` до `_init_multi_backends`), каждое изменение `/config`
 персистится через колбек `config.set_on_change` (config остаётся корнем DAG).
-Пер-сессионные настройки НЕ сохраняются. **Связка Log/Parts:** Parts активен
-только при Log — каскад на двух уровнях: глобальный в
-`config.set_runtime_config` и пер-сессионный в `session_settings.set_config`
-(Parts=on поднимает Log, Log=off гасит Parts); финальный гейт —
-`session_log.parts_enabled` (проверяет `logging_enabled`). **Валидация env** (`env_validate.py`) — строгая, до
+Пер-сессионные настройки НЕ сохраняются. **Один флаг логирования:** связи
+Log/Parts и каскада больше нет (v0.9.10) — `*.parts`-дампы пишутся вместе с
+логами по единственному гейту `session_log.logging_enabled`. **Валидация env** (`env_validate.py`) — строгая, до
 импорта config: невалидный int/bool → `[FATAL]` + `sys.exit(1)`.
 
 **Инвариант DAG:** база без внутренних зависимостей при импорте — `redact.py`,
@@ -122,8 +121,11 @@ v0.9.9 — «вернуться к общему» = снять переопре�
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
 модули зависят минимум от одного из них. `session_settings.py`,
 `session_registry.py`, `state_store.py` и `env_validate.py` — листы DAG
-(`env_validate` — stdlib-only, остальные импортируют только `config`). Новые
-модули — без циклов (dependency graph — `docs/architecture.md` §10).
+(`env_validate` — stdlib-only, остальные импортируют только `config`).
+`artifact_refresh.py` (v0.9.10) — тоже лист (`config`; `artifact_tree`
+импортируется внутри функций — разрыв цикла `session_log` → `artifact_refresh`
+→ `artifact_tree`). Новые модули — без циклов (dependency graph —
+`docs/architecture.md` §10).
 
 **WEBUI** (поднимается всегда — флага отключения нет): ядро `webserver.py`
 (реестр эндпоинтов, `serve()`) в daemon-потоке + модули-эндпоинты

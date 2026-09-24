@@ -11,14 +11,15 @@ webui_config_api.py — эндпойнт "/config" общего веб-серв�
 их смена на лету требует пересоздания слушателей/переинициализации и сорвала
 бы активные соединения.
 
-Особый случай — Log/Parts (v0.9.8): это не выключатели функционала, а ШАБЛОН
-для новых сессий. Сессия получает их значения в момент образования (снимок
-общих флагов, см. session_settings.ensure_session) и дальше живёт своими;
-переключение здесь уже работающих сессий не трогает — их Log/Parts
-управляются на странице /sessions.
+Особый случай — Log (v0.9.8): это не выключатель функционала, а ШАБЛОН
+для новых сессий. Сессия получает его значение в момент образования (снимок
+общего флага, см. session_settings.ensure_session) и дальше живёт своим;
+переключение здесь уже работающих сессий не трогает — их Log
+управляется на странице /sessions. (v0.9.10: второй флаг — Parts — снят;
+части протокола ``*.parts`` собираются вместе с логами по тому же флагу.)
 
 Эндпойнт:
-  GET /config → HTML-форма с текущими значениями пула (13 полей: 6 bool
+  GET /config → HTML-форма с текущими значениями пула (12 полей: 5 bool
                 checkbox + 3 int input + 1 text (маппинг моделей) + 3 select
                 для TARGET-переменных маршрутизации входов)
   POST /config → application/x-www-form-urlencoded или JSON, применяет валидные
@@ -52,7 +53,6 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
     # TARGET-переменные маршрутизации входов, рендерятся выпадающим списком).
     bool_fields = [
         "ADAPTER_DEBUG",
-        "ADAPTER_DEBUG_PARTS",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE",
         "ADAPTER_STREAMING_ENABLE",
         "ADAPTER_STREAM_INCLUDE_USAGE",
@@ -79,11 +79,11 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 
     # Описания полей для подсказок
     field_descriptions = {
-        # v0.9.8: глобальные Log/Parts — не выключатели функционала, а шаблон
-        # для НОВЫХ сессий: существующие держат значения, взятые при своём
-        # образовании (страница /sessions). Формулировки это подчёркивают.
-        "ADAPTER_DEBUG": "Файловая запись логов для НОВЫХ сессий (полные, без обрезки); консоль — всегда, с обрезкой TRIM",
-        "ADAPTER_DEBUG_PARTS": "Дампы частей протокола для НОВЫХ сессий — .json+.yaml по каждому тегу",
+        # v0.9.8: глобальный Log — не выключатель функционала, а шаблон
+        # для НОВЫХ сессий: существующие держат значение, взятое при своём
+        # образовании (страница /sessions). Формулировка это подчёркивает.
+        # v0.9.10: флаг один — логи, трейсы и дампы частей (*.parts) вместе.
+        "ADAPTER_DEBUG": "Файловая запись логов, трейсов и дампов частей (*.parts) для НОВЫХ сессий (полные, без обрезки); консоль — всегда, с обрезкой TRIM",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "Отключить санитайзер логов (секреты в открытом виде!)",
         "ADAPTER_STREAMING_ENABLE": "Рубильник стриминга: 0 — всегда stream=False (аварийный)",
         "ADAPTER_STREAM_INCLUDE_USAGE": "Передавать usage-токены в стриме (stream_options)",
@@ -105,20 +105,10 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_MODELS_MAPPING": "Маппинг моделей agent→backend: agent:backend,agent2:backend2 (пусто — маппинг отключён)",
     }
 
-    # Parts — подробная запись ПОВЕРХ логов (v0.9.6): при снятом Log чекбокс
-    # показывается выключенным и disabled. Согласованность обеспечивает
-    # серверный каскад (config.set_runtime_config), но env мог задать
-    # несогласованную пару (PARTS=1 при DEBUG=0) — рендер это выравнивает.
-    parts_locked = not current_values.get("ADAPTER_DEBUG", False)
-
     rows = []
     for name in bool_fields:
         value = current_values.get(name, False)
         desc = field_descriptions.get(name, "")
-        # Parts при выключенном Log — всегда «off» + disabled (каскад).
-        locked = name == "ADAPTER_DEBUG_PARTS" and parts_locked
-        if locked:
-            value = False
         checked = "checked" if value else ""
         # Hidden-«сосед» bool-поля несёт КОНСТАНТУ "0" (выключено), а не
         # текущее состояние: снятая галка просто отсутствует в теле POST, и
@@ -129,12 +119,11 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         # (как было до v0.9.6) перебивал галку и переключение через форму не
         # работало вовсе — только JSON-API.
         hidden_value = "0"
-        dis = " disabled" if locked else ""
         rows.append(f"""
       <tr>
         <td><label for="{name}">{html.escape(name)}</label></td>
         <td><input type="hidden" name="_{name}" value="{hidden_value}">
-            <input type="checkbox" id="{name}" name="{name}" value="1" {checked}{dis}>
+            <input type="checkbox" id="{name}" name="{name}" value="1" {checked}>
         </td>
         <td style="color:#666; font-size: 13px">{html.escape(desc)}</td>
         <td style="color:#999; font-size: 12px">текущее: {value}</td>
@@ -225,45 +214,17 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
 <p style="color:#888; margin-top: 16px; font-size: 13px">
   Изменения применяются немедленно и не требуют перезапуска адаптера.
   Неизвестные ключи и значения неверного типа игнорируются.
-  <b>Parts</b> работает только при включённом <b>Log</b>.
 </p>
 <p style="color:#888; margin-top: 8px; font-size: 13px">
-  <b>Log</b>/<b>Parts</b> здесь — шаблон для <b>новых</b> сессий: сессия
-  получает эти значения в момент образования и дальше живёт своими
+  <b>Log</b> здесь — шаблон для <b>новых</b> сессий: сессия получает это
+  значение в момент образования и дальше живёт своим
   (управление — на странице <a href="/sessions">Сессии 🗂</a>). Переключение
-  этих флагов не включает и не выключает запись у уже работающих сессий.
+  этого флага не включает и не выключает запись у уже работающих сессий.
 </p>
-{log_parts_script}
 </body>
 </html>
 """
     return html_page.encode("utf-8")
-
-
-# Минимальный inline-JS связки Log/Parts (v0.9.6): переключает disabled у
-# чекбокса Parts при клике по Log, не дожидаясь POST. Источник истины —
-# серверный каскад (config.set_runtime_config), этот скрипт лишь делает
-# намерение видимым сразу: снятый Log гасит и блокирует Parts, включение Log
-# снова делает Parts доступным. Серверный рендер уже выставил начальное
-# состояние (disabled при Log=off) — скрипт синхронизируется с ним по DOM.
-# hidden-«сосед» Parts править НЕ нужно: он несёт константу "0" и в POST идёт
-# ПЕРВЫМ, а checkbox (если отмечен) — вторым; разбор присваивает ключ в
-# порядке тела, поэтому отмеченная галка перекрывает hidden, снятая — нет.
-log_parts_script = """
-<script>
-  (function () {
-    var log = document.getElementById("ADAPTER_DEBUG");
-    var parts = document.getElementById("ADAPTER_DEBUG_PARTS");
-    if (!log || !parts) { return; }
-    function sync() {
-      parts.disabled = !log.checked;
-      if (!log.checked) { parts.checked = false; }
-    }
-    log.addEventListener("change", sync);
-    sync();
-  })();
-</script>
-"""
 
 
 # ==================== ЭНДПОЙНТ ====================

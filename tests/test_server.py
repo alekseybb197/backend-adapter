@@ -2131,13 +2131,14 @@ class TestErrFileProtocol(ServerSetupMixin):
         assert "backend stream broke" in content
 
 
-class TestPartsGatePerSession(ServerSetupMixin):
-    """Гейт сбора частей — СЕССИОННЫЙ (v0.9.8, требование 5).
+class TestLogGatePerSession(ServerSetupMixin):
+    """Гейт файловой записи (логи + части) — СЕССИОННЫЙ (v0.9.8, требование 5;
+    один флаг — v0.9.10).
 
-    Глобальный ``ADAPTER_DEBUG_PARTS`` функционал не включает: он лишь
-    попадает в СНИМОК новой сессии (``ensure_session``). Здесь канал записи
-    ЖИВОЙ (write_debug_json не мокается) и направлен в tmp_path, поэтому
-    проверяется реальное появление ``*.parts/*.json`` на диске."""
+    Глобальный ``ADAPTER_DEBUG`` функционал не включает: он лишь попадает в
+    СНИМОК новой сессии (``ensure_session``). Здесь канал записи ЖИВОЙ
+    (write_debug_json не мокается) и направлен в tmp_path, поэтому проверяется
+    реальное появление ``*.parts/*.json`` на диске."""
 
     def _setup(self, fake_backend, tmp_path):
         from backend_adapter import session_log as session_log_mod
@@ -2161,12 +2162,11 @@ class TestPartsGatePerSession(ServerSetupMixin):
     def _parts_files(self, tmp_path):
         return sorted(tmp_path.glob("*.parts/*.json"))
 
-    def test_global_parts_seeds_new_session(self, fake_backend, tmp_path):
-        """Глобально Parts=on → НОВАЯ сессия получает его снимком и пишет
-        дампы (шаблон для новых сессий)."""
+    def test_global_log_seeds_new_session(self, fake_backend, tmp_path):
+        """Глобально Log=on → НОВАЯ сессия получает его снимком и пишет дампы
+        (шаблон для новых сессий)."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_DEBUG = True
-        cfg.ADAPTER_DEBUG_PARTS = True
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "c1", "model": "test-model",
@@ -2180,16 +2180,13 @@ class TestPartsGatePerSession(ServerSetupMixin):
                 server.shutdown()
         assert self._parts_files(tmp_path), "дампы новой сессии должны появиться"
 
-    def test_session_flag_off_beats_global_parts_on(self, fake_backend, tmp_path):
-        """Обратный случай: глобально Parts=on, но сессия выключила его
-        явно — дампов НЕТ (глобальный флаг не включает функционал)."""
+    def test_session_log_off_beats_global_on(self, fake_backend, tmp_path):
+        """Обратный случай: глобально Log=on, но сессия выключила его явно —
+        дампов НЕТ (глобальный флаг не включает функционал)."""
         from backend_adapter import config as cfg
         from backend_adapter import session_settings
         cfg.ADAPTER_DEBUG = True
-        cfg.ADAPTER_DEBUG_PARTS = True
-        session_settings.set_config(
-            "sess-parts-off", {"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_PARTS": False}
-        )
+        session_settings.set_config("sess-parts-off", {"ADAPTER_DEBUG": False})
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "c1", "model": "test-model",
@@ -2203,14 +2200,13 @@ class TestPartsGatePerSession(ServerSetupMixin):
                 server.shutdown()
         assert self._parts_files(tmp_path) == []
 
-    def test_session_flag_on_writes_without_global(self, fake_backend, tmp_path):
-        """Сессионный Parts=on при ГЛОБАЛЬНО выключенном — дампы пишутся
+    def test_session_log_on_writes_without_global(self, fake_backend, tmp_path):
+        """Сессионный Log=on при ГЛОБАЛЬНО выключенном — дампы пишутся
         (до v0.9.8 внешний гейт читал глобальный флаг и глушил их)."""
         from backend_adapter import config as cfg
         from backend_adapter import session_settings
         cfg.ADAPTER_DEBUG = False
-        cfg.ADAPTER_DEBUG_PARTS = False
-        session_settings.set_config("sess-parts-local", {"ADAPTER_DEBUG_PARTS": True})
+        session_settings.set_config("sess-parts-local", {"ADAPTER_DEBUG": True})
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "c1", "model": "test-model",
@@ -2224,12 +2220,31 @@ class TestPartsGatePerSession(ServerSetupMixin):
                 server.shutdown()
         assert self._parts_files(tmp_path), "сессионный флаг обязан включить сбор"
 
+    def test_removed_parts_key_alone_writes_nothing(self, fake_backend, tmp_path):
+        """Снятый ADAPTER_DEBUG_PARTS (v0.9.10) ничего не включает: при
+        выключенном Log сессия с этим ключом дампов не создаёт."""
+        from backend_adapter import config as cfg
+        from backend_adapter import session_settings
+        cfg.ADAPTER_DEBUG = False
+        session_settings.set_config("sess-parts-gone", {"ADAPTER_DEBUG_PARTS": True})
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
+        fake_backend.completions_response = {
+            "id": "c1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup(fake_backend, tmp_path)
+            try:
+                assert self._request(server, "sess-parts-gone")["status"] == 200
+            finally:
+                server.shutdown()
+        assert self._parts_files(tmp_path) == []
+
     def test_no_session_header_writes_nothing(self, fake_backend, tmp_path):
         """Запрос без заголовка сессии дампов не создаёт даже при глобально
-        включённых Log+Parts (логирование — сессионная функция)."""
+        включённом Log (логирование — сессионная функция)."""
         from backend_adapter import config as cfg
         cfg.ADAPTER_DEBUG = True
-        cfg.ADAPTER_DEBUG_PARTS = True
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         fake_backend.completions_response = {
             "id": "c1", "model": "test-model",

@@ -5,13 +5,13 @@ page (v0.9.5) and its per-session control APIs.
 До v0.9.5 таблица Sessions жила секцией статус-страницы "/" (тесты были в
 test_webui_status.py — см. TestSessionsSection/TestSessionsSnapshotAPI/
 TestSessionDeleteAPI в истории). Теперь это ОТДЕЛЬНАЯ страница "/sessions"
-и единица УПРАВЛЕНИЯ сессией: пер-сессионные Log/Parts/TARGET (см.
+и единица УПРАВЛЕНИЯ сессией: пер-сессионные Log/TARGET (см.
 session_settings), ⏪ сброс счётчиков строки, 🗑 удаление строки, ссылка
 «Ошибок» на .err-файл (открывается в новом окне).
 
 Покрытие:
   - TestSessionSelectHelpers — чистые хелперы селектов/ячеек;
-  - TestSessionsRowsHtml — рендер строк таблицы (13 колонок, data-атрибуты,
+  - TestSessionsRowsHtml — рендер строк таблицы (12 колонок, data-атрибуты,
     экранирование, селекты, кнопки ⏪/🗑, ссылка .err);
   - TestSessionsPage — GET "/sessions": заголовок, навигация, поллинг;
   - TestSessionsSnapshotAPI — GET /api/sessions/snapshot (+ errors_html);
@@ -208,11 +208,10 @@ def _ctx():
 
 class TestSessionSelectHelpers:
     def test_bool_options_has_no_inherit(self):
-        # v0.9.8: у Log/Parts только on/off — состояния «inherit» нет
-        # (значение сессии всегда материализовано снимком при образовании).
+        # v0.9.8: у Log только on/off — состояния «inherit» нет (значение
+        # сессии всегда материализовано снимком при образовании).
         config, ws = _fresh_modules()
         assert ws._bool_options("ADAPTER_DEBUG") == (("1", "on"), ("0", "off"))
-        assert ws._bool_options("ADAPTER_DEBUG_PARTS") == (("1", "on"), ("0", "off"))
 
     def test_target_options_are_plain_domain(self):
         # v0.9.9: у TARGET нет состояния «inherit» — селект несёт ровно домен
@@ -322,14 +321,14 @@ class TestSessionsRowsHtml:
         html = ws._sessions_rows_html([])
         assert "пока нет данных" in html
         assert "таблица заполняется при обращениях агентов" in html
-        assert 'colspan="13"' in html
+        assert 'colspan="12"' in html
 
-    def test_row_has_13_cells_and_data_attrs(self):
+    def test_row_has_12_cells_and_data_attrs(self):
         config, ws = _fresh_modules()
         sid = "1ad13437-1111-2222-3333-444455556666"
         row = _row(sid)
         html = ws._sessions_rows_html([row])
-        assert html.count("<td") == 13
+        assert html.count("<td") == 12
         assert f'<tr data-session="{sid}" data-key=' in html
         assert f'<code title="{sid}">{sid[:8]}</code>' in html
         assert 'data-calls="1"' in html
@@ -342,45 +341,16 @@ class TestSessionsRowsHtml:
         assert 'data-route="passthrough messages→messages"' in html
         assert 'data-seen="2026-09-09 10:00:00"' in html
 
-    def test_row_has_log_parts_target_selects(self):
+    def test_row_has_log_target_selects(self):
         config, ws = _fresh_modules()
         html = ws._sessions_rows_html([_row("sess-1")])
         assert "name=ADAPTER_DEBUG" in html
-        assert "name=ADAPTER_DEBUG_PARTS" in html
         assert "name=ADAPTER_MESSAGES_TARGET" in html
         assert "this.form.submit()" in html
-
-    def test_parts_cell_disabled_when_log_off(self):
-        # v0.9.6 (задача 6): при Log=off селект Parts выключен и показывает
-        # «off» — Parts не может быть активен без Log.
-        config, ws = _fresh_modules()
-        config.ADAPTER_DEBUG = False
-        html = ws._parts_cell_html("sess-1")
-        assert "name=ADAPTER_DEBUG_PARTS" in html
-        assert "disabled" in html
-        assert '<option value="0" selected>' in html
-
-    def test_parts_cell_enabled_when_log_on(self):
-        config, ws = _fresh_modules()
-        config.ADAPTER_DEBUG = True
-        html = ws._parts_cell_html("sess-1")
-        assert "name=ADAPTER_DEBUG_PARTS" in html
-        assert "disabled" not in html
-        # Хранимое переопределение Parts отражено как выбранное.
-        from backend_adapter import session_settings
-        session_settings.set_config("sess-2", {"ADAPTER_DEBUG_PARTS": True})
-        html2 = ws._parts_cell_html("sess-2")
-        assert '<option value="1" selected>' in html2
-
-    def test_parts_cell_disabled_when_session_log_off(self):
-        # Пер-сессионный Log=off (переопределение) тоже блокирует Parts, даже
-        # если общая настройка Log=on.
-        config, ws = _fresh_modules()
-        config.ADAPTER_DEBUG = True
-        from backend_adapter import session_settings
-        session_settings.set_config("sess-3", {"ADAPTER_DEBUG": False})
-        html = ws._parts_cell_html("sess-3")
-        assert "disabled" in html
+        # v0.9.10: второй колонки Parts больше нет — ни селекта, ни гейта
+        # «Parts без Log», ни вспомогательной ячейки.
+        assert "ADAPTER_DEBUG_PARTS" not in html
+        assert not hasattr(ws, "_parts_cell_html")
 
     def test_escapes_session_and_agent(self):
         config, ws = _fresh_modules()
@@ -422,11 +392,13 @@ class TestSessionsPage:
             assert status == 200
             for header in ("Сессия", "Агент", "Модель", "Бэкенд",
                            "Входной эндпойнт", "Маршрут", "Последнее обращение",
-                           "C", "E", "Log", "Parts", "TARGET", "Actions"):
+                           "C", "E", "Log", "TARGET", "Actions"):
                 assert f"<th>{header}</th>" in body
             # Заголовки укорочены (v0.9.6, задача 5).
             assert "<th>Вызовов</th>" not in body
             assert "<th>Ошибок</th>" not in body
+            # v0.9.10: колонка Parts снята — 12 колонок.
+            assert "<th>Parts</th>" not in body
             assert "s-1" in body
         finally:
             httpd.shutdown()
@@ -861,31 +833,30 @@ class TestSessionSettingsAPI:
     def test_json_bulk_values_and_clear(self, tmp_path):
         config, ws = _fresh_modules()
         from backend_adapter import session_settings
-        session_settings.set_config("s-1", {"ADAPTER_DEBUG_PARTS": True})
+        session_settings.set_config("s-1", {"ADAPTER_DEBUG": True})
         httpd, port = _start_server(str(tmp_path))
         try:
             payload = json.dumps(
                 {"session": "s-1",
-                 "values": {"ADAPTER_DEBUG": True, "ADAPTER_COMPLETIONS_TARGET": "none"},
-                 "clear": ["ADAPTER_DEBUG_PARTS"]}
+                 "values": {"ADAPTER_COMPLETIONS_TARGET": "none"},
+                 "clear": ["ADAPTER_DEBUG"]}
             ).encode()
             status, _, body = _http_post_body(
                 port, "/api/sessions/settings", payload, "application/json"
             )
             assert status == 200
             overrides = json.loads(body)["overrides"]
-            assert overrides["ADAPTER_DEBUG"] is True
             assert overrides["ADAPTER_COMPLETIONS_TARGET"] == "none"
-            # v0.9.8: у снимка Log/Parts clear = свежий снимок общего тумблера
+            # v0.9.8: у снимка Log clear = свежий снимок общего тумблера
             # (по умолчанию выключен), а не удаление ключа из строки сессии.
-            assert overrides["ADAPTER_DEBUG_PARTS"] is False
+            assert overrides["ADAPTER_DEBUG"] is False
         finally:
             httpd.shutdown()
             httpd.server_close()
 
     def test_json_clear_target_removes_key(self, tmp_path):
         # У TARGET-поля (живое наследование) clear именно УДАЛЯЕТ запись —
-        # это и отличает его от снимка Log/Parts.
+        # это и отличает его от снимка Log.
         config, ws = _fresh_modules()
         from backend_adapter import session_settings
         session_settings.set_config("s-1", {"ADAPTER_MESSAGES_TARGET": "passthrough"})
