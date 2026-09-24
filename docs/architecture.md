@@ -91,6 +91,9 @@ backend_adapter/
 ├── env_validate.py         ← строгая валидация env при старте (v0.9.6, §6.14):
 │                             невалидный int/bool → [FATAL] + sys.exit(1);
 │                             лист DAG — stdlib only, вызывается ДО импорта config
+├── artifact_refresh.py     ← фоновая дебаунсная отрисовка артефактов (v0.9.10, §8.5):
+│                             notify(parts_dir) из write_debug_json; лист DAG —
+│                             импортирует config, artifact_tree — внутри функций
 └── artifact_tree.py        ← artifact-tree generator, SPLIT INTO A PACKAGE (below):
     artifact_tree_common.py      ← shared utils: volatility patterns, sha12, text extract, colors
     artifact_tree_registry.py    ← ArtifactRegistry: dedup registry + protocol-id links
@@ -1103,6 +1106,19 @@ reform).
 - Thread-safe: uses `threading.Lock` on the per-session counter
 - Full lines also land in `session-*.log` (`.parts` dumps are the machine-readable
   twin of the debug blocks)
+- **Artifact trees are built in the background, on the same switch** (v0.9.10):
+  after each successfully written part, `session_log.write_debug_json` calls
+  `artifact_refresh.notify(parts_dir)` (inside `contextlib.suppress`), which
+  merely marks the directory as dirty and lazily starts a single daemon thread.
+  That thread polls once a second and runs `artifact_tree.generate(parts_dir,
+  verbose=False)` for a directory once `config.ADAPTER_ARTIFACT_DEBOUNCE`
+  seconds (default 20) have passed since its **last** part write — a burst of
+  parts from one turn yields one re-render. Rendering therefore never blocks a
+  proxy request, and generation errors are logged as WARNING without touching
+  either the worker or the part write. The lazy `/session` path in
+  `session_viewer.find_or_generate_sessions()` remains a safety net (adapter
+  restarted, worker has not seen the directory yet) and the standalone CLI path
+  (`python -m backend_adapter.artifact_tree`) is unchanged.
 
 ### 8.6 Runtime config pool + WEBUI endpoint `/config` (`webui_config_api.py`)
 
@@ -1231,6 +1247,9 @@ backend-adapter.py
   ├── session_log.py     (no internal deps — PyYAML; session_settings читается
   │                       локально внутри logging_enabled)
   ├── daemon.py          (no internal deps — stdlib only)
+  ├── artifact_refresh.py → config (лист DAG; artifact_tree импортирует
+  │                       внутри функций — разрыв цикла session_log →
+  │                       artifact_refresh → artifact_tree)
   ├── webserver.py       → session_viewer, webui_status, webui_sessions,
   │                       webui_errors, webui_config_api, webui_ops
   │                       (WEBUI core: serve() импортирует встроенные

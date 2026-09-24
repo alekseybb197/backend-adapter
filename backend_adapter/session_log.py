@@ -305,6 +305,15 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
     with open(yaml_path, "w", encoding="utf-8") as f:
         f.write(yaml_text)
 
+    # Пометить директорию частей для фоновой отрисовки артефактов (v0.9.10).
+    # Импорт внутри функции — разрыв цикла: artifact_refresh импортирует
+    # config, а artifact_tree — только внутри своих функций. Ошибка пометки
+    # не влияет на запись части: канал наблюдательный.
+    with contextlib.suppress(Exception):
+        from . import artifact_refresh
+
+        artifact_refresh.notify(parts_path)
+
 
 # ==================== .err-файлы инцидентов и WARN-событий ====================
 # Безусловный канал сессии (v0.9.0 — инциденты бэкенда, v0.9.1 —

@@ -190,7 +190,7 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (35 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (36 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
 │   ├── routing.py             # Входные эндпоинты/TARGET: decide() по TARGET
@@ -223,6 +223,7 @@ backend-adapter/
 │   ├── artifact_tree_plantuml.py  # PlantUML-рендер
 │   ├── artifact_tree_graphviz.py  # PNG через plantuml/graphviz-fallback
 │   ├── artifact_tree_html.py      # интерактивный tree.html
+│   ├── artifact_refresh.py    # фоновая дебаунсная отрисовка артефактов (v0.9.10)
 │   └── __init__.py            # Module-level proxy
 ├── install.sh                   # Однострочный установщик (curl | bash)
 ├── requirements.txt             # Зависимости (единственная — PyYAML)

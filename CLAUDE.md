@@ -121,8 +121,11 @@ Log/Parts и каскада больше нет (v0.9.10) — `*.parts`-дамп
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
 модули зависят минимум от одного из них. `session_settings.py`,
 `session_registry.py`, `state_store.py` и `env_validate.py` — листы DAG
-(`env_validate` — stdlib-only, остальные импортируют только `config`). Новые
-модули — без циклов (dependency graph — `docs/architecture.md` §10).
+(`env_validate` — stdlib-only, остальные импортируют только `config`).
+`artifact_refresh.py` (v0.9.10) — тоже лист (`config`; `artifact_tree`
+импортируется внутри функций — разрыв цикла `session_log` → `artifact_refresh`
+→ `artifact_tree`). Новые модули — без циклов (dependency graph —
+`docs/architecture.md` §10).
 
 **WEBUI** (поднимается всегда — флага отключения нет): ядро `webserver.py`
 (реестр эндпоинтов, `serve()`) в daemon-потоке + модули-эндпоинты

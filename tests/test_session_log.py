@@ -205,6 +205,46 @@ class TestWriteDebugJson:
         files = list(parts.glob("*.json"))
         assert len(files) == 0
 
+    def test_notify_called_on_success(self, tmp_path):
+        """Успешная запись части дёргает artifact_refresh.notify(parts_dir)
+        (жизненная точка привязки фоновой отрисовки, v0.9.10)."""
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import artifact_refresh, config, session_log
+        session_log._DEBUG_IS_DIR = True
+        session_log._DEBUG_PATH = str(tmp_path)
+        config.ADAPTER_DEBUG = True
+        parts = tmp_path / "parts"
+        parts.mkdir(exist_ok=True)
+        session_log._parts_dir = {"sess1_jsonparts": str(parts)}
+        session_log._debug_json_seq = 0
+
+        with mock.patch.object(artifact_refresh, "notify") as notify:
+            session_log.write_debug_json("sess1", "TEST", {"key": "value"})
+        notify.assert_called_once_with(str(parts))
+
+    def test_notify_failure_does_not_break_write(self, tmp_path):
+        """Канал наблюдательный: падение notify не роняет запись части."""
+        import sys
+        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
+        for n in to_remove:
+            del sys.modules[n]
+        from backend_adapter import artifact_refresh, config, session_log
+        session_log._DEBUG_IS_DIR = True
+        session_log._DEBUG_PATH = str(tmp_path)
+        config.ADAPTER_DEBUG = True
+        parts = tmp_path / "parts"
+        parts.mkdir(exist_ok=True)
+        session_log._parts_dir = {"sess1_jsonparts": str(parts)}
+        session_log._debug_json_seq = 0
+
+        with mock.patch.object(artifact_refresh, "notify", side_effect=RuntimeError("boom")):
+            session_log.write_debug_json("sess1", "TEST", {"key": "value"})
+        assert len(list(parts.glob("*.json"))) == 1
+        assert len(list(parts.glob("*.yaml"))) == 1
+
 
 class TestOpenSessionFile:
     """Tests for _open_session_file() / _close_session_file()."""
