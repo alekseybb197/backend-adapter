@@ -190,7 +190,7 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (32 модуля, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (35 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
 │   ├── routing.py             # Входные эндпоинты/TARGET: decide() по TARGET
@@ -199,7 +199,7 @@ backend-adapter/
 │   ├── tracer.py              # JSONL trace-логирование, tool-use causality
 │   ├── session_log.py         # Per-session логи с FIFO eviction + .err-канал
 │   ├── session_registry.py    # Таблица сессий (страница /sessions): строка-кортеж
-│   ├── session_settings.py    # Пер-сессионные переопределения Log/Parts/TARGET
+│   ├── session_settings.py    # Пер-сессионные переопределения Log/TARGET
 │   ├── daemon.py              # Detach (double fork)
 │   ├── shutdown.py            # Обработка Ctrl-C/SIGTERM
 │   ├── logger.py              # Debug-логирование с redaction
@@ -207,6 +207,7 @@ backend-adapter/
 │   ├── webserver.py           # WEBUI-ядро: общий веб-сервер, роутинг эндпойнтов, CLI
 │   ├── webui_status.py        # WEBUI-эндпойнт "/": статус (версия, LLM, модели)
 │   ├── webui_sessions.py      # WEBUI "/sessions": таблица сессий + /api/sessions/*
+│   ├── webui_errors.py        # WEBUI "/errors/<имя>": превью .err-файла сессии
 │   ├── webui_ops.py           # WEBUI health-эндпоинты "/healthz" "/health" "/live" "/ready"
 │   ├── webui_config_api.py    # WEBUI-эндпойнт "/config": runtime-пул debug-переменных
 │   ├── prometheus_exporter.py # Prometheus-метрики /metrics (отдельный слушатель, stdlib-only)
@@ -678,9 +679,9 @@ export ADAPTER_DEBUG_ENABLE=0
 # export ADAPTER_PIDFILE="adapter.pid"
 
 # JSON/YAML-дампы per-session ВСЕХ логгируемых частей протокола (BODY,
-# TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE — .json и .yaml парой;
-# требуют ADAPTER_DEBUG_ENABLE=1; ложатся в ADAPTER_DATA_ROOT/log)
-# export ADAPTER_DEBUG_PARTS=1
+# TOOL_RESULT, OPENAI_BODY, FETCH_RAW, RESPONSE — .json и .yaml парой)
+# собираются ВМЕСТЕ С ЛОГАМИ по ADAPTER_DEBUG_ENABLE=1 (v0.9.10; отдельного
+# флага ADAPTER_DEBUG_PARTS больше нет — заданное значение даёт лишь [WARN]).
 
 # Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий.
 # Поднимается ВСЕГДА (v0.8.6; флага ADAPTER_WEBUI_ENABLE больше нет) на 127.0.0.1:8765 —
@@ -800,7 +801,7 @@ export ADAPTER_MESSAGES_TARGET=completions
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
 # export ADAPTER_DATA_ROOT="./tmp/adapter"   # корень данных (лог-папка log/ + состояние var/) и корень WEBUI
-# export ADAPTER_DEBUG_PARTS=1    # per-session дампы .json+.yaml всех логгируемых частей
+# (ADAPTER_DEBUG_ENABLE=1 включает и *.parts-дампы — v0.9.10)
 # (ADAPTER_DEBUG_TRIM=3000 — лимит консольных строк; 0 — без обрезки; файл всегда полный)
 
 # --- Sanitizer (secret masking in logs) ---

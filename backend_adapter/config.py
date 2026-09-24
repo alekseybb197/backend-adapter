@@ -46,8 +46,8 @@ def log_dir() -> str:
 
     Живое чтение модульного глобала (не снимок): тесты и смена точки хранения
     должны видеть актуальный путь. Директория создаётся на старте
-    (backend-adapter.py), запись в неё — по гейтам ADAPTER_DEBUG_ENABLE/
-    ADAPTER_DEBUG_PARTS (см. session_log).
+    (backend-adapter.py), запись в неё — по гейту ADAPTER_DEBUG_ENABLE
+    (см. session_log).
     """
     return os.path.join(ADAPTER_DATA_ROOT, "log")
 
@@ -132,13 +132,19 @@ def trim_limit() -> int:
     return ADAPTER_DEBUG_TRIM
 
 
-# ADAPTER_DEBUG_PARTS — логический флаг: включить per-session дампы частей
-# протокола (.json и .yaml парой) для ВСЕХ логгируемых частей (BODY,
-# OPENAI_BODY, FETCH_RAW, TOOL_RESULT, RESPONSE — без фиксированного списка:
-# каждая пишущая точка сама решает, какой тег дампить). Срабатывает только
-# при ADAPTER_DEBUG_ENABLE=1, когда ADAPTER_DATA_ROOT задаёт директорию
-# (файлы кладутся в неё). Пусто / 0 / false — выкл.
-ADAPTER_DEBUG_PARTS = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_PARTS", ""))
+# Жёсткое удаление ADAPTER_DEBUG_PARTS (v0.9.10): второй флаг объёма записи
+# (per-session дампы частей протокола, *.parts) снят — части собираются ВМЕСТЕ
+# с логами по одному ADAPTER_DEBUG_ENABLE. Старое имя больше не читается:
+# задано → одна подсказка и старт, а не молчаливое «стало писаться больше/
+# меньше». Ключ ADAPTER_DEBUG_PARTS в state.yaml игнорируется state_store как
+# неизвестный и исчезает при ближайшей перезаписи файла.
+if os.environ.get("ADAPTER_DEBUG_PARTS", "").strip():
+    print(
+        "[WARN] ADAPTER_DEBUG_PARTS больше не читается (v0.9.10) — второй флаг "
+        "объёма записи снят: части протокола (*.parts) собираются вместе с "
+        "логами по одному ADAPTER_DEBUG_ENABLE. Старое значение игнорируется; "
+        "уберите переменную (переключатель — ADAPTER_DEBUG_ENABLE / /config)."
+    )
 
 # ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
 # Подмножество переменных выше, которые можно менять НЕ ПЕРЕЗАПУСКАЯ адаптер —
@@ -175,7 +181,6 @@ ADAPTER_DEBUG_PARTS = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_PART
 # поэтому 1 через /config сразу начнёт писать в него.)
 RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG",
-    "ADAPTER_DEBUG_PARTS",
     "ADAPTER_DEBUG_TRIM",
     "ADAPTER_SENSITIVE_LOGGING_ENABLE",
     "ADAPTER_STREAMING_ENABLE",
@@ -218,7 +223,6 @@ TARGET_ALLOWED_VALUES = ("messages", "completions", "responses", "passthrough", 
 # не «объём на сессию».
 SESSION_CONFIG_POOL = (
     "ADAPTER_DEBUG",
-    "ADAPTER_DEBUG_PARTS",
     "ADAPTER_MESSAGES_TARGET",
     "ADAPTER_COMPLETIONS_TARGET",
     "ADAPTER_RESPONSES_TARGET",
@@ -230,7 +234,6 @@ SESSION_CONFIG_POOL = (
 # «не задано» и есть живое наследование общей настройки.
 _SESSION_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
-    "ADAPTER_DEBUG_PARTS": bool,
     "ADAPTER_MESSAGES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
     "ADAPTER_COMPLETIONS_TARGET": ("enum", TARGET_ALLOWED_VALUES),
     "ADAPTER_RESPONSES_TARGET": ("enum", TARGET_ALLOWED_VALUES),
@@ -241,7 +244,6 @@ _SESSION_CONFIG_TYPES = {
 # значений (в пуле это три TARGET-переменные). Остальное отклоняем.
 _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
-    "ADAPTER_DEBUG_PARTS": bool,
     "ADAPTER_DEBUG_TRIM": int,
     "ADAPTER_SENSITIVE_LOGGING_ENABLE": bool,
     "ADAPTER_STREAMING_ENABLE": bool,
@@ -332,7 +334,7 @@ def set_runtime_config(**kwargs) -> dict:
     (v0.9.6, set_on_change): так state_store персистит новое состояние на
     диск, оставаясь в стороне от корня DAG.
     """
-    global ADAPTER_DEBUG, ADAPTER_DEBUG_PARTS, ADAPTER_DEBUG_TRIM
+    global ADAPTER_DEBUG, ADAPTER_DEBUG_TRIM
     global ADAPTER_SENSITIVE_LOGGING_ENABLE, ADAPTER_STREAMING_ENABLE
     global ADAPTER_STREAM_INCLUDE_USAGE, ADAPTER_STRICT_MODELS
     global ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
@@ -359,28 +361,6 @@ def set_runtime_config(**kwargs) -> dict:
         if name == "ADAPTER_MODELS_MAPPING":
             _MAP.clear()
             _MAP.update(_parse_models_mapping(value))
-
-    # === Каскад Log/Parts (v0.9.6) ===
-    # Parts — подробная запись поверх обычных логов: без активного Log он
-    # бессмыслен (дампы частей протокола пишутся тем же трактом, что и
-    # session-*.log). Каскад срабатывает, только если в ЭТОМ вызове тронут
-    # один из двух тумблеров (иначе несогласованность из env не «лечится»
-    # побочным изменением TARGET-настройки). Направление выбирается по
-    # явному намерению Parts:
-    #   - Parts=on → Log включается (намерение исполняется: Parts не может
-    #     быть активен без Log);
-    #   - иначе (Log выключили) → Parts гасится.
-    # Приоритет у явного намерения Parts: если в одном POST пришли Log=off и
-    # Parts=on, побеждает Parts (пользователь явно просил parts). Применяется
-    # ПОСЛЕ цикла, поэтому результат не зависит от порядка ключей в kwargs.
-    if {"ADAPTER_DEBUG", "ADAPTER_DEBUG_PARTS"} & kwargs.keys() and (
-        ADAPTER_DEBUG_PARTS and not ADAPTER_DEBUG
-    ):
-        if kwargs.get("ADAPTER_DEBUG_PARTS") is True:
-            ADAPTER_DEBUG = True
-        else:
-            ADAPTER_DEBUG_PARTS = False
-        changed = True
 
     if changed:
         with _ON_CHANGE_LOCK:
@@ -537,6 +517,18 @@ ADAPTER_RESPONSES_TARGET = _parse_target(
 # при штатном завершении таблица сохраняется всегда.
 ADAPTER_MODEL_USAGE_SAVE_INTERVAL = env_validate.parse_int(
     os.environ.get("ADAPTER_MODEL_USAGE_SAVE_INTERVAL", "300"), 300
+)
+
+# Тихий период фоновой отрисовки артефактов сессии (v0.9.10), секунды.
+# Артефакты (artifact_refresh.py) собираются вместе с логами и частями, но
+# рендер дерева (PlantUML/Graphviz — внешние процессы с таймаутом 60 с каждый)
+# никогда не должен ждать запрос прокси: после последней записи части
+# выдерживается эта пауза, и только затем фоновый демон-поток пересобирает
+# дерево (инкрементально, от чекпойнта). Меньше — дерево свежее, но чаще
+# внешние рендеры; больше — реже нагрузка. В runtime-пул (/config) не входит:
+# смена — с рестартом, как у прочих лимитов.
+ADAPTER_ARTIFACT_DEBOUNCE = env_validate.parse_int(
+    os.environ.get("ADAPTER_ARTIFACT_DEBOUNCE", "20"), 20
 )
 
 # Глубина таблицы активных сессий агентов на странице WEBUI "/sessions"
@@ -797,8 +789,8 @@ def _write_models_snapshot(
     ``<имя_бэкенда>.models.json`` пишется в ADAPTER_DATA_ROOT/var при каждой
     проверке — стартовой (_init_multi_backends) и фоновой (refresh_models /
     reload-перечитывания) — каждый раз перезаписываясь целиком. Вне
-    ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_PARTS / TRIM (гейт — только наличие
-    наличия var/); снимок содержит ПОЛНЫЕ записи моделей из ответа /v1/models
+    ADAPTER_DEBUG_ENABLE / TRIM (гейт — только наличие var/); снимок
+    содержит ПОЛНЫЕ записи моделей из ответа /v1/models
     (redact-маскирование секретов — внутри probe_json). Провал записи молча
     глотается модулем probe_json — проверку не роняет."""
     payload = {

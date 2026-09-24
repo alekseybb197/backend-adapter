@@ -3,7 +3,7 @@
 
 Tests cover:
   - Unit: _render_config_page returns HTML with current values
-  - HTTP GET /config → 200, HTML with form (13 fields: 6 bool + 3 int +
+  - HTTP GET /config → 200, HTML with form (12 fields: 5 bool + 3 int +
     1 text (ADAPTER_MODELS_MAPPING) + 3 TARGET select)
   - HTTP POST /config → applies valid, ignores invalid; страница сообщает
     только об ошибках (плашки «Применено» нет)
@@ -189,10 +189,11 @@ class TestConfigHTTPGet:
             status, body = _http_get(port, "/config")
             assert status == 200
             assert "<!DOCTYPE html>" in body or "<html" in body.lower()
-            # Form with 13 fields (6 bool + 3 int + 1 text (маппинг моделей)
+            # Form with 12 fields (5 bool + 3 int + 1 text (маппинг моделей)
             # + 3 select для TARGET)
             assert "ADAPTER_DEBUG" in body
-            assert "ADAPTER_DEBUG_PARTS" in body
+            # v0.9.10: второго флага логирования (Parts) на странице нет.
+            assert "ADAPTER_DEBUG_PARTS" not in body
             assert "ADAPTER_SENSITIVE_LOGGING_ENABLE" in body
             assert "ADAPTER_STREAMING_ENABLE" in body
             assert "ADAPTER_STREAM_INCLUDE_USAGE" in body
@@ -209,6 +210,10 @@ class TestConfigHTTPGet:
             assert "ADAPTER_COMPLETIONS_TARGET" in body
             assert "ADAPTER_RESPONSES_TARGET" in body
             assert body.count("<select") == 3
+            # 5 bool-чекбоксов (v0.9.10) и ни строчки inline-JS: блокировки
+            # Parts больше нет, клиентский код не нужен.
+            assert body.count('type="checkbox"') == 5
+            assert "<script" not in body
             # Favicon — общий ресурс всех страниц WEBUI (см. /favicon.svg)
             assert '<link rel="icon" type="image/svg+xml" href="/favicon.svg">' in body
         finally:
@@ -257,7 +262,7 @@ class TestConfigHTTPPost:
         httpd, port = _start_server(str(tmp_path))
         try:
             # POST with wrong type (bool as string for int field)
-            body = "ADAPTER_DEBUG_TRIM=not_a_number&ADAPTER_DEBUG_PARTS=1".encode()
+            body = "ADAPTER_DEBUG_TRIM=not_a_number&ADAPTER_DEBUG=1".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
@@ -266,8 +271,8 @@ class TestConfigHTTPPost:
             # ADAPTER_DEBUG_TRIM should NOT change (invalid type)
             current = config.get_runtime_config()
             assert current["ADAPTER_DEBUG_TRIM"] == before["ADAPTER_DEBUG_TRIM"]
-            # ADAPTER_DEBUG_PARTS should apply (valid bool)
-            assert current["ADAPTER_DEBUG_PARTS"] is True
+            # ADAPTER_DEBUG should apply (valid bool)
+            assert current["ADAPTER_DEBUG"] is True
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -369,35 +374,58 @@ class TestConfigHTTPPost:
             httpd.shutdown()
             httpd.server_close()
 
-    def test_post_parts_checkbox_off_and_on(self, tmp_path):
-        """/config: чекбокс ADAPTER_DEBUG_PARTS переключается (bool).
-
-        Форма шлёт для каждого bool-поля пару значений: явный checkbox
-        (value=1, только когда отмечен) + hidden-поле "_<NAME>" с состоянием
-        1/0 — снятая галка без hidden-«соседа» просто отсутствовала бы в
-        теле POST и выключить bool было бы невозможно. В разборе берётся
-        последнее значение ключа (hidden), ключ "_NAME" вносится как "NAME"."""
+    def test_post_parts_key_ignored(self, tmp_path):
+        """/config POST со снятым ADAPTER_DEBUG_PARTS (v0.9.10): ключ вне
+        пула — молча игнорируется, страница сообщает о нём в «Игнорировано»,
+        Log не трогается."""
         _reload_config()
         from backend_adapter import config
-        config.ADAPTER_DEBUG_PARTS = True  # пред-условие «включено»
+        config.ADAPTER_DEBUG = False
+
+        httpd, port = _start_server(str(tmp_path))
+        try:
+            body = "ADAPTER_DEBUG_PARTS=1&_ADAPTER_DEBUG_PARTS=0".encode()
+            status, response_body = _http_post(
+                port, "/config", "application/x-www-form-urlencoded", body
+            )
+            assert status == 200
+            assert "Игнорировано" in response_body
+            assert config.ADAPTER_DEBUG is False
+            assert not hasattr(config, "ADAPTER_DEBUG_PARTS")
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+    def test_post_log_checkbox_off_and_on(self, tmp_path):
+        """/config: чекбокс ADAPTER_DEBUG переключается (bool).
+
+        Форма шлёт для каждого bool-поля пару значений: hidden-поле
+        "_<NAME>" с константой 0 (идёт ПЕРВЫМ) + checkbox (value=1, только
+        когда отмечен) — снятая галка без hidden-«соседа» просто
+        отсутствовала бы в теле POST и выключить bool было бы невозможно.
+        В разборе берётся последнее значение ключа, ключ "_NAME" вносится
+        как "NAME"."""
+        _reload_config()
+        from backend_adapter import config
+        config.ADAPTER_DEBUG = True  # пред-условие «включено»
 
         httpd, port = _start_server(str(tmp_path))
         try:
             # Снятая галка: checkbox отсутствует, hidden-состояние → 0
-            body = "_ADAPTER_DEBUG_PARTS=0".encode()
+            body = "_ADAPTER_DEBUG=0".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
             assert status == 200
-            assert config.ADAPTER_DEBUG_PARTS is False
+            assert config.ADAPTER_DEBUG is False
 
-            # Отмеченная галка: checkbox value=1 + hidden-состояние → 1
-            body = "ADAPTER_DEBUG_PARTS=1&_ADAPTER_DEBUG_PARTS=1".encode()
+            # Отмеченная галка: hidden=0 + checkbox value=1 → 1
+            body = "_ADAPTER_DEBUG=0&ADAPTER_DEBUG=1".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
             assert status == 200
-            assert config.ADAPTER_DEBUG_PARTS is True
+            assert config.ADAPTER_DEBUG is True
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -598,9 +626,9 @@ class TestConfigHTTPPost:
             httpd.server_close()
 
 
-class TestLogPartsTemplate:
-    """Log/Parts на /config — ШАБЛОН для новых сессий (v0.9.8), а не
-    выключатель функционала: смена глобального флага не трогает уже
+class TestLogTemplate:
+    """Log на /config — ШАБЛОН для новых сессий (v0.9.8, один флаг — v0.9.10),
+    а не выключатель функционала: смена глобального флага не трогает уже
     образованные сессии (их значения — снимок, управляются на /sessions)."""
 
     def test_page_states_template_semantics(self, tmp_path):
@@ -642,5 +670,5 @@ __all__ = [
     "TestRenderConfigPage",
     "TestConfigHTTPGet",
     "TestConfigHTTPPost",
-    "TestLogPartsTemplate",
+    "TestLogTemplate",
 ]

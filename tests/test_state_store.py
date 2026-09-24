@@ -91,6 +91,25 @@ class TestLoad:
         assert store.load() == {}
         assert "ADAPTER_DEBUG" in capsys.readouterr().out
 
+    def test_removed_parts_key_skipped(self, store, cfg, tmp_path, capsys):
+        """Старый ADAPTER_DEBUG_PARTS (v0.9.10) в файле — неизвестный ключ:
+        load его пропускает с подсказкой, save при первой же перезаписи
+        выкидывает из файла (фильтр по RUNTIME_CONFIG_POOL)."""
+        path = _point_at(cfg, tmp_path)
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(
+                {"ADAPTER_DEBUG_PARTS": True, "ADAPTER_DEBUG": True}, f
+            )
+        loaded = store.load()
+        assert loaded == {"ADAPTER_DEBUG": True}
+        assert "ADAPTER_DEBUG_PARTS" in capsys.readouterr().out
+        # Перезапись по изменению пула — снятый ключ исчезает.
+        store.save({**loaded, "ADAPTER_DEBUG": False})
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        assert "ADAPTER_DEBUG_PARTS" not in data
+        assert data == {"ADAPTER_DEBUG": False}
+
     def test_broken_yaml_warns(self, store, cfg, tmp_path, capsys):
         path = _point_at(cfg, tmp_path)
         with open(path, "w", encoding="utf-8") as f:

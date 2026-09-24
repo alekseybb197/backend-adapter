@@ -103,6 +103,8 @@ class TestWriteDebugJson:
     """Tests for write_debug_json()."""
 
     def test_writes_json_file(self, tmp_path):
+        """Один флаг Log (v0.9.10): ADAPTER_DEBUG=1 пишет и *.parts-дампы
+        (второго выключателя больше нет)."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -110,10 +112,8 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_PARTS = True
         config.ADAPTER_DEBUG = True
         # Force parts dir creation
-        session_log._parts_dir["sess1_jsonparts"] = tmp_path / "parts"
         session_log._parts_dir_ts["sess1"] = "20260831-120000"
         import os
         os.makedirs(str(tmp_path / "parts"), exist_ok=True)
@@ -128,26 +128,6 @@ class TestWriteDebugJson:
         data = json.loads(files[0].read_text())
         assert data == {"key": "value"}
 
-    def test_flag_off_no_files(self, tmp_path):
-        """When ADAPTER_DEBUG_PARTS flag is off, no dumps are written."""
-        import sys
-        to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
-        for n in to_remove:
-            del sys.modules[n]
-        from backend_adapter import session_log, config
-        session_log._DEBUG_IS_DIR = True
-        session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_PARTS = False
-        config.ADAPTER_DEBUG = True
-        parts = tmp_path / "parts"
-        parts.mkdir(exist_ok=True)
-        session_log._parts_dir = {"sess1_jsonparts": str(parts)}
-        session_log._debug_json_seq = 0
-
-        session_log.write_debug_json("sess1", "NOT_TEST", {"key": "value"})
-        files = list(parts.glob("*.json"))
-        assert len(files) == 0
-
     def test_no_dir_no_files(self, tmp_path):
         """When the log dir is not set / not a directory, no dumps are written."""
         import sys
@@ -157,7 +137,6 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = False
         session_log._DEBUG_PATH = str(tmp_path / "not-a-dir.log")
-        config.ADAPTER_DEBUG_PARTS = True
         config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
@@ -169,7 +148,7 @@ class TestWriteDebugJson:
         assert len(files) == 0
 
     def test_writes_yaml_alongside_json(self, tmp_path):
-        """When ADAPTER_DEBUG_PARTS flag is on, .yaml is written alongside .json."""
+        """При включённом Log .yaml пишется рядом с .json (один флаг)."""
         import sys
         to_remove = [n for n in list(sys.modules) if n.startswith("backend_adapter")]
         for n in to_remove:
@@ -177,7 +156,6 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_PARTS = True
         config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
@@ -198,7 +176,6 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_PARTS = True
         config.ADAPTER_DEBUG = True
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
@@ -218,7 +195,6 @@ class TestWriteDebugJson:
         from backend_adapter import session_log, config
         session_log._DEBUG_IS_DIR = True
         session_log._DEBUG_PATH = str(tmp_path)
-        config.ADAPTER_DEBUG_PARTS = True
         config.ADAPTER_DEBUG = False
         parts = tmp_path / "parts"
         parts.mkdir(exist_ok=True)
@@ -365,13 +341,13 @@ class TestWriteErrorFile:
         )
         assert len(list(tmp_path.glob("session-*.err"))) == 1
 
-    def test_writes_without_debug_parts_flag(self, tmp_path):
-        """ADAPTER_DEBUG_PARTS=0 не блокирует .err (это НЕ parts-дампы)."""
+    def test_writes_without_debug_enable(self, tmp_path):
+        """.err — безусловный канал: ADAPTER_DEBUG=0 его не блокирует."""
         session_log = self._fresh()
         session_log._DEBUG_PATH = str(tmp_path)
         session_log._TRACE_PATH = str(tmp_path)
         from backend_adapter import config
-        config.ADAPTER_DEBUG_PARTS = False
+        config.ADAPTER_DEBUG = False
         session_log.write_error_file(
             "sess1", "req1", final_status=400,
             backend_url="http://b", model="m", out_body="{}", err_body="err",
@@ -758,9 +734,10 @@ class TestErrorFileName:
 
 
 class TestPerSessionGates:
-    """logging_enabled/parts_enabled (v0.9.5, снимок — v0.9.8) — пер-сессионный
-    гейт файловой записи: значение сессии берётся СНИМКОМ общих тумблеров в
-    момент образования сессии, дальше общие флаги её не трогают."""
+    """logging_enabled (v0.9.5, снимок — v0.9.8, один флаг — v0.9.10) —
+    пер-сессионный гейт файловой записи (логи, трейсы и части протокола
+    вместе): значение сессии берётся СНИМКОМ общего тумблера в момент
+    образования сессии, дальше общий флаг её не трогает."""
 
     def _fresh(self):
         import sys
@@ -773,9 +750,7 @@ class TestPerSessionGates:
     def test_snapshot_from_config(self):
         config, session_log, _ = self._fresh()
         config.ADAPTER_DEBUG = True
-        config.ADAPTER_DEBUG_PARTS = False
         assert session_log.logging_enabled("sess1") is True
-        assert session_log.parts_enabled("sess1") is False
 
     def test_session_override_wins(self):
         config, session_log, session_settings = self._fresh()
@@ -784,29 +759,8 @@ class TestPerSessionGates:
         assert session_log.logging_enabled("sess1") is True
         assert session_log.logging_enabled("other") is False  # соседняя сессия
 
-    def test_parts_override_wins(self):
-        config, session_log, session_settings = self._fresh()
-        config.ADAPTER_DEBUG_PARTS = False
-        session_settings.set_config("sess1", {"ADAPTER_DEBUG_PARTS": True})
-        assert session_log.parts_enabled("sess1") is True
-        assert session_log.parts_enabled("other") is False
-
-    def test_global_parts_on_session_off_is_off(self):
-        """Обратный случай: глобальный Parts=on, сессия его выключила —
-        сбор частей у этой сессии НЕ идёт (глобальный флаг функционал не
-        включает, он лишь шаблон для новых сессий)."""
-        config, session_log, session_settings = self._fresh()
-        config.ADAPTER_DEBUG = True
-        config.ADAPTER_DEBUG_PARTS = True
-        session_settings.set_config(
-            "sess1", {"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_PARTS": False}
-        )
-        assert session_log.parts_enabled("sess1") is False
-        # А новая сессия получает глобальный шаблон.
-        assert session_log.parts_enabled("fresh") is True
-
     def test_global_switch_off_does_not_stop_existing_session(self):
-        """Глобальные флаги НЕ выключают функционал у работающих сессий:
+        """Общий флаг НЕ выключает функционал у работающих сессий:
         смена config после образования сессии её снимок не трогает."""
         config, session_log, _ = self._fresh()
         config.ADAPTER_DEBUG = True
@@ -826,15 +780,12 @@ class TestPerSessionGates:
         даже при глобально включённой записи."""
         config, session_log, _ = self._fresh()
         config.ADAPTER_DEBUG = True
-        config.ADAPTER_DEBUG_PARTS = True
         assert session_log.logging_enabled("") is False
-        assert session_log.parts_enabled("") is False
 
     def test_unknown_session_id_is_off(self):
         config, session_log, _ = self._fresh()
         config.ADAPTER_DEBUG = True
         assert session_log.logging_enabled(session_log.UNKNOWN_SESSION_ID) is False
-        assert session_log.parts_enabled(session_log.UNKNOWN_SESSION_ID) is False
 
     def test_clear_reinitializes_from_current_global(self):
         config, session_log, session_settings = self._fresh()
@@ -844,13 +795,11 @@ class TestPerSessionGates:
         session_settings.set_config("sess1", clear=("ADAPTER_DEBUG",))
         assert session_log.logging_enabled("sess1") is True  # свежий снимок
 
-    def test_parts_without_log_in_session_is_off(self):
-        """Инвариант «Parts ⊆ Log» держит сам гейт: даже если снимок взял
-        несогласованную env-пару (PARTS=1, DEBUG=0), сбор частей выключен."""
-        config, session_log, _ = self._fresh()
-        config.ADAPTER_DEBUG = False
-        config.ADAPTER_DEBUG_PARTS = True
-        assert session_log.parts_enabled("sess1") is False
+    def test_parts_enabled_removed(self):
+        """v0.9.10: отдельного гейта частей больше нет — части собираются
+        вместе с логами по единственному logging_enabled."""
+        _, session_log, _ = self._fresh()
+        assert not hasattr(session_log, "parts_enabled")
 
     def test_fallback_when_session_settings_unavailable(self):
         """Отказ session_settings не должен гасить файловую запись — фолбэк

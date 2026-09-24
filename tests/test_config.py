@@ -140,23 +140,40 @@ class TestHostVars:
 class TestZeroConfigDefaults:
     """Default flags for the zero-config run (v0.8.6).
 
-    With env vars *absent* the adapter should: NOT write *.parts дампы
-    (ADAPTER_DEBUG_PARTS=0), NOT write log files (ADAPTER_DEBUG_ENABLE=0) and
-    keep the WEBUI always up (флага отключения больше нет — см. v0.8.6).
-    Both parse off-words incl. "" — so asserting the default requires delenv,
-    NOT setenv("", ...) (an empty env value parses as False for both)."""
+    With env vars *absent* the adapter should: NOT write log files
+    (ADAPTER_DEBUG_ENABLE=0, он же гейт *.parts с v0.9.10) and keep the WEBUI
+    always up (флага отключения больше нет — см. v0.8.6). Off-words incl. ""
+    parse as False — so asserting the default requires delenv, NOT
+    setenv("", ...) (an empty env value parses as False)."""
 
     def setup_method(self):
         _reload_config()
         from backend_adapter import config
         self.config = config
 
-    def test_parts_defaults_false(self, monkeypatch):
-        """ADAPTER_DEBUG_PARTS unset → disabled (no per-session parts dumps)."""
-        monkeypatch.delenv("ADAPTER_DEBUG_PARTS", raising=False)
+    def test_debug_defaults_false(self, monkeypatch):
+        """ADAPTER_DEBUG_ENABLE unset → логи и *.parts выключены."""
+        monkeypatch.delenv("ADAPTER_DEBUG_ENABLE", raising=False)
         _reload_config()
         from backend_adapter import config
-        assert config.ADAPTER_DEBUG_PARTS is False
+        assert config.ADAPTER_DEBUG is False
+
+    def test_parts_var_removed_with_warn(self, monkeypatch, capsys):
+        """Снятый ADAPTER_DEBUG_PARTS (v0.9.10): одна строка [WARN], старт идёт,
+        значение нигде не читается (в модуле атрибута нет)."""
+        monkeypatch.setenv("ADAPTER_DEBUG_PARTS", "1")
+        _reload_config()
+        from backend_adapter import config
+        out = capsys.readouterr().out
+        assert "[WARN] ADAPTER_DEBUG_PARTS" in out
+        assert not hasattr(config, "ADAPTER_DEBUG_PARTS")
+
+    def test_parts_var_not_in_pools(self):
+        """ADAPTER_DEBUG_PARTS вычищен из обоих пулов и обеих таблиц типов."""
+        assert "ADAPTER_DEBUG_PARTS" not in self.config.RUNTIME_CONFIG_POOL
+        assert "ADAPTER_DEBUG_PARTS" not in self.config.SESSION_CONFIG_POOL
+        assert "ADAPTER_DEBUG_PARTS" not in self.config._RUNTIME_CONFIG_TYPES
+        assert "ADAPTER_DEBUG_PARTS" not in self.config._SESSION_CONFIG_TYPES
 
 
 class TestParseBackendYaml:
@@ -1105,23 +1122,16 @@ class TestRuntimeConfig:
         self.config = config
 
     def test_valid_keys_applied(self):
-        """Valid bool/int values are applied and visible in get_runtime_config().
-
-        v0.9.6: Log и Parts заданы СОГЛАСОВАННО (Log=on, Parts=on) — иначе
-        сработал бы каскад Parts→Log (Parts не может быть активен без Log).
-        """
+        """Valid bool/int values are applied and visible in get_runtime_config()."""
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG=True,
-            ADAPTER_DEBUG_PARTS=True,
             ADAPTER_TRACE_REASONING_MAX_CHARS=500,
         )
         assert result["ADAPTER_DEBUG"] is True
-        assert result["ADAPTER_DEBUG_PARTS"] is True
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
         # Проверка через get
         current = self.config.get_runtime_config()
         assert current["ADAPTER_DEBUG"] is True
-        assert current["ADAPTER_DEBUG_PARTS"] is True
         assert current["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 500
 
     def test_new_bool_keys_applied(self):
@@ -1161,18 +1171,15 @@ class TestRuntimeConfig:
         assert self.config.ADAPTER_DATA_ROOT == root_before  # не изменилось
 
     def test_wrong_type_not_applied(self):
-        """Wrong type for known key is not applied; other keys still apply.
-
-        Второй ключ — ADAPTER_DEBUG_PARTS=False (не True): с True каскад
-        v0.9.6 включил бы Log, и проверка «Log остался прежним» не имела бы
-        смысла."""
-        debug_before = self.config.ADAPTER_DEBUG
+        """Wrong type for known key is not applied; other keys still apply."""
+        trim_before = self.config.ADAPTER_DEBUG_TRIM
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG="not-a-bool",  # неверный тип
-            ADAPTER_DEBUG_PARTS=False,  # верный тип
+            ADAPTER_DEBUG_TRIM=1234,  # верный тип
         )
-        assert result["ADAPTER_DEBUG"] is debug_before  # осталось прежнее значение
-        assert result["ADAPTER_DEBUG_PARTS"] is False  # применилось
+        assert result["ADAPTER_DEBUG"] is False  # осталось прежнее значение
+        assert result["ADAPTER_DEBUG_TRIM"] == 1234  # применилось
+        assert trim_before != 1234
 
     def test_bool_not_passed_as_int(self):
         """Bool is checked BEFORE int — bool doesn't pass as int field."""
@@ -1182,56 +1189,19 @@ class TestRuntimeConfig:
         # Не применилось (int-поле отклоняет bool)
         assert result["ADAPTER_TRACE_REASONING_MAX_CHARS"] == 0  # дефолт
 
-    def test_parts_bool_applied(self):
-        """ADAPTER_DEBUG_PARTS: bool применяется и виден (str-полей в пуле нет)."""
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS=True)
-        assert result["ADAPTER_DEBUG_PARTS"] is True
-        assert self.config.ADAPTER_DEBUG_PARTS is True
-        # Выключение обратно
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS=False)
-        assert result["ADAPTER_DEBUG_PARTS"] is False
-
-    def test_parts_rejects_non_bool(self):
-        """ADAPTER_DEBUG_PARTS принимает только bool: строка игнорируется."""
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS="yes")
-        assert result["ADAPTER_DEBUG_PARTS"] is False  # осталось прежнее значение
-
-    def test_parts_on_enables_log(self):
-        """Каскад (v0.9.6): Parts=on при Log=off включает Log."""
+    def test_parts_key_in_kwargs_ignored(self):
+        """Снятый ADAPTER_DEBUG_PARTS (v0.9.10) — ключ вне пула: молча
+        игнорируется, Log не включается (каскада больше нет)."""
         self.config.ADAPTER_DEBUG = False
-        self.config.ADAPTER_DEBUG_PARTS = False
         result = self.config.set_runtime_config(ADAPTER_DEBUG_PARTS=True)
-        assert result["ADAPTER_DEBUG_PARTS"] is True
-        assert result["ADAPTER_DEBUG"] is True
-        assert self.config.ADAPTER_DEBUG is True
-
-    def test_log_off_disables_parts(self):
-        """Каскад (v0.9.6): выключение Log гасит Parts."""
-        self.config.ADAPTER_DEBUG = True
-        self.config.ADAPTER_DEBUG_PARTS = True
-        result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert result["ADAPTER_DEBUG"] is False
-        assert result["ADAPTER_DEBUG_PARTS"] is False
-        assert self.config.ADAPTER_DEBUG_PARTS is False
+        assert "ADAPTER_DEBUG_PARTS" not in result
 
-    def test_log_off_and_parts_on_parts_wins(self):
-        """В одном вызове Log=off + Parts=on: побеждает явное намерение Parts."""
-        self.config.ADAPTER_DEBUG = True
-        self.config.ADAPTER_DEBUG_PARTS = False
-        result = self.config.set_runtime_config(
-            ADAPTER_DEBUG=False, ADAPTER_DEBUG_PARTS=True
-        )
+    def test_log_toggle_alone(self):
+        """Log больше не тянет за собой пару: включение/выключение — одиночное."""
+        result = self.config.set_runtime_config(ADAPTER_DEBUG=True)
         assert result["ADAPTER_DEBUG"] is True
-        assert result["ADAPTER_DEBUG_PARTS"] is True
-
-    def test_unrelated_key_does_not_cascade(self):
-        """Несогласованность из env (Log=off, Parts=on) не «лечится»
-        изменением посторонней настройки: каскад срабатывает только когда
-        тронут один из двух тумблеров."""
-        self.config.ADAPTER_DEBUG = False
-        self.config.ADAPTER_DEBUG_PARTS = True
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_TRIM=1234)
-        assert result["ADAPTER_DEBUG_PARTS"] is True  # не тронуто
+        result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert result["ADAPTER_DEBUG"] is False
 
     def test_trim_int_applied(self):
@@ -1264,7 +1234,7 @@ class TestRuntimeConfig:
         """
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
-        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 13
+        assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
         # Три TARGET-переменные входят в пул со значениями-дефолтами env.
         assert result["ADAPTER_MESSAGES_TARGET"] == "completions"
         assert result["ADAPTER_COMPLETIONS_TARGET"] == "none"
@@ -1388,10 +1358,9 @@ class TestSessionConfigPool:
         assert not hasattr(self.config, "SESSION_TARGET_VALUES")
 
     def test_pool_contents(self):
-        # Пул — логирование (2 флага) + три TARGET-переменные входов.
+        # Пул — логирование (один флаг, v0.9.10) + три TARGET-переменные входов.
         assert set(self.config.SESSION_CONFIG_POOL) == {
             "ADAPTER_DEBUG",
-            "ADAPTER_DEBUG_PARTS",
             "ADAPTER_MESSAGES_TARGET",
             "ADAPTER_COMPLETIONS_TARGET",
             "ADAPTER_RESPONSES_TARGET",
@@ -1423,7 +1392,6 @@ class TestSessionConfigPool:
 
     def test_bool_fields_are_bool(self):
         assert self.config._SESSION_CONFIG_TYPES["ADAPTER_DEBUG"] is bool
-        assert self.config._SESSION_CONFIG_TYPES["ADAPTER_DEBUG_PARTS"] is bool
 
     def test_pool_is_subset_of_runtime_pool(self):
         # Имена сессии — из общего пула (сессия переопределяет то, что вообще
@@ -1536,4 +1504,7 @@ class TestDataRootLayout:
         monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "/tmp/legacy-logs")
         config = self._import_fresh()
         assert config.ADAPTER_DATA_ROOT == str(tmp_path)
-        assert "[WARN]" not in capsys.readouterr().out
+        # Проверяем именно молчание СТАРОГО имени LOGPATH: в окружении могут
+        # быть и другие снятые переменные (ADAPTER_DEBUG_PARTS), каждая из
+        # которых честно печатает свою подсказку.
+        assert "ADAPTER_DEBUG_LOGPATH" not in capsys.readouterr().out
