@@ -1311,5 +1311,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.10** (see `backend-adapter.py`).
+Current: **v0.9.11** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).
