@@ -19,6 +19,16 @@ import sys
 import threading
 from collections import Counter
 
+# ==================== CLI (v0.9.11) ====================
+# Разбор argv идёт ПЕРВЫМ — до validate_env() и импорта config ниже. Оба
+# зависят от env на этапе импорта (validate_env → [FATAL] на мусоре; config
+# парсит int(...) на уровне модуля), а --version/--help обязаны отвечать при
+# любом окружении. Порядок импортов здесь намеренный: E402 для этого файла
+# уже разрешён в pyproject.toml — ровно ради «validate_env до config».
+from backend_adapter.cli_args import parse_args
+
+parse_args(sys.argv[1:], __version__)
+
 # ==================== Package imports ====================
 # Строгая проверка env ДО импорта config (v0.9.6): config.py читает env на
 # уровне модуля и парсит int(...) — невалидное значение (ADAPTER_PROXY_PORT=abc)
