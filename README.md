@@ -70,6 +70,18 @@ claude                 # Claude Code — см. docs/claude_code.md
 qwen                   # QwenCode   — см. docs/qwen-code.md
 ```
 
+**Вариант через домашнюю папку** (v0.9.11): вместо шагов 3-4 разметьте
+домашнюю папку `~/.ba` одной командой и запускайте с `--root`:
+
+```bash
+python3 backend-adapter.py --install          # создать ~/.ba со всеми конфигами
+$EDITOR ~/.ba/adapter.env                     # вписать токен бэкенда
+python3 backend-adapter.py --root ~/.ba       # запуск с настройками из дома
+```
+
+Ключи CLI: `--version`/`-v`, `--help`/`-h`/`-?`, `--root <путь>`, `--install`
+(подробности — [docs/install.md](docs/install.md) §4.5).
+
 Подробная инструкция: [docs/install.md](docs/install.md)
 
 ## Документация
@@ -92,7 +104,7 @@ qwen                   # QwenCode   — см. docs/qwen-code.md
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа (__version__)
-├── backend_adapter/            # Доменный пакет (36 модулей, включая __init__.py)
+├── backend_adapter/            # Доменный пакет (37 модулей, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
 │   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
 │   ├── routing.py              # Входные эндпоинты/TARGET: decide() по TARGET
@@ -118,13 +130,15 @@ backend-adapter/
 │   ├── session_viewer.py       # WEBUI "/session": просмотр *.parts сессий
 │   ├── model_usage.py          # Персистентный учёт использованных моделей, тарифы
 │   ├── probe_json.py           # JSON-результат опроса списка моделей в var/
-│   ├── cli.py                  # CLI-утилиты
+│   ├── cli.py                  # CLI-утилиты (runpy-трамплин команды backend-adapter)
+│   ├── cli_args.py             # Разбор argv: --version/--help/--root/--install
 │   ├── artifact_tree*.py       # Генерация дерева артефактов (8 модулей)
 │   ├── artifact_refresh.py     # Фоновая дебаунсная отрисовка артефактов (v0.9.10)
 │   └── __init__.py             # Lazy-прокси глобалов config/logger/tracer на старте
 ├── docs/                       # Документация
 │   ├── samples/                # Примеры конфигов: sample.adapter.env (env-файл),
 │   │                           #   sample.adapter.yaml (YAML бэкендов),
+│   │                           #   sample.tariffs.yaml (тарифы моделей),
 │   │                           #   backend-adapter.service + com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
 │   ├── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)

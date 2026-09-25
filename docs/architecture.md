@@ -91,6 +91,15 @@ backend_adapter/
 ├── env_validate.py         ← строгая валидация env при старте (v0.9.6, §6.14):
 │                             невалидный int/bool → [FATAL] + sys.exit(1);
 │                             лист DAG — stdlib only, вызывается ДО импорта config
+├── cli_args.py             ← разбор argv адаптера (v0.9.11): --version/-v,
+│                             --help/-h/-?, --root <путь> (домашняя папка, дефолт
+│                             ~/.ba), --install (разметка дома). Лист DAG —
+│                             stdlib only; вызывается из backend-adapter.py
+│                             ДО env_validate и импорта config (--version/--help
+│                             обязаны работать при любом env). env-файл дома
+│                             читает своим мини-парсером (export K=V, без shell)
+├── cli.py                  ← консольный entry point пакета (runpy-трамплин на
+│                             backend-adapter.py — версия живёт только там)
 ├── artifact_refresh.py     ← фоновая дебаунсная отрисовка артефактов (v0.9.10, §8.5):
 │                             notify(parts_dir) из write_debug_json; лист DAG —
 │                             импортирует config, artifact_tree — внутри функций
@@ -1234,6 +1243,10 @@ backend-adapter.py
   │                       config.set_on_change, обратной зависимости нет)
   ├── env_validate.py    (no internal deps — stdlib only; вызывается
   │                       backend-adapter.py ДО импорта config — v0.9.6)
+  ├── cli_args.py        (no internal deps — stdlib only; вызывается
+  │                       backend-adapter.py ПЕРВЫМ, до env_validate и config
+  │                       — --version/--help обязаны работать при любом env;
+  │                       --root/--install — домашняя папка адаптера, v0.9.11)
   ├── probe_json.py      (no internal deps on the top level — stdlib only;
   │                       config/redact читаются локально внутри записи)
   ├── routing.py         → config, session_settings (лист DAG по config: входные
@@ -1286,7 +1299,7 @@ backend-adapter.py
 Entry point (WEBUI): `backend-adapter.py` импортирует `webserver.serve()`
 для daemon-потока WEBUI (см. §4.1). Вход CLI: `python -m backend_adapter.webserver`.
 
-**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time**, forming the dependency base. All other modules depend on at least one of these.
+**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `cli_args.py` (stdlib-only, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time**, forming the dependency base. All other modules depend on at least one of these.
 
 ---
 
