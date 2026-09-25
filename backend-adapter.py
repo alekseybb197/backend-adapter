@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.10
+"""[CC] <-> [OI]-backend adapter v0.9.11
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.10"
+__version__ = "0.9.11"
 # КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
 # от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
 # Формулировка дублируется в README.md первой строкой вводного blockquote;
@@ -18,6 +18,16 @@ import signal
 import sys
 import threading
 from collections import Counter
+
+# ==================== CLI (v0.9.11) ====================
+# Разбор argv идёт ПЕРВЫМ — до validate_env() и импорта config ниже. Оба
+# зависят от env на этапе импорта (validate_env → [FATAL] на мусоре; config
+# парсит int(...) на уровне модуля), а --version/--help обязаны отвечать при
+# любом окружении. Порядок импортов здесь намеренный: E402 для этого файла
+# уже разрешён в pyproject.toml — ровно ради «validate_env до config».
+from backend_adapter.cli_args import parse_args
+
+parse_args(sys.argv[1:], __version__)
 
 # ==================== Package imports ====================
 # Строгая проверка env ДО импорта config (v0.9.6): config.py читает env на

@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.10) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v0.9.11) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -190,7 +190,7 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (36 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (37 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
 │   ├── routing.py             # Входные эндпоинты/TARGET: decide() по TARGET
@@ -215,6 +215,7 @@ backend-adapter/
 │   ├── model_usage.py         # Персистентный учёт использованных моделей, тарифы
 │   ├── probe_json.py          # JSON-результат опроса списка моделей в var/
 │   ├── cli.py                 # Консольный entry point пакета
+│   ├── cli_args.py            # Разбор argv адаптера: --version/--help/--root/--install
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
@@ -246,6 +247,7 @@ backend-adapter/
 │   ├── samples/                 # Примеры конфигов (см. раздел 3):
 │   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
 │   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
+│   │   ├── sample.tariffs.yaml  #   Пример тарифов моделей (--install копирует в дом)
 │   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
 │   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
 │   ├── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
@@ -491,10 +493,18 @@ WEBUI доступна на `http://127.0.0.1:8765/`. Руководство п�
 JSON-эндпоинтам (включая таблицу использованных моделей и файл
 `model-usage.yaml`) — `docs/webui.md`.
 
+Проверить версию и получить список ключей можно без запуска адаптера:
+`backend-adapter --version` и `backend-adapter --help` (см.
+[4.5](#45-cli-и-домашняя-папка-root-install)).
+
 Когда стоит предпочесть исходники (`git clone` + `pip install -r
 requirements.txt` или `./scripts/dev-run.sh`): бинарник собирается под конкретную
 ОС/архитектуру и не подходит, если нужен нестандартный Python, свои правки
 кода или запуск на платформе вне таблицы выше.
+
+Вместо россыпи `export`-переменных можно завести домашнюю папку и запускать
+`backend-adapter --root ~/.ba` — тогда конфиги и данные берутся из неё (см.
+[4.5](#45-cli-и-домашняя-папка-root-install)).
 
 ### 4.4 Локальная сборка
 
@@ -528,6 +538,61 @@ pyinstaller --onefile \
 Все четыре артефакта (Linux x64, macOS ARM64/x64, Windows x64) для релизов
 собираются автоматически в CI при push тега `v*` — см.
 `.github/workflows/release-binaries.yml`.
+
+### 4.5 CLI и домашняя папка (`--root`, `--install`)
+
+Начиная с v0.9.11 у адаптера есть командный интерфейс:
+
+| Ключ | Действие |
+|---|---|
+| `-v`, `--version` | Напечатать версию и завершить работу (код 0). Работает при любом, даже заведомо неверном окружении. |
+| `-h`, `--help`, `-?` | Напечатать справку со списком ключей и завершить работу (код 0). |
+| `--root <путь>` | Домашняя папка адаптера. По умолчанию `~/.ba`. Из неё подставляются недостающие настройки. |
+| `--install` | Разметить домашнюю папку (конфиги + каталоги данных) и завершить работу. Адаптер не запускает. |
+
+Без ключей поведение прежнее: адаптер стартует как обычно и требует
+`ADAPTER_BACKEND_CONFIG`.
+
+**Что такое домашняя папка.** Каталог, из которого адаптер берёт настройки,
+если их нет в окружении:
+
+```
+~/.ba/
+├── adapter.env     # переменные окружения (генерируется --install)
+├── adapter.yaml    # конфигурация бэкендов (копия sample.adapter.yaml)
+├── tariffs.yaml    # тарифы моделей (копия sample.tariffs.yaml)
+└── tmp/adapter/    # ADAPTER_DATA_ROOT: внутри log/ и var/
+```
+
+**Приоритет — всегда за явным окружением.** Переменные из `adapter.env`
+применяются только к **незаданным** переменным; значение, экспортированное в
+оболочке, побеждает и файл, и подстановку по умолчанию. Так
+`ADAPTER_BACKEND_CONFIG=... python backend-adapter.py --root ~/.ba` продолжит
+работать с указанным в оболочке конфигом.
+
+**Разметка дома (одноразово):**
+
+```bash
+# Создать ~/.ba со всеми конфигами и каталогами данных
+backend-adapter --install
+
+# Или в произвольном каталоге
+backend-adapter --install --root /opt/ba
+
+# Готовая папка: вписать токен бэкенда в adapter.env и запустить
+backend-adapter --root /opt/ba
+```
+
+`--install` печатает `[OK]` по каждому созданному файлу и `[WARN]` по каждому
+пропущенному — повторный запуск ничего не перезаписывает и не ломает правки
+пользователя. В `adapter.env` токен — заглушка `*****` (файл создаётся с
+правами `0600`, так как в него попадает секрет).
+
+**Ограничение.** `--install` копирует образцы из `docs/samples/` — они есть в
+репозитории с исходниками, но не входят в standalone-бинарник (собран из одного
+`backend-adapter.py`). Из бинарника `--install` завершится `[FATAL]` с
+пояснением; возьмите `sample.adapter.yaml`/`sample.adapter.env` из репозитория
+(раздел [3](#3-клонирование)) и заведите домашнюю папку вручную.
 
 ---
 
@@ -841,7 +906,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v0.9.10
+Backend-Adapter v0.9.11
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation

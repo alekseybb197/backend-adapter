@@ -30,6 +30,18 @@ This file provides guidance to [CC] () when working with code in this repository
 
 ## Ключевые факты
 
+- **CLI (v0.9.11):** `backend-adapter.py` разбирает argv **первым** (до
+  `validate_env` и импорта config) через `cli_args.parse_args` —
+  `--version`/`-v` и `--help`/`-h`/`-?` печатают ответ и выходят (код 0) при
+  любом, даже битом env; `--root <путь>` — домашняя папка адаптера (дефолт
+  `~/.ba`; дом ⊃ данные: конфиги в `<root>/`, данные в `<root>/tmp/adapter`),
+  `--install` — идемпотентная разметка дома (`adapter.env` со всеми дефолтами
+  и заглушкой токена, `adapter.yaml`, `tariffs.yaml` из `docs/samples/`).
+  Дом активен только по флагу; подстановки — через `setdefault` (**явный env
+  побеждает**), без флагов «нулевая настройка» не меняется. Модуль —
+  лист DAG (stdlib-only). Справка/версия нужны внешним потребителям
+  (`install.sh`, `scripts/build-binaries.sh`, CI) вместо запуска бинарника
+  ради разбора `[FATAL]`.
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
   `changelog.md`. `__comment__` — **КОНСТАНТНОЕ определение инструмента**
   (`backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
@@ -121,7 +133,9 @@ Log/Parts и каскада больше нет (v0.9.10) — `*.parts`-дамп
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
 модули зависят минимум от одного из них. `session_settings.py`,
 `session_registry.py`, `state_store.py` и `env_validate.py` — листы DAG
-(`env_validate` — stdlib-only, остальные импортируют только `config`).
+(`env_validate` и `cli_args.py` — stdlib-only, остальные импортируют только
+`config`). `cli_args.py` (v0.9.11) вызывается из `backend-adapter.py`
+**раньше** `env_validate`.
 `artifact_refresh.py` (v0.9.10) — тоже лист (`config`; `artifact_tree`
 импортируется внутри функций — разрыв цикла `session_log` → `artifact_refresh`
 → `artifact_tree`). Новые модули — без циклов (dependency graph —
