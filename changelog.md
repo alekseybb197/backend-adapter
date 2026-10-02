@@ -1,6 +1,56 @@
 # backend-adapter — history / changelog
 
 
+## v0.9.12 — шаблоны дефолтных настроек встроены в код: `--install` работает из бинарника и wheel
+
+### 2026-10-02 Саммари ветки v0.9.12 (1 коммит между merge PR #24 (v0.9.11) и снятием WIP)
+
+**Цель:** починить генератор дефолтных настроек `--install` (v0.9.11) в
+собранном бинарнике. Команда копировала `sample.adapter.yaml`/`sample.tariffs.yaml`
+из `docs/samples/` рядом с пакетом, а этого каталога в standalone-бинарнике нет
+(PyInstaller `--onefile`: `__file__` живёт в `_MEIPASS`, куда `docs/` не
+попадает) и в wheel нет (`pyproject.toml` включает только пакет
+`backend_adapter/`). Из бинарника `--install` завершался `[FATAL]` «Не найдены
+образцы конфигов (docs/samples/)». Задача — встроить типовые шаблоны в сам код,
+чтобы команда работала на собственных данных и облегчала настройку окружения.
+
+**Решение:**
+- **Новый модуль `backend_adapter/templates.py`** (коммит 1) — лист DAG
+  (только stdlib: строковые константы + `os`), несёт всё содержимое шаблонов:
+  `SAMPLE_ADAPTER_YAML` и `SAMPLE_TARIFFS_YAML` (дословные копии
+  `docs/samples/*.yaml`) плюс `render_env(root)` — рендер `adapter.env` со всеми
+  переменными-дефолтами и заглушкой токена `*****`. Три пути в env
+  (`ADAPTER_BACKEND_CONFIG`, `ADAPTER_MODELS_TARIFFS`, `ADAPTER_DATA_ROOT`)
+  строятся абсолютными от `root`, поэтому файл не хранится строкой, а
+  собирается в момент установки;
+- **`cli_args.py`: `--install` из встроенных данных** (коммит 1) — вместо
+  `_samples_dir()`/`_copy_sample()` запись идёт из `templates` через новый
+  `_write_template(path, content, *, mode, hint)`: пишет `newline=""` (файл
+  ложится ровно теми байтами, что и образец — CRLF на Windows не появится),
+  сохраняет идемпотентность (`[WARN]` + пропуск существующего) и `chmod 0600`
+  на `adapter.env`. Удалены `_samples_dir()`, `_copy_sample()` и
+  `_default_env_file()` (переехал в `templates.render_env`); в рантайме
+  `docs/samples/` больше не читается вовсе. Файлы `docs/samples/*.yaml`
+  остаются образцами-справочниками; расхождение сторожит
+  `tests/test_templates.py` (сверка байт-в-байт, `skip` там, где образца нет).
+  Сообщение `[FATAL] ADAPTER_BACKEND_CONFIG is not set` дополнено подсказкой
+  `backend-adapter --install` (грепаемая подстрока сохранена — на ней стоят
+  self-check'и `build-binaries.sh`, CI и `install.sh`);
+- **Побочный эффект** — `[FATAL]` про `docs/samples/` исчезает навсегда:
+  `--install` теперь работает одинаково из исходников, из wheel и из
+  standalone-бинарника. Сборка изменений не требует: `templates.py` лежит в
+  пакете, PyInstaller кладёт его в PYZ сам, `--add-data` не нужен.
+
+**Следствия:** генератор дефолтных настроек больше не зависит от наличия
+репозитория с исходниками — из скачанного бинарника `backend-adapter --install`
+размечает домашнюю папку собственными шаблонами. Версия v0.9.12 публикуется
+(снятие WIP). Рабочее дерево чистое — ветка готова к проверке и отправке в
+удалённый репозиторий.
+
+Детали — `docs/install.md` (§4.5, домашняя папка), `docs/environment.md`
+(«Домашняя папка и `--root`»), `docs/architecture.md` (§2/§10),
+`backend_adapter/templates.py`, `backend_adapter/cli_args.py`.
+
 ## v0.9.11 — CLI (`--version`/`--help`, `--root`, `--install`); домашняя папка `~/.ba`; changelog.md — релизы одной сводкой
 
 ### 2026-09-25 Саммари ветки v0.9.11 (3 коммита между merge PR #23 (v0.9.10) и снятием WIP)
