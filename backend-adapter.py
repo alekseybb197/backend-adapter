@@ -127,7 +127,8 @@ if __name__ == "__main__":
     if not ADAPTER_BACKEND_CONFIG:
         print(
             "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу "
-            "конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
+            "конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml) "
+            "или разметьте домашнюю папку: backend-adapter --install."
         )
         sys.exit(1)
 

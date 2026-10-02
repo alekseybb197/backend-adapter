@@ -36,10 +36,14 @@ This file provides guidance to [CC] () when working with code in this repository
   любом, даже битом env; `--root <путь>` — домашняя папка адаптера (дефолт
   `~/.ba`; дом ⊃ данные: конфиги в `<root>/`, данные в `<root>/tmp/adapter`),
   `--install` — идемпотентная разметка дома (`adapter.env` со всеми дефолтами
-  и заглушкой токена, `adapter.yaml`, `tariffs.yaml` из `docs/samples/`).
+  и заглушкой токена, `adapter.yaml`, `tariffs.yaml`). Шаблоны **встроены в
+  пакет** (v0.9.12, `templates.py`), поэтому `--install` работает и из
+  standalone-бинарника/wheel, где `docs/samples/` недоступен; файлы
+  `docs/samples/*.yaml` — образцы-дубликаты (расхождение сторожит
+  `tests/test_templates.py`).
   Дом активен только по флагу; подстановки — через `setdefault` (**явный env
   побеждает**), без флагов «нулевая настройка» не меняется. Модуль —
-  лист DAG (stdlib-only). Справка/версия нужны внешним потребителям
+  лист DAG (stdlib + `templates`). Справка/версия нужны внешним потребителям
   (`install.sh`, `scripts/build-binaries.sh`, CI) вместо запуска бинарника
   ради разбора `[FATAL]`.
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
@@ -132,10 +136,10 @@ Log/Parts и каскада больше нет (v0.9.10) — `*.parts`-дамп
 `session_log.py`, `daemon.py`, `config.py`, `artifact_tree_common.py`,
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
 модули зависят минимум от одного из них. `session_settings.py`,
-`session_registry.py`, `state_store.py` и `env_validate.py` — листы DAG
-(`env_validate` и `cli_args.py` — stdlib-only, остальные импортируют только
-`config`). `cli_args.py` (v0.9.11) вызывается из `backend-adapter.py`
-**раньше** `env_validate`.
+`session_registry.py`, `state_store.py`, `env_validate.py` и `templates.py` —
+листы DAG (`env_validate` и `templates` — stdlib-only, `cli_args` зависит
+только от `templates`, остальные импортируют только `config`). `cli_args.py`
+(v0.9.11) вызывается из `backend-adapter.py` **раньше** `env_validate`.
 `artifact_refresh.py` (v0.9.10) — тоже лист (`config`; `artifact_tree`
 импортируется внутри функций — разрыв цикла `session_log` → `artifact_refresh`
 → `artifact_tree`). Новые модули — без циклов (dependency graph —

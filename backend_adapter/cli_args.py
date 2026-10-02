@@ -17,9 +17,9 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 **Домашняя папка (``--root``).** По умолчанию ``~/.ba``:
 
     <root>/
-      adapter.env     — переменные окружения (генерирует --install)
-      adapter.yaml    — конфигурация бэкендов (копия sample.adapter.yaml)
-      tariffs.yaml    — тарифы моделей (копия sample.tariffs.yaml)
+      adapter.env     — переменные окружения (рендерит --install из templates)
+      adapter.yaml    — конфигурация бэкендов (встроенный sample.adapter.yaml)
+      tariffs.yaml    — тарифы моделей (встроенный sample.tariffs.yaml)
       tmp/adapter/    — ADAPTER_DATA_ROOT: внутри log/ и var/
 
 Запуск с ``--root`` подставляет из дома ровно то, чего нет в окружении
@@ -28,7 +28,8 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 ``--root``/``--install`` дом не читается вовсе — поведение «нулевой настройки»
 (дефолт ``./tmp/adapter``, обязательный ``ADAPTER_BACKEND_CONFIG``) сохраняется.
 
-Модуль — лист DAG (только stdlib). Версию принимает аргументом: импортировать
+Модуль — лист DAG: stdlib + ``templates`` (тоже stdlib-only), откуда берутся
+встроенные шаблоны ``--install``. Версию принимает аргументом: импортировать
 ``backend-adapter.py`` нельзя (имя с дефисом — не валидный идентификатор), а
 держать её здесь значило бы раздвоить единственный источник версии
 (см. докстринг ``cli.py``).
@@ -41,6 +42,8 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 import os
 import sys
 
+from . import templates
+
 # Ключи версии и справки (синонимы: короткий/длинный; -? — исторический
 # «вопросительный» вариант, привычный по Windows-утилитам).
 _VERSION_FLAGS = ("-v", "--version")
@@ -50,15 +53,12 @@ _HELP_FLAGS = ("-h", "--help", "-?")
 # --root (--root без аргумента — ошибка, см. parse_args).
 _DEFAULT_ROOT = "~/.ba"
 
-# Подпапка данных внутри дома — тот же дефолт, что ADAPTER_DATA_ROOT в
-# «нулевой настройке» (config.ADAPTER_DATA_ROOT), только от корня дома.
-_DATA_SUBDIR = os.path.join("tmp", "adapter")
-
-# Имена файлов, которые --install кладёт в дом (adapter.env генерируется,
-# два других копируются из docs/samples/).
-_ENV_NAME = "adapter.env"
-_YAML_NAME = "adapter.yaml"
-_TARIFFS_NAME = "tariffs.yaml"
+# Имена файлов дома и подпапка данных — в templates (там же, где рендерится
+# adapter.env); берём их оттуда, чтобы не держать два списка имён.
+_DATA_SUBDIR = templates.DATA_SUBDIR
+_ENV_NAME = templates.ENV_NAME
+_YAML_NAME = templates.YAML_NAME
+_TARIFFS_NAME = templates.TARIFFS_NAME
 
 _HELP_TEXT = """\
 backend-adapter — [AN] Messages <-> [OI]-compatible backends for AI agents
@@ -185,128 +185,45 @@ def _load_env_file(path: str) -> None:
 
 
 def _install_home(root: str) -> None:
-    """Разметить домашнюю папку; существующие файлы не трогать.
+    """Разметить домашнюю папку из встроенных шаблонов; существующее не трогать.
 
     Создаёт ``<root>`` с подпапками данных (log/ + var/ — те же, что создаёт
-    старт адаптера), кладёт ``adapter.yaml`` и ``tariffs.yaml`` из
-    ``docs/samples/`` и генерирует ``adapter.env`` со значениями по умолчанию.
-    Каждый уже существующий файл — пропуск с ``[WARN]`` (идемпотентность:
-    повторный запуск ничего не ломает и не перезаписывает правки пользователя).
+    старт адаптера) и кладёт ``adapter.yaml``, ``tariffs.yaml`` и ``adapter.env``
+    из модуля ``templates`` — содержимое встроено в код (v0.9.12), поэтому
+    ``--install`` работает и из standalone-бинарника/wheel, где ``docs/samples/``
+    недоступен. Каждый уже существующий файл — пропуск с ``[WARN]``
+    (идемпотентность: повторный запуск не перезаписывает правки пользователя).
     """
-    samples = _samples_dir()
     os.makedirs(os.path.join(root, _DATA_SUBDIR, "log"), exist_ok=True)
     os.makedirs(os.path.join(root, _DATA_SUBDIR, "var"), exist_ok=True)
 
-    _copy_sample(os.path.join(samples, "sample.adapter.yaml"), os.path.join(root, _YAML_NAME))
-    _copy_sample(os.path.join(samples, "sample.tariffs.yaml"), os.path.join(root, _TARIFFS_NAME))
-
-    env_path = os.path.join(root, _ENV_NAME)
-    if os.path.exists(env_path):
-        print(f"[WARN] {env_path} уже существует — оставлен без изменений.")
-    else:
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write(_default_env_file(root))
-        # В adapter.env попадает токен бэкенда — файл только для владельца.
-        os.chmod(env_path, 0o600)
-        print(f"[OK]   {env_path} — создан (заполните токен).")
+    _write_template(os.path.join(root, _YAML_NAME), templates.SAMPLE_ADAPTER_YAML)
+    _write_template(os.path.join(root, _TARIFFS_NAME), templates.SAMPLE_TARIFFS_YAML)
+    # В adapter.env попадает токен бэкенда — файл только для владельца (0600).
+    _write_template(
+        os.path.join(root, _ENV_NAME),
+        templates.render_env(root),
+        mode=0o600,
+        hint=" (заполните токен)",
+    )
 
     print(f"[OK]   Домашняя папка адаптера готова: {root}")
     print(f"       Запуск: backend-adapter --root {root}")
 
 
-def _samples_dir() -> str:
-    """Каталог ``docs/samples/`` рядом с пакетом; понятный [FATAL] если нет."""
-    # cli_args.py лежит в backend_adapter/ — образцы на уровень выше, в docs/.
-    samples = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs", "samples")
-    samples = os.path.normpath(samples)
-    if not os.path.isdir(samples):
-        print(
-            "[FATAL] Не найдены образцы конфигов (docs/samples/) — --install "
-            "доступен только при запуске из репозитория с исходниками "
-            "(в standalone-бинарник образцы не входят)."
-        )
-        sys.exit(2)
-    return samples
+def _write_template(path: str, content: str, *, mode: int | None = None, hint: str = "") -> None:
+    """Записать файл из встроенного шаблона, не перезаписывая существующий.
 
-
-def _copy_sample(src: str, dst: str) -> None:
-    """Скопировать образец, не перезаписывая существующий файл."""
-    if os.path.exists(dst):
-        print(f"[WARN] {dst} уже существует — оставлен без изменений.")
-        return
-    try:
-        with open(src, "rb") as f:
-            data = f.read()
-    except OSError as e:
-        print(f"[FATAL] Не удалось прочитать образец {src}: {e}")
-        sys.exit(2)
-    with open(dst, "wb") as f:
-        f.write(data)
-    print(f"[OK]   {dst} — создан.")
-
-
-def _default_env_file(root: str) -> str:
-    """Содержимое генерируемого adapter.env — все переменные с дефолтами.
-
-    Значения совпадают с дефолтами ``config.py``/``docs/environment.md``;
-    пути к данным и конфигам — абсолютные, вычисленные от ``root`` (чтобы
-    запуск ``--root`` находил их при любом рабочем каталоге).
+    ``newline=""`` отключает трансляцию ``\\n`` → ``os.linesep``: файлы ложатся
+    ровно теми байтами, что и ``docs/samples/*.yaml`` (важно для Windows, где
+    иначе получился бы CRLF). ``mode`` — права создаваемого файла (``None`` —
+    по umask).
     """
-    data_root = os.path.join(root, _DATA_SUBDIR)
-    return f"""\
-# adapter.env — окружение backend-adapter (сгенерировано --install).
-# Заполните токен бэкенда в ADAPTER_BACKEND_KEY_LLM_SERVICE (имя переменной
-# задано полем key в adapter.yaml) и при необходимости поправьте значения.
-# Переменные, заданные в оболочке, побеждают этот файл.
-
-# --- Backend connection ---
-export ADAPTER_BACKEND_CONFIG='{os.path.join(root, _YAML_NAME)}'
-export ADAPTER_BACKEND_KEY_LLM_SERVICE='*****'
-
-# --- Server settings ---
-export ADAPTER_PROXY_PORT=9999
-export ADAPTER_ENDPOINT_HOST="127.0.0.1"
-
-# --- Network ---
-export ADAPTER_TIMEOUT=300
-export ADAPTER_RETRY_COUNT=3
-
-# --- Streaming ---
-export ADAPTER_STREAMING_ENABLE=1
-export ADAPTER_STREAM_INCLUDE_USAGE=1
-
-# --- Models ---
-export ADAPTER_STRICT_MODELS=1
-export ADAPTER_MODELS_MAPPING=""
-export ADAPTER_MODELS_TARIFFS='{os.path.join(root, _TARIFFS_NAME)}'
-
-# --- Input endpoint routing (TARGET) ---
-export ADAPTER_MESSAGES_TARGET=completions
-# export ADAPTER_COMPLETIONS_TARGET=passthrough
-# export ADAPTER_RESPONSES_TARGET=passthrough
-
-# --- Sessions ---
-# export ADAPTER_SESSION_HEADER='X-Claude-Code-Session-Id,x-opencode-session,x-codex-turn-metadata:session_id'
-export ADAPTER_SESSIONS_TABLE=10
-
-# --- Logging ---
-export ADAPTER_DEBUG_ENABLE=0
-export ADAPTER_DATA_ROOT='{data_root}'
-export ADAPTER_DEBUG_TRIM=3000
-export ADAPTER_TRACE_REASONING_MAX_CHARS=0
-export ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS=0
-
-# --- Sanitizer (secret masking in logs) ---
-export ADAPTER_SENSITIVE_LOGGING_ENABLE=0
-
-# --- WEBUI ---
-export ADAPTER_WEBUI_HOST="127.0.0.1"
-export ADAPTER_WEBUI_PORT=8765
-# export ADAPTER_EXPORTER_ENABLE=1
-# export ADAPTER_EXPORTER_PORT=9100
-
-# --- Mode ---
-export ADAPTER_DETACH_ENABLE=0
-export ADAPTER_PIDFILE='adapter.pid'
-# export ADAPTER_STATE='state.yaml'
-"""
+    if os.path.exists(path):
+        print(f"[WARN] {path} уже существует — оставлен без изменений.")
+        return
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+    if mode is not None:
+        os.chmod(path, mode)
+    print(f"[OK]   {path} — создан{hint}.")

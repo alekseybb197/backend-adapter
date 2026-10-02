@@ -190,7 +190,7 @@ cp docs/samples/sample.adapter.yaml adapter.yaml
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа
-├── backend_adapter/            # Доменный пакет (37 модулей, включая __init__.py; artifact_tree* — 8 модулей)
+├── backend_adapter/            # Доменный пакет (38 модулей, включая __init__.py; artifact_tree* — 8 модулей)
 │   ├── config.py              # Парсинг env, конфиг бэкендов (YAML), модели
 │   ├── server.py              # HTTP-сервер, Handler, три входа + TARGET-маршрутизация
 │   ├── routing.py             # Входные эндпоинты/TARGET: decide() по TARGET
@@ -216,6 +216,7 @@ backend-adapter/
 │   ├── probe_json.py          # JSON-результат опроса списка моделей в var/
 │   ├── cli.py                 # Консольный entry point пакета
 │   ├── cli_args.py            # Разбор argv адаптера: --version/--help/--root/--install
+│   ├── templates.py           # Встроенные шаблоны дефолтов для --install (v0.9.12)
 │   ├── artifact_tree.py       # artifact_tree*: публичный API (generate())
 │   ├── artifact_tree_common.py    # утилиты, константы, цвета
 │   ├── artifact_tree_registry.py  # реестр артефактов + дедупликация
@@ -558,9 +559,9 @@ pyinstaller --onefile \
 
 ```
 ~/.ba/
-├── adapter.env     # переменные окружения (генерируется --install)
-├── adapter.yaml    # конфигурация бэкендов (копия sample.adapter.yaml)
-├── tariffs.yaml    # тарифы моделей (копия sample.tariffs.yaml)
+├── adapter.env     # переменные окружения (рендерит --install)
+├── adapter.yaml    # конфигурация бэкендов (встроенный sample.adapter.yaml)
+├── tariffs.yaml    # тарифы моделей (встроенный sample.tariffs.yaml)
 └── tmp/adapter/    # ADAPTER_DATA_ROOT: внутри log/ и var/
 ```
 
@@ -588,11 +589,12 @@ backend-adapter --root /opt/ba
 пользователя. В `adapter.env` токен — заглушка `*****` (файл создаётся с
 правами `0600`, так как в него попадает секрет).
 
-**Ограничение.** `--install` копирует образцы из `docs/samples/` — они есть в
-репозитории с исходниками, но не входят в standalone-бинарник (собран из одного
-`backend-adapter.py`). Из бинарника `--install` завершится `[FATAL]` с
-пояснением; возьмите `sample.adapter.yaml`/`sample.adapter.env` из репозитория
-(раздел [3](#3-клонирование)) и заведите домашнюю папку вручную.
+**Шаблоны встроены в код** (v0.9.12): `adapter.yaml`, `tariffs.yaml` и
+`adapter.env` берутся из модуля `backend_adapter/templates.py`, а не из
+`docs/samples/`. Поэтому `--install` работает одинаково из исходников, из
+wheel (`pip install .`) и из standalone-бинарника. Файлы `docs/samples/*.yaml`
+в репозитории остаются образцами-справочниками — их содержимое синхронно со
+встроенным (это сторожит `tests/test_templates.py`).
 
 ---
 

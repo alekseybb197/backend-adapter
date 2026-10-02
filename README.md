@@ -104,7 +104,7 @@ python3 backend-adapter.py --root ~/.ba       # запуск с настройк
 ```
 backend-adapter/
 ├── backend-adapter.py          # Точка входа (__version__)
-├── backend_adapter/            # Доменный пакет (37 модулей, включая __init__.py)
+├── backend_adapter/            # Доменный пакет (38 модулей, включая __init__.py)
 │   ├── config.py               # Парсинг env, multi-backend YAML, фоновые проверки
 │   ├── server.py               # HTTP-сервер (три входа + TARGET-маршрутизация)
 │   ├── routing.py              # Входные эндпоинты/TARGET: decide() по TARGET
@@ -132,6 +132,7 @@ backend-adapter/
 │   ├── probe_json.py           # JSON-результат опроса списка моделей в var/
 │   ├── cli.py                  # CLI-утилиты (runpy-трамплин команды backend-adapter)
 │   ├── cli_args.py             # Разбор argv: --version/--help/--root/--install
+│   ├── templates.py            # Встроенные шаблоны дефолтов для --install (v0.9.12)
 │   ├── artifact_tree*.py       # Генерация дерева артефактов (8 модулей)
 │   ├── artifact_refresh.py     # Фоновая дебаунсная отрисовка артефактов (v0.9.10)
 │   └── __init__.py             # Lazy-прокси глобалов config/logger/tracer на старте
