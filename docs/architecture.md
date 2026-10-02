@@ -93,11 +93,19 @@ backend_adapter/
 │                             лист DAG — stdlib only, вызывается ДО импорта config
 ├── cli_args.py             ← разбор argv адаптера (v0.9.11): --version/-v,
 │                             --help/-h/-?, --root <путь> (домашняя папка, дефолт
-│                             ~/.ba), --install (разметка дома). Лист DAG —
-│                             stdlib only; вызывается из backend-adapter.py
-│                             ДО env_validate и импорта config (--version/--help
-│                             обязаны работать при любом env). env-файл дома
-│                             читает своим мини-парсером (export K=V, без shell)
+│                             ~/.ba), --install (разметка дома). Вызывается из
+│                             backend-adapter.py ДО env_validate и импорта config
+│                             (--version/--help обязаны работать при любом env).
+│                             env-файл дома читает своим мини-парсером (export K=V,
+│                             без shell); шаблоны --install — из templates.py
+│                             (v0.9.12), т.е. лист DAG: stdlib + templates
+├── templates.py            ← встроенные шаблоны дефолтных настроек для --install
+│                             (v0.9.12): SAMPLE_ADAPTER_YAML, SAMPLE_TARIFFS_YAML
+│                             и render_env(root) для adapter.env. Лист DAG —
+│                             stdlib only; встроены в пакет, поэтому --install
+│                             работает и из standalone-бинарника/wheel, где
+│                             docs/samples/ недоступен (docs/samples/*.yaml —
+│                             образцы-дубликаты, синхронность сторожит тест)
 ├── cli.py                  ← консольный entry point пакета (runpy-трамплин на
 │                             backend-adapter.py — версия живёт только там)
 ├── artifact_refresh.py     ← фоновая дебаунсная отрисовка артефактов (v0.9.10, §8.5):
@@ -1243,7 +1251,10 @@ backend-adapter.py
   │                       config.set_on_change, обратной зависимости нет)
   ├── env_validate.py    (no internal deps — stdlib only; вызывается
   │                       backend-adapter.py ДО импорта config — v0.9.6)
-  ├── cli_args.py        (no internal deps — stdlib only; вызывается
+  ├── templates.py       (no internal deps — stdlib only; встроенные шаблоны
+  │                       --install: SAMPLE_ADAPTER_YAML/SAMPLE_TARIFFS_YAML +
+  │                       render_env — v0.9.12)
+  ├── cli_args.py        → templates (лист DAG: stdlib + templates; вызывается
   │                       backend-adapter.py ПЕРВЫМ, до env_validate и config
   │                       — --version/--help обязаны работать при любом env;
   │                       --root/--install — домашняя папка адаптера, v0.9.11)
@@ -1299,7 +1310,7 @@ backend-adapter.py
 Entry point (WEBUI): `backend-adapter.py` импортирует `webserver.serve()`
 для daemon-потока WEBUI (см. §4.1). Вход CLI: `python -m backend_adapter.webserver`.
 
-**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `cli_args.py` (stdlib-only, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time**, forming the dependency base. All other modules depend on at least one of these.
+**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `templates.py` (stdlib-only), `cli_args.py` (stdlib + `templates`, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time** (or depend only on the stdlib-only `templates.py`), forming the dependency base. All other modules depend on at least one of these.
 
 ---
 
@@ -1311,5 +1322,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.11** (see `backend-adapter.py`).
+Current: **v0.9.12** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

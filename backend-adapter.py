@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v0.9.11
+"""[CC] <-> [OI]-backend adapter v0.9.12
 — changelog: ../changelog.md"""
 
-__version__ = "0.9.11"
+__version__ = "0.9.12"
 # КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
 # от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
 # Формулировка дублируется в README.md первой строкой вводного blockquote;
@@ -127,7 +127,8 @@ if __name__ == "__main__":
     if not ADAPTER_BACKEND_CONFIG:
         print(
             "[FATAL] ADAPTER_BACKEND_CONFIG is not set. Задайте путь к YAML-файлу "
-            "конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml)."
+            "конфигурации бэкенда (пример — docs/samples/sample.adapter.yaml) "
+            "или разметьте домашнюю папку: backend-adapter --install."
         )
         sys.exit(1)
 

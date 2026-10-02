@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Tests for backend_adapter.cli_args — CLI-ключи адаптера (v0.9.11).
 
-Модуль — лист DAG (только stdlib): импортируется на уровне файла, свежесть
-через fresh_env не нужна. Проверяем разбор argv: информационные ключи
+Модуль — лист DAG (stdlib + ``templates``): импортируется на уровне файла,
+свежесть через fresh_env не нужна. Проверяем разбор argv: информационные ключи
 завершают процесс кодом 0, неизвестный — кодом 2, пустой argv — обычный старт.
 Ключи ``--root``/``--install`` трогают ``os.environ`` и файловую систему,
 поэтому каждый тест изолирован: fixture подменяет ``os.environ`` приватной
@@ -14,7 +14,7 @@ import os
 
 import pytest
 
-from backend_adapter import cli_args
+from backend_adapter import cli_args, templates
 
 # Переменные, которые тесты выставляют сами: снимаем их из окружения, чтобы
 # реальный adapter.env разработчика не влиял на результат.
@@ -146,6 +146,11 @@ class TestInstall:
         # Токен — заглушка, не пустое значение.
         assert "ADAPTER_BACKEND_KEY_LLM_SERVICE='*****'" in env_text
 
+        # v0.9.12: файлы кладутся из встроенных шаблонов — ровно те же байты,
+        # что и в docs/samples (иначе из бинарника лёг бы иной текст).
+        assert (root / "adapter.yaml").read_text(encoding="utf-8") == templates.SAMPLE_ADAPTER_YAML
+        assert (root / "tariffs.yaml").read_text(encoding="utf-8") == templates.SAMPLE_TARIFFS_YAML
+
         # В adapter.env попадает токен — файл закрыт для остальных.
         assert (root / "adapter.env").stat().st_mode & 0o777 == 0o600
 
@@ -173,11 +178,19 @@ class TestInstall:
         assert ei.value.code == 0
         assert (tmp_path / ".ba" / "adapter.env").is_file()
 
-    def test_missing_samples_gets_fatal(self, tmp_path, clean_env, monkeypatch, capsys):
-        # Образцов рядом нет (например, standalone-бинарник без docs/):
-        # _samples_dir не находит каталог — [FATAL] с кодом 2.
+    def test_install_works_without_docs_samples(
+        self, tmp_path, clean_env, monkeypatch, capsys
+    ):
+        # v0.9.12: шаблоны встроены в код (templates.py), docs/samples/ в
+        # рантайме не читается. Подменяем __file__ в несуществующий каталог
+        # (аналог standalone-бинарника/wheel) — --install всё равно размечает
+        # дом и завершается кодом 0, без [FATAL].
         monkeypatch.setattr(cli_args, "__file__", str(tmp_path / "pkg" / "cli_args.py"))
+        root = tmp_path / "home"
         with pytest.raises(SystemExit) as ei:
-            cli_args.parse_args(["--install", "--root", str(tmp_path / "home")], "9.9.9")
-        assert ei.value.code == 2
-        assert "[FATAL]" in capsys.readouterr().out
+            cli_args.parse_args(["--install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert (root / "adapter.yaml").is_file()
+        assert (root / "tariffs.yaml").is_file()
+        assert (root / "adapter.env").is_file()
+        assert "[FATAL]" not in capsys.readouterr().out
