@@ -157,7 +157,7 @@ def _chat(proxy_port: int, body: dict) -> tuple[int, str]:
 
 def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
                  web_port: int, exp_port: int, data_root: str,
-                 debug_enable: str, trim: str = "3000") -> dict:
+                 debug_enable: str, trim: str = "1000") -> dict:
     """env для процесса адаптера: чистое ADAPTER_-окружение + тестовые пути."""
     env = dict(os.environ)
     for k in list(env):
@@ -174,7 +174,7 @@ def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
         # WEBUI_ENABLE больше НЕ задаём — должен подняться сам (v0.8.6)
         "ADAPTER_DEBUG_ENABLE": debug_enable,
         "ADAPTER_DATA_ROOT": data_root,
-        "ADAPTER_DEBUG_TRIM": trim,
+        "ADAPTER_LOG_TRIM": trim,
     })
     return env
 
@@ -499,7 +499,7 @@ class TestManualAdapterProcess:
 
     def test_console_trimmed_file_full(self, tmp_path):
         """Контракт v0.8.6-реформы на реальном процессе: при ENABLE=1 и малом
-        ADAPTER_DEBUG_TRIM консоль показывает ОБРЕЗАННУЮ [BODY]-строку,
+        ADAPTER_LOG_TRIM консоль показывает ОБРЕЗАННУЮ [BODY]-строку,
         session-*.log получает её ПОЛНОЙ."""
         data_root = str(tmp_path / "data")
         log_dir = os.path.join(data_root, "log")

@@ -59,7 +59,7 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_STRICT_MODELS",
     ]
     int_fields = [
-        "ADAPTER_DEBUG_TRIM",
+        "ADAPTER_LOG_TRIM",
         "ADAPTER_TRACE_REASONING_MAX_CHARS",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS",
     ]
@@ -88,7 +88,7 @@ def _render_config_page(current_values: dict, applied: dict | None = None) -> by
         "ADAPTER_STREAMING_ENABLE": "Рубильник стриминга: 0 — всегда stream=False (аварийный)",
         "ADAPTER_STREAM_INCLUDE_USAGE": "Передавать usage-токены в стриме (stream_options)",
         "ADAPTER_STRICT_MODELS": "Строгая валидация моделей по списку бэкенда",
-        "ADAPTER_DEBUG_TRIM": "Порог обрезки консольного вывода (символы, 0=без обрезки; файл — всегда полный)",
+        "ADAPTER_LOG_TRIM": "Порог обрезки консольного вывода (символы, 0=без обрезки; файл — всегда полный)",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "Макс. символов reasoning в трейсе (0=без ограничений)",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "Макс. символов tool-полей в трейсе (0=без ограничений)",
         # TARGET-маршрутизация входов (см. docs/routing.md): значение задаёт,

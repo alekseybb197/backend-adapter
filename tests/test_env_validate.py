@@ -117,7 +117,7 @@ class TestValidateEnv:
             "ADAPTER_PROXY_PORT",
             "ADAPTER_TIMEOUT",
             "ADAPTER_RETRY_COUNT",
-            "ADAPTER_DEBUG_TRIM",
+            "ADAPTER_LOG_TRIM",
             "ADAPTER_WEBUI_PORT",
             "ADAPTER_EXPORTER_PORT",
             "ADAPTER_SESSIONS_TABLE",

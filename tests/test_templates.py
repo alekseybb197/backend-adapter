@@ -55,7 +55,7 @@ class TestRenderEnv:
         # Несколько дефолтов, сверяемых с config.py (регрессия при рассинхроне).
         assert "export ADAPTER_PROXY_PORT=9999" in text
         assert "export ADAPTER_ENDPOINT_HOST=\"127.0.0.1\"" in text
-        assert "export ADAPTER_DEBUG_TRIM=3000" in text
+        assert "export ADAPTER_LOG_TRIM=1000" in text
         assert "export ADAPTER_WEBUI_PORT=8765" in text
 
     def test_paths_follow_root(self, tmp_path):

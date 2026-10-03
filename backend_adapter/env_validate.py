@@ -47,7 +47,7 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_PROXY_PORT": "int",
     "ADAPTER_TIMEOUT": "int",
     "ADAPTER_RETRY_COUNT": "int",
-    "ADAPTER_DEBUG_TRIM": "int",
+    "ADAPTER_LOG_TRIM": "int",
     "ADAPTER_TRACE_REASONING_MAX_CHARS": "int",
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "int",
     "ADAPTER_WEBUI_PORT": "int",

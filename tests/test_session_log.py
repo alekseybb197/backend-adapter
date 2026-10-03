@@ -395,12 +395,12 @@ class TestWriteErrorFile:
         assert len(list(tmp_path.glob("session-*.err"))) == 1
 
     def test_no_trim(self, tmp_path):
-        """Содержимое БЕЗ обрезки по ADAPTER_DEBUG_TRIM (даже при малом TRIM)."""
+        """Содержимое БЕЗ обрезки по ADAPTER_LOG_TRIM (даже при малом TRIM)."""
         session_log = self._fresh()
         session_log._DEBUG_PATH = str(tmp_path)
         session_log._TRACE_PATH = str(tmp_path)
         from backend_adapter import config
-        config.ADAPTER_DEBUG_TRIM = 10  # малый лимит консольной обрезки
+        config.ADAPTER_LOG_TRIM = 10  # малый лимит консольной обрезки
         long_req = '{"prompt": "' + "x" * 5000 + '"}'
         long_err = "E" * 5000
         session_log.write_error_file(
@@ -525,10 +525,10 @@ class TestWriteWarnFile:
         assert len(list(tmp_path.glob("session-*.err"))) == 1
 
     def test_no_trim(self, tmp_path):
-        """Содержимое БЕЗ обрезки по ADAPTER_DEBUG_TRIM (малый TRIM не режет)."""
+        """Содержимое БЕЗ обрезки по ADAPTER_LOG_TRIM (малый TRIM не режет)."""
         session_log = self._fresh()
         from backend_adapter import config
-        config.ADAPTER_DEBUG_TRIM = 10
+        config.ADAPTER_LOG_TRIM = 10
         long_req = '{"prompt": "' + "x" * 5000 + '"}'
         self._write(session_log, tmp_path, out_body=long_req, warn_body="W" * 5000)
         content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")
@@ -646,10 +646,10 @@ class TestWriteSessionError:
         assert len(list(tmp_path.glob("session-*.err"))) == 1
 
     def test_no_trim(self, tmp_path):
-        """Содержимое БЕЗ обрезки по ADAPTER_DEBUG_TRIM."""
+        """Содержимое БЕЗ обрезки по ADAPTER_LOG_TRIM."""
         session_log = self._fresh()
         from backend_adapter import config
-        config.ADAPTER_DEBUG_TRIM = 10
+        config.ADAPTER_LOG_TRIM = 10
         long_body = '{"prompt": "' + "x" * 5000 + '"}'
         self._write(session_log, tmp_path, in_body=long_body)
         content = list(tmp_path.glob("session-*.err"))[0].read_text(encoding="utf-8")

@@ -551,7 +551,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
             # (v0.9.5, задача 7): _note_session_error пишет [REQUEST] из него,
             # когда запрос до бэкенда не дошёл и out_body не сформирован.
             _req_ctx.in_body = _body
-            # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
+            # Полная строка: консоль обрежет её до ADAPTER_LOG_TRIM в
             # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
             _dr(req_id, f"[BODY] {_body}")
             if logging_enabled(session_id):
@@ -2059,7 +2059,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                 warn_role = msgs[0]["role"] if msgs else "empty"
                 _dr(req_id, f"[WARN] First message is NOT system: {warn_role}")
 
-            # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM в
+            # Полная строка: консоль обрежет её до ADAPTER_LOG_TRIM в
             # logger._write, файл при ADAPTER_DEBUG_ENABLE=1 получит полную.
             _dr(
                 req_id,
@@ -2411,7 +2411,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         req_id,
                         f"[FETCH] Success in {elapsed:.1f}s, {resp.status}, {len(raw)} bytes",
                     )
-                    # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM
+                    # Полная строка: консоль обрежет её до ADAPTER_LOG_TRIM
                     # в logger._write, файл при ENABLE=1 получит полную.
                     _dr(req_id, f"[FETCH_RAW] {raw.decode()}")
                     if logging_enabled(session_id):
@@ -2437,7 +2437,7 @@ class Adapter(http.server.BaseHTTPRequestHandler):
                         usage_tokens["input"] += int(u.get("prompt_tokens") or 0)
                         usage_tokens["output"] += int(u.get("completion_tokens") or 0)
 
-                    # Полная строка: консоль обрежет её до ADAPTER_DEBUG_TRIM
+                    # Полная строка: консоль обрежет её до ADAPTER_LOG_TRIM
                     # в logger._write, файл при ENABLE=1 получит полную.
                     _dr(
                         req_id,

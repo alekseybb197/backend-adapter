@@ -81,7 +81,7 @@ class TestUnconditionalChannel:
         наличие корня данных; вне ENABLE/TRIM)."""
         os.environ["ADAPTER_DATA_ROOT"] = str(tmp_path)
         os.environ["ADAPTER_DEBUG_ENABLE"] = "0"
-        os.environ["ADAPTER_DEBUG_TRIM"] = "0"
+        os.environ["ADAPTER_LOG_TRIM"] = "0"
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
         assert (tmp_path / "var" / "llm.models.json").exists()
@@ -95,6 +95,7 @@ class TestUnconditionalChannel:
         # импорте — канал должен быть тихим, поэтому убираем и их.
         os.environ.pop("ADAPTER_DEBUG_LOGPATH", None)
         os.environ.pop("ADAPTER_DEBUG_PARTS", None)
+        os.environ.pop("ADAPTER_DEBUG_TRIM", None)
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
         assert os.path.isfile(

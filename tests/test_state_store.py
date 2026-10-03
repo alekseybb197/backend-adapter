@@ -73,8 +73,8 @@ class TestLoad:
     def test_reads_valid_file(self, store, cfg, tmp_path):
         path = _point_at(cfg, tmp_path)
         with open(path, "w", encoding="utf-8") as f:
-            yaml.safe_dump({"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_TRIM": 500}, f)
-        assert store.load() == {"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_TRIM": 500}
+            yaml.safe_dump({"ADAPTER_DEBUG": True, "ADAPTER_LOG_TRIM": 500}, f)
+        assert store.load() == {"ADAPTER_DEBUG": True, "ADAPTER_LOG_TRIM": 500}
 
     def test_unknown_key_skipped(self, store, cfg, tmp_path, capsys):
         path = _point_at(cfg, tmp_path)
@@ -185,36 +185,36 @@ class TestApplyOnStartup:
     def test_no_file_creates_from_env(self, store, cfg, tmp_path):
         path = _point_at(cfg, tmp_path)
         cfg.ADAPTER_DEBUG = True
-        cfg.ADAPTER_DEBUG_TRIM = 123
+        cfg.ADAPTER_LOG_TRIM = 123
         store.apply_on_startup()
         assert os.path.isfile(path)
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         # В файл попал весь пул (снимок env-значений).
         assert data["ADAPTER_DEBUG"] is True
-        assert data["ADAPTER_DEBUG_TRIM"] == 123
+        assert data["ADAPTER_LOG_TRIM"] == 123
         assert set(data) == set(cfg.RUNTIME_CONFIG_POOL)
 
     def test_file_overrides_env(self, store, cfg, tmp_path):
         path = _point_at(cfg, tmp_path)
         cfg.ADAPTER_DEBUG = False
-        cfg.ADAPTER_DEBUG_TRIM = 3000
+        cfg.ADAPTER_LOG_TRIM = 3000
         with open(path, "w", encoding="utf-8") as f:
-            yaml.safe_dump({"ADAPTER_DEBUG": True, "ADAPTER_DEBUG_TRIM": 777}, f)
+            yaml.safe_dump({"ADAPTER_DEBUG": True, "ADAPTER_LOG_TRIM": 777}, f)
         store.apply_on_startup()
         # Файл победил env.
         assert cfg.ADAPTER_DEBUG is True
-        assert cfg.ADAPTER_DEBUG_TRIM == 777
+        assert cfg.ADAPTER_LOG_TRIM == 777
 
     def test_broken_file_keeps_env(self, store, cfg, tmp_path, capsys):
         path = _point_at(cfg, tmp_path)
         cfg.ADAPTER_DEBUG = True
-        cfg.ADAPTER_DEBUG_TRIM = 3000
+        cfg.ADAPTER_LOG_TRIM = 3000
         with open(path, "w", encoding="utf-8") as f:
             f.write("ADAPTER_DEBUG: [unclosed\n")
         store.apply_on_startup()
         assert cfg.ADAPTER_DEBUG is True
-        assert cfg.ADAPTER_DEBUG_TRIM == 3000
+        assert cfg.ADAPTER_LOG_TRIM == 3000
         assert "[WARN]" in capsys.readouterr().out
 
     def test_registers_change_callback(self, store, cfg, tmp_path):
@@ -226,10 +226,10 @@ class TestApplyOnStartup:
         path = _point_at(cfg, tmp_path)
         store.apply_on_startup()
         # Изменение пула через config → колбек → файл.
-        cfg.set_runtime_config(ADAPTER_DEBUG_TRIM=999)
+        cfg.set_runtime_config(ADAPTER_LOG_TRIM=999)
         with open(path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        assert data["ADAPTER_DEBUG_TRIM"] == 999
+        assert data["ADAPTER_LOG_TRIM"] == 999
 
     def test_callback_ignores_unknown_only_change(self, store, cfg, tmp_path):
         path = _point_at(cfg, tmp_path)

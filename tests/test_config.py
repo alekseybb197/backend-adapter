@@ -88,17 +88,17 @@ class TestTrimLimit:
 
     def test_trim_on(self):
         """TRIM=N → возвращает N (консоль обрезается до N символов)."""
-        self.config.ADAPTER_DEBUG_TRIM = 100
+        self.config.ADAPTER_LOG_TRIM = 100
         assert self.config.trim_limit() == 100
 
     def test_trim_off_zero(self):
         """TRIM=0 → «без обрезки» (0 = выкл., не ошибка конфигурации)."""
-        self.config.ADAPTER_DEBUG_TRIM = 0
+        self.config.ADAPTER_LOG_TRIM = 0
         assert self.config.trim_limit() == 0
 
     def test_default(self):
-        """Env не задан → дефолт ADAPTER_DEBUG_TRIM=3000."""
-        assert self.config.trim_limit() == 3000
+        """Env не задан → дефолт ADAPTER_LOG_TRIM=1000 (v0.9.13)."""
+        assert self.config.trim_limit() == 1000
 
 
 class TestHostVars:
@@ -174,6 +174,18 @@ class TestZeroConfigDefaults:
         assert "ADAPTER_DEBUG_PARTS" not in self.config.SESSION_CONFIG_POOL
         assert "ADAPTER_DEBUG_PARTS" not in self.config._RUNTIME_CONFIG_TYPES
         assert "ADAPTER_DEBUG_PARTS" not in self.config._SESSION_CONFIG_TYPES
+
+    def test_old_trim_var_removed_with_warn(self, monkeypatch, capsys):
+        """Переименованный ADAPTER_DEBUG_TRIM (v0.9.13): одна строка [WARN],
+        старт идёт на новом дефолте, старое имя в модуле отсутствует."""
+        monkeypatch.setenv("ADAPTER_DEBUG_TRIM", "3000")
+        monkeypatch.delenv("ADAPTER_LOG_TRIM", raising=False)
+        _reload_config()
+        from backend_adapter import config
+        out = capsys.readouterr().out
+        assert "[WARN] ADAPTER_DEBUG_TRIM" in out
+        assert not hasattr(config, "ADAPTER_DEBUG_TRIM")
+        assert config.trim_limit() == 1000  # старое значение не читается
 
 
 class TestParseBackendYaml:
@@ -1172,13 +1184,13 @@ class TestRuntimeConfig:
 
     def test_wrong_type_not_applied(self):
         """Wrong type for known key is not applied; other keys still apply."""
-        trim_before = self.config.ADAPTER_DEBUG_TRIM
+        trim_before = self.config.ADAPTER_LOG_TRIM
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG="not-a-bool",  # неверный тип
-            ADAPTER_DEBUG_TRIM=1234,  # верный тип
+            ADAPTER_LOG_TRIM=1234,  # верный тип
         )
         assert result["ADAPTER_DEBUG"] is False  # осталось прежнее значение
-        assert result["ADAPTER_DEBUG_TRIM"] == 1234  # применилось
+        assert result["ADAPTER_LOG_TRIM"] == 1234  # применилось
         assert trim_before != 1234
 
     def test_bool_not_passed_as_int(self):
@@ -1205,22 +1217,22 @@ class TestRuntimeConfig:
         assert result["ADAPTER_DEBUG"] is False
 
     def test_trim_int_applied(self):
-        """ADAPTER_DEBUG_TRIM: int применяется, 0 допустим (без обрезки)."""
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_TRIM=0)
-        assert result["ADAPTER_DEBUG_TRIM"] == 0
+        """ADAPTER_LOG_TRIM: int применяется, 0 допустим (без обрезки)."""
+        result = self.config.set_runtime_config(ADAPTER_LOG_TRIM=0)
+        assert result["ADAPTER_LOG_TRIM"] == 0
         assert self.config.trim_limit() == 0
-        result = self.config.set_runtime_config(ADAPTER_DEBUG_TRIM=777)
-        assert result["ADAPTER_DEBUG_TRIM"] == 777
+        result = self.config.set_runtime_config(ADAPTER_LOG_TRIM=777)
+        assert result["ADAPTER_LOG_TRIM"] == 777
         assert self.config.trim_limit() == 777
 
     def test_return_value_matches_sent(self):
         """Return value reflects actual values after application."""
         result = self.config.set_runtime_config(
             ADAPTER_DEBUG=False,
-            ADAPTER_DEBUG_TRIM=1000,
+            ADAPTER_LOG_TRIM=1000,
         )
         assert result["ADAPTER_DEBUG"] is False
-        assert result["ADAPTER_DEBUG_TRIM"] == 1000
+        assert result["ADAPTER_LOG_TRIM"] == 1000
         # Возвращает актуальные значения (могли отличаться от посланных, если что-то отклонилось)
 
     def test_pool_keys_match_pool(self):

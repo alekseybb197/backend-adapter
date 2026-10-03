@@ -327,7 +327,7 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 # [USAGE_WARN] стрима без usage — пишет WARNING-блок.
 # Файл принципиально НЕ гейтится флагами подробности:
 #   - НЕ гейтится config.ADAPTER_DEBUG (ENABLE=0 — тоже пишется);
-#   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и сообщение).
+#   - НЕ обрезается по ADAPTER_LOG_TRIM (полные запрос и сообщение).
 # Гейтится только наличием лог-папки (ADAPTER_DATA_ROOT — всегда непуст,
 # дефолт ~/.ba, лог-папка log/; is_dir=True всегда — см.
 # _resolve_log_base).
@@ -385,7 +385,7 @@ def write_error_file(
     в духе session-лога: timestamp-строки с префиксом [req_id]; содержимое —
     шапка-метаданные (session_id/final_status/model/backend_url), ПОЛНОЕ тело
     запроса к бэкенду (out_body) и ПОЛНОЕ сообщение об ошибке последней
-    попытки (err_body). Без обрезки по ADAPTER_DEBUG_TRIM.
+    попытки (err_body). Без обрезки по ADAPTER_LOG_TRIM.
 
     Функция никогда не бросает исключений: файл ошибок — наблюдательный
     канал, его провал не должен ронять обработку запроса."""
@@ -535,7 +535,7 @@ def write_warn_file(
 
     Тот же безусловный канал, что и инциденты (write_error_file): файл
     session-<ts>-<safe8>.err, общий _session_file_ts сессии, полные запрос и
-    текст события без обрезки по ADAPTER_DEBUG_TRIM, вне
+    текст события без обрезки по ADAPTER_LOG_TRIM, вне
     ADAPTER_DEBUG_ENABLE. В отличие от ERROR-блока у WARN нет
     final_status — событие-предупреждение наблюдается и на успешном ответе
     (200): сюда пишутся диагностические проверки адаптера —
