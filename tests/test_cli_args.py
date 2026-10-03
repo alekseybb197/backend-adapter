@@ -54,7 +54,7 @@ class TestHelp:
         assert ei.value.code == 0
         out = capsys.readouterr().out
         # Справка перечисляет все информационные ключи с пояснениями.
-        for key in ("--version", "--help", "--root", "--install"):
+        for key in ("--version", "--help", "--root", "--install", "--name", "--base", "--key"):
             assert key in out
 
 
@@ -178,9 +178,7 @@ class TestInstall:
         assert ei.value.code == 0
         assert (tmp_path / ".ba" / "adapter.env").is_file()
 
-    def test_install_works_without_docs_samples(
-        self, tmp_path, clean_env, monkeypatch, capsys
-    ):
+    def test_install_works_without_docs_samples(self, tmp_path, clean_env, monkeypatch, capsys):
         # v0.9.12: шаблоны встроены в код (templates.py), docs/samples/ в
         # рантайме не читается. Подменяем __file__ в несуществующий каталог
         # (аналог standalone-бинарника/wheel) — --install всё равно размечает
@@ -194,3 +192,92 @@ class TestInstall:
         assert (root / "tariffs.yaml").is_file()
         assert (root / "adapter.env").is_file()
         assert "[FATAL]" not in capsys.readouterr().out
+
+
+class TestInstallBackend:
+    """--install --name/--base/--key (v0.9.13): генерация adapter.yaml.
+
+    Ключи осмысленны только вместе с --install и только все три сразу;
+    без них --install кладёт образцовый SAMPLE_ADAPTER_YAML (см. TestInstall).
+    """
+
+    def test_all_three_generate_backend_yaml(self, tmp_path, clean_env, capsys):
+        root = tmp_path / "home"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                [
+                    "--install",
+                    "--root",
+                    str(root),
+                    "--name",
+                    "demo",
+                    "--base",
+                    "https://x.example",
+                    "--key",
+                    "ADAPTER_DEMO_KEY",
+                ],
+                "9.9.9",
+            )
+        assert ei.value.code == 0
+        yaml_text = (root / "adapter.yaml").read_text(encoding="utf-8")
+        assert "name: demo" in yaml_text
+        assert "base: https://x.example" in yaml_text
+        assert "key: ADAPTER_DEMO_KEY" in yaml_text
+        # Имя токена из --key подставлено и в adapter.env.
+        env_text = (root / "adapter.env").read_text(encoding="utf-8")
+        assert "ADAPTER_DEMO_KEY='*****'" in env_text
+        assert str(root) in env_text  # ADAPTER_DATA_ROOT = <root>
+
+    def test_custom_key_replaces_default_env_name(self, tmp_path, clean_env, capsys):
+        root = tmp_path / "home"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(
+                [
+                    "--install",
+                    "--root",
+                    str(root),
+                    "--name",
+                    "n",
+                    "--base",
+                    "http://b",
+                    "--key",
+                    "MY_KEY",
+                ],
+                "9.9.9",
+            )
+        env_text = (root / "adapter.env").read_text(encoding="utf-8")
+        assert "export MY_KEY='*****'" in env_text
+        # Образцовая переменная токена не остаётся.
+        assert "ADAPTER_BACKEND_KEY_LLM_SERVICE" not in env_text
+
+    @pytest.mark.parametrize(
+        "partial",
+        [
+            ["--name", "demo"],
+            ["--base", "https://x.example"],
+            ["--key", "ADAPTER_DEMO_KEY"],
+            ["--name", "demo", "--base", "https://x.example"],
+        ],
+    )
+    def test_partial_set_is_fatal(self, partial, tmp_path, clean_env, capsys):
+        root = tmp_path / "home"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--install", "--root", str(root), *partial], "9.9.9")
+        assert ei.value.code == 2
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "--name/--base/--key" in out
+        assert not root.exists()  # дом не тронут
+
+    @pytest.mark.parametrize("flag", ["--name", "--base", "--key"])
+    def test_without_install_is_fatal(self, flag, tmp_path, clean_env, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--root", str(tmp_path / "home"), flag, "x"], "9.9.9")
+        assert ei.value.code == 2
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "--install" in out
+
+    def test_missing_value_is_fatal(self, clean_env, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--install", "--name"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
