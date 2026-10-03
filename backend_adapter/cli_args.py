@@ -20,13 +20,16 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
       adapter.env     — переменные окружения (рендерит --install из templates)
       adapter.yaml    — конфигурация бэкендов (встроенный sample.adapter.yaml)
       tariffs.yaml    — тарифы моделей (встроенный sample.tariffs.yaml)
-      tmp/adapter/    — ADAPTER_DATA_ROOT: внутри log/ и var/
+      log/            — файловые логи сессий (*.parts, .err, ...)
+      var/            — состояние (PID, model-usage.yaml, state.yaml)
 
-Запуск с ``--root`` подставляет из дома ровно то, чего нет в окружении
-(``os.environ.setdefault`` — **явный env всегда побеждает**): путь данных,
-переменные из ``adapter.env``, ``adapter.yaml``/``tariffs.yaml``. Без
-``--root``/``--install`` дом не читается вовсе — поведение «нулевой настройки»
-(дефолт ``./tmp/adapter``, обязательный ``ADAPTER_BACKEND_CONFIG``) сохраняется.
+С v0.9.13 дом и корень данных совпадают: ``ADAPTER_DATA_ROOT`` == ``<root>``
+(подпапка ``tmp/adapter`` убрана). Запуск с ``--root`` подставляет из дома
+ровно то, чего нет в окружении (``os.environ.setdefault`` — **явный env всегда
+побеждает**): путь данных, переменные из ``adapter.env``,
+``adapter.yaml``/``tariffs.yaml``. Без ``--root``/``--install`` дом не читается
+вовсе, но дефолт ``ADAPTER_DATA_ROOT`` всё равно ``~/.ba``: «нулевой запуск»
+требует лишь ``ADAPTER_BACKEND_CONFIG`` в окружении.
 
 Модуль — лист DAG: stdlib + ``templates`` (тоже stdlib-only), откуда берутся
 встроенные шаблоны ``--install``. Версию принимает аргументом: импортировать
@@ -53,9 +56,8 @@ _HELP_FLAGS = ("-h", "--help", "-?")
 # --root (--root без аргумента — ошибка, см. parse_args).
 _DEFAULT_ROOT = "~/.ba"
 
-# Имена файлов дома и подпапка данных — в templates (там же, где рендерится
-# adapter.env); берём их оттуда, чтобы не держать два списка имён.
-_DATA_SUBDIR = templates.DATA_SUBDIR
+# Имена файлов дома — в templates (там же, где рендерится adapter.env); берём
+# их оттуда, чтобы не держать два списка имён.
 _ENV_NAME = templates.ENV_NAME
 _YAML_NAME = templates.YAML_NAME
 _TARIFFS_NAME = templates.TARIFFS_NAME
@@ -69,10 +71,11 @@ Usage:
 Options:
   -v, --version      Показать версию и завершить работу.
   -h, --help, -?     Показать эту справку и завершить работу.
-  --root <путь>      Домашняя папка адаптера (по умолчанию ~/.ba). Из неё
-                     подставляются недостающие настройки: корень данных
-                     <путь>/tmp/adapter, переменные <путь>/adapter.env,
-                     конфиги <путь>/adapter.yaml и <путь>/tariffs.yaml.
+  --root <путь>      Домашняя папка адаптера (по умолчанию ~/.ba). Одновременно
+                     корень данных (ADAPTER_DATA_ROOT). Из неё подставляются
+                     недостающие настройки: переменные <путь>/adapter.env,
+                     конфиги <путь>/adapter.yaml и <путь>/tariffs.yaml,
+                     данные <путь>/log и <путь>/var.
                      Явно заданные переменные окружения всегда побеждают.
   --install          Разметить домашнюю папку для работы адаптера: создать
                      каталоги данных и положить adapter.env (все переменные
@@ -139,13 +142,12 @@ def _apply_home(root: str) -> None:
 
     Порядок важен: **сначала** ``adapter.env`` (файл дома — это тоже
     пользовательская настройка, и он вправе задать ``ADAPTER_DATA_ROOT``
-    сам, как реальный ``~/.ba``: там путь данных — ``tmp/logs``), и лишь
-    затем — подстановка путей по умолчанию от ``root``. Каждое присваивание
-    через ``setdefault``: уже заданное в окружении значение сильнее и файла,
-    и подстановки.
+    сам), и лишь затем — подстановка путей по умолчанию от ``root``. Каждое
+    присваивание через ``setdefault``: уже заданное в окружении значение
+    сильнее и файла, и подстановки.
     """
     _load_env_file(os.path.join(root, _ENV_NAME))
-    os.environ.setdefault("ADAPTER_DATA_ROOT", os.path.join(root, _DATA_SUBDIR))
+    os.environ.setdefault("ADAPTER_DATA_ROOT", root)
     os.environ.setdefault("ADAPTER_BACKEND_CONFIG", os.path.join(root, _YAML_NAME))
     tariffs = os.path.join(root, _TARIFFS_NAME)
     if os.path.isfile(tariffs):
@@ -187,15 +189,16 @@ def _load_env_file(path: str) -> None:
 def _install_home(root: str) -> None:
     """Разметить домашнюю папку из встроенных шаблонов; существующее не трогать.
 
-    Создаёт ``<root>`` с подпапками данных (log/ + var/ — те же, что создаёт
-    старт адаптера) и кладёт ``adapter.yaml``, ``tariffs.yaml`` и ``adapter.env``
-    из модуля ``templates`` — содержимое встроено в код (v0.9.12), поэтому
-    ``--install`` работает и из standalone-бинарника/wheel, где ``docs/samples/``
-    недоступен. Каждый уже существующий файл — пропуск с ``[WARN]``
-    (идемпотентность: повторный запуск не перезаписывает правки пользователя).
+    Создаёт ``<root>`` с подпапками данных (``log/`` + ``var/`` — те же, что
+    создаёт старт адаптера; дом и корень данных совпадают с v0.9.13) и кладёт
+    ``adapter.yaml``, ``tariffs.yaml`` и ``adapter.env`` из модуля ``templates``
+    — содержимое встроено в код (v0.9.12), поэтому ``--install`` работает и из
+    standalone-бинарника/wheel, где ``docs/samples/`` недоступен. Каждый уже
+    существующий файл — пропуск с ``[WARN]`` (идемпотентность: повторный запуск
+    не перезаписывает правки пользователя).
     """
-    os.makedirs(os.path.join(root, _DATA_SUBDIR, "log"), exist_ok=True)
-    os.makedirs(os.path.join(root, _DATA_SUBDIR, "var"), exist_ok=True)
+    os.makedirs(os.path.join(root, "log"), exist_ok=True)
+    os.makedirs(os.path.join(root, "var"), exist_ok=True)
 
     _write_template(os.path.join(root, _YAML_NAME), templates.SAMPLE_ADAPTER_YAML)
     _write_template(os.path.join(root, _TARIFFS_NAME), templates.SAMPLE_TARIFFS_YAML)

@@ -1022,8 +1022,8 @@ class TestModelsJsonWritePoints:
 
     def _setup(self, backend=None, models=None):
         """Fresh config + один бэкенд в глобалах (+ модели в _MODEL_TO_BACKEND),
-        DATA_ROOT → tmp_path (иначе файлы писались бы в ./tmp/adapter/var
-        репозитория)."""
+        DATA_ROOT → tmp_path (иначе файлы писались бы в ``~/.ba/var`` —
+        дефолт v0.9.13)."""
         os.environ["ADAPTER_DATA_ROOT"] = str(self._tmp)
         _reload_config()
         from backend_adapter import config
@@ -1445,13 +1445,13 @@ class TestAcceptsValue:
 
 
 class TestDataRootLayout:
-    """ADAPTER_DATA_ROOT и подпапки log/ + var/ (v0.9.9).
+    """ADAPTER_DATA_ROOT и подпапки log/ + var/ (v0.9.9, дом = корень данных v0.9.13).
 
     Переименование жёсткое: читается только ADAPTER_DATA_ROOT, старое
     ADAPTER_DEBUG_LOGPATH больше не читается (fallback нет). Задано только
-    старое имя → на импорте [WARN] с подсказкой, старт на дефолте
-    ./tmp/adapter; содержимое старого каталога не мигрируется. Пути подпапок —
-    функции (живое чтение модульного глобала), а не снимок-константы.
+    старое имя → на импорте [WARN] с подсказкой, старт на дефолте ``~/.ba``;
+    содержимое старого каталога не мигрируется. Пути подпапок — функции
+    (живое чтение модульного глобала), а не снимок-константы.
     """
 
     def _import_fresh(self):
@@ -1459,11 +1459,13 @@ class TestDataRootLayout:
         from backend_adapter import config
         return config
 
-    def test_default_is_tmp_adapter(self, monkeypatch):
+    def test_default_is_home_ba(self, monkeypatch, tmp_path):
+        # HOME подменяем: дефолт — расширенный ~/.ba, а не реальный дом.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("ADAPTER_DATA_ROOT", "")
         monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "")
         config = self._import_fresh()
-        assert config.ADAPTER_DATA_ROOT == "./tmp/adapter"
+        assert config.ADAPTER_DATA_ROOT == os.path.join(str(tmp_path), ".ba")
 
     def test_explicit_value_wins(self, monkeypatch, tmp_path):
         monkeypatch.setenv("ADAPTER_DATA_ROOT", str(tmp_path))
@@ -1487,8 +1489,9 @@ class TestDataRootLayout:
         assert config.log_dir() == os.path.join(str(tmp_path / "b"), "log")
         assert config.var_dir() == os.path.join(str(tmp_path / "b"), "var")
 
-    def test_old_name_only_warns_and_uses_default(self, monkeypatch, capsys):
+    def test_old_name_only_warns_and_uses_default(self, monkeypatch, tmp_path, capsys):
         """Только старое имя → [WARN] с обоими именами, старт на дефолте."""
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("ADAPTER_DATA_ROOT", "")
         monkeypatch.setenv("ADAPTER_DEBUG_LOGPATH", "/tmp/legacy-logs")
         config = self._import_fresh()
@@ -1496,7 +1499,7 @@ class TestDataRootLayout:
         assert "[WARN]" in out
         assert "ADAPTER_DEBUG_LOGPATH" in out and "ADAPTER_DATA_ROOT" in out
         assert "/tmp/legacy-logs" not in config.ADAPTER_DATA_ROOT
-        assert config.ADAPTER_DATA_ROOT == "./tmp/adapter"
+        assert config.ADAPTER_DATA_ROOT == os.path.join(str(tmp_path), ".ba")
 
     def test_old_name_silent_when_new_set(self, monkeypatch, tmp_path, capsys):
         """Оба заданы → старое молча игнорируется, работает новое."""

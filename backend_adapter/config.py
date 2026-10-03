@@ -35,10 +35,12 @@ ADAPTER_DEBUG = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_ENABLE", "
 # Корень ДАННЫХ адаптера (v0.9.9, переименован из ADAPTER_DEBUG_LOGPATH): здесь
 # живёт корень веб-интерфейса (WEBUI), а всё содержимое разложено по двум
 # подпапкам (см. log_dir/var_dir ниже). ВСЕГДА непуст: пусто / не задано →
-# дефолт "./tmp/adapter" (относительно папки запуска). Корень создаётся на
-# старте адаптера; лог-ФАЙЛЫ в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1
-# (см. ADAPTER_DEBUG выше). Режим «один файл» удалён — путь всегда директория.
-ADAPTER_DATA_ROOT = os.environ.get("ADAPTER_DATA_ROOT", "") or "./tmp/adapter"
+# дефолт ~/.ba — та же домашняя папка, что у --root (v0.9.13): `--root` и
+# ADAPTER_DATA_ROOT совпадают, конфиги (adapter.yaml/tariffs.yaml) и данные
+# (log/ + var/) лежат в одной папке. Корень создаётся на старте адаптера;
+# лог-ФАЙЛЫ в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1 (см.
+# ADAPTER_DEBUG выше). Режим «один файл» удалён — путь всегда директория.
+ADAPTER_DATA_ROOT = os.environ.get("ADAPTER_DATA_ROOT", "") or os.path.expanduser("~/.ba")
 
 
 def log_dir() -> str:
@@ -379,7 +381,7 @@ def set_runtime_config(**kwargs) -> dict:
 # LLM-эндпоинты, таблица «Models in use») + health-эндпоинты (/healthz,
 # /live, /ready) + /session (просмотр *.parts сессий; при ADAPTER_DEBUG_ENABLE=0
 # логов нет — вкладки сессий пусты) + /config (runtime-пул). Корень —
-# директория ADAPTER_DATA_ROOT (см. выше; дефолт ./tmp/adapter) — в var/
+# директория ADAPTER_DATA_ROOT (см. выше; дефолт ~/.ba) — в var/
 # лежит model-usage.yaml. Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST
 # (пусто/не задано → дефолт 127.0.0.1, только локально).
 ADAPTER_WEBUI_PORT = env_validate.parse_int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"), 8765)

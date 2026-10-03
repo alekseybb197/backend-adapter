@@ -249,7 +249,9 @@ SERVICE_USER="${ADAPTER_SERVICE_USER:-backend-adapter}"
 SERVICE_UNIT="/etc/systemd/system/backend-adapter.service"
 SERVICE_ENV="${SERVICE_ROOT}/adapter.env"
 SERVICE_YAML="${SERVICE_ROOT}/adapter.yaml"
-SERVICE_DATA="${SERVICE_ROOT}/data"
+# Home and data root coincide (v0.9.13): configs, log/ and var/ live directly
+# under SERVICE_ROOT — there is no separate data/ subdirectory.
+SERVICE_DATA="${SERVICE_ROOT}"
 
 # macOS launchd agent layout (per-user). Kept here so both install_launchd and
 # update_install (which backs up and regenerates them) agree on the paths.
@@ -544,7 +546,7 @@ install_systemd() {
 # Expects SERVICE_BASE / SERVICE_KEY to be set (fresh: collect_service_config;
 # update: read_old_config). Idempotent: safe to run over an existing layout.
 write_service_files() {
-  as_root mkdir -p "$SERVICE_ROOT" "$SERVICE_DATA"
+  as_root mkdir -p "$SERVICE_ROOT"
 
   if ! id -u "$SERVICE_USER" &>/dev/null; then
     # --no-create-home: the state dir is SERVICE_ROOT, not a home directory.

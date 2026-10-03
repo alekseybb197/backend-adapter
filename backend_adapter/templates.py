@@ -23,15 +23,14 @@
 (``ADAPTER_BACKEND_CONFIG``, ``ADAPTER_MODELS_TARIFFS``, ``ADAPTER_DATA_ROOT``)
 обязаны быть **абсолютными от ``<root>``**, чтобы ``--root`` работал при любом
 рабочем каталоге; поэтому файл собирается из ``root`` в момент установки.
+Сам ``ADAPTER_DATA_ROOT`` с v0.9.13 равен ``<root>`` (дом и корень данных
+совпадают): конфиги и данные (``log/`` + ``var/``) лежат в одной папке.
 """
 
 import os
 
-# Раскладка дома: имена файлов, которые --install кладёт в <root>, и подпапка
-# данных внутри дома (тот же дефолт, что ADAPTER_DATA_ROOT в «нулевой
-# настройке», только от корня дома). Экспортируются — потребитель (cli_args)
-# не должен дублировать имена, под которые рендерится adapter.env.
-DATA_SUBDIR = os.path.join("tmp", "adapter")
+# Имена файлов, которые --install кладёт в <root>. Экспортируются — потребитель
+# (cli_args) не должен дублировать имена, под которые рендерится adapter.env.
 ENV_NAME = "adapter.env"
 YAML_NAME = "adapter.yaml"
 TARIFFS_NAME = "tariffs.yaml"
@@ -139,9 +138,10 @@ def render_env(root: str) -> str:
 
     Значения совпадают с дефолтами ``config.py``/``docs/environment.md``;
     пути к данным и конфигам — абсолютные, вычисленные от ``root`` (чтобы
-    запуск ``--root`` находил их при любом рабочем каталоге).
+    запуск ``--root`` находил их при любом рабочем каталоге). ``ADAPTER_DATA_ROOT``
+    равен ``root`` (v0.9.13: дом и корень данных совпадают).
     """
-    data_root = os.path.join(root, DATA_SUBDIR)
+    data_root = root
     return f"""\
 # adapter.env — окружение backend-adapter (сгенерировано --install).
 # Заполните токен бэкенда в ADAPTER_BACKEND_KEY_LLM_SERVICE (имя переменной

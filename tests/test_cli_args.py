@@ -88,7 +88,7 @@ class TestRoot:
     def test_sets_data_root_and_backend_config(self, tmp_path, clean_env):
         root = str(tmp_path / "home")
         assert cli_args.parse_args(["--root", root], "9.9.9") is None
-        assert os.environ["ADAPTER_DATA_ROOT"] == os.path.join(root, "tmp", "adapter")
+        assert os.environ["ADAPTER_DATA_ROOT"] == root
         assert os.environ["ADAPTER_BACKEND_CONFIG"] == os.path.join(root, "adapter.yaml")
 
     def test_explicit_env_wins(self, tmp_path, clean_env):
@@ -136,13 +136,13 @@ class TestInstall:
         assert (root / "adapter.env").is_file()
         assert (root / "adapter.yaml").is_file()
         assert (root / "tariffs.yaml").is_file()
-        assert (root / "tmp" / "adapter" / "log").is_dir()
-        assert (root / "tmp" / "adapter" / "var").is_dir()
+        assert (root / "log").is_dir()
+        assert (root / "var").is_dir()
 
         env_text = (root / "adapter.env").read_text(encoding="utf-8")
         assert str(root / "adapter.yaml") in env_text
         assert str(root / "tariffs.yaml") in env_text
-        assert str(root / "tmp" / "adapter") in env_text
+        assert str(root) in env_text
         # Токен — заглушка, не пустое значение.
         assert "ADAPTER_BACKEND_KEY_LLM_SERVICE='*****'" in env_text
 

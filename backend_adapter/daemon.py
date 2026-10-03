@@ -57,7 +57,7 @@ def _pidfile_path() -> str:
     (_remove_pidfile) — путь не должен разъезжаться между ними. Модуль
     остаётся stdlib-only: корень читается из os.environ напрямую (та же
     формула, что у config.ADAPTER_DATA_ROOT / config.var_dir)."""
-    data_root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or "./tmp/adapter"
+    data_root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or os.path.expanduser("~/.ba")
     name = os.environ.get("ADAPTER_PIDFILE", "").strip()
     if not name:
         name = "adapter.pid"

@@ -46,7 +46,7 @@ class TestRenderEnv:
         # os.path.join — идиома кроссплатформенная (разделитель зависит от ОС).
         assert f"ADAPTER_BACKEND_CONFIG='{os.path.join(root, 'adapter.yaml')}'" in text
         assert f"ADAPTER_MODELS_TARIFFS='{os.path.join(root, 'tariffs.yaml')}'" in text
-        assert f"ADAPTER_DATA_ROOT='{os.path.join(root, 'tmp', 'adapter')}'" in text
+        assert f"ADAPTER_DATA_ROOT='{root}'" in text
 
     def test_token_placeholder_and_key_defaults(self, tmp_path):
         text = templates.render_env(str(tmp_path / "home"))

@@ -136,7 +136,7 @@ if __name__ == "__main__":
     # Корень данных (v0.9.9, переименован из ADAPTER_DEBUG_LOGPATH): корень
     # веб-интерфейса WEBUI, внутри — log/ (сессии: debug/trace/*.parts/.err)
     # и var/ (состояние: PID, model-usage.yaml, state.yaml, *.models.json).
-    # Корень всегда непуст (дефолт ./tmp/adapter в config); обе подпапки
+    # Корень всегда непуст (дефолт ~/.ba в config); обе подпапки
     # создаются сразу, лог-ФАЙЛЫ в log/ пишутся только при
     # ADAPTER_DEBUG_ENABLE=1 (см. config).
     # Путь всегда директория: проверяем, что это не файл — путь-файл сломал
@@ -235,7 +235,7 @@ if __name__ == "__main__":
     # session_viewer.py "/session" + webui_status.py "/" + webui_ops.py
     # health-эндпойнты) поднимается ВСЕГДА — отдельный daemon-поток внутри
     # процесса адаптера. Корень — директория ADAPTER_DATA_ROOT (всегда
-    # непуст, дефолт ./tmp/adapter): внутри log/ лежат *.parts папки сессий и
+    # непуст, дефолт ~/.ba): внутри log/ лежат *.parts папки сессий и
     # .err-файлы, внутри var/ — model-usage.yaml и прочее состояние.
     webui_root = ADAPTER_DATA_ROOT
     os.makedirs(webui_root, exist_ok=True)
