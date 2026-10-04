@@ -1,5 +1,5 @@
 """CLI-ключи адаптера: ``--version``, ``--help``, ``--root``, ``--install``,
-``--name``/``--base``/``--key``.
+``--name``/``--base``/``--key``, ``--check``.
 
 До v0.9.11 у адаптера не было CLI вообще: ``backend-adapter.py`` не читал
 ``sys.argv``, а версия печаталась безусловно стартовым баннером. Из-за этого
@@ -46,7 +46,7 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 import os
 import sys
 
-from . import templates
+from . import env_check, templates
 
 # Ключи версии и справки (синонимы: короткий/длинный; -? — исторический
 # «вопросительный» вариант, привычный по Windows-утилитам).
@@ -91,6 +91,10 @@ Options:
                      в adapter.yaml). Только вместе с --install.
                      --name/--base/--key задаются все три вместе: они
                      заменяют образцовый adapter.yaml на один бэкенд.
+  --check            Проверить конфигурацию дома (--root, по умолчанию ~/.ba)
+                     и живое окружение: типы значений (int/bool), устаревшие
+                     переменные, структуру adapter.yaml/tariffs.yaml.
+                     Завершает работу: код 1 при ошибках, иначе 0.
 
 Без ключей адаптер стартует как обычно (нужен ADAPTER_BACKEND_CONFIG).
 """
@@ -113,10 +117,13 @@ def parse_args(argv: list[str], version: str) -> None:
     ``--name``/``--base``/``--key`` (v0.9.13) задают единственный бэкенд
     генерируемого ``adapter.yaml`` и допустимы только вместе с ``--install``
     и все три сразу: частичный набор или набор без ``--install`` — ``[FATAL]``
-    и ``sys.exit(2)``.
+    и ``sys.exit(2)``. ``--check`` (v0.9.13) — офлайн-диагностика конфигов
+    дома: завершает работу кодом ``env_check.run_check`` (1 при ошибках,
+    иначе 0); несовместим с ``--install`` и ``--name/--base/--key``.
     """
     root: str | None = None
     install = False
+    check = False
     name: str | None = None
     base: str | None = None
     key: str | None = None
@@ -131,6 +138,8 @@ def parse_args(argv: list[str], version: str) -> None:
             sys.exit(0)
         if arg == "--install":
             install = True
+        elif arg == "--check":
+            check = True
         elif arg == "--root":
             i += 1
             if i >= len(argv):
@@ -153,12 +162,22 @@ def parse_args(argv: list[str], version: str) -> None:
             sys.exit(2)
         i += 1
 
+    # --check — офлайн-диагностика конфигов: режим только читает и завершает
+    # работу, поэтому несовместим с --install (--root у них общий, а --name/
+    # --base/--key задают генерируемый adapter.yaml, которого --check не пишет).
+    if check and install:
+        print("[FATAL] --check и --install несовместимы.")
+        sys.exit(2)
+
     # --name/--base/--key задают бэкенд генерируемого adapter.yaml: они
     # осмысленны только вместе с --install и только все три сразу (иначе
     # получился бы недонастроенный бэкенд). Отказ — [FATAL] + exit 2.
     backend_keys = {"--name": name, "--base": base, "--key": key}
     given = [flag for flag, value in backend_keys.items() if value is not None]
     if given:
+        if check:
+            print(f"[FATAL] {'/'.join(given)} несовместимы с --check.")
+            sys.exit(2)
         if not install:
             print(
                 f"[FATAL] {'/'.join(given)} задаются только вместе с --install "
@@ -173,6 +192,8 @@ def parse_args(argv: list[str], version: str) -> None:
             )
             sys.exit(2)
 
+    if check:
+        sys.exit(env_check.run_check(_resolve_root(root)))
     if install:
         _install_home(_resolve_root(root), name=name, base=base, key_env=key)
         sys.exit(0)
@@ -206,32 +227,18 @@ def _load_env_file(path: str) -> None:
     """Прочитать env-файл и подставить НЕзаданные переменные.
 
     Формат — построчный ``export K=V`` / ``K=V`` (как ``source`` в sh, но без
-    исполнения shell): снимаются кавычки, ``#`` в начале строки — комментарий,
-    пробелы вокруг имени/значения игнорируются. Уже заданное в окружении
-    значение сохраняется (``setdefault``) — файл дома лишь заполняет пробелы.
-    Отсутствие файла — не ошибка (дом может обходиться без adapter.env).
+    исполнения shell). Разбор — общим парсером ``env_check.parse_env_text``
+    (тот же, что у ``--check``). Уже заданное в окружении значение сохраняется
+    (``setdefault``) — файл дома лишь заполняет пробелы. Отсутствие файла — не
+    ошибка (дом может обходиться без adapter.env).
     """
     try:
         with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
+            values = env_check.parse_env_text(f.read())
     except OSError:
         return
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        key, sep, value = line.partition("=")
-        if not sep:
-            continue
-        key = key.strip()
-        if not key or key in os.environ:
-            continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
-        os.environ[key] = value
+    for key, value in values.items():
+        os.environ.setdefault(key, value)
 
 
 def _install_home(

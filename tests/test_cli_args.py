@@ -54,7 +54,16 @@ class TestHelp:
         assert ei.value.code == 0
         out = capsys.readouterr().out
         # Справка перечисляет все информационные ключи с пояснениями.
-        for key in ("--version", "--help", "--root", "--install", "--name", "--base", "--key"):
+        for key in (
+            "--version",
+            "--help",
+            "--root",
+            "--install",
+            "--name",
+            "--base",
+            "--key",
+            "--check",
+        ):
             assert key in out
 
 
@@ -281,3 +290,82 @@ class TestInstallBackend:
             cli_args.parse_args(["--install", "--name"], "9.9.9")
         assert ei.value.code == 2
         assert "[FATAL]" in capsys.readouterr().out
+
+
+class TestCheck:
+    """--check (v0.9.13): офлайн-диагностика дома.
+
+    Код выхода — ровно код ``env_check.run_check`` (1 при [ERROR], иначе 0);
+    ключ несовместим с --install и --name/--base/--key. Запускается до
+    validate_env/импорта config, поэтому обязан пережить битый env.
+    """
+
+    @staticmethod
+    def _clear_adapter_vars():
+        """Убрать живые ADAPTER_* (dev-шелл дал бы недетерминированные WARN)."""
+        for name in [k for k in os.environ if k.startswith("ADAPTER_")]:
+            os.environ.pop(name, None)
+
+    def test_dispatches_with_resolved_root(self, tmp_path, clean_env, monkeypatch):
+        seen: dict[str, str] = {}
+
+        def fake_run_check(path: str) -> int:
+            seen["path"] = path
+            return 0
+
+        monkeypatch.setattr(cli_args.env_check, "run_check", fake_run_check)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--check", "--root", str(tmp_path)], "9.9.9")
+        assert ei.value.code == 0
+        assert seen["path"] == str(tmp_path)
+
+    def test_exit_code_propagated(self, tmp_path, clean_env, monkeypatch):
+        monkeypatch.setattr(cli_args.env_check, "run_check", lambda path: 1)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--check", "--root", str(tmp_path)], "9.9.9")
+        assert ei.value.code == 1
+
+    def test_defaults_to_home_ba(self, tmp_path, clean_env, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        seen: dict[str, str] = {}
+
+        def fake_run_check(path: str) -> int:
+            seen["path"] = path
+            return 0
+
+        monkeypatch.setattr(cli_args.env_check, "run_check", fake_run_check)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--check"], "9.9.9")
+        assert ei.value.code == 0
+        assert seen["path"] == str(tmp_path / ".ba")
+
+    def test_empty_root_warns_but_zero(self, tmp_path, clean_env, capsys):
+        self._clear_adapter_vars()
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--check", "--root", str(tmp_path)], "9.9.9")
+        assert ei.value.code == 0
+        assert "[WARN]" in capsys.readouterr().out
+
+    def test_broken_env_reports_error_not_crash(self, tmp_path, clean_env, monkeypatch, capsys):
+        """--check идёт ДО validate_env: битый int — строка отчёта, не ValueError."""
+        self._clear_adapter_vars()
+        monkeypatch.setenv("ADAPTER_PROXY_PORT", "abc")
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--check", "--root", str(tmp_path)], "9.9.9")
+        assert ei.value.code == 1
+        assert "[ERROR]" in capsys.readouterr().out
+
+    def test_incompatible_with_install(self, clean_env, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--check", "--install"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_incompatible_with_backend_keys(self, clean_env, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                ["--check", "--name", "n", "--base", "http://b", "--key", "K"], "9.9.9"
+            )
+        assert ei.value.code == 2
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "--check" in out
