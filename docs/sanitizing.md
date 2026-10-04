@@ -82,7 +82,7 @@ grep "Authorization:" session-debug.log
 ### 2.2 Входной запрос Anthropic (`server.py:161`)
 
 ```python
-_dr(req_id, f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_DEBUG_TRIM])}")
+_dr(req_id, f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_LOG_TRIM])}")
 ```
 
 **Важный нюанс:** эта строка **НЕ** проходит через `redact()`, потому что `_body` — это Python-строка, встроенная прямо в f-string. Вызов `_dr()` оборачивает итоговую строку в `redact()` — **НО** `_body` уже полностью сформирован до вызова `_dr()`.
@@ -91,7 +91,7 @@ _dr(req_id, f"[BODY] {(_body if ADAPTER_DEBUG_BODY_FULL else _body[:ADAPTER_DEBU
 
 | Флаг | Что попадает в лог | Маскируется? |
 |---|---|---|
-| `ADAPTER_DEBUG_BODY_FULL=0` (default) | первые 3000 символов (`ADAPTER_DEBUG_TRIM`) | **Да** — через `_dr()` → `redact()` |
+| `ADAPTER_DEBUG_BODY_FULL=0` (default) | первые 1000 символов (`ADAPTER_LOG_TRIM`) | **Да** — через `_dr()` → `redact()` |
 | `ADAPTER_DEBUG_BODY_FULL=1` | полный текст тела | **НЕТ** — полный raw-текст записывается без обработки |
 
 При `ADAPTER_DEBUG_BODY_FULL=0` маскация работает через `_dr()` → `redact()`, потому что внутри тела JSON есть пары типа `key: value` и потенциально `Bearer ...` — оба паттерна `redact()` подхватывают эти строки.
@@ -109,14 +109,14 @@ grep "\[BODY\]" session-debug.log
 ### 2.3 Тело запроса на бэкенд OpenAI (`server.py:324`)
 
 ```python
-_dr(req_id, f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_DEBUG_TRIM])}")
+_dr(req_id, f"[OPENAI_BODY] {(json.dumps(openai_body, ensure_ascii=False) if ADAPTER_DEBUG_OPENAI_BODY_FULL else json.dumps(openai_body, ensure_ascii=False)[:ADAPTER_LOG_TRIM])}")
 ```
 
 Аналогично пункту 2.2:
 
 | Флаг | Что попадает в лог | Маскируется? |
 |---|---|---|
-| `ADAPTER_DEBUG_OPENAI_BODY_FULL=0` (default) | первые 3000 символов | **Да** — через `_dr()` → `redact()` |
+| `ADAPTER_DEBUG_OPENAI_BODY_FULL=0` (default) | первые 1000 символов | **Да** — через `_dr()` → `redact()` |
 | `ADAPTER_DEBUG_OPENAI_BODY_FULL=1` | полный JSON | **НЕТ** — raw-текст |
 
 **Риск:** тело запроса бэкенду содержит `Authorization: Bearer <key>` как отдельное поле (не заголовок), но `openai_body` — это JSON, который не содержит заголовок Authorization. Токен бэкенда передаётся только как HTTP-заголовок и в лог **не пишется** в этом месте. Токен клиента тоже здесь отсутствует — это тело OpenAI-формата, которое генерируется из данных Anthropic-запроса.
@@ -212,14 +212,14 @@ Claude Code → Адаптер
   │  └─ redact_headers() → redact()        ✅ МАССИРУЕТСЯ
   │
   │  2. Тело Anthropic-запроса (messages, system, tools)
-  │  └─ _dr() → redact() [по умолчанию, первые 3000 символов]
+  │  └─ _dr() → redact() [по умолчанию, первые 1000 символов]
   │     или raw при ADAPTER_DEBUG_BODY_FULL=1  ⚠️ РИСК
   │
   ▼
 Адаптер (конвертация)
   │
   │  3. Тело OpenAI-запроса (сгенерированное)
-  │  └─ _dr() → redact() [по умолчанию, первые 3000 символов]
+  │  └─ _dr() → redact() [по умолчанию, первые 1000 символов]
   │     или raw при ADAPTER_DEBUG_OPENAI_BODY_FULL=1  ⚠️ РИСК
   │
   │  4. Authorization: Bearer <backend_key>

@@ -91,14 +91,20 @@ backend_adapter/
 ├── env_validate.py         ← строгая валидация env при старте (v0.9.6, §6.14):
 │                             невалидный int/bool → [FATAL] + sys.exit(1);
 │                             лист DAG — stdlib only, вызывается ДО импорта config
+├── env_check.py            ← офлайн-диагностика конфигов дома (--check, v0.9.13):
+│                             читает adapter.env/adapter.yaml/tariffs.yaml и
+│                             проверяет их без сети; лист DAG — stdlib + PyYAML
+│                             + env_validate
 ├── cli_args.py             ← разбор argv адаптера (v0.9.11): --version/-v,
 │                             --help/-h/-?, --root <путь> (домашняя папка, дефолт
-│                             ~/.ba), --install (разметка дома). Вызывается из
+│                             ~/.ba), --install (разметка дома), --check (офлайн-
+│                             диагностика конфигов дома). Вызывается из
 │                             backend-adapter.py ДО env_validate и импорта config
 │                             (--version/--help обязаны работать при любом env).
 │                             env-файл дома читает своим мини-парсером (export K=V,
 │                             без shell); шаблоны --install — из templates.py
-│                             (v0.9.12), т.е. лист DAG: stdlib + templates
+│                             (v0.9.12), диагностика --check — из env_check.py,
+│                             т.е. лист DAG: stdlib + templates + env_check
 ├── templates.py            ← встроенные шаблоны дефолтных настроек для --install
 │                             (v0.9.12): SAMPLE_ADAPTER_YAML, SAMPLE_TARIFFS_YAML
 │                             и render_env(root) для adapter.env. Лист DAG —
@@ -198,8 +204,10 @@ module on one level, see ADR 2026-09-01).
    the PID file is written below, at any startup, so it holds the PID of
    the final grandchild process, not the exiting parent)
 2. Parse env config → `backend_adapter/config.py` (all env vars with `ADAPTER_` prefix)
-3. Data root `ADAPTER_DATA_ROOT` (default `./tmp/adapter` when the env var is
-   empty/unset — the path is always non-empty; v0.8.6, **renamed in v0.9.9** from
+3. Data root `ADAPTER_DATA_ROOT` (default `~/.ba`, expanded `~`; **coincides
+   with the home folder `--root`** — v0.9.13, the `tmp/adapter` subdirectory is
+   gone: `log/` and `var/` live directly under `<root>`; when the env var is
+   empty/unset the path is still always non-empty; v0.8.6, **renamed in v0.9.9** from
    `ADAPTER_DEBUG_LOGPATH`, which is no longer read): created unconditionally at
    startup (it doubles as the WEBUI root); two fixed-role subdirectories are
    created too — `log/` (session logs, traces, `*.parts` dumps, `.err` files) and
@@ -603,7 +611,7 @@ GET `/` и по кнопке:
   (HTTP 400), токенов не дают.
 - **Персистентность** — таблица сохраняется в YAML-файл `model-usage.yaml`
   в папке состояния корня данных (`ADAPTER_DATA_ROOT/var`, дефолт
-  `./tmp/adapter/var`); файл
+  `~/.ba/var`); файл
   несёт версию формата (`version: 2`, строки — под ключом `models`). Точка
   синхронизации пути — `webserver.serve()` (`set_persist_path(var_dir)`;
   в standalone — явный `[ROOT]`). Загрузка — ленивая, при первом обращении
@@ -724,7 +732,7 @@ GET `/` и по кнопке:
 
 Каждый файл при каждой новой проверке ПЕРЕЗАПИСЫВАЕТСЯ целиком (атомарно:
 tmp + `os.replace`), .tmp-хвостов не остаётся. Канал не гейтится
-`ADAPTER_DEBUG_ENABLE` / `ADAPTER_DEBUG_TRIM`;
+`ADAPTER_DEBUG_ENABLE` / `ADAPTER_LOG_TRIM`;
 директория создаётся при записи. Секреты маскируются `redact()` по
 умолчанию (полные данные — при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1`,
 живое чтение config); любая ошибка записи молча глотается — проверку не
@@ -989,7 +997,7 @@ Trace event `tool_result` includes `parent_req_id` — `null` if the producer wa
 `_d(msg)` / `_dr(req_id, msg)` — timestamped console+file debug log (`_write`)
 
 - **Console: unconditional** (always printed — v0.8.6), **trimmed** to
-  `ADAPTER_DEBUG_TRIM` chars (`0` = no trim)
+  `ADAPTER_LOG_TRIM` chars (`0` = no trim)
 - **File**: per-session `session-<ts>-<sid>.log` in `ADAPTER_DATA_ROOT/log`,
   written **only** when `ADAPTER_DEBUG_ENABLE=1` — and carrying the **FULL
   line, untrimmed**: the file channel is inherently full-part (v0.8.6 reform)
@@ -1003,7 +1011,7 @@ Debug flags (runtime pool):
 | Flag | Purpose |
 |---|---|
 | `ADAPTER_DEBUG` | File logging master switch (full parts, no trim); since v0.9.10 it also covers per-session `.json`+`.yaml` protocol-part dumps |
-| `ADAPTER_DEBUG_TRIM` | Console trim limit in chars (0 = no trim; default 3000) |
+| `ADAPTER_LOG_TRIM` | Console trim limit in chars (0 = no trim; default 1000) |
 | `ADAPTER_SENSITIVE_LOGGING_ENABLE` | Disables the redaction sanitizer (1 = raw secrets) |
 
 `ADAPTER_DEBUG` is additionally **per-session overridable** (v0.9.5, §6.11):
@@ -1013,7 +1021,7 @@ app-wide flag taken when the session is first seen (`ensure_session`) — the
 global switch is a template for **new** sessions only and neither enables nor
 disables anything for running ones. A request with no session id writes no files
 at all (empty/`unknown` → `False`).
-`ADAPTER_DEBUG_TRIM` and the sanitizer stay app-wide only.
+`ADAPTER_LOG_TRIM` and the sanitizer stay app-wide only.
 **v0.9.10:** the old `ADAPTER_DEBUG_PARTS` flag and its `parts_enabled` gate are
 gone — «Parts ⊆ Log» is an identity, one gate remains.
 
@@ -1088,7 +1096,7 @@ Long base64/hex strings may also be matched.
 - FIFO eviction at `_LOG_FILES_PER_SESSION` (5000 entries)
 - The log directory `ADAPTER_DATA_ROOT/log` is created on demand (adapter
   startup creates it unconditionally, and/or at first write); its parent
-  `ADAPTER_DATA_ROOT` is always non-empty (default `./tmp/adapter`)
+  `ADAPTER_DATA_ROOT` is always non-empty (default `~/.ba`)
 - **Per-session gate (v0.9.5, snapshot — v0.9.8):** `logging_enabled(session_id)`
   reads the session value (`session_settings.
   effective`) — a **snapshot** of `config.ADAPTER_DEBUG`
@@ -1147,7 +1155,7 @@ and strict-models switches), flip-able without restarting the adapter:
 |---|---|
 | bool | `ADAPTER_DEBUG` (logs and parts — one switch since v0.9.10) |
 | bool | `ADAPTER_SENSITIVE_LOGGING_ENABLE`, `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS` |
-| int | `ADAPTER_DEBUG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS` |
+| int | `ADAPTER_LOG_TRIM`, `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS` |
 | *(none)* | no string members — the old detail selectors were removed (v0.8.6) |
 
 - `get_runtime_config()` — snapshot dict `{name: value}`; `set_runtime_config(**kw)`
@@ -1254,10 +1262,14 @@ backend-adapter.py
   ├── templates.py       (no internal deps — stdlib only; встроенные шаблоны
   │                       --install: SAMPLE_ADAPTER_YAML/SAMPLE_TARIFFS_YAML +
   │                       render_env — v0.9.12)
-  ├── cli_args.py        → templates (лист DAG: stdlib + templates; вызывается
-  │                       backend-adapter.py ПЕРВЫМ, до env_validate и config
-  │                       — --version/--help обязаны работать при любом env;
-  │                       --root/--install — домашняя папка адаптера, v0.9.11)
+  ├── env_check.py       (лист DAG — stdlib + PyYAML + env_validate: офлайн-
+  │                       диагностика конфигов дома для режима CLI --check,
+  │                       v0.9.13)
+  ├── cli_args.py        → templates, env_check (лист DAG: stdlib + templates +
+  │                       env_check; вызывается backend-adapter.py ПЕРВЫМ, до
+  │                       env_validate и config — --version/--help обязаны
+  │                       работать при любом env; --root/--install — домашняя
+  │                       папка адаптера, v0.9.11; --check — env_check, v0.9.13)
   ├── probe_json.py      (no internal deps on the top level — stdlib only;
   │                       config/redact читаются локально внутри записи)
   ├── routing.py         → config, session_settings (лист DAG по config: входные
@@ -1310,7 +1322,7 @@ backend-adapter.py
 Entry point (WEBUI): `backend-adapter.py` импортирует `webserver.serve()`
 для daemon-потока WEBUI (см. §4.1). Вход CLI: `python -m backend_adapter.webserver`.
 
-**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `templates.py` (stdlib-only), `cli_args.py` (stdlib + `templates`, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time** (or depend only on the stdlib-only `templates.py`), forming the dependency base. All other modules depend on at least one of these.
+**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `templates.py` (stdlib-only), `env_check.py` (stdlib + PyYAML + `env_validate`, вызывается до config), `cli_args.py` (stdlib + `templates` + `env_check`, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time** (or depend only on the stdlib-only `templates.py` and/or `env_check.py`), forming the dependency base. All other modules depend on at least one of these.
 
 ---
 

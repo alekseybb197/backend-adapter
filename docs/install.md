@@ -540,29 +540,35 @@ pyinstaller --onefile \
 собираются автоматически в CI при push тега `v*` — см.
 `.github/workflows/release-binaries.yml`.
 
-### 4.5 CLI и домашняя папка (`--root`, `--install`)
+### 4.5 CLI и домашняя папка (`--root`, `--install`, `--check`)
 
-Начиная с v0.9.11 у адаптера есть командный интерфейс:
+Начиная с v0.9.11 у адаптера есть командный интерфейс; ключи `--name/--base/
+--key` и режим `--check` добавлены в v0.9.13:
 
 | Ключ | Действие |
 |---|---|
 | `-v`, `--version` | Напечатать версию и завершить работу (код 0). Работает при любом, даже заведомо неверном окружении. |
 | `-h`, `--help`, `-?` | Напечатать справку со списком ключей и завершить работу (код 0). |
-| `--root <путь>` | Домашняя папка адаптера. По умолчанию `~/.ba`. Из неё подставляются недостающие настройки. |
+| `--root <путь>` | Домашняя папка адаптера. По умолчанию `~/.ba`. Из неё подставляются недостающие настройки, и она же — корень данных. |
 | `--install` | Разметить домашнюю папку (конфиги + каталоги данных) и завершить работу. Адаптер не запускает. |
+| `--install --name <имя> --base <url> --key <имя_переменной>` | Разметить дом сразу с одним бэкендом: `--name` — имя бэкенда, `--base` — базовый URL, `--key` — **имя** переменной окружения с токеном. Все три ключа — только вместе и только с `--install`. |
+| `--check [--root <путь>]` | Офлайн-проверка конфигов дома (`adapter.env`, `adapter.yaml`, `tariffs.yaml`) и живого окружения: типы значений и устаревшие переменные. Адаптер не запускает. |
 
 Без ключей поведение прежнее: адаптер стартует как обычно и требует
 `ADAPTER_BACKEND_CONFIG`.
 
 **Что такое домашняя папка.** Каталог, из которого адаптер берёт настройки,
-если их нет в окружении:
+если их нет в окружении. С v0.9.13 дом **совпадает** с корнем данных
+(`ADAPTER_DATA_ROOT`): конфиги и данные (`log/`, `var/`) лежат в одной папке,
+подпапка `tmp/adapter` убрана.
 
 ```
-~/.ba/
-├── adapter.env     # переменные окружения (рендерит --install)
-├── adapter.yaml    # конфигурация бэкендов (встроенный sample.adapter.yaml)
-├── tariffs.yaml    # тарифы моделей (встроенный sample.tariffs.yaml)
-└── tmp/adapter/    # ADAPTER_DATA_ROOT: внутри log/ и var/
+~/.ba/                # --root И ADAPTER_DATA_ROOT
+├── adapter.env       # переменные окружения (рендерит --install)
+├── adapter.yaml      # конфигурация бэкендов (встроенный sample.adapter.yaml)
+├── tariffs.yaml      # тарифы моделей (встроенный sample.tariffs.yaml)
+├── log/              # сессионные логи, *.parts-дампы, .err-инциденты
+└── var/              # состояние: adapter.pid, model-usage.yaml, state.yaml
 ```
 
 **Приоритет — всегда за явным окружением.** Переменные из `adapter.env`
@@ -580,14 +586,42 @@ backend-adapter --install
 # Или в произвольном каталоге
 backend-adapter --install --root /opt/ba
 
-# Готовая папка: вписать токен бэкенда в adapter.env и запустить
+# Или сразу с одним бэкендом (v0.9.13): сгенерировать adapter.yaml
+# (name/base/key) и подставить имя переменной токена в adapter.env
+backend-adapter --install --root /opt/ba \
+    --name demo --base https://llm.example.com --key ADAPTER_DEMO_KEY
+
+# Готовая папка: вписать токен бэкенда в adapter.env и проверить конфиги
+backend-adapter --check --root /opt/ba
+
+# Запуск с настройками из дома
 backend-adapter --root /opt/ba
 ```
 
 `--install` печатает `[OK]` по каждому созданному файлу и `[WARN]` по каждому
 пропущенному — повторный запуск ничего не перезаписывает и не ломает правки
 пользователя. В `adapter.env` токен — заглушка `*****` (файл создаётся с
-правами `0600`, так как в него попадает секрет).
+правами `0600`, так как в него попадает секрет). Без `--name/--base/--key`
+`adapter.yaml` — встроенный образец; с ними — компактная запись одного
+бэкенда (`backend:` / `name` / `base` / `key`).
+
+**Режим `--check` (v0.9.13).** Офлайн-диагностика: читает `adapter.env`,
+`adapter.yaml` и `tariffs.yaml` в доме (или `~/.ba`) **и** живое окружение,
+печатает строки `[OK]`/`[WARN]`/`[ERROR]` и завершается **кодом 1**, если
+найдены ошибки типов (нечисло в числовом поле, невалидный bool), иначе `0`.
+`[WARN]` сами по себе итог не роняют. Проверяются:
+
+- **типы** всех переменных `ADAPTER_*` по той же таблице, что и при старте
+  (`env_validate._ENV_SPECS`);
+- **устаревшие/неиспользуемые** имена (`ADAPTER_DEBUG_LOGPATH`,
+  `ADAPTER_DEBUG_PARTS`, `ADAPTER_DEBUG_TRIM`, `ADAPTER_DEBUG_BODY_FULL`,
+  `ADAPTER_DEBUG_OPENAI_BODY_FULL`, `ADAPTER_BACKEND_BASE`,
+  `ADAPTER_BACKEND_KEY`) — `[WARN]` с версией, в которой переменная снята;
+- **YAML**: `backend` — список записей с непустыми `name`/`base`/`key`;
+  `tariffs` — необязателен.
+
+Режим запускается **до** `validate_env` и импорта `config`, поэтому работает
+даже при заведомо битом окружении (как `--version`).
 
 **Шаблоны встроены в код** (v0.9.12): `adapter.yaml`, `tariffs.yaml` и
 `adapter.env` берутся из модуля `backend_adapter/templates.py`, а не из
@@ -727,7 +761,8 @@ export ADAPTER_DEBUG_ENABLE=0
 # (создаются при старте). log/ — debug-логи (session-*.log), trace-логи
 # (session-*.jsonl), *.parts дампы и файлы инцидентов session-*.err;
 # var/ — adapter.pid, model-usage.yaml, state.yaml, <бэкенд>.models.json.
-# Путь всегда непуст — при незаданной/пустой env дефолт ./tmp/adapter.
+# Путь всегда непуст — при незаданной/пустой env дефолт ~/.ba (раскрытый ~),
+# и он же — домашняя папка --root (v0.9.13: дом и корень данных совпадают).
 # Файлы в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1. Исключение — файлы
 # инцидентов session-*.err (v0.9.0) и JSON-дампы опроса списка моделей:
 # пишутся БЕЗУСЛОВНО при финальном ответе клиенту 4xx/5xx реального
@@ -738,8 +773,9 @@ export ADAPTER_DEBUG_ENABLE=0
 
 # Максимальная длина КОНСОЛЬНЫХ debug-строк (символы; 0 — без обрезки).
 # Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1) trim НЕ использует —
-# пишет полные строки (v0.8.6-реформа)
-# export ADAPTER_DEBUG_TRIM=3000
+# пишет полные строки (v0.8.6-реформа). v0.9.13: имя ADAPTER_DEBUG_TRIM больше
+# не читается, дефолт снижен 3000 → 1000.
+# export ADAPTER_LOG_TRIM=1000
 
 # Имя PID-файла: кладётся в ADAPTER_DATA_ROOT/var (basename значения;
 # дефолт — adapter.pid). Пишется при ЛЮБОМ запуске (v0.9.5) и удаляется
@@ -753,7 +789,7 @@ export ADAPTER_DEBUG_ENABLE=0
 
 # Веб-интерфейс: / — статус (версия, LLM-эндпойнты, модели), /session — просмотр сессий.
 # Поднимается ВСЕГДА (v0.8.6; флага ADAPTER_WEBUI_ENABLE больше нет) на 127.0.0.1:8765 —
-# статус-страница доступна сразу; корень — ADAPTER_DATA_ROOT (дефолт ./tmp/adapter;
+# статус-страница доступна сразу; корень — ADAPTER_DATA_ROOT (дефолт ~/.ba;
 # *.parts сессий — в подпапке log/, model-usage.yaml — в подпапке var/).
 # Health-check для оркестрации: /healthz, /health, /live, /ready
 # (см. docs/webui.md). Руководство по страницам и API — docs/webui.md.
@@ -769,7 +805,7 @@ export ADAPTER_DEBUG_ENABLE=0
 
 # (Прежние «селекторы подробности» — ADAPTER_DEBUG_TOOLS /
 # ADAPTER_DEBUG_TOOLS_ERROR / ADAPTER_DEBUG_TAGS_FULL — удалены в v0.8.6:
-# консоль всегда печатается с обрезкой ADAPTER_DEBUG_TRIM, файловый канал
+# консоль всегда печатается с обрезкой ADAPTER_LOG_TRIM, файловый канал
 # при ADAPTER_DEBUG_ENABLE=1 несёт полные строки. Отдельных рубильников нет.)
 ```
 
@@ -868,9 +904,10 @@ export ADAPTER_MESSAGES_TARGET=completions
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
-# export ADAPTER_DATA_ROOT="./tmp/adapter"   # корень данных (лог-папка log/ + состояние var/) и корень WEBUI
+# export ADAPTER_DATA_ROOT="~/.ba"   # корень данных (лог-папка log/ + состояние var/) и корень WEBUI;
+#                                    # с v0.9.13 совпадает с домашней папкой --root
 # (ADAPTER_DEBUG_ENABLE=1 включает и *.parts-дампы — v0.9.10)
-# (ADAPTER_DEBUG_TRIM=3000 — лимит консольных строк; 0 — без обрезки; файл всегда полный)
+# (ADAPTER_LOG_TRIM=1000 — лимит консольных строк; 0 — без обрезки; файл всегда полный)
 
 # --- Sanitizer (secret masking in logs) ---
 export ADAPTER_SENSITIVE_LOGGING_ENABLE=0
@@ -917,7 +954,7 @@ Streaming:  enabled (SSE passthrough)
 Backends:   1 configured:
   - home: http://127.0.0.1:8002  (12 models) [default]
 TARGET:     messages=completions  completions=none  responses=none
-[WEBUI] http://127.0.0.1:8765/ (root: ./tmp/adapter)
+[WEBUI] http://127.0.0.1:8765/ (root: ~/.ba)
 [EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================
 ```

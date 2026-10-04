@@ -40,9 +40,9 @@ v0.9.5, `daemon.py`) — не лог, а служебный артефакт д�
 
 Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог-папку**
 `ADAPTER_DATA_ROOT/log` (v0.9.9; при незаданной/пустой env корень данных —
-дефолт `./tmp/adapter`, т.е. `./tmp/adapter/log`).
+дефолт `~/.ba`, т.е. `~/.ba/log`).
 **Консольные** debug-блоки печатаются **всегда** (v0.8.6) и **обрезаются** до
-`ADAPTER_DEBUG_TRIM` символов (`0` — без обрезки); **файловая запись**
+`ADAPTER_LOG_TRIM` символов (`0` — без обрезки); **файловая запись**
 включена только при `ADAPTER_DEBUG_ENABLE=1` (при `0` — диск не используется,
 папки `log/` и `var/` внутри корня данных всё равно создаются на старте) и пишет в `session-*.log`
 **ПОЛНЫЕ строки без обрезки** — файловый канал принципиально несёт части
@@ -59,7 +59,7 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
 | 1 | `[REQ]` | ← CLIENT | всегда | HTTP метод, путь, session_id |
-| 2 | `[BODY]` | ← CLIENT | всегда | Тело Anthropic-запроса клиента: в консоли — с обрезкой `ADAPTER_DEBUG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полное |
+| 2 | `[BODY]` | ← CLIENT | всегда | Тело Anthropic-запроса клиента: в консоли — с обрезкой `ADAPTER_LOG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полное |
 
 ### → BACKEND — Подготовка и отправка в бэкенд
 
@@ -73,7 +73,7 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог
 | 8 | `[TOOL_CHOICE]` | INTERNAL | всегда | Конфигурация tool choice |
 | 9 | `[CHECK]` | INTERNAL | всегда | Инвариант: "First message is system, OK" |
 | 10 | `[WARN]` (invariant) | INTERNAL | всегда | Инвариант нарушен: "First message is NOT system: \<role\>" |
-| 11 | `[OPENAI_BODY]` | → BACKEND | всегда | Тело [OI]-запроса, отправляемого в бэкенд: в консоли — с обрезкой `ADAPTER_DEBUG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полное |
+| 11 | `[OPENAI_BODY]` | → BACKEND | всегда | Тело [OI]-запроса, отправляемого в бэкенд: в консоли — с обрезкой `ADAPTER_LOG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полное |
 
 ---
 
@@ -82,7 +82,7 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
 | 12 | `[TOOL_RESULT]` (summary) | ← CLIENT | всегда | `tool_name`, `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` |
-| 13 | `[TOOL_RESULT]` (content) | ← CLIENT | всегда | Полный JSON content каждого результата (ошибки НЕ выделяются отдельным блоком). В консоли — с обрезкой `ADAPTER_DEBUG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полный. Дополнительно: при `ADAPTER_DEBUG_ENABLE=1` пишутся JSON/YAML-файлы per-session |
+| 13 | `[TOOL_RESULT]` (content) | ← CLIENT | всегда | Полный JSON content каждого результата (ошибки НЕ выделяются отдельным блоком). В консоли — с обрезкой `ADAPTER_LOG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полный. Дополнительно: при `ADAPTER_DEBUG_ENABLE=1` пишутся JSON/YAML-файлы per-session |
 | 14 | *(удалён, v0.8.6)* | — | — | `[TOOL_RESULT_ERROR]` больше не выводится: полный content идёт единым блоком для всех результатов (см. 13); тег исчез из кода и дампов |
 
 ### → BACKEND — FETCH (request phase, отправка запроса)
@@ -95,15 +95,15 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог
 
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
-| 16 | `[FETCH_RAW]` | ← BACKEND | всегда | Сырой ответ бэкенда (OI-format), до конвертации: в консоли — с обрезкой `ADAPTER_DEBUG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полный |
+| 16 | `[FETCH_RAW]` | ← BACKEND | всегда | Сырой ответ бэкенда (OI-format), до конвертации: в консоли — с обрезкой `ADAPTER_LOG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полный |
 | 17 | `[FETCH]` (success) | INTERNAL | всегда | Elapsed time, HTTP status, размер ответа в байтах |
 
 ### → CLIENT — Конвертация и отправка ответа
 
 | # | Block | Направление | Опции | Что содержит |
 |---|---|---|---|---|
-| 18 | `[RESPONSE]` (non-stream) | → CLIENT | всегда | Полностью преобразованный Anthropic-ответ: в консоли — с обрезкой `ADAPTER_DEBUG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полный |
-| 19 | `[RESPONSE]` (stream) | → CLIENT | всегда | Агрегированный snapshot стримированного ответа: text, reasoning, tool_uses, длины (в консоли — с обрезкой `ADAPTER_DEBUG_TRIM`). Дополнительно: при `ADAPTER_DEBUG_ENABLE=1` пишутся JSON/YAML-файлы per-session |
+| 18 | `[RESPONSE]` (non-stream) | → CLIENT | всегда | Полностью преобразованный Anthropic-ответ: в консоли — с обрезкой `ADAPTER_LOG_TRIM`; в файл при `ADAPTER_DEBUG_ENABLE=1` — полный |
+| 19 | `[RESPONSE]` (stream) | → CLIENT | всегда | Агрегированный snapshot стримированного ответа: text, reasoning, tool_uses, длины (в консоли — с обрезкой `ADAPTER_LOG_TRIM`). Дополнительно: при `ADAPTER_DEBUG_ENABLE=1` пишутся JSON/YAML-файлы per-session |
 
 ### → CLIENT — Статус завершения
 
@@ -133,7 +133,7 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог
 **Безусловный наблюдательный канал** — файл ошибок пишется при финальном
 ответе клиенту **4xx/5xx** (после ретраев/таймаутов) реального прокси-запроса
 агента (`POST /v1/messages` → `server.do_POST`), независимо от `ADAPTER_DEBUG_ENABLE`
-и `ADAPTER_DEBUG_TRIM`.
+и `ADAPTER_LOG_TRIM`.
 
 | Свойство | Значение |
 |---|---|
@@ -141,9 +141,9 @@ Debug-логи, trace-логи и `.parts`-дампы пишутся в **лог
 | Имя файла | `session-<YYYYMMDD-HHMMSS>-<session_id[:8]>.err` — **общий** `_session_file_ts` сессии (тот же ts, что у `session-*.log`/`.jsonl`), та же лог-папка `ADAPTER_DATA_ROOT/log` |
 | Когда пишется | Финальный статус клиенту 4xx/5xx: код HTTPError последней попытки (не-retry 4xx, исчерпанные 429/502/503/504), `504` после таймаутов, `502` после прочих ошибок. Один `.err` на запрос (не на попытку). С v0.9.7 сюда же — **обрыв потока mid-stream** (см. ниже) |
 | Когда НЕ пишется | 200-успех (кроме WARN-блоков, §«WARN-события») |
-| Содержимое | Шапка-метаданные (`session_id`, `final_status`, `model`, `backend_url`), **ПОЛНОЕ** тело запроса к бэкенду (`out_body`), **ПОЛНОЕ** сообщение об ошибке последней попытки (`err_body`). Без обрезки по `ADAPTER_DEBUG_TRIM` |
+| Содержимое | Шапка-метаданные (`session_id`, `final_status`, `model`, `backend_url`), **ПОЛНОЕ** тело запроса к бэкенду (`out_body`), **ПОЛНОЕ** сообщение об ошибке последней попытки (`err_body`). Без обрезки по `ADAPTER_LOG_TRIM` |
 | Санитайзер | Секреты маскируются `redact()` по умолчанию; при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1` — полные данные |
-| Гейт записи | Только наличие лог-папки `ADAPTER_DATA_ROOT/log` (корень всегда непуст, дефолт `./tmp/adapter`); **не** зависит от `ADAPTER_SESSIONS_TABLE` |
+| Гейт записи | Только наличие лог-папки `ADAPTER_DATA_ROOT/log` (корень всегда непуст, дефолт `~/.ba`); **не** зависит от `ADAPTER_SESSIONS_TABLE` |
 
 **Обрыв потока mid-stream (v0.9.7).** Сбой бэкенда/чтения **после**
 `_start_sse(200)` — заголовки `200` и, возможно, часть SSE-событий уже ушли
@@ -266,7 +266,7 @@ v0.9.9; см. `docs/routing.md` §2.4).
 | Имя файла | Тот же `session-<YYYYMMDD-HHMMSS>-<session_id[:8]>.err`, что и у инцидентов (общий `_session_file_ts`/дескриптор) |
 | Триггер 1 — `[WARN] First message is NOT system: <role>` | server.py, convert-ветка: первое сообщение запроса не `system` (инвариант конвертации нарушен). Пишется один раз на запрос, сразу после построения `out_body`/`backend_url` — точка покрывает и stream-, и non-stream-ветки конвертации. `<role>` — роль первого сообщения (`user`, `assistant`, …; `empty` — пустой список) |
 | Триггер 2 — `[USAGE_WARN] Backend не вернул usage в стриме — input_tokens оценён эвристически (~N, chars/4), реальное число неизвестно` | streaming.py, `stream_openai_to_anthropic`: бэкенд не прислал `usage` (нет `stream_options.include_usage` / флаг `ADAPTER_STREAM_INCLUDE_USAGE=0`) и `input_tokens` оценён `approx_prompt_chars // 4`. Пишется только когда вызывающий код (server.do_POST) передал `out_body`/`backend_url`; прямые вызовы функции без этих параметров записи не делают |
-| Содержимое | Шапка-метаданные **без статуса** (`session_id`, `model`, `backend_url`), **ПОЛНЫЙ** `[REQUEST]` (`out_body`), `[WARN]` — полный текст события. Без обрезки по `ADAPTER_DEBUG_TRIM` |
+| Содержимое | Шапка-метаданные **без статуса** (`session_id`, `model`, `backend_url`), **ПОЛНЫЙ** `[REQUEST]` (`out_body`), `[WARN]` — полный текст события. Без обрезки по `ADAPTER_LOG_TRIM` |
 | Когда НЕ пишется | Вне двух триггеров выше — прочие диагностические предупреждения (в т.ч. не-стрим «бэкенд без usage» и passthrough-ветки без usage) в `.err` НЕ пишутся, остаются консоль/`session-*.log` |
 
 Формат записи:
@@ -287,7 +287,7 @@ v0.9.9; см. `docs/routing.md` §2.4).
 моделей пишется плоским JSON-файлом в папку состояния
 `ADAPTER_DATA_ROOT/var` (рядом с `model-usage.yaml`, `state.yaml` и PID-файлом),
 независимо от `ADAPTER_DEBUG_ENABLE` и
-`ADAPTER_DEBUG_TRIM` — как канал `.err` выше.
+`ADAPTER_LOG_TRIM` — как канал `.err` выше.
 
 | Свойство | Значение |
 |---|---|
@@ -297,7 +297,7 @@ v0.9.9; см. `docs/routing.md` §2.4).
 | Перезапись | Каждый файл при новой проверке ПЕРЕЗАПИСЫВАЕТСЯ целиком (атомарно: tmp + `os.replace`, .tmp-хвостов не остаётся) |
 | Содержимое | `{"backend", "checked_at", "ok", "count", "models": [полные записи ответа /v1/models]}`; при ошибке — `{"backend", "checked_at", "ok": false, "error": "<текст>"}` |
 | Санитайзер | Секреты маскируются `redact()` по умолчанию (по всему дампу); при `ADAPTER_SENSITIVE_LOGGING_ENABLE=1` — полные данные (живое чтение `config`) |
-| Гейт записи | Только наличие корня данных `ADAPTER_DATA_ROOT` (всегда непуст, дефолт `./tmp/adapter`; папка `var/` создаётся при записи) |
+| Гейт записи | Только наличие корня данных `ADAPTER_DATA_ROOT` (всегда непуст, дефолт `~/.ba`; папка `var/` создаётся при записи) |
 
 Функция модуля: `write_models_json(backend_name, payload)` →
 `<ADAPTER_DATA_ROOT>/var/<бэкенд>.models.json`.
@@ -396,7 +396,7 @@ JSONL-события с полями `ts`, `session_id`, `req_id`, `seq`, `event
 | `[REQ]` | HTTP metadata: метод, путь, session_id (первый непустой кандидат из списка `ADAPTER_SESSION_HEADER`; элемент `Имя:ключ` — JSON-заголовок; иначе `unknown`) |
 | `[BODY]` | Исходное Anthropic-тело запроса клиента |
 | `[TOOL_RESULT]` (summary) | `tool_use_id`, `parent_req_id`, `is_error`, `len(content)` (всегда) |
-| `[TOOL_RESULT]` (content) | Полный JSON content tool result — безусловно, единым блоком для всех результатов (в консоли с обрезкой `ADAPTER_DEBUG_TRIM`, в файл при `ADAPTER_DEBUG_ENABLE=1` полный) |
+| `[TOOL_RESULT]` (content) | Полный JSON content tool result — безусловно, единым блоком для всех результатов (в консоли с обрезкой `ADAPTER_LOG_TRIM`, в файл при `ADAPTER_DEBUG_ENABLE=1` полный) |
 
 ### INTERNAL — мониторинг и отладка
 
@@ -453,7 +453,7 @@ WEBUI — `docs/webui.md`.
   баннер «Проверка выполняется…» и сама перезагружается по завершении
   (JS опрашивает JSON-эндпоинт `/api/refresh-state`). Провал опроса не
   роняет страницу — показывается прежний список и текст ошибки.
-- Корень веб-сервера — `ADAPTER_DATA_ROOT` (по умолчанию `./tmp/adapter`).
+- Корень веб-сервера — `ADAPTER_DATA_ROOT` (по умолчанию `~/.ba`).
   Содержимое разложено по подпапкам (v0.9.9): `log/` — `*.parts` папки сессий,
   `session-*.log`/`.jsonl`, `.err`; `var/` — `model-usage.yaml`, `state.yaml`,
   PID-файл `adapter.pid` (v0.9.5 — пишется при любом запуске) и JSON-файл
@@ -494,7 +494,7 @@ WEBUI — `docs/webui.md`.
   `/config`: чекбоксы/числа для узкого пула переменных (5 bool:
   `ADAPTER_DEBUG`, `ADAPTER_SENSITIVE_LOGGING_ENABLE`,
   `ADAPTER_STREAMING_ENABLE`, `ADAPTER_STREAM_INCLUDE_USAGE`,
-  `ADAPTER_STRICT_MODELS`; 3 int: `ADAPTER_DEBUG_TRIM`,
+  `ADAPTER_STRICT_MODELS`; 3 int: `ADAPTER_LOG_TRIM`,
   `ADAPTER_TRACE_REASONING_MAX_CHARS`, `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`),
   POST применяет через `config.set_runtime_config()` и показывает, что
   применилось. Переменные пула читаются кодом «на лету»

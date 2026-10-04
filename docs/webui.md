@@ -98,7 +98,7 @@ Prometheus-метрики — НЕ на WEBUI-порту, а на отдельн
 - Адрес по умолчанию: **`http://127.0.0.1:8765/`**.
 - Порт — `ADAPTER_WEBUI_PORT` (по умолчанию `8765`); адрес прослушивания —
   `ADAPTER_WEBUI_HOST` (по умолчанию `127.0.0.1` — только локально).
-- **Корень веб-сервера** — `ADAPTER_DATA_ROOT` (по умолчанию `./tmp/adapter`);
+- **Корень веб-сервера** — `ADAPTER_DATA_ROOT` (по умолчанию `~/.ba`);
   содержимое разложено по подпапкам (v0.9.9): в `log/` лежат `*.parts` папки
   сессий, `session-*.log`/`.jsonl` и `.err`, в `var/` — `model-usage.yaml`,
   `state.yaml` и PID-файл. Подпапки создаются при старте всегда; вкладка
@@ -410,12 +410,12 @@ Sessions (вернувшаяся сессия получит свои настр
 
 - **bool (5)** — файловая запись: `ADAPTER_DEBUG` (файл `session-*.log` —
   полные строки, без обрезки; консоль — всегда, с обрезкой
-  `ADAPTER_DEBUG_TRIM`; тем же флагом — дампы `.json`+`.yaml` всех
+  `ADAPTER_LOG_TRIM`; тем же флагом — дампы `.json`+`.yaml` всех
   логгируемых частей, v0.9.10); рубильники поведения
   новых запросов и логов: `ADAPTER_SENSITIVE_LOGGING_ENABLE` (отключение
   санитайзера — секреты в открытом виде), `ADAPTER_STREAMING_ENABLE`,
   `ADAPTER_STREAM_INCLUDE_USAGE`, `ADAPTER_STRICT_MODELS`;
-- **int (3)** — лимиты обрезки: `ADAPTER_DEBUG_TRIM` (консоль; `0` — без
+- **int (3)** — лимиты обрезки: `ADAPTER_LOG_TRIM` (консоль; `0` — без
   обрезки), `ADAPTER_TRACE_REASONING_MAX_CHARS`,
   `ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS`;
 - **enum (3)** — TARGET-маршрутизация входов (v0.9.1): `ADAPTER_MESSAGES_TARGET`,
@@ -809,7 +809,7 @@ curl 'http://127.0.0.1:8765/errors/session-20260909-222202-1ad13437.err?section=
 Персистентное хранилище таблицы использованных моделей.
 
 **Расположение** — папка состояния корня WEBUI: `ADAPTER_DATA_ROOT/var`
-(дефолт `./tmp/adapter/var`). Встроенный запуск кладёт файл туда автоматически
+(дефолт `~/.ba/var`). Встроенный запуск кладёт файл туда автоматически
 (синхронизация в `webserver.serve()`); standalone
 (`python -m backend_adapter.webserver [ROOT]`) — в `<явный корень>/var`.
 

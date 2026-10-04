@@ -30,22 +30,31 @@ This file provides guidance to [CC] () when working with code in this repository
 
 ## Ключевые факты
 
-- **CLI (v0.9.11):** `backend-adapter.py` разбирает argv **первым** (до
-  `validate_env` и импорта config) через `cli_args.parse_args` —
+- **CLI (v0.9.11; `--name/--base/--key` и `--check` — v0.9.13):**
+  `backend-adapter.py` разбирает argv **первым** (до `validate_env` и импорта
+  config) через `cli_args.parse_args` —
   `--version`/`-v` и `--help`/`-h`/`-?` печатают ответ и выходят (код 0) при
   любом, даже битом env; `--root <путь>` — домашняя папка адаптера (дефолт
-  `~/.ba`; дом ⊃ данные: конфиги в `<root>/`, данные в `<root>/tmp/adapter`),
+  `~/.ba`; **с v0.9.13 дом И корень данных**: конфиги и данные — `log/`,
+  `var/` — в одной папке `<root>`; подпапка `tmp/adapter` убрана),
   `--install` — идемпотентная разметка дома (`adapter.env` со всеми дефолтами
-  и заглушкой токена, `adapter.yaml`, `tariffs.yaml`). Шаблоны **встроены в
-  пакет** (v0.9.12, `templates.py`), поэтому `--install` работает и из
-  standalone-бинарника/wheel, где `docs/samples/` недоступен; файлы
+  и заглушкой токена, `adapter.yaml`, `tariffs.yaml`). С v0.9.13:
+  `--install --name <имя> --base <url> --key <имя_переменной_токена>` —
+  генерация `adapter.yaml` с заданным бэкендом (все три ключа **только
+  вместе** и только с `--install`, иначе `[FATAL]` exit 2); `--check
+  [--root <путь>]` — офлайн-диагностика конфигов (`env_check.py`: типы по
+  `env_validate._ENV_SPECS` + `[WARN]` об устаревших/неиспользуемых
+  `ADAPTER_*`; `[ERROR]` → exit 1, `[WARN]` итог не роняет), запускается
+  **до** `validate_env`/config, потому переживает битое окружение. Шаблоны
+  **встроены в пакет** (v0.9.12, `templates.py`), поэтому `--install` работает
+  и из standalone-бинарника/wheel, где `docs/samples/` недоступен; файлы
   `docs/samples/*.yaml` — образцы-дубликаты (расхождение сторожит
   `tests/test_templates.py`).
   Дом активен только по флагу; подстановки — через `setdefault` (**явный env
-  побеждает**), без флагов «нулевая настройка» не меняется. Модуль —
-  лист DAG (stdlib + `templates`). Справка/версия нужны внешним потребителям
-  (`install.sh`, `scripts/build-binaries.sh`, CI) вместо запуска бинарника
-  ради разбора `[FATAL]`.
+  побеждает**), без флагов «нулевая настройка» не меняется. `cli_args.py` —
+  лист DAG (stdlib + `templates` + `env_check`). Справка/версия нужны внешним
+  потребителям (`install.sh`, `scripts/build-binaries.sh`, CI) вместо запуска
+  бинарника ради разбора `[FATAL]`.
 - Точка входа: `backend-adapter.py`; `__version__` — источник версии, история —
   `changelog.md`. `__comment__` — **КОНСТАНТНОЕ определение инструмента**
   (`backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
@@ -67,12 +76,15 @@ This file provides guidance to [CC] () when working with code in this repository
 - Рабочие копии конфигов кладутся в корень репозитория как
   `adapter.env`/`adapter.yaml` (в `.gitignore`); образцы — `docs/samples/`.
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны
-  и обрезаются до `ADAPTER_DEBUG_TRIM`; файловая запись гейтится
+  и обрезаются до `ADAPTER_LOG_TRIM` (v0.9.13, переименован из
+  `ADAPTER_DEBUG_TRIM`, который больше не читается; дефолт `1000`);
+  файловая запись гейтится
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
   `*.parts` — дампы; все три — одним флагом, v0.9.10). Корень данных —
   `ADAPTER_DATA_ROOT` (v0.9.9,
   переименован из `ADAPTER_DEBUG_LOGPATH`, который больше не читается; дефолт
-  `./tmp/adapter`), внутри — две подпапки: `log/` (всё файловое о сессиях) и
+  `~/.ba`, с v0.9.13 совпадает с домашней папкой `--root`), внутри — две
+  подпапки: `log/` (всё файловое о сессиях) и
   `var/` (состояние). Вне ENABLE/TRIM в `log/` живут безусловные
   артефакты: `.err`-файлы инцидентов и WARN-событий (v0.9.1); в `var/` —
   JSON-результат опроса списка моделей (`probe_json.py`), PID-файл (`daemon.py` —
@@ -130,16 +142,20 @@ v0.9.9 — «вернуться к общему» = снять переопре�
 Пер-сессионные настройки НЕ сохраняются. **Один флаг логирования:** связи
 Log/Parts и каскада больше нет (v0.9.10) — `*.parts`-дампы пишутся вместе с
 логами по единственному гейту `session_log.logging_enabled`. **Валидация env** (`env_validate.py`) — строгая, до
-импорта config: невалидный int/bool → `[FATAL]` + `sys.exit(1)`.
+импорта config: невалидный int/bool → `[FATAL]` + `sys.exit(1)`; тот же
+`check_value` переиспользует офлайн-режим `--check` (`env_check.py`, v0.9.13).
 
 **Инвариант DAG:** база без внутренних зависимостей при импорте — `redact.py`,
 `session_log.py`, `daemon.py`, `config.py`, `artifact_tree_common.py`,
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
 модули зависят минимум от одного из них. `session_settings.py`,
-`session_registry.py`, `state_store.py`, `env_validate.py` и `templates.py` —
-листы DAG (`env_validate` и `templates` — stdlib-only, `cli_args` зависит
-только от `templates`, остальные импортируют только `config`). `cli_args.py`
-(v0.9.11) вызывается из `backend-adapter.py` **раньше** `env_validate`.
+`session_registry.py`, `state_store.py`, `env_validate.py`, `templates.py` и
+`env_check.py` — листы DAG (`env_validate` и `templates` — stdlib-only;
+`cli_args` зависит только от `templates` + `env_check`, остальные импортируют
+только `config`; `env_check` — stdlib + PyYAML + `env_validate`).
+`cli_args.py` (v0.9.11) вызывается из `backend-adapter.py` **раньше**
+`env_validate`; режим `--check` (v0.9.13, `env_check.py`) уходит ещё раньше —
+до `validate_env`/импорта config.
 `artifact_refresh.py` (v0.9.10) — тоже лист (`config`; `artifact_tree`
 импортируется внутри функций — разрыв цикла `session_log` → `artifact_refresh`
 → `artifact_tree`). Новые модули — без циклов (dependency graph —
