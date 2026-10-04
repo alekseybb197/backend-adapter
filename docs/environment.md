@@ -178,8 +178,8 @@ backend:
 | Переменная | Default | Описание |
 |---|---|---|
 | `ADAPTER_MESSAGES_TARGET` | `completions` | Куда направлять запросы с **`/v1/messages`** (Anthropic-формат). |
-| `ADAPTER_COMPLETIONS_TARGET` | `none` | Куда направлять запросы с **`/v1/chat/completions`** ([OI]-формат). |
-| `ADAPTER_RESPONSES_TARGET` | `none` | Куда направлять запросы с **`/v1/responses`** (Responses-формат). |
+| `ADAPTER_COMPLETIONS_TARGET` | `completions` | Куда направлять запросы с **`/v1/chat/completions`** ([OI]-формат). |
+| `ADAPTER_RESPONSES_TARGET` | `completions` | Куда направлять запросы с **`/v1/responses`** (Responses-формат). |
 
 Допустимые значения всех трёх — одно из: **`completions`**, **`messages`**,
 **`responses`** (целевой формат: **прямое преобразование** входа в него),
@@ -188,13 +188,14 @@ backend:
 Значение `auto` прежних версий удалено в v0.9.4: в env оно невалидно — консоль
 `[WARN]`, вход трактуется как `none`. Детали и примеры — `docs/routing.md`.
 
-> **Дефолты — это нулевая настройка (100% прежнее поведение):** принимается
-> только `/v1/messages`, который конвертируется в `chat.completions`
-> (`ADAPTER_MESSAGES_TARGET=completions`); входы
-> `/v1/chat/completions` и `/v1/responses` закрыты (`none`). Пример из
-> задачи «принимать только messages, конвертировать в chat completions» —
-> ровно эти дефолты: `ADAPTER_COMPLETIONS_TARGET=none,
-> ADAPTER_MESSAGES_TARGET=completions, ADAPTER_RESPONSES_TARGET=none`.
+> **Дефолты (v1.0.0) — это нулевая настройка:** принимаются **все три** входа,
+> и каждый ведёт к `chat.completions` — `/v1/messages` конвертируется
+> (`messages→completions`), `/v1/chat/completions` идёт дословной копией E→E
+> (`completions→completions`), `/v1/responses` конвертируется
+> (`responses→completions`). То есть
+> `ADAPTER_MESSAGES_TARGET=completions, ADAPTER_COMPLETIONS_TARGET=completions,
+> ADAPTER_RESPONSES_TARGET=completions`. Чтобы закрыть вход — задайте `none`
+> явно.
 
 **Входят в runtime-пул `/config`** (см. §6): значения TARGET-переменных
 меняются на лету через WEBUI — на странице `/config` для каждой переменной —
@@ -533,10 +534,10 @@ YAML-файлы проверяются **мягко** (принцип «биты
 | Health-check: `/healthz` `/health` `/live` — процесс жив; `/ready` — готов принимать трафик | — | `curl http://127.0.0.1:<ADAPTER_WEBUI_PORT>/healthz` (200 JSON; `/ready` — 200 при настроенных бэкендах, 503 пока кэш моделей пуст) |
 | Prometheus-метрики (текст text exposition 0.0.4, `GET /metrics`) | `ADAPTER_EXPORTER_ENABLE` | `1` (дефолт) → `0` для отключения |
 | Порт Prometheus-экспортёра | `ADAPTER_EXPORTER_PORT` | `9100` (дефолт) |
-| Принимать только `/v1/messages` (нулевая настройка; вход конвертируется в chat completions) | `ADAPTER_MESSAGES_TARGET` | `completions` (дефолт) |
-| Включить вход `/v1/chat/completions` ([OI]-клиент) | `ADAPTER_COMPLETIONS_TARGET` | `passthrough` (дословно на [OI]-бэкенд, без преобразования) — дефолт `none` (вход закрыт) |
-| Включить вход `/v1/responses` | `ADAPTER_RESPONSES_TARGET` | `passthrough` (дословно, без преобразования) — дефолт `none` (вход закрыт) |
+| Принимать `/v1/messages` (нулевая настройка; вход конвертируется в chat completions) | `ADAPTER_MESSAGES_TARGET` | `completions` (дефолт) |
+| Принимать `/v1/chat/completions` ([OI]-клиент) | `ADAPTER_COMPLETIONS_TARGET` | `completions` (дефолт, v1.0.0) — дословная копия E→E; `passthrough` — то же без защиты `max_tokens`; `none` — закрыть вход (404) |
+| Принимать `/v1/responses` | `ADAPTER_RESPONSES_TARGET` | `completions` (дефолт, v1.0.0) — конверсия в chat completions; `passthrough` — дословно; `none` — закрыть вход (404) |
 | Включить конвертер `responses→responses` + команду `/model` (внутренний конвертер, `store:false`) | `ADAPTER_RESPONSES_TARGET` | `responses` (v0.9.6; см. §1а и `docs/routing.md` §2.5) |
-| Включить конвертер `responses→completions` + команду `/model` (полная кросс-форматная конверсия) | `ADAPTER_RESPONSES_TARGET` | `completions` (v0.9.7; см. `docs/routing.md` §2.2, §2.5) |
+| Принимать `/v1/chat/completions` дословной копией (дефолт v1.0.0) | `ADAPTER_COMPLETIONS_TARGET` | `completions` — self-пара `completions→completions` (см. `docs/routing.md` §2.2) |
 | Преобразовать вход в указанный формат (напр. `messages→completions`, `responses→completions`) | `ADAPTER_*_TARGET` | формат-цель: `messages` \| `completions` \| `responses`; нереализованная пара → 400 «not implemented» (см. §1а) |
 | Валидация env при старте (невалидный int/bool → `[FATAL]` и выход) | `backend_adapter/env_validate.py` | вызывается из `backend-adapter.py` **до** импорта config (v0.9.6) |

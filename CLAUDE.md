@@ -100,7 +100,11 @@ This file provides guidance to [CC] () when working with code in this repository
 
 - Не ломать «нулевую настройку»: минимальный запуск — `ADAPTER_BACKEND_CONFIG`
   (путь к YAML-файлу `backend:`) + env-переменная токена, на которую ссылается
-  поле `key`.
+  поле `key`. **С v1.0.0 дефолты всех трёх TARGET-входов — `completions`**
+  (`messages→completions` конверсия, `responses→completions` конверсия,
+  `completions→completions` — дословная копия E→E через verbatim-ветку
+  `server.py`): из коробки работают [CC], [OI]-клиенты и Codex. Кто полагался
+  на прежние 404 новых входов — задаёт `none` явно.
 - Все секреты в логах маскируются (`redact.py`); санитайзер включён по умолчанию.
 - Новые возможности покрываются флагами окружения (см. `docs/environment.md`),
   дефолты выбирают безопасное поведение.

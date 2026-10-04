@@ -71,10 +71,16 @@ INPUT_PATHS: dict[Format, str] = {
 #       («сортировка полей» — system первым) к собранным messages. Как и
 #       responses→responses, поддерживает "/model <имя>"
 #       (detect_model_switch_command) — служебная команда перехватывается
-#       ДО конвертации, реальный бэкенд не вызывается.
-# Прочие пары (completions→messages, messages→responses, …, а также
-# self-пара completions→completions) не реализованы: для дословной передачи
-# таких входов используйте TARGET=passthrough.
+#       ДО конвертации, реальный бэкенд не вызывается;
+#   completions → completions (v1.0.0) — дословная передача E→E: тело
+#       запроса и SSE уходят бэкенду КАК ЕСТЬ, без преобразования формата
+#       (единственные вмешательства — резолв модели и sanitize_max_tokens,
+#       как у TARGET=passthrough). Отдельного конвертера нет: сервер
+#       обслуживает пару своей ветвью ``verbatim`` (out_fmt_val == inp_fmt).
+#       Введена, чтобы дефолтный TARGET=completions для /v1/chat/completions
+#       был исполнимым без обязательного passthrough.
+# Прочие пары (completions→messages, messages→responses, …) не реализованы:
+# для дословной передачи таких входов используйте TARGET=passthrough.
 IMPLEMENTED_CONVERSIONS: dict[tuple[Format, Format], bool] = {
     ("messages", "completions"): True,
     ("messages", "messages"): True,
@@ -83,17 +89,18 @@ IMPLEMENTED_CONVERSIONS: dict[tuple[Format, Format], bool] = {
     ("responses", "messages"): False,
     ("completions", "responses"): False,
     ("responses", "completions"): True,
-    ("completions", "completions"): False,
+    ("completions", "completions"): True,
     ("responses", "responses"): True,
 }
 
 # Zero-config дефолты TARGET-переменных (если env не задана): описывают
-# ТЕКУЩИЕ возможности конвертера — принимается только /v1/messages и
-# конвертируется в chat completions; остальные два входа выключены (404).
+# ТЕКУЩИЕ возможности конвертера — все три входа принимаются и ведут к chat
+# completions (messages→completions, completions→completions как копия,
+# responses→completions). Зеркало дефолтов config.py.
 _TARGET_DEFAULTS: dict[Format, TargetValue] = {
     "messages": "completions",
-    "completions": "none",
-    "responses": "none",
+    "completions": "completions",
+    "responses": "completions",
 }
 
 # Имя env-переменной для каждого входа (префикс переменной == вход).
@@ -189,8 +196,8 @@ def decide(inp: Format, session_id: str = "") -> tuple[str, Format | None, str, 
 
     # --- конкретный формат: прямое преобразование inp → out ---
     # Реализованные пары — реестр IMPLEMENTED_CONVERSIONS (messages→completions,
-    # messages→messages, responses→responses, responses→completions); для
-    # остальных (в т.ч. self-пары completions→completions) преобразования нет
+    # messages→messages, responses→responses, responses→completions,
+    # completions→completions — копия); для остальных преобразования нет
     # (400) — дословная передача таких входов достигается значением
     # TARGET=passthrough.
     assert target in ("messages", "completions", "responses"), target

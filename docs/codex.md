@@ -80,23 +80,25 @@ Codex CLI говорит на **Responses API**: клиент отправляе
 
 Прежде чем настраивать клиент, проверьте вход адаптера: у каждого из трёх
 входов есть TARGET-переменная (`ADAPTER_*_TARGET`, см.
-[`docs/routing.md`](routing.md)), и **вход Responses по умолчанию выключен**:
+[`docs/routing.md`](routing.md)), и **с v1.0.0 вход Responses включён по
+умолчанию** — `completions` (кросс-форматная конвертация в Chat Completions):
 
 | Значение `ADAPTER_RESPONSES_TARGET` | Что происходит |
 |---|---|
-| `none` (**дефолт**) | Вход выключен: на любой запрос Codex придёт `404 "endpoint is disabled (ADAPTER_RESPONSES_TARGET=none)"` |
+| `none` | Вход выключен (нужно задать явно): на любой запрос Codex придёт `404 "endpoint is disabled (ADAPTER_RESPONSES_TARGET=none)"` |
+| `completions` (**дефолт** с v1.0.0) | Кросс-форматная конвертация `responses→completions`: запрос переводится в Chat Completions для [OI]-совместимого бэкенда, ответ — обратно в Responses; команда `/model` **поддерживается** |
 | `responses` | Внутренний конвертер `responses→responses`: тело уходит бэкенду в формате Responses; адаптер принудительно ставит `store: false` и **поддерживает команду `/model`** (раздел 7) |
-| `completions` | Кросс-форматная конвертация `responses→completions`: запрос переводится в Chat Completions для [OI]-совместимого бэкенда, ответ — обратно в Responses; команда `/model` **поддерживается** |
 | `passthrough` | Тело уходит бэкенду **дословно**, без вмешательств; команда `/model` **не работает** (адаптер не разбирает тело) |
 
-Включение — переменной окружения адаптера:
+Смена значения — переменной окружения адаптера (по умолчанию ничего задавать
+не нужно):
 
 ```bash
-# Бэкенд умеет Responses API — отдаём тело как есть (плюс store:false)
-export ADAPTER_RESPONSES_TARGET=responses
+# Дефолт: бэкенд умеет только Chat Completions — конвертируем
+# export ADAPTER_RESPONSES_TARGET=completions
 
-# Бэкенд умеет только Chat Completions — конвертируем
-export ADAPTER_RESPONSES_TARGET=completions
+# Бэкенд умеет Responses API — отдаём тело как есть (плюс store:false)
+# export ADAPTER_RESPONSES_TARGET=responses
 ```
 
 > **`passthrough` и `/model` несовместимы.** В режиме `passthrough` адаптер
@@ -325,7 +327,7 @@ export LOCAL_API_KEY=dummy
 # 1. Адаптер слушает и отвечает
 curl -s http://127.0.0.1:9999/v1/models | head
 
-# 2. Вход Responses включён: запрос доходит до бэкенда, а не отдаёт 404
+# 2. Вход Responses активен (дефолт v1.0.0): запрос доходит до бэкенда
 curl -s http://127.0.0.1:9999/v1/responses \
   -H 'Content-Type: application/json' \
   -d '{"model":"local","input":"ping","stream":false}' | head
@@ -342,8 +344,9 @@ codex
 ```
 
 Если на запрос Codex приходит
-`404 "endpoint is disabled (ADAPTER_RESPONSES_TARGET=none)"` — не включён вход
-`/v1/responses` (раздел 3).
+`404 "endpoint is disabled (ADAPTER_RESPONSES_TARGET=none)"` — вход
+`/v1/responses` явно выключен (`none`, раздел 3); по умолчанию (v1.0.0) он
+включён.
 
 ---
 

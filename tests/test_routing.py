@@ -13,7 +13,8 @@ v0.9.9: активные пробы эндпойнтов удалены — ма
 
 Каждый тест получает свежие модули: autouse-фикстура isolate_logs
 (→ fresh_env) пересоздаёт backend_adapter-модули из env-дефолтов conftest
-(zero-config TARGET: messages=completions, completions=none, responses=none),
+(zero-config TARGET: messages=completions, completions=completions,
+responses=completions),
 а setup_method каждого класса делает reload ещё раз — класс держит свои
 self.config/self.routing (тот же паттерн, что tests/test_config.py:
 module-level импорт не переживает reload между тестами).
@@ -81,11 +82,12 @@ class TestInputPathToFormat(_RouteCase):
 
 class TestTargetConfig(_RouteCase):
     def test_zero_config_defaults(self):
-        # Дефолты conftest: принимается только /v1/messages, конвертация в
-        # chat completions; остальные два входа выключены (404).
+        # Дефолты conftest (v1.0.0): все три входа принимаются и ведут к
+        # chat completions — messages→completions, completions→completions
+        # (копия), responses→completions.
         assert self.config.ADAPTER_MESSAGES_TARGET == "completions"
-        assert self.config.ADAPTER_COMPLETIONS_TARGET == "none"
-        assert self.config.ADAPTER_RESPONSES_TARGET == "none"
+        assert self.config.ADAPTER_COMPLETIONS_TARGET == "completions"
+        assert self.config.ADAPTER_RESPONSES_TARGET == "completions"
 
     def test_input_paths_cover_all_formats(self):
         # INPUT_PATHS — статическая таблица входных путей адаптера (v0.9.9:
@@ -157,9 +159,10 @@ class TestTargetForInput(_RouteCase):
 
     def test_falls_back_to_module_default(self):
         # Незнакомого атрибута в config нет — target_for_input берёт дефолт
-        # из _TARGET_DEFAULTS (зеркало zero-config поведения).
+        # из _TARGET_DEFAULTS (зеркало zero-config поведения: v1.0.0 — все
+        # три входа на completions).
         delattr(self.config, "ADAPTER_COMPLETIONS_TARGET")
-        assert self.routing.target_for_input("completions") == "none"
+        assert self.routing.target_for_input("completions") == "completions"
 
 
 class TestTargetEnvName(_RouteCase):
@@ -243,11 +246,13 @@ class TestPerSessionTarget(_RouteCase):
 # ---------------------------------------------------------------------------
 
 class TestDecideDisabled(_RouteCase):
-    def test_input_disabled_by_default(self):
-        # Дефолты conftest: completions и responses выключены → disabled с
-        # именем своей env-переменной в тексте и HTTP-статусом 404.
+    def test_completions_and_responses_explicitly_disabled(self):
+        # v1.0.0: дефолт больше НЕ disabled (все три входа принимаются) —
+        # выключение проверяем явным TARGET=none. Текст ошибки несёт имя
+        # своей env-переменной, статус 404.
         # Сравнение — ТОЧНОЕ равенство: substring-ассерт пропускал бы
         # дублирование префикса («ADAPTER_ADAPTER_…» содержит «ADAPTER_…»).
+        self._set_target(completions="none", responses="none")
         action, out, msg, status = self.routing.decide("completions")
         assert action == "disabled"
         assert out is None
@@ -331,6 +336,18 @@ class TestDecideExplicitConvert(_RouteCase):
         assert msg == ""
         assert status == 200
 
+    def test_completions_to_completions_is_convert(self):
+        # completions→completions — реализованная пара (v1.0.0): дословная
+        # копия E→E (серверная ветвь verbatim), поэтому это convert, а не
+        # reject 400 и не passthrough. Пара достижима и по дефолту
+        # (ADAPTER_COMPLETIONS_TARGET=completions), и при явной установке.
+        self._set_target(completions="completions")
+        action, out, msg, status = self.routing.decide("completions")
+        assert action == "convert"
+        assert out == "completions"
+        assert msg == ""
+        assert status == 200
+
     def test_responses_to_responses_is_convert(self):
         # responses→responses — реализованная пара (v0.9.6): «внутренний
         # конвертор» — store=false + /model, без перестановки полей. TARGET
@@ -363,11 +380,9 @@ class TestDecideUnimplemented(_RouteCase):
             ("messages", "responses", ("messages", "responses")),
             ("responses", "messages", ("responses", "messages")),
             ("completions", "responses", ("completions", "responses")),
-            # self-пары без конвертера (реестр False) — тоже 400; дословная
-            # передача таких входов достигается значением TARGET=passthrough.
-            # (responses→responses с v0.9.6 и responses→completions с v0.9.7 —
-            # реализованные пары, см. TestDecideExplicitConvert.)
-            ("completions", "completions", ("completions", "completions")),
+            # (responses→responses с v0.9.6, responses→completions с v0.9.7 и
+            # completions→completions с v1.0.0 — реализованные пары, см.
+            # TestDecideExplicitConvert.)
         ],
     )
     def test_unimplemented_pair_rejected(self, inp, target, pair):

@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v0.9.13) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v1.0.0) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -856,22 +856,23 @@ TARGET-переменная (**префикс имени = входной энд
 формат `none`, не принимается вовсе (404):
 
 ```bash
-# /v1/messages → ПРЕОБРАЗОВАНИЕ в chat.completions (ДЕФОЛТ — нулевая настройка,
-# прежнее поведение 100%). Прочие значения: messages (преобразование
-# messages→messages — сортировка system), passthrough (дословно, без
-# преобразования), responses (не реализовано → 400), none (вход выключен).
+# /v1/messages → ПРЕОБРАЗОВАНИЕ в chat.completions (ДЕФОЛТ v1.0.0). Прочие
+# значения: messages (преобразование messages→messages — сортировка system),
+# passthrough (дословно, без преобразования), responses (не реализовано →
+# 400), none (вход выключен).
 export ADAPTER_MESSAGES_TARGET=completions
 
-# /v1/chat/completions: default none — вход закрыт (404).
-# passthrough → дословная передача на /v1/chat/completions бэкенда.
-# export ADAPTER_COMPLETIONS_TARGET=passthrough
+# /v1/chat/completions: default completions — дословная копия E→E на
+# /v1/chat/completions бэкенда. passthrough — то же без защиты max_tokens;
+# none — вход закрыт (404).
+export ADAPTER_COMPLETIONS_TARGET=completions
 
-# /v1/responses: default none — вход закрыт (404).
-# passthrough → дословная передача на /v1/responses бэкенда.
-# responses → внутренний конвертер responses→responses (store:false) + /model.
-# completions → полная конверсия responses→completions на /v1/chat/completions
-#               бэкенда (v0.9.7) + /model.
-# export ADAPTER_RESPONSES_TARGET=passthrough
+# /v1/responses: default completions — полная конверсия responses→completions
+# на /v1/chat/completions бэкенда (v0.9.7) + /model. Прочие значения:
+# passthrough → дословная передача на /v1/responses бэкенда;
+# responses → внутренний конвертер responses→responses (store:false) + /model;
+# none — вход закрыт (404).
+export ADAPTER_RESPONSES_TARGET=completions
 ```
 
 Допустимые значения всех трёх — `messages | completions | responses | passthrough | none`
@@ -912,12 +913,15 @@ export ADAPTER_STREAM_INCLUDE_USAGE=1
 export ADAPTER_STRICT_MODELS=1
 # export ADAPTER_MODELS_MAPPING=":k2-05"
 
-# --- Input endpoint routing (TARGET, v0.9.0) ---
-# Дефолты = нулевая настройка: принимается только /v1/messages и конвертируется
-# в chat.completions; /v1/chat/completions и /v1/responses закрыты (404).
+# --- Input endpoint routing (TARGET, v1.0.0) ---
+# Дефолты = нулевая настройка: принимаются все три входа, каждый конвертируется
+# в chat.completions (completions→completions — дословная копия E→E).
 export ADAPTER_MESSAGES_TARGET=completions
-# export ADAPTER_COMPLETIONS_TARGET=passthrough   # дословно (вход закрыт при none)
-# export ADAPTER_RESPONSES_TARGET=passthrough     # дословно (вход закрыт при none)
+export ADAPTER_COMPLETIONS_TARGET=completions
+export ADAPTER_RESPONSES_TARGET=completions
+# Альтернативы: passthrough — дословно; none — вход закрыт (404).
+# export ADAPTER_COMPLETIONS_TARGET=passthrough
+# export ADAPTER_RESPONSES_TARGET=passthrough
 
 # --- Logging ---
 export ADAPTER_DEBUG_ENABLE=0   # файловая запись логов на диск (0 — дефолт: только консоль)
@@ -962,7 +966,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v0.9.13
+Backend-Adapter v1.0.0
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -970,7 +974,7 @@ Streaming:  enabled (SSE passthrough)
 
 Backends:   1 configured:
   - home: http://127.0.0.1:8002  (12 models) [default]
-TARGET:     messages=completions  completions=none  responses=none
+TARGET:     messages=completions  completions=completions  responses=completions
 [WEBUI] http://127.0.0.1:8765/ (root: ~/.ba)
 [EXPORTER] http://127.0.0.1:9100/metrics
 ======================================================================
@@ -1067,10 +1071,9 @@ curl -X POST http://localhost:9999/v1/messages \
   -H "x-api-key: dummy" \
   -d '{"model":"qwen3.6-35b-a3b","messages":[{"role":"user","content":"Hi"}]}'
 
-# Новые входы (v0.9.0) — работают только при ненулевом TARGET:
-# /v1/chat/completions при ADAPTER_COMPLETIONS_TARGET=passthrough,
-# /v1/responses при ADAPTER_RESPONSES_TARGET=passthrough,
-# при TARGET=none (дефолт) оба отвечают 404.
+# Новые входы (v0.9.0) — с v1.0.0 работают из коробки (дефолт completions):
+# /v1/chat/completions → дословная копия E→E; /v1/responses → конверсия
+# responses→completions. При TARGET=none соответствующий вход отвечает 404.
 curl -X POST http://localhost:9999/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "x-api-key: dummy" \

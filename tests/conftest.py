@@ -97,12 +97,13 @@ def fresh_env(monkeypatch):
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
         "ADAPTER_PIDFILE": "",
-        # Input-endpoint routing (v0.9.0): zero-config defaults — only
-        # /v1/messages accepted, converted to chat completions; the other two
-        # inputs are disabled (404).
+        # Input-endpoint routing (v0.9.0; defaults v1.0.0): zero-config —
+        # all three inputs accepted and converted to chat completions
+        # (messages→completions, completions→completions copy,
+        # responses→completions).
         "ADAPTER_MESSAGES_TARGET": "completions",
-        "ADAPTER_COMPLETIONS_TARGET": "none",
-        "ADAPTER_RESPONSES_TARGET": "none",
+        "ADAPTER_COMPLETIONS_TARGET": "completions",
+        "ADAPTER_RESPONSES_TARGET": "completions",
         # Session-id header candidates (v0.9.4): default list matches config.py
         # so tests exercising [CC], QwenCode and Codex headers all work
         # (x-codex-turn-metadata is a JSON-valued header read by key).
@@ -168,8 +169,8 @@ def _default_config():
         "ADAPTER_PIDFILE": "",
         # Input-endpoint routing (v0.9.0): zero-config defaults (see fresh_env).
         "ADAPTER_MESSAGES_TARGET": "completions",
-        "ADAPTER_COMPLETIONS_TARGET": "none",
-        "ADAPTER_RESPONSES_TARGET": "none",
+        "ADAPTER_COMPLETIONS_TARGET": "completions",
+        "ADAPTER_RESPONSES_TARGET": "completions",
         "ADAPTER_SESSION_HEADER": (
             "X-Claude-Code-Session-Id,x-opencode-session,"
             "x-codex-turn-metadata:session_id"

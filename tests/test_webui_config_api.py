@@ -133,9 +133,11 @@ class TestRenderConfigPage:
         # Новое значение домена присутствует, удалённое auto — нет.
         assert 'value="passthrough"' in html
         assert 'value="auto"' not in html
-        # Дефолты: MESSAGES=completions, COMPLETIONS/RESPONSES=none — selected.
+        # Дефолты (v1.0.0): все три входа = completions — selected в каждом
+        # из трёх селектов; none не выбран нигде.
         assert '<option value="completions" selected>completions</option>' in html
-        assert html.count('<option value="none" selected>none</option>') == 2
+        assert html.count('<option value="completions" selected>completions</option>') == 3
+        assert html.count('<option value="none" selected>none</option>') == 0
 
     def test_renders_only_errors_no_applied_flash(self):
         """Flash показывает ТОЛЬКО ошибки; плашка «Применено» убрана (v0.9.3).
