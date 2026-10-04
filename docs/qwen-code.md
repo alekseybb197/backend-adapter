@@ -95,25 +95,26 @@ qwen
 
 Прежде чем настраивать клиент, проверьте входы адаптера: у каждого из трёх
 входов есть TARGET-переменная (`ADAPTER_*_TARGET`, см.
-[`docs/routing.md`](routing.md)), и **по умолчанию два из трёх выключены**:
+[`docs/routing.md`](routing.md)), и **с v1.0.0 по умолчанию включены все три**:
 
 | Вход адаптера | Дефолт | Что это значит для QwenCode |
 |---|---|---|
 | `/v1/messages` | `completions` (включён) | Протокол `anthropic` работает **сразу**, без правок |
-| `/v1/chat/completions` | `none` (**выключен**) | Протокол `openai` вернёт **404**, пока не включите |
-| `/v1/responses` | `none` (выключен) | QwenCode его не использует |
+| `/v1/chat/completions` | `completions` (включён) | Протокол `openai` работает **сразу**: тело идёт дословной копией E→E |
+| `/v1/responses` | `completions` (включён) | QwenCode его не использует |
 
-Чтобы заработал провайдер `openai`, включите соответствующий вход —
-например, режимом **passthrough E→E** (тело уходит бэкенду как есть):
+Правок не требуется. Если нужен режим **passthrough E→E** (передать тело
+бэкенду совсем без вмешательств адаптера — без защиты `max_tokens`), задайте
+явно:
 
 ```bash
 export ADAPTER_COMPLETIONS_TARGET=passthrough
 ```
 
-Без этого на запрос через `openai`-провайдер придёт
+Закрыть вход, наоборот, можно значением `none` — тогда придёт
 `404 "endpoint is disabled (ADAPTER_COMPLETIONS_TARGET=none)"`. В типовом
-файле активен именно `openai` (`security.auth.selectedType: "openai"`),
-поэтому эта переменная нужна почти всегда.
+файле активен именно `openai` (`security.auth.selectedType: "openai"`), но
+теперь он работает из коробки.
 
 ---
 
@@ -378,9 +379,9 @@ mkdir -p ~/.qwen
 cp docs/qwen-code/global.settings.json ~/.qwen/settings.json
 #    поправьте baseUrl, имена моделей и contextWindowSize (раздел 7)
 
-# И не забудьте разрешить вход, которым пользуется выбранный протокол
-# (раздел 3): для провайдера openai — ADAPTER_COMPLETIONS_TARGET=passthrough
-# в окружении адаптера; для anthropic правок не требуется.
+# Входы адаптера включены по умолчанию (v1.0.0, раздел 3): и anthropic,
+# и openai работают из коробки. Правки нужны только для смены режима,
+# например ADAPTER_COMPLETIONS_TARGET=passthrough в окружении адаптера.
 ```
 
 ---
@@ -402,8 +403,9 @@ qwen --version
 ```
 
 Если при запросе через `openai`-провайдер приходит
-`404 "endpoint is disabled (ADAPTER_COMPLETIONS_TARGET=none)"` — не включён
-вход `/v1/chat/completions` (раздел 3).
+`404 "endpoint is disabled (ADAPTER_COMPLETIONS_TARGET=none)"` — вход
+`/v1/chat/completions` явно выключен значением `none` (раздел 3); по умолчанию
+(v1.0.0) он включён.
 
 ---
 

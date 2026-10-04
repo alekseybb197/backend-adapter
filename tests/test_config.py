@@ -1247,10 +1247,11 @@ class TestRuntimeConfig:
         result = self.config.set_runtime_config(ADAPTER_DEBUG=False)
         assert set(result.keys()) == set(self.config.RUNTIME_CONFIG_POOL)
         assert len(result) == len(self.config.RUNTIME_CONFIG_POOL) == 12
-        # Три TARGET-переменные входят в пул со значениями-дефолтами env.
+        # Три TARGET-переменные входят в пул со значениями-дефолтами env
+        # (v1.0.0: все три входа на completions).
         assert result["ADAPTER_MESSAGES_TARGET"] == "completions"
-        assert result["ADAPTER_COMPLETIONS_TARGET"] == "none"
-        assert result["ADAPTER_RESPONSES_TARGET"] == "none"
+        assert result["ADAPTER_COMPLETIONS_TARGET"] == "completions"
+        assert result["ADAPTER_RESPONSES_TARGET"] == "completions"
         # Строка маппинга — тоже в пуле (дефолт env: пусто).
         assert result["ADAPTER_MODELS_MAPPING"] == ""
 
@@ -1287,7 +1288,7 @@ class TestRuntimeConfig:
             ADAPTER_RESPONSES_TARGET=True,  # bool
             ADAPTER_MESSAGES_TARGET=1,  # int
         )
-        assert result["ADAPTER_RESPONSES_TARGET"] == before == "none"
+        assert result["ADAPTER_RESPONSES_TARGET"] == before == "completions"
         assert result["ADAPTER_MESSAGES_TARGET"] == "completions"  # дефолт не тронут
 
     # -- str-поле пула: маппинг моделей (v0.9.3) --------------------------
@@ -1339,9 +1340,10 @@ class TestRuntimeConfig:
         """
         from backend_adapter import routing
 
-        # Дефолт: messages → completions (конверсия); вход закрыт = none.
+        # Дефолт (v1.0.0): messages → completions (конверсия);
+        # /v1/chat/completions → completions (копия E→E).
         assert routing.target_for_input("messages") == "completions"
-        assert routing.target_for_input("completions") == "none"
+        assert routing.target_for_input("completions") == "completions"
 
         # Меняем на лету: messages → convert messages→messages (сортировка system).
         self.config.set_runtime_config(ADAPTER_MESSAGES_TARGET="messages")

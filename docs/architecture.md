@@ -273,8 +273,8 @@ module on one level, see ADR 2026-09-01).
 API) — пути зеркалят `routing.INPUT_PATHS`. Что делать с запросом на каждом
 входе решает **TARGET-маршрутизация** (`backend_adapter/routing.py`, лист DAG,
 импортирует config и session_settings; его импортирует только server.py): три
-env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
-`ADAPTER_COMPLETIONS_TARGET` и `ADAPTER_RESPONSES_TARGET` (дефолт `none`) —
+env-переменные `ADAPTER_MESSAGES_TARGET`, `ADAPTER_COMPLETIONS_TARGET` и
+`ADAPTER_RESPONSES_TARGET` (v1.0.0: дефолт у всех трёх `completions`) —
 префикс = входной эндпоинт, значение ∈
 `completions|messages|responses|passthrough|none` (значение-формат —
 **прямое преобразование** входа в него; `passthrough` — дословная передача;
@@ -289,7 +289,7 @@ env-переменные `ADAPTER_MESSAGES_TARGET` (дефолт `completions`),
 {passthrough (TARGET=passthrough: тело на эндпойнт
 входного формата дословно), convert (реализованные
 пары — `messages→completions`, `messages→messages`, `responses→responses`,
-`responses→completions`), reject
+`responses→completions`, `completions→completions` — копия), reject
 (нереализованная конверсия → 400 «conversion … is not implemented»),
 disabled (TARGET=none → 404)}. Реестр реализованных пар —
 `IMPLEMENTED_CONVERSIONS` в routing.py. Неверный выбор эндпойнта агентом
@@ -338,7 +338,8 @@ disabled (TARGET=none → 404)}. Реестр реализованных пар 
      инвариант «system первым» обеспечивает normalize_messages_system_first внутри
      конвертера
    Дословная ветка (out_fmt == inp_fmt): TARGET=passthrough ИЛИ convert
-   messages→messages / responses→responses. Тело как пришло — мутация body["model"] = resolved_model
+   messages→messages / responses→responses / completions→completions
+   (self-пара с v1.0.0). Тело как пришло — мутация body["model"] = resolved_model
    (и stream:false при ADAPTER_STREAMING_ENABLE=0); конвертеры не участвуют,
    поля запроса не валидируются (бэкенд ответит 400 сам). Исключение v0.9.2 —
    только convert messages→messages: все role=system переносятся в начало
@@ -1334,5 +1335,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v0.9.13** (see `backend-adapter.py`).
+Current: **v1.0.0** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

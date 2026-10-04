@@ -202,7 +202,13 @@ export ADAPTER_MODELS_MAPPING=""
 export ADAPTER_MODELS_TARIFFS='{os.path.join(root, TARIFFS_NAME)}'
 
 # --- Input endpoint routing (TARGET) ---
+# Все три входа принимаются и конвертируются в chat completions (дефолт).
 export ADAPTER_MESSAGES_TARGET=completions
+export ADAPTER_COMPLETIONS_TARGET=completions
+export ADAPTER_RESPONSES_TARGET=completions
+# Альтернативы: passthrough — дословная передача на входной эндпойнт бэкенда;
+# none — выключить вход (404); messages — конвертация в Messages API.
+# export ADAPTER_MESSAGES_TARGET=passthrough
 # export ADAPTER_COMPLETIONS_TARGET=passthrough
 # export ADAPTER_RESPONSES_TARGET=passthrough
 

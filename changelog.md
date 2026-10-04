@@ -1,6 +1,56 @@
 # backend-adapter — history / changelog
 
 
+## v1.0.0 — все три TARGET-входа по умолчанию `completions`
+
+### 2026-10-04 Саммари ветки v1.0.0
+
+**Цель:** сделать «нулевую настройку» по-настоящему нулевой для всех трёх
+входных эндпоинтов. До этой версии из коробки работал только `/v1/messages`
+(конверсия в chat completions), а `/v1/chat/completions` и `/v1/responses`
+отвечали `404` (`ADAPTER_*_TARGET=none`). Теперь каждый вход включён и
+приводит запрос к chat completions — бэкенду, к которому адаптер и написан.
+
+**Решение:**
+- **Дефолты всех трёх TARGET-входов — `completions`** —
+  `ADAPTER_MESSAGES_TARGET`, `ADAPTER_COMPLETIONS_TARGET` и
+  `ADAPTER_RESPONSES_TARGET` в `config.py`; `routing._TARGET_DEFAULTS`
+  синхронно. Домен значений (`messages | completions | responses |
+  passthrough | none`) не меняется — только дефолты.
+- **`completions → completions` — простое копирование (v1.0.0)** — пара
+  реализована (`IMPLEMENTED_CONVERSIONS` → `True`): тело и SSE-поток уходят
+  бэкенду дословно через существующую verbatim-ветку `server.py`, с обычной
+  заменой `model` и защитой `max_tokens` (`sanitize_max_tokens`). Это
+  отличает её от `messages → messages` (сортировка system) — отдельный
+  конвертер не нужен.
+- **`--install`-шаблон и образец** — `templates.render_env` и
+  `docs/samples/sample.adapter.env` содержат три активных
+  `export ADAPTER_*_TARGET=completions` (альтернативы `passthrough`/`none` —
+  закомментированы).
+- **Документация** — `docs/routing.md` (матрица §2.1, §2.2, §2.3),
+  `docs/environment.md`, `docs/architecture.md`, `docs/codex.md`,
+  `docs/qwen-code.md`, `docs/install.md`, `README.md`, `CLAUDE.md`.
+- **Версия 1.0.0** — `__version__`/`pyproject.toml`, баннеры README/install/
+  webui/architecture (минорный релиз: zero-config модель меняется заметно).
+
+**Миграционная заметка.** Кто полагался на прежнее поведение «новый вход
+закрыт» и получал `404` как сигнал, должен теперь задать `none` явно:
+
+```bash
+export ADAPTER_COMPLETIONS_TARGET=none
+export ADAPTER_RESPONSES_TARGET=none
+```
+
+**Следствия:** адаптер без настройки принимает [CC] (`/v1/messages`),
+[OI]-клиентов (`/v1/chat/completions`) и Codex (`/v1/responses`, полная
+кросс-форматная конверсия). `passthrough` и `none` остаются доступны явной
+настройкой. Версия v1.0.0 публикуется.
+
+Детали — `docs/routing.md` (§2), `docs/environment.md` («Входные эндпоинты»),
+`docs/architecture.md` (§4.2), `backend_adapter/config.py`,
+`backend_adapter/routing.py`, `backend_adapter/server.py`.
+
+
 ## v0.9.13 — дом совпадает с корнем данных; `ADAPTER_LOG_TRIM`; `--install --name/--base/--key`; режим `--check`
 
 ### 2026-10-04 Саммари ветки v0.9.13 (7 коммитов между merge PR #25 (v0.9.12) и снятием WIP)

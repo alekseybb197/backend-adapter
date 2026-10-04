@@ -483,9 +483,10 @@ class TestInputEndpoints(ServerSetupMixin):
     """Новые входные POST-эндпоинты адаптера. TARGET-константы config
     выставляются прямым присваиванием (как runtime). Пробы эндпойнтов сняты
     в v0.9.9: маршрут выбирается всегда (disabled только при TARGET=none),
-    запрос уходит в бэкенд. Дефолты conftest — zero-config:
-    /v1/chat/completions и /v1/responses выключены (404), /v1/messages
-    конвертируется."""
+    запрос уходит в бэкенд. Дефолты conftest (v1.0.0) — zero-config:
+    ВСЕ три входа принимаются и ведут к chat completions
+    (/v1/messages — конвертация, /v1/chat/completions — дословная копия,
+    /v1/responses — конвертация)."""
 
     def _enable(self, **targets: str) -> None:
         """Включить входы: установить TARGET-константы config."""
@@ -493,12 +494,60 @@ class TestInputEndpoints(ServerSetupMixin):
         for var, value in targets.items():
             setattr(cfg, f"ADAPTER_{var.upper()}_TARGET", value)
 
-    # -- нулевой конфиг: новые входы выключены ----------------------------
+    # -- нулевой конфиг: все три входа принимаются ------------------------
 
-    def test_new_inputs_disabled_by_default(self, fake_backend):
-        """Дефолт (TARGET=none): POST на новые входы → 404 «disabled»."""
+    def test_new_inputs_enabled_by_default(self, fake_backend):
+        """Дефолт (v1.0.0): оба новых входа принимаются и уходят в бэкенд.
+
+        /v1/chat/completions — дословная копия (completions→completions):
+        ответ бэкенда отдаётся как есть. /v1/responses — конвертация
+        responses→completions: ответ — Responses-объект. Оба запроса уходят
+        на /v1/chat/completions бэкенда.
+        """
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
-        fake_backend.completions_response = {}
+        fake_backend.completions_response = {
+            "id": "chat1", "model": "test-model",
+            "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+        }
+        with fake_backend:
+            server = self._setup_adapter(fake_backend)
+            try:
+                # /v1/chat/completions: дословная копия E→E
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/chat/completions",
+                    body={"model": "test-model", "messages": []},
+                )
+                assert resp["status"] == 200
+                assert json.loads(resp["body"]) == fake_backend.completions_response
+                # /v1/responses: конвертация → Responses-объект
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/responses",
+                    body={
+                        "model": "test-model",
+                        "instructions": "Be terse.",
+                        "input": [{"type": "message", "role": "user", "content": "Hi"}],
+                    },
+                )
+                assert resp["status"] == 200
+                assert json.loads(resp["body"])["object"] == "response"
+                # оба запроса ушли на вход бэкенда chat completions
+                posts = [p for p, _m, _b in fake_backend.requests if _m == "POST"]
+                assert posts == ["/v1/chat/completions"] * 2
+                # messages-дефолт жив: конвертация работает
+                resp = _send_http(
+                    "127.0.0.1", server.port, "POST", "/v1/messages",
+                    body={"model": "test-model",
+                          "messages": [{"role": "user", "content": "Hi"}],
+                          "max_tokens": 100},
+                )
+                assert resp["status"] == 200
+            finally:
+                server.shutdown()
+
+    def test_new_inputs_explicitly_disabled(self, fake_backend):
+        """TARGET=none (явное выключение): POST на вход → 404 «disabled»."""
+        self._enable(completions="none", responses="none")
+        fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)
             try:
@@ -514,18 +563,6 @@ class TestInputEndpoints(ServerSetupMixin):
                     assert json.loads(resp["body"])["error"] == (
                         f"endpoint is disabled ({env}=none)"
                     )
-                # messages-дефолт жив: конвертация работает
-                fake_backend.completions_response = {
-                    "id": "chat1", "model": "test-model",
-                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
-                }
-                resp = _send_http(
-                    "127.0.0.1", server.port, "POST", "/v1/messages",
-                    body={"model": "test-model",
-                          "messages": [{"role": "user", "content": "Hi"}],
-                          "max_tokens": 100},
-                )
-                assert resp["status"] == 200
             finally:
                 server.shutdown()
 
@@ -1634,6 +1671,7 @@ class TestSessionAccounting(ServerSetupMixin):
 
     def test_disabled_increments_errors_and_records_route(self, fake_backend):
         """TARGET=none (disabled) → 404 + строка с route=disabled и errors=1."""
+        self._enable(completions="none")
         fake_backend.models_response = {"data": [{"id": "test-model"}]}
         with fake_backend:
             server = self._setup_adapter(fake_backend)

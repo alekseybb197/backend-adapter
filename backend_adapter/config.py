@@ -478,15 +478,17 @@ ADAPTER_MODEL_USAGE_ENABLE = env_validate.parse_bool(
 #   messages|completions|responses — конкретный формат-цель: ПРЯМОЕ
 #       преобразование запроса входа в указанный формат (реестр
 #       routing.IMPLEMENTED_CONVERSIONS; сейчас messages→completions,
-#       messages→messages — сортировка system в начало, responses→responses
-#       и responses→completions). Нереализованная
+#       messages→messages — сортировка system в начало, responses→responses,
+#       responses→completions и completions→completions — дословная
+#       передача E→E). Нереализованная
 #       пара даёт ошибку агенту (400 «conversion … is not implemented»);
 #   passthrough — передать на соответствующий входу эндпойнт бэкенда БЕЗ
 #       преобразования: тело и SSE уходят дословно (E→E);
-#   none — входной эндпоинт выключен (404) — безопасный дефолт.
-# Zero-config дефолты описывают текущие возможности конвертера:
-# MESSAGES=completions (принимается только /v1/messages, конвертация в chat
-# completions), COMPLETIONS=none, RESPONSES=none.
+#   none — входной эндпоинт выключен (404).
+# Zero-config дефолты описывают текущие возможности конвертера: все три
+# входа принимаются и ведут к chat completions — MESSAGES=completions
+# (конвертация messages→completions), COMPLETIONS=completions (копирование
+# E→E), RESPONSES=completions (конвертация responses→completions).
 # Входят в RUNTIME_CONFIG_POOL (см. выше): значение меняется на лету через
 # /config (routing.target_for_input читает config.ADAPTER_*_TARGET на каждый
 # запрос) и влияет только на НОВЫЕ запросы, не рвя активные соединения.
@@ -522,10 +524,10 @@ ADAPTER_MESSAGES_TARGET = _parse_target(
     os.environ.get("ADAPTER_MESSAGES_TARGET", "completions"), "ADAPTER_MESSAGES_TARGET"
 )
 ADAPTER_COMPLETIONS_TARGET = _parse_target(
-    os.environ.get("ADAPTER_COMPLETIONS_TARGET", "none"), "ADAPTER_COMPLETIONS_TARGET"
+    os.environ.get("ADAPTER_COMPLETIONS_TARGET", "completions"), "ADAPTER_COMPLETIONS_TARGET"
 )
 ADAPTER_RESPONSES_TARGET = _parse_target(
-    os.environ.get("ADAPTER_RESPONSES_TARGET", "none"), "ADAPTER_RESPONSES_TARGET"
+    os.environ.get("ADAPTER_RESPONSES_TARGET", "completions"), "ADAPTER_RESPONSES_TARGET"
 )
 
 # Период персистентного сохранения таблицы использованных моделей в YAML

@@ -24,13 +24,16 @@
    преобразуется в него и уходит на соответствующий эндпойнт бэкенда. Это
    преобразование, даже когда целевой формат совпадает с входным: например
    `ADAPTER_MESSAGES_TARGET=messages` — это `convert messages→messages`
-   (сортировка system-полей, см. §2.2), а **не** дословная передача.
+   (сортировка system-полей, см. §2.2), а **не** дословная передача. При
+   совпадении форматов, для которых преобразования нет, вход идёт дословной
+   копией, но маршрут по-прежнему считается `convert` (v1.0.0:
+   `completions→completions` — копия E→E, см. §2.2).
 3. **`passthrough` = дословно.** Отдельное значение `passthrough` передаёт
    запрос на эндпойнт **входного** формата **без преобразования**: тело и
    SSE-поток уходят бэкенду как пришли (адаптер подставляет только
    резолвнутую модель). Это способ «ничего не менять».
-4. **`none` — вход выключен.** Значение `none` (безопасный дефолт) запрещает
-   вход: запросы на него не принимаются, ответ — HTTP **404** «endpoint is
+4. **`none` — вход выключен.** Значение `none` запрещает вход: запросы на
+   него не принимаются, ответ — HTTP **404** «endpoint is
    disabled (ADAPTER_*_TARGET=none)». Единственный способ закрыть вход.
 5. **`auto` удалён (v0.9.4).** Прежнее значение `auto` (автовыбор маршрута по
    данным проверок) убрано — для него нет приемлемой логики. Встретив `auto` в env
@@ -52,27 +55,27 @@
 
 ---
 
-## 2. Что реализовано сейчас (v0.9.x)
+## 2. Что реализовано сейчас (v1.0.x)
 
 ### 2.1 Матрица «вход × значение TARGET»
 
 Что произойдёт с запросом при каждом допустимом значении TARGET-переменной
 входа (значение ∈ `messages | completions | responses | passthrough | none`):
 
-| Вход | `messages` | `completions` | `responses` | `passthrough` | `none` (дефолт для 2 входов) |
+| Вход | `messages` | `completions` | `responses` | `passthrough` | `none` |
 |---|---|---|---|---|---|
 | **`/v1/messages`** | **convert `messages→messages`** (сортировка system) | **convert `messages→completions`** *(дефолт)* | не реализовано → 400 | **дословно `messages→messages`** | вход выключен → 404 |
-| **`/v1/chat/completions`** | не реализовано → 400 | не реализовано → 400 | не реализовано → 400 | **дословно `completions→completions`** | **вход выключен → 404** *(дефолт)* |
-| **`/v1/responses`** | не реализовано → 400 | **convert `responses→completions`** (полная конверсия) | **convert `responses→responses`** (внутренний конвертер, `store:false`) | **дословно `responses→responses`** | **вход выключен → 404** *(дефолт)* |
+| **`/v1/chat/completions`** | не реализовано → 400 | **convert `completions→completions`** (дословная копия E→E) *(дефолт)* | не реализовано → 400 | **дословно `completions→completions`** | вход выключен → 404 |
+| **`/v1/responses`** | не реализовано → 400 | **convert `responses→completions`** (полная конверсия) *(дефолт)* | **convert `responses→responses`** (внутренний конвертер, `store:false`) | **дословно `responses→responses`** | вход выключен → 404 |
 
 Реализованные маршруты выделены жирным. Не-реализованные ячейки принимают
 директиву, но отвергают запрос HTTP **400** «conversion … is not implemented» —
-см. §2.2. Дословная передача входа, формат которого совпадает с целевым
-(`completions→completions`), достигается **только** значением `passthrough`:
-self-пара `completions→completions` конвертером не реализована. Пары
-`responses→responses` (v0.9.6) и `responses→completions` (v0.9.7) —
-исключения: они **реализованы** (см. §2.2) и вдобавок поддерживают команду
-`/model` (см. §2.5).
+см. §2.2. Дословная передача `completions→completions` достижима двумя
+значениями (v1.0.0): `completions` — как **реализованная** self-пара
+(копирование E→E, дефолт), и `passthrough` — как «передать без
+преобразования» вообще. Пары `responses→responses` (v0.9.6) и
+`responses→completions` (v0.9.7) вдобавок поддерживают команду `/model`
+(см. §2.5).
 
 ### 2.2 Сводка реализованного
 
@@ -80,8 +83,7 @@ self-пара `completions→completions` конвертером не реали
   `IMPLEMENTED_CONVERSIONS` в `routing.py`): запрос
   `convert_messages_anthropic_to_openai`, ответ `convert_openai_to_anthropic`,
   стрим `stream_openai_to_anthropic` (`convert.py`/`streaming.py`). Это
-  дефолт для `/v1/messages` — «нулевая настройка» сохраняет прежнее
-  поведение 100%.
+  дефолт для `/v1/messages`.
 - **Конверсия `messages → messages`** — сортировка полей: все `role=system`
   переносятся в начало диалога (`normalize_messages_system_first`,
   `convert.py` — перенос без склейки, относительный порядок остальных ролей
@@ -112,12 +114,23 @@ self-пара `completions→completions` конвертером не реали
   Элементы `input` с `role="developer"` **схлопываются** в единое system-сообщение
   вместе с `instructions` (через `\n\n`) — часть chat-шаблонов (Qwen3-семейство под
   llama.cpp) не знает роль `developer` и требует ровно одно system-сообщение первым.
+- **Копирование `completions → completions`** (v1.0.0) — self-пара реестра:
+  тело запроса и SSE-поток уходят на эндпойнт `/v1/chat/completions` бэкенда
+  **как есть** (дословная передача E→E). Отдельного конвертера нет —
+  сервер исполняет пару своей ветвью `verbatim` (`out_fmt_val == inp_fmt`);
+  единственные вмешательства — резолв модели и защита `max_tokens`
+  (`sanitize_max_tokens`), как у `passthrough`. Введена, чтобы дефолтный
+  `ADAPTER_COMPLETIONS_TARGET=completions` был исполнимым без перехода на
+  `passthrough`. Отличие от `TARGET=passthrough` здесь только в семантике
+  маршрута (convert vs «без преобразования»), поведение на проводе то же.
 - **Passthrough E→E** (`passthrough`) — дословная передача на эндпойнт
   входного формата: `messages→messages`, `completions→completions`,
   `responses→responses`. Тело уходит **без единого преобразования** — в
   частности, для `/v1/messages` с `passthrough` system-сообщения **не**
   переставляются (в отличие от `TARGET=messages`). Ответ и SSE-поток
-  возвращаются дословно (`relay_sse`).
+  возвращаются дословно (`relay_sse`). Для `completions→completions` с
+  v1.0.0 поведение на проводе совпадает с `convert completions→completions`
+  (см. выше) — разница лишь в семантике маршрута.
 - **Запрет входа** — `none` → HTTP **404**.
 
 **Коды ответов при отказе:** нереализованное преобразование → 400
@@ -130,32 +143,33 @@ self-пара `completions→completions` конвертером не реали
 ### 2.3 Примеры конфигураций
 
 ```bash
-# Нулевая настройка (дефолты, можно ничего не задавать): принимается только
-# /v1/messages, конвертируется в chat.completions; остальные входы закрыты (404).
-export ADAPTER_MESSAGES_TARGET=completions      # = дефолт
-# export ADAPTER_COMPLETIONS_TARGET=none        # = дефолт (вход закрыт)
-# export ADAPTER_RESPONSES_TARGET=none          # = дефолт (вход закрыт)
+# Нулевая настройка (дефолты v1.0.0, можно ничего не задавать): принимаются ВСЕ
+# три входа, каждый ведёт к chat.completions — /v1/messages конвертируется,
+# /v1/chat/completions идёт дословной копией, /v1/responses конвертируется.
+export ADAPTER_MESSAGES_TARGET=completions       # = дефолт
+export ADAPTER_COMPLETIONS_TARGET=completions    # = дефолт (копия E→E)
+export ADAPTER_RESPONSES_TARGET=completions      # = дефолт (конверсия)
 
-# Открыть вход /v1/chat/completions для [OI]-клиента: дословно (passthrough)
-# на бэкенд, говорящий на chat.completions.
+# /v1/chat/completions дословно через passthrough (то же, что дефолт-копия,
+# но без защиты max_tokens и нормализации — «передать как есть»).
 # export ADAPTER_COMPLETIONS_TARGET=passthrough
 
-# Открыть вход /v1/responses: дословно (passthrough) на бэкенд, говорящий
-# на Responses.
+# /v1/responses: дословно (passthrough) на бэкенд, говорящий на Responses.
 # export ADAPTER_RESPONSES_TARGET=passthrough
 
 # /v1/messages: дословно, без сортировки system (в отличие от =messages).
 # export ADAPTER_MESSAGES_TARGET=passthrough
 ```
 
-> **Миграция с версий < 0.9.4.** Раньше целевой формат, равный входу, означал
-> passthrough E→E. Теперь это преобразование: `ADAPTER_COMPLETIONS_TARGET=completions`
-> даёт **400** «not implemented» — замените его на `passthrough`.
-> `ADAPTER_RESPONSES_TARGET=responses` с v0.9.6 больше не 400: это реализованный
-> внутренний конвертер (`store:false` + `/model`); при необходимости дословной
-> передачи используйте `passthrough`. Прежнее `auto` замените на конкретное
-> значение (`passthrough` или формат-цель). Дефолт `/v1/messages=completions` не
-> менялся.
+> **Миграция с версий < 1.0.0.** До v1.0.0 дефолт для `/v1/chat/completions`
+> и `/v1/responses` был `none` (404), а `ADAPTER_COMPLETIONS_TARGET=completions`
+> давал **400** «not implemented». Теперь оба входа открыты по умолчанию, а
+> `completions` для completions-входа — дословная копия E→E (v1.0.0), не 400.
+> Если вы **полагались** на 404 (закрытый вход) — задайте `none` явно.
+> `ADAPTER_RESPONSES_TARGET=responses` с v0.9.6 — реализованный внутренний
+> конвертер (`store:false` + `/model`), не 400. Прежнее `auto`
+> (удалено в v0.9.4) замените на конкретное значение (`passthrough` или
+> формат-цель).
 
 Полный env-файл с комментариями всех переменных — `docs/samples/sample.adapter.env`.
 
@@ -251,12 +265,11 @@ TARGET-переменную можно переопределить **для о�
 > появляется.
 
 1. **Дополнительные пары конверсий** — `completions → messages`,
-   `messages → responses`, `completions → responses` и обратные (включая
-   оставшуюся self-пару `completions→completions`). Станут доступны с
-   реализацией соответствующих конвертеров; появятся в реестре
+   `messages → responses`, `completions → responses` и обратные. Станут
+   доступны с реализацией соответствующих конвертеров; появятся в реестре
    `IMPLEMENTED_CONVERSIONS` (`routing.py`) и в матрице §2.1.
    (`responses→responses` реализована в v0.9.6, `responses→completions` — в
-   v0.9.7; см. §2.2 и §2.5.)
+   v0.9.7, `completions→completions` — в v1.0.0; см. §2.2 и §2.5.)
 2. **Отбор маршрута по доступности эндпоинтов** — сознательно **не**
    реализуется (принцип §1.7): маршрут задаётся директивой, а не живой
    проверкой. Пробы эндпойнтов сняты в v0.9.9; остаётся только опрос списка
