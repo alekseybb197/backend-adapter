@@ -19,6 +19,27 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
+# Home isolation
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolate_home(tmp_path_factory):
+    """Не дать тестам писать в реальный ``~/.ba`` (v0.9.13).
+
+    С v0.9.13 ``ADAPTER_DATA_ROOT`` по умолчанию равен ``~/.ba`` — та же
+    домашняя папка, что у ``--root``. Многие тесты оставляют переменную
+    пустой (``fresh_env``/``_default_config``) в расчёте на дефолт, а это уже
+    НЕ ``./tmp/adapter`` внутри репозитория, а реальный дом пользователя с
+    живыми секретами. Подменяем ``HOME`` (и ``USERPROFILE`` для Windows) на
+    временный каталог на всю сессию: ``expanduser("~/.ba")`` уходит в tmp,
+    реальный дом недостижим. Ортогонально к ``isolate_logs`` (тот гасит
+    модульные пути после каждого теста), здесь — источник дефолта."""
+    home = tmp_path_factory.mktemp("home")
+    with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+        yield home
+
+
+# ---------------------------------------------------------------------------
 # Environment / module reload
 # ---------------------------------------------------------------------------
 
@@ -43,6 +64,9 @@ def fresh_env(monkeypatch):
         # гасим унаследованное из шелла значение: непустое при пустом новом
         # даёт [WARN] о переименовании на импорте config.
         "ADAPTER_DEBUG_LOGPATH": "",
+        # Старое имя TRIM (v0.9.13 переименовано в ADAPTER_LOG_TRIM) — та же
+        # причина: унаследованное из шелла значение даёт [WARN] на импорте.
+        "ADAPTER_DEBUG_TRIM": "",
         # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
         # Сам файл в тестах не создаётся — apply_on_startup вызывает только
         # backend-adapter.py, а тесты state_store задают путь через tmp_path.
@@ -68,7 +92,7 @@ def fresh_env(monkeypatch):
         "ADAPTER_MODELS_TARIFFS": "",
         "ADAPTER_ARTIFACT_DEBOUNCE": "20",
         "ADAPTER_WEBUI_PORT": "8765",
-        "ADAPTER_DEBUG_TRIM": "3000",
+        "ADAPTER_LOG_TRIM": "1000",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "0",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",
@@ -114,6 +138,9 @@ def _default_config():
         # гасим унаследованное из шелла значение: непустое при пустом новом
         # даёт [WARN] о переименовании на импорте config.
         "ADAPTER_DEBUG_LOGPATH": "",
+        # Старое имя TRIM (v0.9.13 переименовано в ADAPTER_LOG_TRIM) — та же
+        # причина: унаследованное из шелла значение даёт [WARN] на импорте.
+        "ADAPTER_DEBUG_TRIM": "",
         # Перманентное состояние runtime-пула (v0.9.6): имя файла по умолчанию.
         # Сам файл в тестах не создаётся — apply_on_startup вызывает только
         # backend-adapter.py, а тесты state_store задают путь через tmp_path.
@@ -134,7 +161,7 @@ def _default_config():
         "ADAPTER_MODELS_TARIFFS": "",
         "ADAPTER_ARTIFACT_DEBOUNCE": "20",
         "ADAPTER_WEBUI_PORT": "8765",
-        "ADAPTER_DEBUG_TRIM": "3000",
+        "ADAPTER_LOG_TRIM": "1000",
         "ADAPTER_TRACE_REASONING_MAX_CHARS": "0",
         "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "0",
         "ADAPTER_SENSITIVE_LOGGING_ENABLE": "0",

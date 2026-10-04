@@ -308,7 +308,7 @@ def stream_openai_to_anthropic(
     # ветке server.py) — пишется один раз по завершении стрима, содержит
     # весь текст, tool calls и reasoning. Snapshot держит ПОЛНЫЙ текст (для
     # файла при ADAPTER_DEBUG_ENABLE=1); консоль обрежет строку до
-    # ADAPTER_DEBUG_TRIM в logger._write. (Reasoning-поля _trace ниже
+    # ADAPTER_LOG_TRIM в logger._write. (Reasoning-поля _trace ниже
     # по-прежнему ограничиваются ADAPTER_TRACE_REASONING_MAX_CHARS — это
     # отдельный int-лимит trace, к консольному trim отношения не имеет.)
     # Санитайзер работает через _dr() → redact().

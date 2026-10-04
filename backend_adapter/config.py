@@ -35,10 +35,12 @@ ADAPTER_DEBUG = env_validate.parse_bool(os.environ.get("ADAPTER_DEBUG_ENABLE", "
 # Корень ДАННЫХ адаптера (v0.9.9, переименован из ADAPTER_DEBUG_LOGPATH): здесь
 # живёт корень веб-интерфейса (WEBUI), а всё содержимое разложено по двум
 # подпапкам (см. log_dir/var_dir ниже). ВСЕГДА непуст: пусто / не задано →
-# дефолт "./tmp/adapter" (относительно папки запуска). Корень создаётся на
-# старте адаптера; лог-ФАЙЛЫ в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1
-# (см. ADAPTER_DEBUG выше). Режим «один файл» удалён — путь всегда директория.
-ADAPTER_DATA_ROOT = os.environ.get("ADAPTER_DATA_ROOT", "") or "./tmp/adapter"
+# дефолт ~/.ba — та же домашняя папка, что у --root (v0.9.13): `--root` и
+# ADAPTER_DATA_ROOT совпадают, конфиги (adapter.yaml/tariffs.yaml) и данные
+# (log/ + var/) лежат в одной папке. Корень создаётся на старте адаптера;
+# лог-ФАЙЛЫ в log/ пишутся только при ADAPTER_DEBUG_ENABLE=1 (см.
+# ADAPTER_DEBUG выше). Режим «один файл» удалён — путь всегда директория.
+ADAPTER_DATA_ROOT = os.environ.get("ADAPTER_DATA_ROOT", "") or os.path.expanduser("~/.ba")
 
 
 def log_dir() -> str:
@@ -109,7 +111,9 @@ ADAPTER_REASONING_RETRY = env_validate.parse_int(os.environ.get("ADAPTER_REASONI
 # ВСЕГДА-включённый канал, поэтому любая строка обрезается до N символов
 # (0 = без обрезки). Файловый канал (session-*.log при ADAPTER_DEBUG_ENABLE=1)
 # лимит НЕ уважает — туда пишутся полные части (см. trim_limit() и logger.py).
-ADAPTER_DEBUG_TRIM = env_validate.parse_int(os.environ.get("ADAPTER_DEBUG_TRIM", "3000"), 3000)
+# v0.9.13: ADAPTER_DEBUG_TRIM → ADAPTER_LOG_TRIM, дефолт 3000 → 1000 (старое
+# имя больше не читается — см. [WARN] ниже).
+ADAPTER_LOG_TRIM = env_validate.parse_int(os.environ.get("ADAPTER_LOG_TRIM", "1000"), 1000)
 ADAPTER_TRACE_REASONING_MAX_CHARS = env_validate.parse_int(
     os.environ.get("ADAPTER_TRACE_REASONING_MAX_CHARS", "0"), 0
 )
@@ -124,12 +128,12 @@ ADAPTER_STRICT_MODELS = env_validate.parse_bool(os.environ.get("ADAPTER_STRICT_M
 def trim_limit() -> int:
     """Живой лимит обрезки консольного debug-вывода (0 = без обрезки).
 
-    Читает модульный глобал ADAPTER_DEBUG_TRIM на каждый вызов — тот входит
+    Читает модульный глобал ADAPTER_LOG_TRIM на каждый вызов — тот входит
     в RUNTIME_CONFIG_POOL и может быть изменён через /config без перезапуска
     (см. комментарий над RUNTIME_CONFIG_POOL: live-доступ `config.X`, не
     `from .config import X` — иначе снимок на импорте).
     """
-    return ADAPTER_DEBUG_TRIM
+    return ADAPTER_LOG_TRIM
 
 
 # Жёсткое удаление ADAPTER_DEBUG_PARTS (v0.9.10): второй флаг объёма записи
@@ -144,6 +148,21 @@ if os.environ.get("ADAPTER_DEBUG_PARTS", "").strip():
         "объёма записи снят: части протокола (*.parts) собираются вместе с "
         "логами по одному ADAPTER_DEBUG_ENABLE. Старое значение игнорируется; "
         "уберите переменную (переключатель — ADAPTER_DEBUG_ENABLE / /config)."
+    )
+
+# Переименование ADAPTER_DEBUG_TRIM → ADAPTER_LOG_TRIM (v0.9.13): лимит
+# обрезки консольного вывода больше не привязан к семейству ADAPTER_DEBUG_*
+# (обрезается всегда-включённая консоль, а не отладочный канал) и мягче —
+# дефолт 1000 символов вместо 3000. Старое имя больше не читается: задано →
+# одна подсказка и старт на новом дефолте, а не молчаливая смена предела.
+# Ключ ADAPTER_DEBUG_TRIM в state.yaml игнорируется state_store как
+# неизвестный и исчезает при ближайшей перезаписи файла.
+if os.environ.get("ADAPTER_DEBUG_TRIM", "").strip():
+    print(
+        "[WARN] ADAPTER_DEBUG_TRIM больше не читается (v0.9.13) — переменная "
+        "переименована в ADAPTER_LOG_TRIM (дефолт 1000). Старое значение "
+        "игнорируется; перенесите настройку в ADAPTER_LOG_TRIM "
+        "(переключатель — /config)."
     )
 
 # ==================== RUNTIME-ПЕРЕКЛЮЧАЕМЫЙ ПУЛ (см. /config эндпойнт) ====================
@@ -181,7 +200,7 @@ if os.environ.get("ADAPTER_DEBUG_PARTS", "").strip():
 # поэтому 1 через /config сразу начнёт писать в него.)
 RUNTIME_CONFIG_POOL = (
     "ADAPTER_DEBUG",
-    "ADAPTER_DEBUG_TRIM",
+    "ADAPTER_LOG_TRIM",
     "ADAPTER_SENSITIVE_LOGGING_ENABLE",
     "ADAPTER_STREAMING_ENABLE",
     "ADAPTER_STREAM_INCLUDE_USAGE",
@@ -244,7 +263,7 @@ _SESSION_CONFIG_TYPES = {
 # значений (в пуле это три TARGET-переменные). Остальное отклоняем.
 _RUNTIME_CONFIG_TYPES = {
     "ADAPTER_DEBUG": bool,
-    "ADAPTER_DEBUG_TRIM": int,
+    "ADAPTER_LOG_TRIM": int,
     "ADAPTER_SENSITIVE_LOGGING_ENABLE": bool,
     "ADAPTER_STREAMING_ENABLE": bool,
     "ADAPTER_STREAM_INCLUDE_USAGE": bool,
@@ -334,7 +353,7 @@ def set_runtime_config(**kwargs) -> dict:
     (v0.9.6, set_on_change): так state_store персистит новое состояние на
     диск, оставаясь в стороне от корня DAG.
     """
-    global ADAPTER_DEBUG, ADAPTER_DEBUG_TRIM
+    global ADAPTER_DEBUG, ADAPTER_LOG_TRIM
     global ADAPTER_SENSITIVE_LOGGING_ENABLE, ADAPTER_STREAMING_ENABLE
     global ADAPTER_STREAM_INCLUDE_USAGE, ADAPTER_STRICT_MODELS
     global ADAPTER_TRACE_REASONING_MAX_CHARS, ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS
@@ -379,7 +398,7 @@ def set_runtime_config(**kwargs) -> dict:
 # LLM-эндпоинты, таблица «Models in use») + health-эндпоинты (/healthz,
 # /live, /ready) + /session (просмотр *.parts сессий; при ADAPTER_DEBUG_ENABLE=0
 # логов нет — вкладки сессий пусты) + /config (runtime-пул). Корень —
-# директория ADAPTER_DATA_ROOT (см. выше; дефолт ./tmp/adapter) — в var/
+# директория ADAPTER_DATA_ROOT (см. выше; дефолт ~/.ba) — в var/
 # лежит model-usage.yaml. Порт — ADAPTER_WEBUI_PORT; адрес — ADAPTER_WEBUI_HOST
 # (пусто/не задано → дефолт 127.0.0.1, только локально).
 ADAPTER_WEBUI_PORT = env_validate.parse_int(os.environ.get("ADAPTER_WEBUI_PORT", "8765"), 8765)

@@ -47,7 +47,7 @@ _ENV_SPECS: dict[str, str] = {
     "ADAPTER_PROXY_PORT": "int",
     "ADAPTER_TIMEOUT": "int",
     "ADAPTER_RETRY_COUNT": "int",
-    "ADAPTER_DEBUG_TRIM": "int",
+    "ADAPTER_LOG_TRIM": "int",
     "ADAPTER_TRACE_REASONING_MAX_CHARS": "int",
     "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS": "int",
     "ADAPTER_WEBUI_PORT": "int",
@@ -106,6 +106,24 @@ def parse_int(raw: str, default: int) -> int:
         return default
 
 
+def check_value(kind: str, raw: str) -> str | None:
+    """Описание ожидаемого типа, если ``raw`` невалиден для ``kind``; иначе None.
+
+    Единый домен значений для строгого старта (``validate_env``) и офлайн-режима
+    ``--check`` (``env_check``): обе точки обязаны трактовать int/bool
+    одинаково. ``str`` не проверяется (свободный текст) — всегда None.
+    """
+    if kind == "bool":
+        if raw.strip().lower() not in _BOOL_TRUE + _BOOL_FALSE:
+            return "bool (1/0/true/false/yes/no/on/off)"
+    elif kind == "int":
+        try:
+            int(raw.strip())
+        except ValueError:
+            return "целое число (int)"
+    return None
+
+
 def validate_env() -> None:
     """Проверить env по ``_ENV_SPECS``; при невалидном — FATAL и выход.
 
@@ -117,14 +135,9 @@ def validate_env() -> None:
         raw = os.environ.get(name)
         if raw is None:
             continue
-        if kind == "bool":
-            if raw.strip().lower() not in _BOOL_TRUE + _BOOL_FALSE:
-                _fatal(name, raw, "bool (1/0/true/false/yes/no/on/off)")
-        elif kind == "int":
-            try:
-                int(raw.strip())
-            except ValueError:
-                _fatal(name, raw, "целое число (int)")
+        expected = check_value(kind, raw)
+        if expected is not None:
+            _fatal(name, raw, expected)
 
 
 def _fatal(name: str, raw: str, expected: str) -> None:

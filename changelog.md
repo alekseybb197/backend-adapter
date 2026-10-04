@@ -1,6 +1,83 @@
 # backend-adapter — history / changelog
 
 
+## v0.9.13 — дом совпадает с корнем данных; `ADAPTER_LOG_TRIM`; `--install --name/--base/--key`; режим `--check`
+
+### 2026-10-04 Саммари ветки v0.9.13 (7 коммитов между merge PR #25 (v0.9.12) и снятием WIP)
+
+**Цель:** сблизить «домашнюю папку» (`--root`) и корень данных так, чтобы
+`--root`/`ADAPTER_DATA_ROOT` были одним и тем же путём (без вложенного
+`tmp/adapter`); переименовать обрезку логов в имя с ясной областью действия;
+дать `--install` параметры для генерации `adapter.yaml` из одного бэкенда;
+добавить офлайн-режим диагностики конфигов `--check`; задействовать новые
+возможности CLI в `install.sh`; описать всё в документации.
+
+**Решение:**
+- **Дом = корень данных** (коммит 1) — `ADAPTER_DATA_ROOT == <root>`, дефолт
+  `~/.ba` (раскрытый `~`) даже без флагов; подпапка `tmp/adapter` убрана,
+  `log/` и `var/` лежат прямо в `<root>`. `cli_args._apply_home` и
+  `templates.render_env` подставляют `ADAPTER_DATA_ROOT = root`; дублирующая
+  формула `./tmp/adapter` в листьях DAG (`daemon.py`, `probe_json.py`,
+  `session_log.py`) заменена на `os.path.expanduser("~/.ba")`. `install.sh`
+  выравнивает `SERVICE_DATA = SERVICE_ROOT` (systemd-раскладка без отдельного
+  `data/`). Канонический дефолт — `~/.ba`; относительный явный `ADAPTER_DATA_ROOT`
+  по-прежнему побеждает.
+- **`ADAPTER_DEBUG_TRIM` → `ADAPTER_LOG_TRIM`, дефолт 1000** (коммит 2) —
+  жёсткое переименование (старое имя не читается), одна стартовая `[WARN]` с
+  подсказкой; переменная входит в `RUNTIME_CONFIG_POOL` (`/config`), старый
+  ключ `state.yaml` игнорируется как неизвестный и удаляется при перезаписи.
+  Имя обновлено в `env_validate._ENV_SPECS`, `templates.render_env` и
+  документации.
+- **`--install --name/--base/--key`** (коммит 3) — генерируют `adapter.yaml` с
+  одним бэкендом (имя, URL, **имя** переменной токена); допустимы только все
+  три вместе и только с `--install` (иначе `[FATAL]` + код 2). Без них —
+  прежний образцовый `adapter.yaml` байт-в-байт. Новый
+  `templates.render_adapter_yaml(name, base, key_env)`; `render_env` принимает
+  `key_env` и подставляет имя переменной токена в `adapter.env`.
+- **Режим `--check`** (коммит 4) — новый лист DAG `env_check.py`: офлайн
+  проверяет файлы дома (`adapter.env`, `adapter.yaml`, `tariffs.yaml`) и живое
+  окружение (`ADAPTER_*`) — типы по `_ENV_SPECS` (общий `check_value` вынесен
+  из `env_validate`), устаревшие имена (`_LEGACY`) как `[WARN]`, структуру
+  YAML. Итог: `exit 1` при `[ERROR]`, иначе `0`. Запускается из
+  `cli_args.parse_args` **до** `validate_env`/импорта config, поэтому
+  диагностирует и заведомо битое окружение (несовместим с `--install` и
+  `--name/--base/--key`). Парсер env-файла общий с `--root`
+  (`env_check.parse_env_text`).
+- **`install.sh`** (коммит 5) — единый helper `write_backend_yaml()` (формат
+  совпадает с `templates.render_adapter_yaml`) для systemd-раскладки;
+  `read_old_config` восстанавливает base из поля `base:` и token по **имени**
+  из поля `key:` (снимает кавычки); добавлен режим `--check` (+ `--root`),
+  пробрасывающий офлайн-проверку в установленный бинарник (несовместим с
+  `--service`/`--delete`).
+- **Документация и образцы** (коммит 6) — `docs/install.md`,
+  `docs/environment.md`, `docs/logging.md`, `docs/webui.md`,
+  `docs/sanitizing.md`, `docs/architecture.md`, `README.md`, `CLAUDE.md`;
+  `docs/samples/sample.adapter.env` (`ADAPTER_LOG_TRIM=1000`,
+  `ADAPTER_DATA_ROOT=~/.ba`), `docs/samples/sample.adapter.yaml` (комментарий
+  про генерацию), синхронно с `templates.py` (сверка байт-в-байт в тесте).
+- **Бэкап `.bak` в `--install` и автопоиск дома** (коммит 7, после снятия
+  WIP) — контрольная проверка выявила два расхождения с ожидаемым поведением;
+  устранены. `--install` при существующем файле больше не пропускает его:
+  прежняя копия ложится рядом как `<файл>.bak` (`shutil.copy2` — права
+  сохраняются, `adapter.env` остаётся `0600`), затем файл перезаписывается
+  свежим шаблоном; сбой копирования — `[WARN]` и **без** перезаписи. Без
+  `--root` дом теперь ищется сам: **текущая папка → `~/.ba`** (признак —
+  `adapter.env` или `adapter.yaml`); найденный дом подключается целиком,
+  явный env по-прежнему побеждает (`setdefault`), ничего не найдено — дом не
+  читается («нулевой запуск»). `--install`/`--check` без `--root` автопоиск не
+  применяют (цель — всегда `~/.ba`).
+
+**Следствия:** `--root` и `ADAPTER_DATA_ROOT` больше не расходятся — одна
+папка несёт конфиги и данные; дефолт закреплён на `~/.ba`. `--install` умеет
+сразу создать рабочую конфигурацию одного бэкенда. `--check` даёт
+предполётную диагностику без запуска сервиса. `install.sh` использует оба
+новых режима. Версия v0.9.13 публикуется (снятие WIP).
+
+Детали — `docs/install.md` (§4.5), `docs/environment.md` («Домашняя папка и
+`--root`», сводные таблицы), `docs/architecture.md` (§2/§10),
+`backend_adapter/env_check.py`, `backend_adapter/cli_args.py`,
+`backend_adapter/templates.py`, `install.sh`.
+
 ## v0.9.12 — шаблоны дефолтных настроек встроены в код: `--install` работает из бинарника и wheel
 
 ### 2026-10-02 Саммари ветки v0.9.12 (1 коммит между merge PR #24 (v0.9.11) и снятием WIP)

@@ -126,7 +126,7 @@ def _resolve_log_base():
     ``ADAPTER_DATA_ROOT/log``, v0.9.9). Режим «один файл» удалён.
 
     Путь ВСЕГДА непуст: пустая / не заданная env-переменная → дефолт
-    ``./tmp/adapter/log`` (та же формула, что config.log_dir; папка создаётся
+    ``~/.ba/log`` (та же формула, что config.log_dir; папка создаётся
     на старте адаптера). Файлы в неё пишутся ТОЛЬКО при
     ADAPTER_DEBUG_ENABLE=1 — гейт на уровне вызывающих (logger/tracer/
     write_debug_json), а не здесь.
@@ -135,7 +135,7 @@ def _resolve_log_base():
     на диске: отсутствие лечится os.makedirs(exist_ok=True) при записи
     (см. _open_session_file / _body_tags_parts_dir).
     """
-    root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or "./tmp/adapter"
+    root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or os.path.expanduser("~/.ba")
     p = os.path.join(root, "log")
     return (True, p, True, p)
 
@@ -239,7 +239,7 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 
     Файл пишется, только если включён мастер-выключатель логирования
     ADAPTER_DEBUG (лог-путь задан всегда — папка ADAPTER_DATA_ROOT/log
-    с дефолтом ./tmp/adapter/log; папка создаётся при необходимости). Для
+    с дефолтом ~/.ba/log; папка создаётся при необходимости). Для
     каждого тега пишутся парные файлы — ``.json`` и ``.yaml``.
 
     v0.9.5: флаг читается ПЕР-СЕССИОННО (``logging_enabled`` поверх
@@ -327,9 +327,9 @@ def write_debug_json(session_id: str, tag: str, data: dict | str) -> None:
 # [USAGE_WARN] стрима без usage — пишет WARNING-блок.
 # Файл принципиально НЕ гейтится флагами подробности:
 #   - НЕ гейтится config.ADAPTER_DEBUG (ENABLE=0 — тоже пишется);
-#   - НЕ обрезается по ADAPTER_DEBUG_TRIM (полные запрос и сообщение).
+#   - НЕ обрезается по ADAPTER_LOG_TRIM (полные запрос и сообщение).
 # Гейтится только наличием лог-папки (ADAPTER_DATA_ROOT — всегда непуст,
-# дефолт ./tmp/adapter, лог-папка log/; is_dir=True всегда — см.
+# дефолт ~/.ba, лог-папка log/; is_dir=True всегда — см.
 # _resolve_log_base).
 # Санитайзер уважает ADAPTER_SENSITIVE_LOGGING_ENABLE (живое чтение config,
 # как в logger._write): по умолчанию секреты redact'ятся, при =1 пишутся
@@ -385,7 +385,7 @@ def write_error_file(
     в духе session-лога: timestamp-строки с префиксом [req_id]; содержимое —
     шапка-метаданные (session_id/final_status/model/backend_url), ПОЛНОЕ тело
     запроса к бэкенду (out_body) и ПОЛНОЕ сообщение об ошибке последней
-    попытки (err_body). Без обрезки по ADAPTER_DEBUG_TRIM.
+    попытки (err_body). Без обрезки по ADAPTER_LOG_TRIM.
 
     Функция никогда не бросает исключений: файл ошибок — наблюдательный
     канал, его провал не должен ронять обработку запроса."""
@@ -535,7 +535,7 @@ def write_warn_file(
 
     Тот же безусловный канал, что и инциденты (write_error_file): файл
     session-<ts>-<safe8>.err, общий _session_file_ts сессии, полные запрос и
-    текст события без обрезки по ADAPTER_DEBUG_TRIM, вне
+    текст события без обрезки по ADAPTER_LOG_TRIM, вне
     ADAPTER_DEBUG_ENABLE. В отличие от ERROR-блока у WARN нет
     final_status — событие-предупреждение наблюдается и на успешном ответе
     (200): сюда пишутся диагностические проверки адаптера —

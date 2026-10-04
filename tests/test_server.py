@@ -85,7 +85,7 @@ class ServerSetupMixin:
         server_mod.write_debug_json = lambda *a, **kw: None
         # .err-канал (v0.9.0 инциденты + v0.9.1 WARN) безусловен (не зависит от
         # ADAPTER_DEBUG_ENABLE) — в unit-контексте без лог-папки его надо
-        # мокать, иначе записи уходят в дефолтный ./tmp/adapter/log. Тесты
+        # мокать, иначе записи уходят в дефолтный ~/.ba/log. Тесты
         # самого .err ставят путь на tmp_path и вызывают
         # _setup_adapter(mock_err=False), чтобы
         # канал был живым (в т.ч. WARN «First message is NOT system»).
@@ -94,7 +94,7 @@ class ServerSetupMixin:
             server_mod.write_warn_file = lambda *a, **kw: None
             # v0.9.7: обобщённый .err-блок «ранней» ошибки (write_session_error)
             # тоже безусловен — мокаем, иначе unit-тесты без лог-папки пишут
-            # в дефолтный ./tmp/adapter/log.
+            # в дефолтный ~/.ba/log (HOME подменён conftest).
             server_mod.write_session_error = lambda *a, **kw: None
 
         # Used-models table: reset so tests start from an empty table (no

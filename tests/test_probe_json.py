@@ -81,23 +81,26 @@ class TestUnconditionalChannel:
         наличие корня данных; вне ENABLE/TRIM)."""
         os.environ["ADAPTER_DATA_ROOT"] = str(tmp_path)
         os.environ["ADAPTER_DEBUG_ENABLE"] = "0"
-        os.environ["ADAPTER_DEBUG_TRIM"] = "0"
+        os.environ["ADAPTER_LOG_TRIM"] = "0"
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
         assert (tmp_path / "var" / "llm.models.json").exists()
 
     def test_default_data_root_used_when_env_empty(self, monkeypatch, tmp_path, capsys):
-        """DATA_ROOT пуст/не задан → дефолт ./tmp/adapter (относительно папки
-        запуска). Проверяем на подменённом cwd, чтобы не писать в репозиторий."""
-        monkeypatch.chdir(tmp_path)
+        """DATA_ROOT пуст/не задан → дефолт ``~/.ba`` (v0.9.13). HOME подменён
+        conftest-фикстурой ``_isolate_home``, поэтому запись уходит в tmp-дом,
+        не в реальный."""
         os.environ.pop("ADAPTER_DATA_ROOT", None)
         # Старые имена (если экспортированы в окружении) дали бы [WARN] на
         # импорте — канал должен быть тихим, поэтому убираем и их.
         os.environ.pop("ADAPTER_DEBUG_LOGPATH", None)
         os.environ.pop("ADAPTER_DEBUG_PARTS", None)
+        os.environ.pop("ADAPTER_DEBUG_TRIM", None)
         pj = _reload_probe_json()
         pj.write_models_json("llm", {"ok": True})
-        assert (tmp_path / "tmp" / "adapter" / "var" / "llm.models.json").exists()
+        assert os.path.isfile(
+            os.path.join(os.path.expanduser("~/.ba"), "var", "llm.models.json")
+        )
         assert capsys.readouterr().out == ""  # тихий канал
 
 

@@ -46,17 +46,23 @@ class TestRenderEnv:
         # os.path.join — идиома кроссплатформенная (разделитель зависит от ОС).
         assert f"ADAPTER_BACKEND_CONFIG='{os.path.join(root, 'adapter.yaml')}'" in text
         assert f"ADAPTER_MODELS_TARIFFS='{os.path.join(root, 'tariffs.yaml')}'" in text
-        assert f"ADAPTER_DATA_ROOT='{os.path.join(root, 'tmp', 'adapter')}'" in text
+        assert f"ADAPTER_DATA_ROOT='{root}'" in text
 
     def test_token_placeholder_and_key_defaults(self, tmp_path):
         text = templates.render_env(str(tmp_path / "home"))
-        # Токен — заглушка, не пустое значение.
+        # Токен — заглушка, не пустое значение; без --key имя образцовое.
         assert "ADAPTER_BACKEND_KEY_LLM_SERVICE='*****'" in text
         # Несколько дефолтов, сверяемых с config.py (регрессия при рассинхроне).
         assert "export ADAPTER_PROXY_PORT=9999" in text
-        assert "export ADAPTER_ENDPOINT_HOST=\"127.0.0.1\"" in text
-        assert "export ADAPTER_DEBUG_TRIM=3000" in text
+        assert 'export ADAPTER_ENDPOINT_HOST="127.0.0.1"' in text
+        assert "export ADAPTER_LOG_TRIM=1000" in text
         assert "export ADAPTER_WEBUI_PORT=8765" in text
+
+    def test_custom_key_env(self, tmp_path):
+        """--key подставляет имя переменной токена (v0.9.13)."""
+        text = templates.render_env(str(tmp_path / "home"), key_env="MY_ADAPTER_KEY")
+        assert "export MY_ADAPTER_KEY='*****'" in text
+        assert "ADAPTER_BACKEND_KEY_LLM_SERVICE" not in text
 
     def test_paths_follow_root(self, tmp_path):
         """Разные root дают разные абсолютные пути (файл не захардкожен)."""
@@ -65,3 +71,23 @@ class TestRenderEnv:
         assert a != b
         assert str(tmp_path / "a") in a
         assert str(tmp_path / "b") in b
+
+
+class TestRenderAdapterYaml:
+    """render_adapter_yaml — один бэкенд из --install --name/--base/--key."""
+
+    def test_single_backend_structure(self):
+        text = templates.render_adapter_yaml("demo", "https://x.example", "ADAPTER_DEMO_KEY")
+        assert text.startswith("# backend-adapter config")
+        assert "backend:\n" in text
+        assert "  - name: demo\n" in text
+        assert "    base: https://x.example\n" in text
+        assert "    key: ADAPTER_DEMO_KEY\n" in text
+
+    def test_ends_with_newline(self):
+        assert templates.render_adapter_yaml("n", "http://b", "K").endswith("\n")
+
+    def test_key_is_env_var_name_not_token(self):
+        """Поле key — имя переменной, а не сам токен (ср. SAMPLE_ADAPTER_YAML)."""
+        text = templates.render_adapter_yaml("n", "http://b", "ADAPTER_ENV_NAME")
+        assert "key: ADAPTER_ENV_NAME" in text

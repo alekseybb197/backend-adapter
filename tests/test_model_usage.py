@@ -241,12 +241,12 @@ class TestPersistPath:
         assert not (root / "model-usage.yaml").exists()
 
     def test_auto_root_uses_data_root_var(self, tmp_path):
-        """No explicit path → ADAPTER_DATA_ROOT/var (v0.9.9: дефолт
-        ./tmp/adapter, папка состояния var/)."""
+        """No explicit path → ADAPTER_DATA_ROOT/var (v0.9.13: дефолт
+        ``~/.ba``, папка состояния var/; HOME в тестах подменён conftest)."""
         config, mu = _fresh()
         mu.set_persist_path(None)  # авто-режим (прод): _fresh оставил "" (тесты)
         assert mu.usage_persist_file() == os.path.join(
-            "./tmp/adapter", "var", mu.MODEL_USAGE_FILE
+            os.path.expanduser("~/.ba"), "var", mu.MODEL_USAGE_FILE
         )
         config.ADAPTER_DATA_ROOT = str(tmp_path / "data")
         assert mu.usage_persist_file() == str(

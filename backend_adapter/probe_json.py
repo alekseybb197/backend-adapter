@@ -11,9 +11,9 @@ v0.9.9: дампы проб эндпойнтов (``<бэкенд>.<модель
 опрос списка моделей.
 
 Канал записи БЕЗУСЛОВНЫЙ (как .err-файлы): пишется независимо от
-ADAPTER_DEBUG_ENABLE / ADAPTER_DEBUG_TRIM; гейт —
+ADAPTER_DEBUG_ENABLE / ADAPTER_LOG_TRIM; гейт —
 только наличие папки состояния (путь всегда непуст: дефолт
-``./tmp/adapter/var``).
+``~/.ba/var``).
 Директория создаётся при записи (os.makedirs). Секреты маскируются по
 умолчанию двумя слоями: структурно (значения ключей *_KEY/_TOKEN/_SECRET/
 _PAT/API_KEY и key/token/secret/password/authorization — рекурсивно по
@@ -83,8 +83,8 @@ def _mask_secrets(payload):
 def _logpath() -> str:
     """Папка состояния ``ADAPTER_DATA_ROOT/var`` без импорта config на верхнем
     уровне (та же формула, что у config.var_dir и daemon._pidfile_path):
-    пусто/не задано → дефолт ``./tmp/adapter`` + ``var``."""
-    root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or "./tmp/adapter"
+    пусто/не задано → дефолт ``~/.ba`` + ``var``."""
+    root = os.environ.get("ADAPTER_DATA_ROOT", "").strip() or os.path.expanduser("~/.ba")
     return os.path.join(root, "var")
 
 

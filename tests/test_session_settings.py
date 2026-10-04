@@ -186,9 +186,9 @@ class TestSetConfig:
     def test_name_outside_pool_ignored(self, ss, cfg):
         # Имя вне config.SESSION_CONFIG_POOL молча игнорируется (снимок
         # Log при этом материализуется — сессия образована).
-        result = ss.set_config("sess1", {"ADAPTER_DEBUG_TRIM": 500})
+        result = ss.set_config("sess1", {"ADAPTER_LOG_TRIM": 500})
         assert result == _snapshot(cfg)
-        assert "ADAPTER_DEBUG_TRIM" not in ss.session_overrides("sess1")
+        assert "ADAPTER_LOG_TRIM" not in ss.session_overrides("sess1")
 
     def test_wrong_type_ignored(self, ss, cfg):
         # Строка в bool-настройку не проходит accepts_value → игнор.
@@ -208,7 +208,7 @@ class TestSetConfig:
         # Невалидное имя/значение игнорируются, валидное — применяется.
         result = ss.set_config(
             "sess1",
-            {"ADAPTER_DEBUG": True, "NOT_A_SETTING": 1, "ADAPTER_DEBUG_TRIM": "no"},
+            {"ADAPTER_DEBUG": True, "NOT_A_SETTING": 1, "ADAPTER_LOG_TRIM": "no"},
         )
         assert result == {**_snapshot(cfg), "ADAPTER_DEBUG": True}
 

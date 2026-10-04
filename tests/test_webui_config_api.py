@@ -200,7 +200,7 @@ class TestConfigHTTPGet:
             assert "ADAPTER_STRICT_MODELS" in body
             assert "ADAPTER_TRACE_REASONING_MAX_CHARS" in body
             assert "ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS" in body
-            assert "ADAPTER_DEBUG_TRIM" in body
+            assert "ADAPTER_LOG_TRIM" in body
             # Ровно одно text-поле — маппинг моделей (v0.9.3)
             assert 'type="text"' in body
             assert body.count('type="text"') == 1
@@ -232,12 +232,12 @@ class TestConfigHTTPPost:
         from backend_adapter import config
         # Set initial values
         config.ADAPTER_DEBUG = True
-        config.ADAPTER_DEBUG_TRIM = 3000
+        config.ADAPTER_LOG_TRIM = 3000
 
         httpd, port = _start_server(str(tmp_path))
         try:
             # POST form-data
-            body = "ADAPTER_DEBUG=0&ADAPTER_DEBUG_TRIM=1000".encode()
+            body = "ADAPTER_DEBUG=0&ADAPTER_LOG_TRIM=1000".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
@@ -248,7 +248,7 @@ class TestConfigHTTPPost:
             # Check values actually changed
             current = config.get_runtime_config()
             assert current["ADAPTER_DEBUG"] is False
-            assert current["ADAPTER_DEBUG_TRIM"] == 1000
+            assert current["ADAPTER_LOG_TRIM"] == 1000
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -262,15 +262,15 @@ class TestConfigHTTPPost:
         httpd, port = _start_server(str(tmp_path))
         try:
             # POST with wrong type (bool as string for int field)
-            body = "ADAPTER_DEBUG_TRIM=not_a_number&ADAPTER_DEBUG=1".encode()
+            body = "ADAPTER_LOG_TRIM=not_a_number&ADAPTER_DEBUG=1".encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
             )
             assert status == 200
 
-            # ADAPTER_DEBUG_TRIM should NOT change (invalid type)
+            # ADAPTER_LOG_TRIM should NOT change (invalid type)
             current = config.get_runtime_config()
-            assert current["ADAPTER_DEBUG_TRIM"] == before["ADAPTER_DEBUG_TRIM"]
+            assert current["ADAPTER_LOG_TRIM"] == before["ADAPTER_LOG_TRIM"]
             # ADAPTER_DEBUG should apply (valid bool)
             assert current["ADAPTER_DEBUG"] is True
         finally:
@@ -592,7 +592,7 @@ class TestConfigHTTPPost:
         Браузер шлёт int-поля (type="number") строками; «0» раньше кралась
         bool-эвристикой парсера ("0" → False), и set_runtime_config отклонял
         bool для int-поля — лимиты с дефолтом 0 (ADAPTER_TRACE_*_MAX_CHARS,
-        ADAPTER_DEBUG_TRIM=0) уходили в «Игнорировано». Типизированный разбор
+        ADAPTER_LOG_TRIM=0) уходили в «Игнорировано». Типизированный разбор
         (по config._RUNTIME_CONFIG_TYPES) разбирает int-поля через int()
         без bool-эвристики: "0" → 0."""
         _reload_config()
@@ -600,7 +600,7 @@ class TestConfigHTTPPost:
         # Пред-условие: лимиты НЕ 0, чтобы применение «0» было наблюдаемым.
         config.ADAPTER_TRACE_REASONING_MAX_CHARS = 100
         config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS = 200
-        config.ADAPTER_DEBUG_TRIM = 300
+        config.ADAPTER_LOG_TRIM = 300
 
         httpd, port = _start_server(str(tmp_path))
         try:
@@ -608,7 +608,7 @@ class TestConfigHTTPPost:
             body = (
                 "ADAPTER_TRACE_REASONING_MAX_CHARS=0"
                 "&ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS=0"
-                "&ADAPTER_DEBUG_TRIM=0"
+                "&ADAPTER_LOG_TRIM=0"
             ).encode()
             status, response_body = _http_post(
                 port, "/config", "application/x-www-form-urlencoded", body
@@ -617,7 +617,7 @@ class TestConfigHTTPPost:
             # Все три int-поля применились как 0 — в «Игнорировано» не ушли.
             assert config.ADAPTER_TRACE_REASONING_MAX_CHARS == 0
             assert config.ADAPTER_TRACE_TOOL_FIELD_MAX_CHARS == 0
-            assert config.ADAPTER_DEBUG_TRIM == 0
+            assert config.ADAPTER_LOG_TRIM == 0
             # Ошибок нет → flash пуст (и плашки «Применено» тоже нет).
             assert "Игнорировано" not in response_body
             assert "Применено" not in response_body
