@@ -53,6 +53,9 @@ BINARY_NAME="backend-adapter"
 SERVICE_INSTALL="${SERVICE_INSTALL:-0}"
 DELETE_INSTALL="${DELETE_INSTALL:-0}"
 DELETE_YES="${ADAPTER_DELETE_YES:-0}"
+CHECK_INSTALL="${CHECK_INSTALL:-0}"
+# Optional --root for --check; empty means "let the binary use its default ~/.ba".
+CHECK_ROOT=""
 
 # Set by detect_existing_install() when a previous install is found; switches
 # main() from the fresh-install path to update_install().
@@ -111,6 +114,13 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --service) SERVICE_INSTALL=1; shift ;;
     --delete) DELETE_INSTALL=1; shift ;;
+    --check) CHECK_INSTALL=1; shift ;;
+    --root)
+      if [[ $# -lt 2 || -z "${2:-}" ]]; then
+        err "--root requires the home/data root path to check."
+        exit 1
+      fi
+      CHECK_ROOT="$2"; shift 2 ;;
     --yes|-y) DELETE_YES=1; shift ;;
     --pip)
       err "--pip (sources install) was removed: only the latest-release binary is supported."
@@ -157,12 +167,20 @@ Options:
                   Asks for confirmation unless --yes is given. Linux only for
                   now (macOS is not supported); requires root (sudo is used
                   when needed). Mutually exclusive with --service.
+  --check         Diagnose the adapter config offline (types, retired env vars,
+                  adapter.yaml/tariffs.yaml structure) via the installed binary's
+                  --check mode, then exit with its code (1 on errors, else 0).
+                  Combined with `--root <path>` it checks that home; without it
+                  the binary's default root (~/.ba) is used. Mutually exclusive
+                  with --service and --delete.
+  --root <path>   Home/data root to pass to --check. Only with --check.
   --yes, -y       Skip the --delete confirmation (for scripts/CI).
   --help          Show this help
 
 Environment:
   SERVICE_INSTALL             Same as --service (1/0)
   DELETE_INSTALL              Same as --delete (1/0)
+  CHECK_INSTALL               Same as --check (1/0)
   ADAPTER_DELETE_YES          Same as --yes (1/0)
   ADAPTER_SERVICE_BACKEND_BASE  Backend base URL for --service (skips the prompt)
   ADAPTER_SERVICE_BACKEND_KEY   Backend API token for --service (skips the prompt)
@@ -185,6 +203,18 @@ done
 if [[ "$SERVICE_INSTALL" == 1 && "$DELETE_INSTALL" == 1 ]]; then
   err "--service and --delete are mutually exclusive."
   exit 1
+fi
+
+# --check only diagnoses the config of an existing install: it downloads and
+# changes nothing, so pairing it with an install/delete mode is a mistake.
+if [[ "$CHECK_INSTALL" == 1 && ( "$SERVICE_INSTALL" == 1 || "$DELETE_INSTALL" == 1 ) ]]; then
+  err "--check is mutually exclusive with --service and --delete."
+  exit 1
+fi
+
+# --root only makes sense as a modifier of --check; on its own it is ignored.
+if [[ -n "$CHECK_ROOT" && "$CHECK_INSTALL" != 1 ]]; then
+  warn "--root is only used with --check — ignored."
 fi
 
 # ── Detect platform ────────────────────────────────────────────────────
@@ -300,9 +330,10 @@ ensure_install_dir() {
   USE_SUDO=1
 }
 
-# Deletion must not (re)create the install dir it may be removing — and it
-# never downloads anything, so it needs no writable INSTALL_DIR up front.
-if [[ "$DELETE_INSTALL" != 1 ]]; then
+# Deletion must not (re)create the install dir it may be removing — and neither
+# does --check (it only reads config), so neither needs a writable INSTALL_DIR
+# up front.
+if [[ "$DELETE_INSTALL" != 1 && "$CHECK_INSTALL" != 1 ]]; then
   ensure_install_dir
 fi
 
@@ -433,11 +464,24 @@ version_gt() {
 # fill the globals only when they are still empty (explicit env values
 # ADAPTER_SERVICE_BACKEND_BASE/_KEY keep priority).
 read_old_config() {
+  # Base URL: field `base:` (leading whitespace tolerated, quoted or not).
   if [[ -z "$SERVICE_BASE" && -f "$SERVICE_YAML" ]]; then
     SERVICE_BASE=$(sed -n 's/^[[:space:]]*base:[[:space:]]*//p' "$SERVICE_YAML" | head -1)
+    SERVICE_BASE="${SERVICE_BASE%\"}"; SERVICE_BASE="${SERVICE_BASE#\"}"
+    SERVICE_BASE="${SERVICE_BASE%\'}"; SERVICE_BASE="${SERVICE_BASE#\'}"
   fi
-  if [[ -z "$SERVICE_KEY" && -f "$SERVICE_ENV" ]]; then
-    SERVICE_KEY=$(sed -n 's/^ADAPTER_BACKEND_KEY_MAIN=//p' "$SERVICE_ENV" | head -1)
+  # Token: the env var NAME comes from the `key:` field (default
+  # ADAPTER_BACKEND_KEY_MAIN for files we generate), then its value from the env
+  # file. Reading the name instead of hardcoding it keeps a user-renamed token
+  # var recoverable on update.
+  if [[ -z "$SERVICE_KEY" && -f "$SERVICE_YAML" && -f "$SERVICE_ENV" ]]; then
+    local key_env
+    key_env=$(sed -n 's/^[[:space:]]*key:[[:space:]]*//p' "$SERVICE_YAML" | head -1)
+    key_env="${key_env:-ADAPTER_BACKEND_KEY_MAIN}"
+    SERVICE_KEY=$(sed -n "s/^${key_env}=//p" "$SERVICE_ENV" | head -1)
+    # Generated env files may quote the value; strip one surrounding layer.
+    SERVICE_KEY="${SERVICE_KEY%\"}"; SERVICE_KEY="${SERVICE_KEY#\"}"
+    SERVICE_KEY="${SERVICE_KEY%\'}"; SERVICE_KEY="${SERVICE_KEY#\'}"
   fi
 }
 
@@ -542,6 +586,27 @@ install_systemd() {
   info "Status:  systemctl status backend-adapter"
 }
 
+# ── Emit an adapter.yaml with a single backend ─────────────────────────
+# One place that knows the generated YAML layout, shared by the systemd service
+# (and any future caller). Writes to stdout so the caller picks how to place it:
+# `... | as_root tee "$path"` for a root-owned file, or plain `> "$path"`.
+# The format matches templates.render_adapter_yaml in the Python package
+# (--install --name/--base/--key) — keep both in sync.
+#
+#   write_backend_yaml <name> <base> <key_env>
+#
+# `key_env` is the NAME of the env var holding the token, never the token itself.
+write_backend_yaml() {
+  local name="$1" base="$2" key_env="$3"
+  cat <<EOF
+# backend-adapter config (generated by install.sh --service)
+backend:
+  - name: ${name}
+    base: ${base}
+    key: ${key_env}
+EOF
+}
+
 # ── Generate the state dir, configs and unit (shared install/update) ───
 # Expects SERVICE_BASE / SERVICE_KEY to be set (fresh: collect_service_config;
 # update: read_old_config). Idempotent: safe to run over an existing layout.
@@ -558,13 +623,8 @@ write_service_files() {
 
   # Backend YAML: one provider 'main'; the token itself lives in the env file
   # (key: is the *name* of the env var holding it — see docs/environment.md).
-  as_root tee "$SERVICE_YAML" >/dev/null <<EOF
-# backend-adapter config (generated by install.sh --service)
-backend:
-  - name: main
-    base: ${SERVICE_BASE}
-    key: ADAPTER_BACKEND_KEY_MAIN
-EOF
+  write_backend_yaml main "$SERVICE_BASE" ADAPTER_BACKEND_KEY_MAIN \
+    | as_root tee "$SERVICE_YAML" >/dev/null
 
   # Env file: minimal working set. ADAPTER_DETACH_ENABLE=0 is mandatory —
   # detach (double fork) is incompatible with systemd supervision.
@@ -610,6 +670,27 @@ SyslogIdentifier=backend-adapter
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+# ── Diagnose the config via the installed binary (--check) ─────────────
+# Thin passthrough to the binary's own offline `--check` (v0.9.13): it inspects
+# the home/data root (default ~/.ba, or --root <path>) and the live environment
+# for type errors (int/bool), retired env vars and adapter.yaml/tariffs.yaml
+# structure. Nothing is downloaded or modified; the binary's exit code (1 on
+# errors, else 0) becomes the installer's.
+run_check() {
+  local bin_path="${INSTALL_DIR}/${BINARY_NAME}"
+  if [[ ! -x "$bin_path" ]]; then
+    err "backend-adapter is not installed at ${bin_path} — nothing to check."
+    info "Install it first: install.sh (without --check)."
+    exit 1
+  fi
+  local args=("--check")
+  if [[ -n "$CHECK_ROOT" ]]; then
+    args+=("--root" "$CHECK_ROOT")
+  fi
+  info "Checking adapter config with: ${bin_path} ${args[*]}"
+  "$bin_path" "${args[@]}"
 }
 
 # ── Delete the installed binary and service (Linux) ────────────────────
@@ -879,6 +960,15 @@ info "Platform:  $PLATFORM"
 if [[ "$DELETE_INSTALL" == 1 ]]; then
   info "Mode:      delete"
   delete_install
+  exit 0
+fi
+
+# --check is read-only: hand off to the installed binary and exit with its code.
+# `|| exit $?` propagates the binary's status even under `set -e` (a plain
+# `run_check` would abort there and lose the explicit exit line).
+if [[ "$CHECK_INSTALL" == 1 ]]; then
+  info "Mode:      check"
+  run_check || exit $?
   exit 0
 fi
 
