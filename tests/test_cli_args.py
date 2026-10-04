@@ -165,7 +165,7 @@ class TestInstall:
 
         assert "[OK]" in capsys.readouterr().out
 
-    def test_is_idempotent(self, tmp_path, clean_env, capsys):
+    def test_backs_up_edited_file(self, tmp_path, clean_env, capsys):
         root = tmp_path / "home"
         with pytest.raises(SystemExit):
             cli_args.parse_args(["--install", "--root", str(root)], "9.9.9")
@@ -176,9 +176,28 @@ class TestInstall:
             cli_args.parse_args(["--install", "--root", str(root)], "9.9.9")
         assert ei.value.code == 0
         out = capsys.readouterr().out
-        # Правка пользователя не перезаписана, о пропуске сказано.
-        assert (root / "adapter.env").read_text(encoding="utf-8") == "edited: keep me\n"
-        assert "[WARN]" in out
+        # Правка пользователя сохранена в .bak, файл перезаписан шаблоном.
+        assert (root / "adapter.env.bak").read_text(encoding="utf-8") == "edited: keep me\n"
+        assert (root / "adapter.env").read_text(encoding="utf-8") != "edited: keep me\n"
+        assert "[WARN]" in out and ".bak" in out
+
+    def test_backup_keeps_mode(self, tmp_path, clean_env):
+        # adapter.env несёт токен: копия .bak должна остаться 0600 (copy2).
+        root = tmp_path / "home"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--install", "--root", str(root)], "9.9.9")
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--install", "--root", str(root)], "9.9.9")
+        assert (root / "adapter.env.bak").stat().st_mode & 0o777 == 0o600
+
+    def test_fresh_install_has_no_backups(self, tmp_path, clean_env):
+        # Первый --install ничего не бэкапит: копировать было нечего.
+        root = tmp_path / "home"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--install", "--root", str(root)], "9.9.9")
+        assert not (root / "adapter.env.bak").exists()
+        assert not (root / "adapter.yaml.bak").exists()
+        assert not (root / "tariffs.yaml.bak").exists()
 
     def test_default_root_is_home_ba(self, tmp_path, clean_env, monkeypatch, capsys):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -201,6 +220,80 @@ class TestInstall:
         assert (root / "tariffs.yaml").is_file()
         assert (root / "adapter.env").is_file()
         assert "[FATAL]" not in capsys.readouterr().out
+
+
+class TestDiscoverHome:
+    """Без --root дом ищется: текущая папка → ~/.ba (v0.9.13).
+
+    Признак дома — adapter.env или adapter.yaml. Явный --root важнее поиска;
+    явный env важнее дома (setdefault). Ничего не найдено — дом не
+    подключается, работает нулевой запуск.
+    """
+
+    def test_current_dir_env_file_wins(self, tmp_path, clean_env, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "adapter.env").write_text(
+            "export ADAPTER_PROXY_PORT=1111\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(work)
+        cli_args.parse_args([], "9.9.9")
+        assert os.environ["ADAPTER_PROXY_PORT"] == "1111"
+        assert os.environ["ADAPTER_DATA_ROOT"] == str(work)
+        assert os.environ["ADAPTER_BACKEND_CONFIG"] == str(work / "adapter.yaml")
+
+    def test_current_dir_yaml_is_a_marker(self, tmp_path, clean_env, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "adapter.yaml").write_text("backend: []\n", encoding="utf-8")
+        monkeypatch.chdir(work)
+        cli_args.parse_args([], "9.9.9")
+        assert os.environ["ADAPTER_DATA_ROOT"] == str(work)
+
+    def test_falls_back_to_home_ba(self, tmp_path, clean_env, monkeypatch):
+        # CWD без маркеров, в ~/.ba — маркер: дом найден в ~/.ba.
+        work = tmp_path / "work"
+        work.mkdir()
+        home = tmp_path / "home"
+        (home / ".ba").mkdir(parents=True)
+        (home / ".ba" / "adapter.env").write_text("", encoding="utf-8")
+        monkeypatch.chdir(work)
+        monkeypatch.setenv("HOME", str(home))
+        cli_args.parse_args([], "9.9.9")
+        assert os.environ["ADAPTER_DATA_ROOT"] == str(home / ".ba")
+
+    def test_no_home_anywhere_stays_unset(self, tmp_path, clean_env, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+        cli_args.parse_args([], "9.9.9")
+        # Дом не подключён — ADAPTER_DATA_ROOT не выставлен (дефолт даст config).
+        assert "ADAPTER_DATA_ROOT" not in os.environ
+        assert "ADAPTER_BACKEND_CONFIG" not in os.environ
+
+    def test_explicit_root_beats_discovery(self, tmp_path, clean_env, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "adapter.env").write_text(
+            "export ADAPTER_PROXY_PORT=1111\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(work)
+        explicit = tmp_path / "explicit"
+        cli_args.parse_args(["--root", str(explicit)], "9.9.9")
+        assert os.environ["ADAPTER_DATA_ROOT"] == str(explicit)
+        assert "ADAPTER_PROXY_PORT" not in os.environ  # файл CWD не прочитан
+
+    def test_explicit_env_beats_discovered_home(self, tmp_path, clean_env, monkeypatch):
+        work = tmp_path / "work"
+        work.mkdir()
+        (work / "adapter.env").write_text(
+            "export ADAPTER_BACKEND_CONFIG=/from/file\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(work)
+        os.environ["ADAPTER_BACKEND_CONFIG"] = "/from/env"
+        cli_args.parse_args([], "9.9.9")
+        assert os.environ["ADAPTER_BACKEND_CONFIG"] == "/from/env"  # env сильнее
 
 
 class TestInstallBackend:

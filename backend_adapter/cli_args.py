@@ -28,9 +28,14 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 (подпапка ``tmp/adapter`` убрана). Запуск с ``--root`` подставляет из дома
 ровно то, чего нет в окружении (``os.environ.setdefault`` — **явный env всегда
 побеждает**): путь данных, переменные из ``adapter.env``,
-``adapter.yaml``/``tariffs.yaml``. Без ``--root``/``--install`` дом не читается
-вовсе, но дефолт ``ADAPTER_DATA_ROOT`` всё равно ``~/.ba``: «нулевой запуск»
-требует лишь ``ADAPTER_BACKEND_CONFIG`` в окружении.
+``adapter.yaml``/``tariffs.yaml``.
+
+**Автопоиск дома (v0.9.13).** Без ``--root`` дом находится сам, в порядке:
+текущая папка, затем ``~/.ba`` (признак дома — ``adapter.env`` или
+``adapter.yaml``). Найденный дом подключается целиком; не найдено нигде — дом
+не читается, но дефолт ``ADAPTER_DATA_ROOT`` всё равно ``~/.ba``: «нулевой
+запуск» требует лишь ``ADAPTER_BACKEND_CONFIG`` в окружении. ``--install`` и
+``--check`` без ``--root`` автопоиск не используют — у них цель всегда ``~/.ba``.
 
 Модуль — лист DAG: stdlib + ``templates`` (тоже stdlib-only), откуда берутся
 встроенные шаблоны ``--install``. Версию принимает аргументом: импортировать
@@ -44,6 +49,7 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 """
 
 import os
+import shutil
 import sys
 
 from . import env_check, templates
@@ -72,17 +78,20 @@ Usage:
 Options:
   -v, --version      Показать версию и завершить работу.
   -h, --help, -?     Показать эту справку и завершить работу.
-  --root <путь>      Домашняя папка адаптера (по умолчанию ~/.ba). Одновременно
-                     корень данных (ADAPTER_DATA_ROOT). Из неё подставляются
-                     недостающие настройки: переменные <путь>/adapter.env,
-                     конфиги <путь>/adapter.yaml и <путь>/tariffs.yaml,
-                     данные <путь>/log и <путь>/var.
+  --root <путь>      Домашняя папка адаптера. Одновременно корень данных
+                     (ADAPTER_DATA_ROOT). Из неё подставляются недостающие
+                     настройки: переменные <путь>/adapter.env, конфиги
+                     <путь>/adapter.yaml и <путь>/tariffs.yaml, данные
+                     <путь>/log и <путь>/var.
+                     Без --root дом ищется сам: сначала текущая папка, затем
+                     ~/.ba (признак — adapter.env или adapter.yaml).
                      Явно заданные переменные окружения всегда побеждают.
   --install          Разметить домашнюю папку для работы адаптера: создать
                      каталоги данных и положить adapter.env (все переменные
                      со значениями по умолчанию), adapter.yaml и tariffs.yaml.
-                     Существующие файлы не перезаписывает. Завершает работу,
-                     адаптер не запускает.
+                     Существующий файл не теряется: прежняя копия ложится
+                     рядом как <файл>.bak, затем файл перезаписывается.
+                     Завершает работу, адаптер не запускает.
   --name <имя>       Имя бэкенда для генерируемого adapter.yaml.
                      Только вместе с --install.
   --base <url>       Базовый URL [OI]-совместимого эндпойнта бэкенда.
@@ -199,11 +208,35 @@ def parse_args(argv: list[str], version: str) -> None:
         sys.exit(0)
     if root is not None:
         _apply_home(_resolve_root(root))
+    else:
+        # Без --root дом ищется сам (v0.9.13): текущая папка, затем ~/.ba.
+        found = _discover_home()
+        if found is not None:
+            _apply_home(found)
 
 
 def _resolve_root(root: str | None) -> str:
     """Абсолютный путь домашней папки; ``None`` → дефолт ``~/.ba``."""
     return os.path.abspath(os.path.expanduser(root or _DEFAULT_ROOT))
+
+
+def _discover_home() -> str | None:
+    """Найти дом без ``--root``: текущая папка, затем ``~/.ba``; иначе None.
+
+    Порядок (v0.9.13): **сначала текущая папка**, затем домашняя ``~/.ba``.
+    Признак дома — файл ``adapter.env`` или ``adapter.yaml`` (по ним дом и
+    опознаётся: пустая папка домом не считается). Явный ``--root`` важнее
+    поиска (обрабатывается вызывающим до этого), а переменные окружения —
+    важнее самого дома (``_apply_home`` кладёт всё через ``setdefault``).
+    Каталог не найден нигде — ``None``: дом не подключается, работает
+    «нулевой запуск» на ``ADAPTER_BACKEND_CONFIG`` из окружения.
+    """
+    for candidate in (os.getcwd(), os.path.expanduser(_DEFAULT_ROOT)):
+        if os.path.isfile(os.path.join(candidate, _ENV_NAME)) or os.path.isfile(
+            os.path.join(candidate, _YAML_NAME)
+        ):
+            return candidate
+    return None
 
 
 def _apply_home(root: str) -> None:
@@ -286,7 +319,14 @@ def _install_home(
 
 
 def _write_template(path: str, content: str, *, mode: int | None = None, hint: str = "") -> None:
-    """Записать файл из встроенного шаблона, не перезаписывая существующий.
+    """Записать файл из встроенного шаблона, сохранив прежнюю копию в ``.bak``.
+
+    Файл есть → сперва копируется в ``<path>.bak`` (``shutil.copy2`` — права
+    сохраняются, важно для ``adapter.env`` с токеном: копия тоже ``0600``),
+    затем ``<path>`` перезаписывается свежим содержимым. Прежняя версия не
+    теряется, а пользователь видит ``[WARN]`` с именем бэкапа. Сбой копирования
+    — ``[WARN]`` и **без** перезаписи: оригинал важнее свежего шаблона.
+    Файла нет → обычное создание.
 
     ``newline=""`` отключает трансляцию ``\\n`` → ``os.linesep``: файлы ложатся
     ровно теми байтами, что и ``docs/samples/*.yaml`` (важно для Windows, где
@@ -294,8 +334,15 @@ def _write_template(path: str, content: str, *, mode: int | None = None, hint: s
     по umask).
     """
     if os.path.exists(path):
-        print(f"[WARN] {path} уже существует — оставлен без изменений.")
-        return
+        backup = path + ".bak"
+        try:
+            shutil.copy2(path, backup)
+        except OSError as e:
+            print(
+                f"[WARN] {path} существует, но копия в {backup} не удалась: {e} — оставлен без изменений."
+            )
+            return
+        print(f"[WARN] {path} уже существует — прежняя копия в {backup}, файл перезаписан.")
     with open(path, "w", encoding="utf-8", newline="") as f:
         f.write(content)
     if mode is not None:

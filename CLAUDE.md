@@ -37,7 +37,7 @@ This file provides guidance to [CC] () when working with code in this repository
   любом, даже битом env; `--root <путь>` — домашняя папка адаптера (дефолт
   `~/.ba`; **с v0.9.13 дом И корень данных**: конфиги и данные — `log/`,
   `var/` — в одной папке `<root>`; подпапка `tmp/adapter` убрана),
-  `--install` — идемпотентная разметка дома (`adapter.env` со всеми дефолтами
+  `--install` — разметка дома (`adapter.env` со всеми дефолтами
   и заглушкой токена, `adapter.yaml`, `tariffs.yaml`). С v0.9.13:
   `--install --name <имя> --base <url> --key <имя_переменной_токена>` —
   генерация `adapter.yaml` с заданным бэкендом (все три ключа **только
@@ -50,8 +50,13 @@ This file provides guidance to [CC] () when working with code in this repository
   и из standalone-бинарника/wheel, где `docs/samples/` недоступен; файлы
   `docs/samples/*.yaml` — образцы-дубликаты (расхождение сторожит
   `tests/test_templates.py`).
-  Дом активен только по флагу; подстановки — через `setdefault` (**явный env
-  побеждает**), без флагов «нулевая настройка» не меняется. `cli_args.py` —
+  **Автопоиск дома (v0.9.13):** без `--root` дом ищется сам — **текущая
+  папка**, затем **`~/.ba`** (признак — `adapter.env` или `adapter.yaml`);
+  первый найденный становится домом целиком, не найдено нигде — дом не
+  подключается. `--install`/`--check` без `--root` автопоиск не используют
+  (их цель всегда `~/.ba`). Подстановки — через `setdefault` (**явный env
+  побеждает**); повторный `--install` существующий файл уводит в `<файл>.bak`
+  и перезаписывает свежим. `cli_args.py` —
   лист DAG (stdlib + `templates` + `env_check`). Справка/версия нужны внешним
   потребителям (`install.sh`, `scripts/build-binaries.sh`, CI) вместо запуска
   бинарника ради разбора `[FATAL]`.
