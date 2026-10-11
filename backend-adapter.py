@@ -285,7 +285,8 @@ if __name__ == "__main__":
     # выходит, finally выполняет вежливое завершение. Проблема была в том,
     # что ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
     # запись: Python кидает KI в главный поток, где бы тот ни был. Решение
-    # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см. ADR):
+    # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см.
+    # docs/adr/026-graceful-shutdown-contract.md):
     # (1) первый сигнал обрабатывает ЕДИНЫЙ хэндлер _first_signal, который
     # сразу переключает SIGINT/SIGTERM на немедленный os._exit(130) и лишь
     # затем делает raise KeyboardInterrupt — повторный/задвоенный сигнал

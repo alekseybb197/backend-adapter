@@ -1,8 +1,9 @@
 """Тесты корректного завершения по Ctrl-C/SIGTERM (backend_adapter.shutdown).
 
 Модуль shutdown.py выносит логику graceful-завершения из backend-adapter.py
-(главный цикл вызывает функции модуля — см. ADR «Корректное завершение по
-Ctrl-C/SIGTERM»), поэтому контракт можно проверить тестами без спавна
+(главный цикл вызывает функции модуля — см.
+docs/adr/026-graceful-shutdown-contract.md), поэтому контракт можно
+проверить тестами без спавна
 реального процесса:
 
 - install_signal_handlers(graceful=True) ставит ЕДИНЫЙ хэндлер _first_signal

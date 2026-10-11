@@ -132,7 +132,7 @@ backend_adapter/
 `from backend_adapter import artifact_tree` and the `session_viewer.py` import keep
 working unchanged. The 7 real modules above it live flat in `backend_adapter/`
 (the package was intentionally NOT nested in a subdirectory — the repo keeps every
-module on one level, see ADR 2026-09-01).
+module on one level, see docs/adr/016-flat-package-import-dag.md).
 
 ---
 

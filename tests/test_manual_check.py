@@ -20,7 +20,8 @@
 pytest (маркер @pytest.mark.manual — регистрация и запуск через
 venv/bin/pytest -m manual, чтобы при желании гонять только его); скорость
 приемлема, а контроль сигнального завершения реального процесса — часть
-контракта graceful shutdown (см. ADR), поэтому по умолчанию тест НЕ
+контракта graceful shutdown (см.
+docs/adr/026-graceful-shutdown-contract.md), поэтому по умолчанию тест НЕ
 пропускается.
 
 ВНИМАНИЕ: процесс-ребёнок пишет model-usage.yaml и session-* в подпапки
