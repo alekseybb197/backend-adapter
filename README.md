@@ -112,6 +112,7 @@ python3 backend-adapter.py --root ~/.ba       # запуск с настройк
 | [docs/sanitizing.md](docs/sanitizing.md) | Санитизация и маскирование секретов |
 | [docs/architecture.md](docs/architecture.md) | Архитектура, диаграмма компонентов, lifecycle запросов |
 | [docs/webui.md](docs/webui.md) | WEBUI и API: страницы `/`, `/sessions`, `/session`, `/config`, `/api/*`, секция «Models in use» (live-счётчики) и таблица сессий с пер-сессионными настройками |
+| [docs/adr/](docs/adr/README.md) | Архитектурные решения (ADR): действующие решения, предложения, порядок принятия |
 
 ## Структура проекта
 

@@ -2,7 +2,7 @@
 
 | Поле | Значение |
 |---|---|
-| Статус | Принято (v0.9.6 — `responses→responses`; v0.9.7 — `responses→completions`) |
+| Статус | Действует (v0.9.6 — `responses→responses`; v0.9.7 — `responses→completions`) |
 | Тип решения | deliberate (записано) |
 | Уверенность | high |
 | Источник рационала | changelog v0.9.6, v0.9.7; комментарии `routing.py`; `docs/routing.md` §2.5, `docs/codex.md` §7 |

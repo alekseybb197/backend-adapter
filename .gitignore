@@ -1,5 +1,11 @@
 # project
-.claude/
+# .claude/: в репозитории — только общие правила и skills (ADR-процесс,
+# docs/adr/README.md). Личные settings*.json и прочее остаются локальными.
+# «.claude/*», а не «.claude/»: из исключённого каталога git не умеет
+# возвращать файлы обратно.
+.claude/*
+!.claude/rules/
+!.claude/skills/
 .mcp.json
 local-adapter.env
 local-adapter.yaml

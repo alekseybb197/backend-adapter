@@ -19,6 +19,63 @@ ADR-001…031 описывают решения v1.0.0. ADR-032…040 — пре
 | Ответы автора | 2026-10-10 | разделы «Ответ автора» в ADR | первоисточник |
 | Реконструкция | сквозные решения без записей | код, структура, комментарии | гипотеза (отмечена в ADR) |
 
+## Порядок работы
+
+```
+  ЧАТ / обсуждение                РЕПОЗИТОРИЙ                       АГЕНТ-РАЗРАБОТЧИК
+  ────────────────                ───────────                       ─────────────────
+  выработка решения ──файл──►  docs/adr/NNN.md                 ◄── /adr-propose: нашёл
+                               Статус: Предложено                    значимое изменение
+                                     │                               (оформляет, стоп)
+                       автор:        ▼
+                               Статус: Принято    ──задание──►  /adr-implement NNN
+                                                                     │
+                                                         код + тесты + changelog
+                                     ┌────────────── PR ◄────────────┘
+                                     ▼            Статус: Действует (коммит)
+                               автор: review / merge
+
+  .claude/rules/adr-*.md ─── при работе с файлами подсистемы агент получает
+                             список её действующих ADR автоматически (paths:)
+```
+
+**Статус** — первое слово строки `| Статус | …` в ADR:
+
+| Статус | Значение | Кто ставит |
+|---|---|---|
+| `Предложено` | решение сформулировано, ждёт решения автора | автор или агент (`/adr-propose`) |
+| `Принято` | автор согласовал, ждёт реализации | **только автор** |
+| `Действует` | решение реализовано и действует в коде | агент в PR реализации (со ссылкой на коммит); для 001–031 — по состоянию v1.0.0 |
+| `Заменено (ADR-…)` | вытеснено другим ADR | автор |
+| `Отклонено` | рассмотрено и не принято; файл остаётся как запись | автор |
+
+Инструменты:
+
+- [`TEMPLATE.md`](TEMPLATE.md) — шаблон нового ADR.
+- `.claude/rules/adr-*.md` — шесть правил по подсистемам (протоколы, конфигурация,
+  наблюдаемость, WEBUI, процесс, поставка) и правило каталога; загружаются
+  только при работе с файлами подсистемы.
+- `.claude/skills/adr-implement` — `/adr-implement NNN`: реализация принятого ADR
+  по фиксированному порядку (проверка статуса, ветка, тесты, четыре проверки,
+  статус → `Действует`). Только ручной вызов.
+- `.claude/skills/adr-propose` — оформление значимого изменения как
+  `Предложено` вместо реализации; агент может вызвать сам.
+- `tests/test_adr_catalog.py` — формат статусов и заголовков, уникальность
+  номеров, полнота индекса, неизменность `archive/`, живые `paths:` правил и
+  ссылки правил на существующие ADR.
+
+Рекомендуемая личная настройка (не в репозитории — `.claude/settings.json`
+игнорируется): запретить агенту чтение архива.
+
+```json
+{ "permissions": { "deny": ["Read(/docs/adr/archive/**)"] } }
+```
+
+Ведущий `/` привязывает шаблон к корню проекта (а не к текущему каталогу).
+Запрет надёжно действует для Read; к Grep и Glob Claude Code применяет его по
+мере возможности (best-effort), а shell-команды им не ограничиваются. Поэтому
+это дополнение к правилу в `CLAUDE.md`, а не замена ему.
+
 ## Легенда
 
 **Тип решения**
@@ -57,43 +114,43 @@ ADR-001…031 описывают решения v1.0.0. ADR-032…040 — пре
 | № | Решение | Статус | Тип | Уверенность |
 |---|---|---|---|---|
 | **Фундамент** |||||
-| [001](001-local-protocol-adapter.md) | Локальный прокси-адаптер протоколов | Принято | deliberate (записано) | high |
-| [002](002-stdlib-threaded-http.md) | stdlib для HTTP; поток на запрос | Принято | deliberate (записано) | high |
-| [003](003-http10-connection-close.md) | HTTP/1.0 и `Connection: close` | Принято, тех. долг → 036 | deliberate (записано) | high |
-| [004](004-env-config-zero-config.md) | Конфигурация через env; приоритеты источников | Принято | deliberate (записано) | high |
-| [005](005-python310-pyyaml.md) | Python 3.10+, единственная зависимость PyYAML | Принято; парсер **исправлен** | deliberate; парсер — accidental | high |
+| [001](001-local-protocol-adapter.md) | Локальный прокси-адаптер протоколов | Действует | deliberate (записано) | high |
+| [002](002-stdlib-threaded-http.md) | stdlib для HTTP; поток на запрос | Действует | deliberate (записано) | high |
+| [003](003-http10-connection-close.md) | HTTP/1.0 и `Connection: close` | Действует, тех. долг → 036 | deliberate (записано) | high |
+| [004](004-env-config-zero-config.md) | Конфигурация через env; приоритеты источников | Действует | deliberate (записано) | high |
+| [005](005-python310-pyyaml.md) | Python 3.10+, единственная зависимость PyYAML | Действует; парсер **исправлен** | deliberate; парсер — accidental | high |
 | **Протоколы** |||||
-| [006](006-anthropic-to-chat-completions-conversion.md) | Конвертация Messages ↔ Chat Completions | Принято; изображения не поддерживаются | deliberate (записано) | high |
-| [007](007-system-messages-first.md) | Инвариант «system в начале» | Принято | deliberate (записано) | high |
-| [008](008-qwen-text-tool-call-fallback.md) | Разбор текстовых tool_call Qwen | Принято; пробел в стриме → 038 | deliberate (записано) | high |
-| [009](009-sse-streaming-conversion.md) | SSE на лету; ретрай до первого байта | Принято | deliberate (записано) | high |
-| [010](010-retry-timeouts-max-tokens.md) | Ретраи, таймауты, коррекция `max_tokens` | Принято → 034, 035 | deliberate (записано) | high |
-| [011](011-input-endpoints-target-routing.md) | Три входа и TARGET-маршрутизация | Принято (4 пересмотра) | deliberate (записано) | high |
-| [012](012-no-active-endpoint-probing.md) | Отказ от зондирования эндпойнтов | Принято | deliberate (записано) | high |
-| [013](013-responses-converter-model-command.md) | Конвертер Responses и команда `/model` | Принято → 037 | deliberate (записано) | high |
+| [006](006-anthropic-to-chat-completions-conversion.md) | Конвертация Messages ↔ Chat Completions | Действует; изображения не поддерживаются | deliberate (записано) | high |
+| [007](007-system-messages-first.md) | Инвариант «system в начале» | Действует | deliberate (записано) | high |
+| [008](008-qwen-text-tool-call-fallback.md) | Разбор текстовых tool_call Qwen | Действует; пробел в стриме → 038 | deliberate (записано) | high |
+| [009](009-sse-streaming-conversion.md) | SSE на лету; ретрай до первого байта | Действует | deliberate (записано) | high |
+| [010](010-retry-timeouts-max-tokens.md) | Ретраи, таймауты, коррекция `max_tokens` | Действует → 034, 035 | deliberate (записано) | high |
+| [011](011-input-endpoints-target-routing.md) | Три входа и TARGET-маршрутизация | Действует (4 пересмотра) | deliberate (записано) | high |
+| [012](012-no-active-endpoint-probing.md) | Отказ от зондирования эндпойнтов | Действует | deliberate (записано) | high |
+| [013](013-responses-converter-model-command.md) | Конвертер Responses и команда `/model` | Действует → 037 | deliberate (записано) | high |
 | **Бэкенды и модели** |||||
-| [014](014-multi-backend-yaml.md) | Несколько бэкендов в YAML; токены по имени env | Принято | deliberate (записано) | high |
-| [015](015-fail-fast-model-validation.md) | Fail-fast на старте; strict-проверка модели | Принято | deliberate (записано) | high |
+| [014](014-multi-backend-yaml.md) | Несколько бэкендов в YAML; токены по имени env | Действует | deliberate (записано) | high |
+| [015](015-fail-fast-model-validation.md) | Fail-fast на старте; strict-проверка модели | Действует | deliberate (записано) | high |
 | **Структура кода** |||||
-| [016](016-flat-package-import-dag.md) | Плоский пакет с инвариантом DAG | Принято | deliberate (записано) | high |
-| [017](017-module-globals-shared-state.md) | Глобалы `config` как разделяемое состояние | Принято; гонка → 033 | deliberate (по признакам) | medium |
+| [016](016-flat-package-import-dag.md) | Плоский пакет с инвариантом DAG | Действует | deliberate (записано) | high |
+| [017](017-module-globals-shared-state.md) | Глобалы `config` как разделяемое состояние | Действует; гонка → 033 | deliberate (по признакам) | medium |
 | **Наблюдаемость** |||||
-| [018](018-logging-channels-trace.md) | Каналы логов; JSONL-трейс с причинностью | Принято; хранение → 039 | deliberate (записано) | high |
-| [019](019-unconditional-err-incidents.md) | Безусловный канал `.err` | Принято | deliberate (записано) | high |
-| [020](020-secret-redaction-default.md) | Маскирование секретов по умолчанию | Принято; **пробелы** → 040 | deliberate (записано) | high |
-| [021](021-session-as-control-unit.md) | Сессия — единица управления | Принято → 037 | deliberate (записано) | high |
-| [022](022-token-usage-accounting.md) | Учёт расхода в токенах | Принято | deliberate (записано) | high |
+| [018](018-logging-channels-trace.md) | Каналы логов; JSONL-трейс с причинностью | Действует; хранение → 039 | deliberate (записано) | high |
+| [019](019-unconditional-err-incidents.md) | Безусловный канал `.err` | Действует | deliberate (записано) | high |
+| [020](020-secret-redaction-default.md) | Маскирование секретов по умолчанию | Действует; **пробелы** → 040 | deliberate (записано) | high |
+| [021](021-session-as-control-unit.md) | Сессия — единица управления | Действует → 037 | deliberate (записано) | high |
+| [022](022-token-usage-accounting.md) | Учёт расхода в токенах | Действует | deliberate (записано) | high |
 | **Эксплуатация** |||||
-| [023](023-embedded-webui-exporter.md) | Встроенный WEBUI; отдельный экспортёр | Принято; порт → 032 | deliberate (записано) | high |
-| [024](024-localhost-bind-default.md) | Привязка к 127.0.0.1 по умолчанию | Принято; **CSRF/rebinding** → 040 | deliberate (записано) | high |
-| [025](025-file-state-data-root.md) | Состояние в файлах; корень данных `~/.ba` | Принято | deliberate (записано) | high |
-| [026](026-graceful-shutdown-contract.md) | Контракт корректного завершения | Принято | deliberate (записано) | high |
-| [027](027-background-artifact-rendering.md) | Фоновая отрисовка артефактов | Принято | deliberate (записано) | high |
+| [023](023-embedded-webui-exporter.md) | Встроенный WEBUI; отдельный экспортёр | Действует; порт → 032 | deliberate (записано) | high |
+| [024](024-localhost-bind-default.md) | Привязка к 127.0.0.1 по умолчанию | Действует; **CSRF/rebinding** → 040 | deliberate (записано) | high |
+| [025](025-file-state-data-root.md) | Состояние в файлах; корень данных `~/.ba` | Действует | deliberate (записано) | high |
+| [026](026-graceful-shutdown-contract.md) | Контракт корректного завершения | Действует | deliberate (записано) | high |
+| [027](027-background-artifact-rendering.md) | Фоновая отрисовка артефактов | Действует | deliberate (записано) | high |
 | **Поставка и процесс** |||||
-| [028](028-distribution-standalone-binary.md) | Standalone-бинарник, один путь установки | Принято; **дефект linux-arm64** | deliberate (записано) | high |
-| [029](029-strict-env-validation-hard-renames.md) | Строгая валидация; жёсткие переименования с `[WARN]` | Принято | deliberate (записано) | high |
-| [030](030-quality-gates.md) | Четыре обязательные проверки | Принято | deliberate (записано) | high |
-| [031](031-docs-with-code-adr-journal-removed.md) | Журнал ADR упразднён в пользу changelog | Принято, **к пересмотру** | deliberate (записано) | high |
+| [028](028-distribution-standalone-binary.md) | Standalone-бинарник, один путь установки | Действует; **дефект linux-arm64** | deliberate (записано) | high |
+| [029](029-strict-env-validation-hard-renames.md) | Строгая валидация; жёсткие переименования с `[WARN]` | Действует | deliberate (записано) | high |
+| [030](030-quality-gates.md) | Четыре обязательные проверки | Действует | deliberate (записано) | high |
+| [031](031-docs-with-code-adr-journal-removed.md) | Журнал ADR упразднён в пользу changelog | Действует, **к пересмотру** | deliberate (записано) | high |
 
 ## Предложения (2026-10-11)
 
@@ -156,5 +213,7 @@ ADR-001…031 описывают решения v1.0.0. ADR-032…040 — пре
 - Критерий записи — из исходного правила журнала (`d72f1cb`): новый
   компонент/модуль, контракт протокола, ограничение зависимостей, каркас
   тестирования. Мелочи — только в changelog.
-- Принятое предложение меняет статус на «Принято» и получает ссылку на
-  реализующий коммит.
+- Жизненный цикл и роли — раздел «Порядок работы» выше: `Принято` ставит
+  только автор, `Действует` с коммитом — агент в PR реализации.
+- После изменения статуса или добавления ADR обновить таблицы этого файла;
+  `tests/test_adr_catalog.py` проверит формат и полноту.
