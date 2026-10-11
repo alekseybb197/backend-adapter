@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v1.0.0) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v1.0.1) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -966,7 +966,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v1.0.0
+Backend-Adapter v1.0.1
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation

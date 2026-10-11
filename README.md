@@ -3,7 +3,7 @@
 > backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
 > backends for AI agents
 >
-> **v1.0.0** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v1.0.1** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
