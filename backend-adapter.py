@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v1.0.0
+"""[CC] <-> [OI]-backend adapter v1.0.1
 — changelog: ../changelog.md"""
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 # КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
 # от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
 # Формулировка дублируется в README.md первой строкой вводного blockquote;
@@ -285,7 +285,8 @@ if __name__ == "__main__":
     # выходит, finally выполняет вежливое завершение. Проблема была в том,
     # что ПОВТОРНЫЙ Ctrl-C во время finally (flush_table пишет YAML) прерывал
     # запись: Python кидает KI в главный поток, где бы тот ни был. Решение
-    # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см. ADR):
+    # (вынесено в backend_adapter/shutdown.py — покрыто тестами, см.
+    # docs/adr/026-graceful-shutdown-contract.md):
     # (1) первый сигнал обрабатывает ЕДИНЫЙ хэндлер _first_signal, который
     # сразу переключает SIGINT/SIGTERM на немедленный os._exit(130) и лишь
     # затем делает raise KeyboardInterrupt — повторный/задвоенный сигнал

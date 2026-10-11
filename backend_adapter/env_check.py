@@ -121,6 +121,12 @@ def _check_source(out: TextIO, source: str, values: dict[str, str]) -> int:
     return errors
 
 
+def _filled(value: object) -> bool:
+    """Поле записи adapter.yaml заполнено: непустая строка (BaseLoader отдаёт
+    скаляры строками; словарь/список вместо скаляра — не заполнено)."""
+    return isinstance(value, str) and bool(value.strip())
+
+
 def _check_adapter_yaml(out: TextIO, path: str) -> int:
     """Проверить adapter.yaml: список backend с непустыми name/base/key.
 
@@ -132,7 +138,10 @@ def _check_adapter_yaml(out: TextIO, path: str) -> int:
         return 0
     try:
         with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            # BaseLoader — тот же загрузчик, что у рантайма
+            # (config._parse_backend_yaml): скаляры остаются строками, так что
+            # проверка и запуск видят файл одинаково (name: no — это "no").
+            data = yaml.load(f, Loader=yaml.BaseLoader)  # noqa: S506 — BaseLoader безопасен
     except (OSError, yaml.YAMLError) as e:
         print(f"[ERROR] {path}: не читается как YAML: {e}", file=out)
         return 1
@@ -151,7 +160,9 @@ def _check_adapter_yaml(out: TextIO, path: str) -> int:
             print(f"[ERROR] {path}: запись backend[{i}] не является словарём.", file=out)
             errors += 1
             continue
-        missing = [k for k in ("name", "base", "key") if not str(entry.get(k) or "").strip()]
+        # Заполненное поле — непустая строка; вложенный словарь/список вместо
+        # скаляра считается пустым, как и в рантайме.
+        missing = [k for k in ("name", "base", "key") if not _filled(entry.get(k))]
         if missing:
             label = entry.get("name") or f"#{i}"
             print(

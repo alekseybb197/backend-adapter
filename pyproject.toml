@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "backend-adapter"
-version = "1.0.0"
+version = "1.0.1"
 description = "Anthropic API ↔ OpenAI Backend Proxy Adapter"
 readme = "README.md"
 license = {text = "Apache-2.0"}

@@ -20,7 +20,8 @@
 pytest (маркер @pytest.mark.manual — регистрация и запуск через
 venv/bin/pytest -m manual, чтобы при желании гонять только его); скорость
 приемлема, а контроль сигнального завершения реального процесса — часть
-контракта graceful shutdown (см. ADR), поэтому по умолчанию тест НЕ
+контракта graceful shutdown (см.
+docs/adr/026-graceful-shutdown-contract.md), поэтому по умолчанию тест НЕ
 пропускается.
 
 ВНИМАНИЕ: процесс-ребёнок пишет model-usage.yaml и session-* в подпапки
@@ -257,7 +258,7 @@ class TestManualAdapterProcess:
                 assert _wait_http(exp_port, "/metrics") == 200, \
                     f"экспортёр не поднялся на :{exp_port}"
                 out = ap.output
-                assert "Backend-Adapter v1.0.0" in out, out[:400]
+                assert "Backend-Adapter v1.0.1" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
                 # v0.9.9: старт создаёт обе подпапки корня данных — log/

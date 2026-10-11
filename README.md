@@ -3,7 +3,7 @@
 > backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
 > backends for AI agents
 >
-> **v1.0.0** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v1.0.1** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
@@ -112,6 +112,7 @@ python3 backend-adapter.py --root ~/.ba       # запуск с настройк
 | [docs/sanitizing.md](docs/sanitizing.md) | Санитизация и маскирование секретов |
 | [docs/architecture.md](docs/architecture.md) | Архитектура, диаграмма компонентов, lifecycle запросов |
 | [docs/webui.md](docs/webui.md) | WEBUI и API: страницы `/`, `/sessions`, `/session`, `/config`, `/api/*`, секция «Models in use» (live-счётчики) и таблица сессий с пер-сессионными настройками |
+| [docs/adr/](docs/adr/README.md) | Архитектурные решения (ADR): действующие решения, предложения, порядок принятия |
 
 ## Структура проекта
 
