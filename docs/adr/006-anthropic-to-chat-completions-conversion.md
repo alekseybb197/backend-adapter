@@ -53,8 +53,19 @@
 - `backend_adapter/streaming.py`: `stream_openai_to_anthropic`.
 - `backend_adapter/routing.py`: `IMPLEMENTED_CONVERSIONS`.
 
-## Открытые вопросы автору
+## Ответ автора (2026-10-10) и наблюдение по коду
 
-- Какие элементы Anthropic-протокола сознательно не поддерживаются
-  (thinking, images, cache_control, `metadata`)? Это стоит записать как
-  ограничение.
+- **Изображения сознательно не поддерживаются.**
+- thinking-блоки, `cache_control`, `metadata` — требуют изучения и доработки.
+
+**Как это выглядит сейчас в коде:** `extract_text` берёт из content только
+блоки `type: "text"`. Блоки `image`, `thinking`/`redacted_thinking`,
+`document` и разметка `cache_control` отбрасываются **молча** — без 400,
+без `[WARN]` и без trace-события. Агент, приложивший скриншот, получит ответ
+модели, которая скриншота не видела, и ни одна сторона об этом не узнает.
+
+**Рекомендация (отдельная задача):** раз отказ от изображений сознательный,
+сделать его явным — при наличии `image`-блоков либо отвечать 400
+`image content is not supported by this adapter`, либо (мягче) писать
+`[WARN]` + trace-событие `content_dropped` с типами отброшенных блоков.
+Для thinking и `cache_control` — то же событие, пока они изучаются.

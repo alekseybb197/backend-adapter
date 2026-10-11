@@ -46,9 +46,7 @@ JSON внутри тегов `<tool_call>…</tool_call>`. Агент такой
 - `grep parse_tool_calls_from_text backend_adapter/streaming.py` — пусто.
 - `docs/architecture.md` §5.2 «Text fallback» (описан только для non-stream).
 
-## Открытые вопросы автору
+## Ответ автора (2026-10-10)
 
-- Отсутствие fallback в стриме — сознательное (нельзя ретроактивно
-  превратить уже отправленные `text_delta` в `tool_use`) или пробел? Если
-  сознательное — это ограничение стоит записать в README рядом с проблемой
-  №4.
+Это **пробел**. Последствия и проект исправления —
+[ADR-038](038-proposal-stream-tool-call-fallback.md).

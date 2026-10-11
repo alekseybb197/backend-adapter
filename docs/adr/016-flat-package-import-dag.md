@@ -63,8 +63,76 @@
 Решение о плоской раскладке записано только в сообщении `193d987`
 (2026-09-02). Ссылку стоит заменить на ADR-016.
 
-## Открытые вопросы автору
+## Ответ автора (2026-10-10)
 
-- Почему плоская раскладка предпочтена подпакетам: простота PyInstaller,
-  импортов, привычка? Мотив не записан.
-- Нужна ли автоматическая проверка DAG в CI (например, `import-linter`)?
+- Плоская раскладка — **сознательный выбор дизайна**: дробить проект на
+  подпакеты нет смысла, пока он не публикуется в PyPI. Установка через pip и
+  Homebrew — задача последнего порядка.
+- Автоматическая проверка DAG в CI не исключена, но CI не должен
+  перегружаться.
+
+**Предложение по проверке DAG с учётом бюджета CI.** Внешний инструмент
+(`import-linter`) нарушает принцип минимума зависимостей (ADR-002) даже для
+dev-окружения. Дешевле — один тест в существующем прогоне pytest, без
+отдельного CI-джоба: разобрать `ast` каждого модуля `backend_adapter/`,
+собрать рёбра **импортов верхнего уровня** (импорты внутри функций
+намеренно исключены — это легальный приём разрыва цикла) и проверить
+ацикличность обходом в глубину. Стоимость — доли секунды; ошибка теста
+печатает найденный цикл.
+
+```python
+# tests/test_import_dag.py
+import ast
+import pathlib
+
+PKG = pathlib.Path(__file__).resolve().parent.parent / "backend_adapter"
+
+
+def _top_level_deps(path: pathlib.Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    deps: set[str] = set()
+    for node in tree.body:  # только верхний уровень модуля
+        if isinstance(node, ast.ImportFrom) and node.level == 1:
+            if node.module:
+                deps.add(node.module.split(".")[0])
+            else:  # from . import x, y
+                deps.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").startswith("backend_adapter"):
+            parts = (node.module or "").split(".")
+            if len(parts) > 1:
+                deps.add(parts[1])
+            else:
+                deps.update(a.name for a in node.names)
+    return deps
+
+
+def test_package_import_graph_is_acyclic() -> None:
+    mods = {p.stem: p for p in PKG.glob("*.py") if p.stem != "__init__"}
+    graph = {m: _top_level_deps(p) & mods.keys() for m, p in mods.items()}
+    state: dict[str, int] = {}  # 1 — в стеке обхода, 2 — пройден
+    stack: list[str] = []
+
+    def visit(m: str) -> None:
+        state[m] = 1
+        stack.append(m)
+        for d in sorted(graph[m]):
+            if state.get(d) == 1:
+                cycle = stack[stack.index(d):] + [d]
+                raise AssertionError("цикл импортов: " + " -> ".join(cycle))
+            if d not in state:
+                visit(d)
+        stack.pop()
+        state[m] = 2
+
+    for m in sorted(graph):
+        if m not in state:
+            visit(m)
+```
+
+Тест намеренно проверяет только ацикличность, а не список «листьев» из
+`CLAUDE.md`: роль модуля меняется чаще, чем инвариант.
+
+Проверено на v1.0.0: проходит за 0,1 с; на копии пакета с добавленной в
+`routing.py` строкой `from . import server` падает с сообщением
+`цикл импортов: routing -> server -> routing`. В репозиторий тест не
+добавлен — решение за автором.

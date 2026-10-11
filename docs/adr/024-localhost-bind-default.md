@@ -47,7 +47,38 @@ reasoning).
 - `docs/claude_code.md`: `ANTHROPIC_API_KEY` оставляется пустым —
   «авторизацию на бэкенде выполняет адаптер».
 
-## Открытые вопросы автору
+## Ответ автора (2026-10-10)
 
-- Рассматривалась ли хотя бы общая токен-проверка для WEBUI/`/config` при
-  `ADAPTER_WEBUI_HOST≠127.0.0.1`? Сейчас риск записан только в документации.
+Аутентификация рассматривалась и **запланирована: basic auth**.
+
+## Подтверждённая уязвимость: CSRF и DNS rebinding на localhost
+
+Привязка к `127.0.0.1` не защищает WEBUI от **браузера самого
+пользователя**. Проверено на v1.0.0 (standalone `python -m
+backend_adapter.webserver`):
+
+```bash
+# так отправляет форму любая открытая в браузере страница (simple request,
+# CORS-preflight не нужен):
+curl -X POST http://127.0.0.1:18766/config \
+  -H 'Origin: https://evil.example' \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data 'ADAPTER_SENSITIVE_LOGGING_ENABLE=0&ADAPTER_SENSITIVE_LOGGING_ENABLE=1'
+# до:    name="ADAPTER_SENSITIVE_LOGGING_ENABLE" value="1" >          (выкл.)
+# после: name="ADAPTER_SENSITIVE_LOGGING_ENABLE" value="1" checked>   (вкл.)
+```
+
+- **CSRF:** изменяющие POST (`/config`, сброс/удаление строк, настройки
+  сессий) принимаются без проверки `Origin`/`Referer`. Сторонний сайт может
+  отключить маскирование секретов, сменить маршруты TARGET, включить запись
+  логов. В полном адаптере изменение `/config` сохраняется в `state.yaml` и
+  переживает рестарт.
+- **DNS rebinding:** запрос с `Host: attacker.example` обслуживается (200).
+  Страница злоумышленника, чей домен перепривязан на `127.0.0.1`, становится
+  same-origin с WEBUI и может **читать** `/session`, `.err` (полные запросы
+  агента) и отправлять их наружу.
+
+**Basic auth эти атаки не закрывает:** браузер подставляет закэшированные
+учётные данные в межсайтовый form-POST автоматически, а при rebinding
+страница сама находится «внутри» источника. Нужны проверки `Host` и
+`Origin`, независимые от аутентификации. Проект — [ADR-040](040-proposal-webui-auth-csrf-host.md).

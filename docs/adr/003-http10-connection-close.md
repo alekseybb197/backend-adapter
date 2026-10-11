@@ -42,7 +42,6 @@
 - `backend_adapter/server.py`, docstring `_start_sse` («ВАЖНО про
   Connection…»), `self.send_header("Connection", "close")`.
 
-## Открытые вопросы автору
+## Ответ автора (2026-10-10)
 
-- Актуален ли ещё долг keep-alive? Измерялась ли задержка TLS-рукопожатия к
-  бэкенду на длинных агентных сессиях?
+Долг актуален, требует исследования. Предложение — [ADR-036](036-proposal-keepalive-measure-first.md).
