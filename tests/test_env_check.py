@@ -179,6 +179,59 @@ class TestAdapterYaml:
         assert env_check.run_check(str(tmp_path)) == 0
         assert "поля name/base/key заполнены" in capsys.readouterr().out
 
+    def test_nested_value_is_empty_field(self, tmp_path, clean_adapter_env, capsys):
+        """Вложенный словарь вместо строки — пустое поле, как в рантайме."""
+        _valid_yaml(
+            tmp_path,
+            body="backend:\n  - name: llm\n    base:\n      url: https://x\n    key: K\n",
+        )
+        assert env_check.run_check(str(tmp_path)) == 1
+        out = capsys.readouterr().out
+        assert "[ERROR]" in out and "base" in out
+
+    def test_falsey_scalar_is_a_string(self, tmp_path, clean_adapter_env, capsys):
+        """BaseLoader: name: no — строка "no", а не False (как в рантайме)."""
+        _valid_yaml(
+            tmp_path,
+            body="backend:\n  - name: no\n    base: https://llm.example.com\n    key: K\n",
+        )
+        assert env_check.run_check(str(tmp_path)) == 0
+
+
+class TestAdapterYamlAgreesWithRuntime:
+    """--check и рантайм обязаны видеть adapter.yaml одинаково: файл, который
+    одобрил --check, рантайм разбирает в те же записи (регрессия v1.0.1 —
+    регэксп-парсер склеивал запись с первым ключом не-name с предыдущей)."""
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # первый ключ записи — не name
+            "backend:\n"
+            "  - name: first\n    base: https://a.example.com\n    key: KEY_A\n"
+            "  - base: https://b.example.com\n    name: second\n    key: KEY_B\n",
+            # flow-стиль
+            "backend: [{name: first, base: 'https://a.example.com', key: KEY_A},"
+            " {key: KEY_B, base: 'https://b.example.com', name: second}]\n",
+        ],
+    )
+    def test_same_entries(self, tmp_path, clean_adapter_env, capsys, monkeypatch, body):
+        from backend_adapter import config
+
+        # Переменные токенов не заданы: _parse_backend_yaml оставит в key имя
+        # переменной — так видно, какой токен к какому бэкенду привязан.
+        for name in ("KEY_A", "KEY_B"):
+            monkeypatch.delenv(name, raising=False)
+        _valid_yaml(tmp_path, body=body)
+        assert env_check.run_check(str(tmp_path)) == 0
+        assert "2 запись(ей)" in capsys.readouterr().out
+
+        parsed = config._parse_backend_yaml(str(tmp_path / "adapter.yaml"))
+        assert parsed == [
+            {"name": "first", "base": "https://a.example.com", "key": "KEY_A"},
+            {"name": "second", "base": "https://b.example.com", "key": "KEY_B"},
+        ]
+
 
 class TestTariffsYaml:
     def test_absent_is_ok(self, tmp_path, clean_adapter_env, capsys):

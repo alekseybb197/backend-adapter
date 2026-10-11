@@ -341,6 +341,119 @@ backend:
         assert result[0]["name"] == "home"
         assert "probe" not in result[0]
 
+    # --- v1.0.1: парсер на PyYAML (BaseLoader) вместо построчного регэкспа ---
+
+    def test_entry_not_starting_with_name(self, tmp_path, monkeypatch):
+        """Регрессия: запись, где первым ключом идёт не name, раньше молча
+        склеивалась с предыдущей — второй бэкенд получал base первого, и его
+        токен уходил на чужой хост. Порядок ключей не должен ничего значить."""
+        yaml_content = """backend:
+  - name: first
+    base: https://a.example.com
+    key: KEY_A
+  - base: https://b.example.com
+    name: second
+    key: KEY_B
+"""
+        yaml_file = tmp_path / "order.yaml"
+        yaml_file.write_text(yaml_content)
+
+        _reload_config()
+        from backend_adapter import config
+        monkeypatch.setenv("KEY_A", "token-a")
+        monkeypatch.setenv("KEY_B", "token-b")
+        result = config._parse_backend_yaml(str(yaml_file))
+
+        assert result == [
+            {"name": "first", "base": "https://a.example.com", "key": "token-a"},
+            {"name": "second", "base": "https://b.example.com", "key": "token-b"},
+        ]
+
+    def test_flow_style(self, tmp_path, monkeypatch):
+        yaml_file = tmp_path / "flow.yaml"
+        yaml_file.write_text(
+            "backend: [{name: home, base: 'http://localhost:8002', key: KEY1}]\n"
+        )
+
+        _reload_config()
+        from backend_adapter import config
+        monkeypatch.setenv("KEY1", "val")
+        result = config._parse_backend_yaml(str(yaml_file))
+        assert result == [{"name": "home", "base": "http://localhost:8002", "key": "val"}]
+
+    def test_scalars_stay_strings(self, tmp_path, monkeypatch):
+        """BaseLoader: yes/0123 не превращаются в True/123 — имя бэкенда
+        остаётся таким, как написано (как у прежнего текстового парсера)."""
+        yaml_content = """backend:
+  - name: yes
+    base: http://localhost:8002
+    key: KEY1
+  - name: 0123
+    base: http://localhost:8003
+    key: KEY1
+"""
+        yaml_file = tmp_path / "scalars.yaml"
+        yaml_file.write_text(yaml_content)
+
+        _reload_config()
+        from backend_adapter import config
+        monkeypatch.setenv("KEY1", "val")
+        result = config._parse_backend_yaml(str(yaml_file))
+        assert result is not None
+        assert [b["name"] for b in result] == ["yes", "0123"]
+
+    def test_invalid_yaml_returns_none(self, tmp_path, capsys):
+        yaml_file = tmp_path / "broken.yaml"
+        yaml_file.write_text("backend:\n  - name: [unclosed\n")
+
+        _reload_config()
+        from backend_adapter import config
+        assert config._parse_backend_yaml(str(yaml_file)) is None
+        assert "not valid YAML" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "",  # пустой файл
+            "backends:\n  - name: x\n",  # опечатка в корневом ключе
+            "backend: just-a-string\n",  # не список
+            "- name: x\n",  # корень — список, а не словарь
+        ],
+    )
+    def test_wrong_structure_returns_none(self, tmp_path, capsys, content):
+        yaml_file = tmp_path / "structure.yaml"
+        yaml_file.write_text(content)
+
+        _reload_config()
+        from backend_adapter import config
+        assert config._parse_backend_yaml(str(yaml_file)) is None
+        assert "[WARN]" in capsys.readouterr().out
+
+    def test_non_dict_entry_and_nested_value_skipped(self, tmp_path, capsys, monkeypatch):
+        yaml_content = """backend:
+  - just-a-string
+  - name: nested
+    base:
+      url: http://localhost:8002
+    key: KEY1
+  - name: good
+    base: http://localhost:8003
+    key: KEY1
+"""
+        yaml_file = tmp_path / "mixed.yaml"
+        yaml_file.write_text(yaml_content)
+
+        _reload_config()
+        from backend_adapter import config
+        monkeypatch.setenv("KEY1", "val")
+        result = config._parse_backend_yaml(str(yaml_file))
+
+        assert result is not None
+        assert [b["name"] for b in result] == ["good"]
+        out = capsys.readouterr().out
+        assert "backend[0]" in out  # не словарь
+        assert "'nested'" in out and "base" in out  # вложенное значение = пустое поле
+
 
 class TestIsHttpUrl:
     """_is_http_url: base бэкенда обязан быть http(s)-URL (v0.9.6)."""

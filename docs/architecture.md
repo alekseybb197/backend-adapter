@@ -512,6 +512,16 @@ backend:
 Парсер читает только `name`/`base`/`key`; любой другой ключ (в т.ч.
 оставшийся в старом файле `probe:`) молча игнорируется.
 
+Файл читается PyYAML с `BaseLoader` (v1.0.1): порядок ключей внутри записи
+не важен, допустим flow-стиль, скаляры остаются строками как написаны
+(`name: yes` — это `"yes"`). Тем же загрузчиком файл проверяет `--check`
+(`env_check._check_adapter_yaml`), поэтому проверка и запуск видят одинаковые
+записи. Запись, не являющаяся словарём, и поле со вложенным значением вместо
+строки дают `[WARN]` с причиной; битый YAML или отсутствие списка `backend:`
+— `None` (на старте — `[FATAL]`). До v1.0.1 построчный регэксп-парсер
+начинал запись только со строки `- name:`, и запись с другим первым ключом
+склеивалась с предыдущей (ADR-005).
+
 ### 6.5 Фоновая проверка бэкендов (start_refresh / refresh_state, config.py)
 
 Раньше каждый GET/POST статус-страницы `/` синхронно гонял
@@ -1242,7 +1252,7 @@ ADAPTER_RETRY`) подъём не делается: повторять неку�
 
 ```
 backend-adapter.py
-  ├── config.py          (no internal deps on the top level — stdlib only;
+  ├── config.py          (no internal deps on the top level — stdlib + PyYAML;
   │                       writes the models-probe JSON via probe_json —
   │                       безусловный канал; _fetch_models: GET /v1/models)
   ├── server.py          → config, redact, daemon, tracer, logger, session_log,

@@ -14,6 +14,8 @@ import time
 import urllib.error
 import urllib.request
 
+import yaml
+
 from . import (
     env_validate,  # строгий разбор bool/int env (лист DAG, v0.9.6)
     probe_json,  # JSON-дампы опроса моделей в var/ (лист DAG)
@@ -647,8 +649,11 @@ _MAP: dict[str, str] = _parse_models_mapping(ADAPTER_MODELS_MAPPING)
 
 
 # ==================== MULTI-BACKEND: YAML PARSER ====================
+_BACKEND_FIELDS = ("name", "base", "key")
+
+
 def _parse_backend_yaml(path: str) -> list[dict] | None:
-    """Мини-парсер для YAML-файла бэкендов.
+    """Разбор YAML-файла бэкендов (PyYAML, ``BaseLoader``).
 
     Ожидаемая структура:
         backend:
@@ -660,45 +665,56 @@ def _parse_backend_yaml(path: str) -> list[dict] | None:
             key: ADAPTER_BACKEND_KEY_BBB
 
     Читаются только ключи ``name``/``base``/``key``; любые другие ключи
-    записи (в т.ч. подблоки) молча игнорируются.
+    записи (в т.ч. подблоки) молча игнорируются. Порядок ключей внутри
+    записи значения не имеет, допустимы flow-стиль и любые формы YAML.
+
+    ``BaseLoader`` — сознательно, а не ``safe_load``: все скаляры остаются
+    строками ровно в том виде, как написаны (``name: yes`` → ``"yes"``, а не
+    ``True``; ``name: 0123`` → ``"0123"``, а не ``123``). Он не создаёт
+    Python-объекты по тегам и безопасен для недоверенного ввода так же, как
+    ``SafeLoader``. Та же функция загрузки используется в ``--check``
+    (``env_check._check_adapter_yaml``) — офлайн-проверка и рантайм читают
+    файл одинаково.
+
+    До v1.0.1 здесь был построчный регэксп-парсер: новая запись начиналась
+    только со строки ``- name:``, и запись с другим первым ключом молча
+    склеивалась с предыдущей (токен одного бэкенда уходил на адрес другого).
 
     Возвращает список dict: {name, base, key} или None при ошибке."""
     try:
-        with open(path) as f:
-            raw = f.read()
-    except Exception as e:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.load(f, Loader=yaml.BaseLoader)  # noqa: S506 — BaseLoader безопасен
+    except (OSError, UnicodeDecodeError) as e:
+        # UnicodeDecodeError не подкласс OSError: файл adapter.yaml не в UTF-8
+        # обязан давать тот же [WARN]+None, а не вылетать из фонового потока
+        # перечитывания (reload_backend_config).
         print(f"[BACKEND_CONFIG] Failed to read {path}: {e}")
         return None
+    except yaml.YAMLError as e:
+        print(f"[BACKEND_CONFIG] {path} is not valid YAML: {e}")
+        return None
 
-    # Удаляем YAML-документные маркеры
-    lines = raw.splitlines()
-    blocks = []
-    current: dict | None = None
+    entries = data.get("backend") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        print(
+            f"[WARN] adapter.yaml: {path} — ожидается корневой ключ backend: "
+            "со списком записей name/base/key"
+        )
+        return None
 
-    for line in lines:
-        stripped = line.strip()
-        # Пропускаем пустые строки, комментарии, document markers
-        if not stripped or stripped.startswith("#") or stripped in ("---", "..."):
+    blocks: list[dict] = []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            print(f"[WARN] adapter.yaml: запись backend[{i}] пропущена — это не словарь")
             continue
-        # Пропускаем корневую ключевую строку "backend:"
-        if stripped == "backend:" and current is None:
-            continue
-        # Новая запись в списке: "  - name: AAA"
-        m = re.match(r"^\s*-\s+name:\s*(.+)$", line)
-        if m:
-            if current is not None:
-                blocks.append(current)
-            current = {"name": m.group(1).strip().strip('"').strip("'")}
-            continue
-        # Продолжение текущей записи: "    base: ...", "    key: ...".
-        # Прочие ключи (в т.ч. подблоки) молча игнорируются.
-        if current is not None:
-            m2 = re.match(r"^\s+(\w+):\s*(.*)$", line)
-            if m2 and m2.group(1) in ("name", "base", "key"):
-                current[m2.group(1)] = m2.group(2).strip().strip('"').strip("'")
-
-    if current is not None:
-        blocks.append(current)
+        block: dict = {}
+        for field in _BACKEND_FIELDS:
+            value = entry.get(field)
+            # Вложенный словарь/список вместо скаляра — поле считается
+            # незаполненным (ниже запись уйдёт в [WARN] с именем поля).
+            if isinstance(value, str) and value.strip():
+                block[field] = value.strip()
+        blocks.append(block)
 
     # Валидация + раскрытие переменных окружения в поле key
     valid_blocks: list[dict] = []
