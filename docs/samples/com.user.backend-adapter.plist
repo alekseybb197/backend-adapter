@@ -7,6 +7,9 @@
     <!-- Все настройки подхватываются из <root>/adapter.env автоматически. -->
     <!-- ВАЖНО: launchd НЕ раскрывает ~ и переменные окружения — замените -->
     <!-- /Users/USERNAME на свой домашний путь перед загрузкой агента. -->
+    <!-- EnvironmentVariables побеждают adapter.env (они попадают в окружение -->
+    <!-- процесса раньше, а файл ставит значения через setdefault): здесь два -->
+    <!-- инварианта сервиса — путь к adapter.yaml и выключенный detach. -->
 
     <key>Label</key>
     <string>com.user.backend-adapter</string>
@@ -20,6 +23,14 @@
 
     <key>WorkingDirectory</key>
     <string>/Users/USERNAME/.ba</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>ADAPTER_BACKEND_CONFIG</key>
+        <string>/Users/USERNAME/.ba/adapter.yaml</string>
+        <key>ADAPTER_DETACH_ENABLE</key>
+        <string>0</string>
+    </dict>
 
     <key>RunAtLoad</key>
     <false/>

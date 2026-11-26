@@ -344,14 +344,17 @@ systemctl restart backend-adapter
 journalctl -u backend-adapter -f
 ```
 
-**macOS (`--service`).** Ставится launchd-агент текущего пользователя
-(`~/Library/LaunchAgents`); launchd не читает env-файлы, поэтому переменные
-вписаны прямо в plist, а рядом лежит env-файл-образец для копирования.
-В отличие от Linux, агент **не запускается** сразу: заполните
-`ADAPTER_BACKEND_CONFIG` в plist и загрузите его вручную. Системные шаблоны
-репозитория (`docs/samples/backend-adapter.service`,
+**macOS (`--service`).** Установщик размечает дом и делегирует
+`backend-adapter --launchd plist-install --root <root>`: ставится launchd-агент
+текущего пользователя (`~/Library/LaunchAgents`) с `--root`-подходом —
+настройки остаются в `<root>/adapter.env`, токены в plist не попадают.
+Плист сам задаёт `ADAPTER_BACKEND_CONFIG=<root>/adapter.yaml` и
+`ADAPTER_DETACH_ENABLE=0` (v1.0.3). В отличие от Linux, агент **не
+запускается** сразу: заполните токен в `adapter.env` и выполните
+`--launchd load`. Системные шаблоны репозитория
+(`docs/samples/backend-adapter.service`,
 `docs/samples/com.user.backend-adapter.plist`) рассчитаны на запуск из
-исходников; для бинарника юнит генерируется установщиком.
+исходников; для бинарника артефакт генерируется установщиком.
 
 Удаление установленного бинарника и сервиса (**только Linux**):
 
@@ -408,7 +411,7 @@ macOS обновляется бинарник и (при `--service` или на
 
 | Опция | Действие |
 |---|---|
-| `--service` | Дополнительно установить сервис автозапуска для бинарника. **Linux:** системный systemd-юнит с сервисным пользователем и готовым конфигом в `/var/lib/backend-adapter`, включается и **запускается сразу** (нужен root/`sudo`). **macOS:** launchd-агент пользователя (не запускается сразу — заполните `ADAPTER_BACKEND_CONFIG`) |
+| `--service` | Дополнительно установить сервис автозапуска для бинарника. **Linux:** системный systemd-юнит с сервисным пользователем и готовым конфигом в `/var/lib/backend-adapter`, включается и **запускается сразу** (нужен root/`sudo`). **macOS:** launchd-агент пользователя по `--root`-подходу (не запускается сразу — заполните токен в `adapter.env`, затем `--launchd load`) |
 | `--delete` | Удалить установленный бинарник и сервис (Linux): юнит, каталог `/var/lib/backend-adapter`, бинарник и сервисного пользователя. Нужен root; macOS пока не поддерживается; взаимоисключающий с `--service` |
 | `--yes`, `-y` | Пропустить подтверждение `--delete` (для скриптов/CI) |
 | `--help` | Показать справку |
@@ -1233,9 +1236,13 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 Если root не нужен и достаточно сервиса **текущего пользователя**, используйте
 `--systemd` — Linux-аналог `--launchd`. Юнит ставится в
 `~/.config/systemd/user/backend-adapter.service` (или `$XDG_CONFIG_HOME`), а
-все настройки, включая токены, остаются в `~/.ba/adapter.env` (права 0600) и
-**в юнит не попадают**. Это отличается от системного `--service`
-(`/etc/systemd/system`, отдельный пользователь, root).
+токены остаются в `~/.ba/adapter.env` (права 0600) и **в юнит не попадают**.
+Это отличается от системного `--service` (`/etc/systemd/system`, отдельный
+пользователь, root).
+
+Бинарник для юнита выбирается так же, как для plist (v1.0.3): приоритет у
+того, которым выполнена команда, и каждый кандидат проверяется пробой
+`--help` — версия без `--root` даёт `[FATAL]`. Подробности — в разделе 9.2.
 
 ```bash
 # Установить юнит (разметит дом, если нужно). Запуск — отдельно.
@@ -1298,8 +1305,12 @@ disable --now` (остановить и выключить автозагруз�
 > уходят в `.bak` и перезаписываются шаблонами. Для готового дома используйте
 > `--systemd unit-install` — он только генерирует и кладёт юнит.
 
-Юнит содержит `Environment=ADAPTER_DETACH_ENABLE=0`: detach (двойной форк)
-несовместим с надзором systemd, а явная переменная побеждает `adapter.env`.
+Юнит содержит два `Environment=`: `ADAPTER_DETACH_ENABLE=0` (detach — двойной
+форк — несовместим с надзором systemd) и `ADAPTER_BACKEND_CONFIG=<root>/
+adapter.yaml` (путь к конфигу не должен зависеть от содержимого
+`adapter.env`). Обе переменные попадают в окружение раньше файла дома, а файл
+ставит значения через `setdefault` — поэтому **юнит побеждает `adapter.env`**.
+Токенов в юните нет.
 
 ### 9.2 macOS — launchd
 
@@ -1309,10 +1320,33 @@ disable --now` (остановить и выключить автозагруз�
 
 #### Способ 1: автоматический (`--root ~/.ba`) — рекомендуется
 
-После `--install` все настройки живут в `~/.ba/adapter.env`. Plist минимален —
-он содержит только путь к бинарнику и `--root ~/.ba`, а адаптер автоматически
-находит и загружает `adapter.env`, `adapter.yaml`, `tariffs.yaml`. Токены
+После `--install` все настройки живут в `~/.ba/adapter.env`. Plist содержит
+путь к бинарнику, `--root ~/.ba` и **два инварианта сервиса** в
+`<key>EnvironmentVariables</key>`: `ADAPTER_BACKEND_CONFIG` (путь к
+`~/.ba/adapter.yaml`) и `ADAPTER_DETACH_ENABLE=0`. Остальное адаптер
+подхватывает из `adapter.env`, `adapter.yaml`, `tariffs.yaml`. Токены
 остаются в `~/.ba/adapter.env` (права 0600) и **не попадают в plist**.
+
+> **Значения plist побеждают `adapter.env`.** launchd кладёт
+> `EnvironmentVariables` в окружение процесса ещё до того, как адаптер
+> прочитает файл дома, а файл ставит значения через `setdefault`. Поэтому
+> эти две переменные из `adapter.env` не переопределяются — правьте plist
+> (перегенерируйте его) или не полагайтесь на файл в этих двух ключах.
+>
+> Зачем они в plist: без `ADAPTER_BACKEND_CONFIG` агент падал на
+> `[FATAL] ADAPTER_BACKEND_CONFIG is not set`, а при `ADAPTER_DETACH_ENABLE=1`
+> в `adapter.env` делал двойной форк и выпадал из-под надзора launchd.
+
+**Какой бинарник попадёт в plist.** Приоритет — **тот бинарник, которым
+выполнена команда** (`--launchd install`): frozen-сборка → запуск
+`python backend-adapter.py` (в plist пишется интерпретатор + скрипт) →
+консольная команда `backend-adapter` → `<root>/backend-adapter.py` →
+`backend-adapter` из `PATH`. Каждый кандидат проверяется пробой `--help`:
+бинарник, не знающий `--root` (версии до v0.9.13), — `[FATAL]` с подсказкой
+обновиться. Именно этот случай давал `[CC] Adapter v0.8.0` и
+`[FATAL] ADAPTER_BACKEND_CONFIG is not set`: в `PATH` лежал старый бинарник,
+он молча проигнорировал `--root`. Выбранный путь и версия печатаются при
+установке.
 
 **Установка одной командой:**
 
@@ -1395,7 +1429,10 @@ backend-adapter --launchd logs -n 50 -f  # глубина + слежение
 > **Старые plist.** Если агент установлен **до v1.0.2**, его plist либо не
 > содержит `StandardOutPath`/`StandardErrorPath` (логов нет вовсе), либо
 > указывает их на `<root>/log/adapter.log` (лог сервиса смешан с логами
-> работающего адаптера). Перегенерируйте plist:
+> работающего адаптера). Если агент установлен **до v1.0.3**, в plist нет
+> `EnvironmentVariables` — и агент падает на пустом `ADAPTER_BACKEND_CONFIG`
+> (если тот не задан в `adapter.env`) либо теряет надзор при
+> `ADAPTER_DETACH_ENABLE=1`. В обоих случаях перегенерируйте plist:
 > `backend-adapter --launchd plist-install` (дом не трогается), затем
 > `--launchd unload` + `--launchd load`.
 
@@ -1425,20 +1462,28 @@ backend-adapter --launchd logs -n 50 -f  # глубина + слежение
 `com.user.backend-adapter.plist` (шаблон для запуска из исходников — в
 `docs/samples/`).
 
-> **Примечание:** в этом варианте все env-переменные (включая токены)
-> вписываются прямо в plist, так как launchd не читает env-файлы.
-> Рекомендуется первый способ, где секретные данные остаются в
-> `~/.ba/adapter.env` с правами 0600.
-
-**Минимальный набор env-переменных** в `<key>EnvironmentVariables</key>`:
+Образец использует тот же `--root` подход: plist запускает бинарник с
+`--root /Users/USERNAME/.ba`, а адаптер сам читает `adapter.env`,
+`adapter.yaml`, `tariffs.yaml`. Поэтому **токены в plist не нужны** — они
+остаются в `adapter.env` с правами 0600. В `<key>EnvironmentVariables</key>`
+образец содержит только два инварианта сервиса (v1.0.3):
 
 | Переменная | Значение |
 |---|---|
-| `ADAPTER_BACKEND_CONFIG` | путь к YAML (пример — `docs/samples/sample.adapter.yaml`) |
-| `ADAPTER_PROXY_PORT` | `9999` |
-| `ADAPTER_ENDPOINT_HOST` | `127.0.0.1` |
-| `ADAPTER_DEBUG_ENABLE` | `0` |
+| `ADAPTER_BACKEND_CONFIG` | `/Users/USERNAME/.ba/adapter.yaml` |
 | `ADAPTER_DETACH_ENABLE` | `0` |
+
+Если вы сознательно **не** используете дом и задаёте всё в plist, этих двух
+мало — добавьте в `EnvironmentVariables` также `ADAPTER_PROXY_PORT` (`9999`),
+`ADAPTER_ENDPOINT_HOST` (`127.0.0.1`), `ADAPTER_DEBUG_ENABLE` (`0`) и
+переменную токена, на которую ссылается поле `key` в YAML (полный список —
+`docs/environment.md`). Помните: значения plist побеждают `adapter.env`.
+
+> **Запуск из исходников.** Для `backend-adapter.py` в `ProgramArguments`
+> нужны два элемента — интерпретатор и скрипт
+> (`<string>/path/to/python3</string><string>/path/to/backend-adapter.py</string>`),
+> затем `--root <root>`: launchd не исполняет shebang так, как это делает
+> оболочка. Автоматический вариант (`--launchd install`) подставляет это сам.
 
 **Установка:**
 

@@ -35,6 +35,26 @@ def clean_env(monkeypatch):
         os.environ.pop(name, None)
 
 
+@pytest.fixture
+def fake_binary(monkeypatch, tmp_path):
+    """Подменить поиск бинарника: тесты не зависят от PATH машины.
+
+    ``_find_binary`` выбирает бинарник и пробует его ``--help`` — в процессе
+    pytest ``sys.argv[0]`` не адаптер, а в PATH разработчика может лежать
+    устаревшая версия. Возвращаем фиксированный путь без пробы; сам
+    ``_find_binary`` проверяется отдельным классом ``TestFindBinary``.
+    """
+    binary = str(tmp_path / "bin" / "backend-adapter")
+
+    def fake_find(root: str) -> tuple[str, str | None]:
+        # Реальный _find_binary сообщает выбранный путь — сохраняем контракт.
+        print(f"[OK]   Бинарник: {binary}")
+        return binary, None
+
+    monkeypatch.setattr(cli_args, "_find_binary", fake_find)
+    return binary
+
+
 class TestVersion:
     @pytest.mark.parametrize("flag", ["-v", "--version"])
     def test_prints_version_and_exits_zero(self, flag, capsys):
@@ -474,7 +494,7 @@ class TestLaunchd:
     """
 
     @pytest.fixture
-    def home(self, tmp_path, clean_env, monkeypatch):
+    def home(self, tmp_path, clean_env, fake_binary, monkeypatch):
         """HOME → tmp_path: plist ляжет в tmp_path/Library/LaunchAgents."""
         monkeypatch.setenv("HOME", str(tmp_path))
         return tmp_path
@@ -520,6 +540,34 @@ class TestLaunchd:
         assert "--root" in text and str(root) in text
         # Токенов в plist нет — только путь к дому (--root подход).
         assert "ADAPTER_BACKEND_KEY" not in text
+
+    def test_install_writes_service_env_to_plist(self, home, capsys):
+        """plist сам задаёт CONFIG и DETACH: агент не зависит от adapter.env.
+
+        Регрессия v1.0.3: без ``ADAPTER_BACKEND_CONFIG`` агент падал на
+        ``[FATAL] ... is not set``, а при ``ADAPTER_DETACH_ENABLE=1`` в
+        ``adapter.env`` делал двойной форк и выпадал из-под надзора launchd.
+        """
+        import plistlib
+
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        data = plistlib.loads(self._plist(home).read_bytes())
+        env = data["EnvironmentVariables"]
+        assert env["ADAPTER_BACKEND_CONFIG"] == str(root / "adapter.yaml")
+        assert env["ADAPTER_DETACH_ENABLE"] == "0"
+        # Токенов по-прежнему нет.
+        assert not any("KEY" in name for name in env)
+
+    def test_install_reports_chosen_binary(self, home, capsys, fake_binary):
+        """install печатает, какой бинарник попал в plist (диагностика)."""
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert fake_binary in capsys.readouterr().out
 
     def test_plist_install_requires_marked_home(self, home, capsys):
         root = home / ".ba"
@@ -738,6 +786,35 @@ class TestLaunchd:
         assert (root / "adapter.env").read_text(encoding="utf-8") == env_before
         assert "Дом не изменён" in capsys.readouterr().out
 
+    def test_status_prints_log_tail_when_not_running(self, home, capsys, monkeypatch):
+        """Не работающий агент: status печатает хвост лога сразу (v1.0.3).
+
+        Причина падения агента — в логе; заставлять пользователя звать
+        ``logs`` отдельно значит терять шаг диагностики.
+        """
+        import subprocess as sp
+
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        log_dir = home / "Library" / "Logs" / "backend-adapter"
+        (log_dir / "adapter.log").write_text(
+            "[FATAL] ADAPTER_BACKEND_CONFIG is not set\n", encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        def fake_run(cmd, *args, **kwargs):
+            # Агент зарегистрирован, но упал.
+            return sp.CompletedProcess(cmd, 0, "state = exited\nlast exit code = 1\n", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "status", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        out = capsys.readouterr().out
+        assert "[FATAL] ADAPTER_BACKEND_CONFIG is not set" in out
+        assert "Последние строки лога" in out
+
     def test_uninstall_when_not_installed_is_noop(self, home, capsys, monkeypatch):
         """Повторный uninstall: агент не зарегистрирован, plist нет — чистый no-op."""
         import subprocess as sp
@@ -755,6 +832,130 @@ class TestLaunchd:
         out = capsys.readouterr().out
         assert "не был зарегистрирован" in out
         assert "удалять нечего" in out
+
+
+class TestFindBinary:
+    """_find_binary (v1.0.3): приоритет собственного бинарника + проба --root.
+
+    Корень регрессии: в PATH лежал standalone-бинарник v0.8.0 без CLI. Он
+    молча игнорировал ``--root`` и падал на пустом ``ADAPTER_BACKEND_CONFIG``.
+    Теперь каждый кандидат проверяется пробой ``--help``, а несовместимый
+    бинарник — ``[FATAL]``.
+    """
+
+    @staticmethod
+    def _fake_run(responses):
+        """Подменить subprocess.run: ответ по первому аргументу после бинарника."""
+
+        def run(cmd, *args, **kwargs):
+            import subprocess as sp
+
+            flag = cmd[-1]
+            rc, out = responses.get(flag, (1, ""))
+            return sp.CompletedProcess(cmd, rc, out, "")
+
+        return run
+
+    def test_prefers_current_script_with_interpreter(self, tmp_path, monkeypatch, capsys):
+        """Запуск ``python backend-adapter.py`` → скрипт + интерпретатор."""
+        script = tmp_path / "backend-adapter.py"
+        script.write_text("# script\n", encoding="utf-8")
+        monkeypatch.setattr(cli_args.sys, "argv", [str(script)])
+        monkeypatch.setattr(cli_args.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(cli_args.sys, "executable", "/usr/bin/python3")
+        monkeypatch.setattr(cli_args.os.path, "isfile", lambda p: p == str(script))
+        monkeypatch.setattr(
+            cli_args.subprocess,
+            "run",
+            self._fake_run({"--help": (0, "Usage: ... --root <путь>"), "--version": (0, "v9\n")}),
+        )
+        assert cli_args._find_binary("/home/u/.ba") == (str(script), "/usr/bin/python3")
+        assert "Бинарник:" in capsys.readouterr().out
+
+    def test_frozen_uses_executable(self, tmp_path, monkeypatch):
+        """PyInstaller-сборка: ``sys.executable`` и есть бинарник."""
+        monkeypatch.setattr(cli_args.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(cli_args.sys, "executable", "/opt/ba/backend-adapter")
+        monkeypatch.setattr(cli_args.sys, "argv", ["/opt/ba/backend-adapter"])
+        monkeypatch.setattr(
+            cli_args.os.path, "isfile", lambda p: p == "/opt/ba/backend-adapter"
+        )
+        monkeypatch.setattr(
+            cli_args.subprocess, "run", self._fake_run({"--help": (0, " --root ")})
+        )
+        assert cli_args._find_binary("/home/u/.ba") == ("/opt/ba/backend-adapter", None)
+
+    def test_rejects_binary_without_root(self, tmp_path, monkeypatch, capsys):
+        """Старый бинарник (нет --root в справке) — [FATAL] exit 1."""
+        monkeypatch.setattr(cli_args.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(cli_args.sys, "executable", "/opt/old/backend-adapter")
+        monkeypatch.setattr(cli_args.sys, "argv", ["/opt/old/backend-adapter"])
+        monkeypatch.setattr(cli_args.os.path, "isfile", lambda p: True)
+        monkeypatch.setattr(
+            cli_args.subprocess,
+            "run",
+            self._fake_run({"--help": (0, "Usage: backend-adapter  [FATAL] ADAPTER_BACKEND_CONFIG")}),
+        )
+        with pytest.raises(SystemExit) as ei:
+            cli_args._find_binary("/home/u/.ba")
+        assert ei.value.code == 1
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "не понимает --root" in out
+
+    def test_timeout_is_rejection(self, monkeypatch, capsys):
+        """Старый бинарник без CLI висит сервером — таймаут = несовместим."""
+        import subprocess as sp
+
+        monkeypatch.setattr(cli_args.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(cli_args.sys, "executable", "/opt/old/backend-adapter")
+        monkeypatch.setattr(cli_args.sys, "argv", ["/opt/old/backend-adapter"])
+        monkeypatch.setattr(cli_args.os.path, "isfile", lambda p: True)
+
+        def boom(cmd, *args, **kwargs):
+            raise sp.TimeoutExpired(cmd, 1)
+
+        monkeypatch.setattr(cli_args.subprocess, "run", boom)
+        with pytest.raises(SystemExit) as ei:
+            cli_args._find_binary("/home/u/.ba")
+        assert ei.value.code == 1
+        assert "[WARN]" in capsys.readouterr().out
+
+    def test_falls_back_to_script_in_home(self, tmp_path, monkeypatch, capsys):
+        """Несовместимый self-бинарник, но в доме есть скрипт — берём скрипт."""
+        root = tmp_path / ".ba"
+        root.mkdir()
+        script = root / "backend-adapter.py"
+        script.write_text("# script\n", encoding="utf-8")
+        old = tmp_path / "old-backend-adapter"
+        old.write_text("# old\n", encoding="utf-8")
+        monkeypatch.setattr(cli_args.sys, "frozen", True, raising=False)
+        monkeypatch.setattr(cli_args.sys, "executable", str(old))
+        monkeypatch.setattr(cli_args.sys, "argv", [str(old)])
+        # which("python3") нужен для интерпретатора скрипта; остальное — None.
+        monkeypatch.setattr(
+            cli_args.shutil, "which", lambda name: "/usr/bin/python3" if name == "python3" else None
+        )
+
+        def run(cmd, *args, **kwargs):
+            import subprocess as sp
+
+            if cmd[0] == str(old):
+                return sp.CompletedProcess(cmd, 1, "", "")  # старый: без CLI
+            return sp.CompletedProcess(cmd, 0, " --root ", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", run)
+        assert cli_args._find_binary(str(root)) == (str(script), "/usr/bin/python3")
+
+    def test_not_found_warns(self, tmp_path, monkeypatch, capsys):
+        """Ничего не найдено — [WARN], путь по умолчанию (как раньше)."""
+        monkeypatch.setattr(cli_args.sys, "frozen", False, raising=False)
+        monkeypatch.setattr(cli_args.sys, "argv", ["pytest"])
+        monkeypatch.setattr(cli_args.os.path, "isfile", lambda p: False)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: None)
+        binary, interpreter = cli_args._find_binary(str(tmp_path))
+        assert binary == str(tmp_path / "backend-adapter.py")
+        assert interpreter == cli_args.sys.executable
+        assert "[WARN]" in capsys.readouterr().out
 
 
 class TestLogsFlags:
@@ -807,7 +1008,7 @@ class TestSystemd:
     """
 
     @pytest.fixture
-    def home(self, tmp_path, clean_env, monkeypatch):
+    def home(self, tmp_path, clean_env, fake_binary, monkeypatch):
         """XDG_CONFIG_HOME → tmp_path: юнит ляжет в tmp_path/systemd/user."""
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
         return tmp_path
@@ -861,6 +1062,8 @@ class TestSystemd:
         assert "ADAPTER_BACKEND_KEY" not in text
         # Инвариант: detach выключен при надзоре systemd.
         assert "ADAPTER_DETACH_ENABLE=0" in text
+        # Юнит сам задаёт путь к adapter.yaml — не зависит от adapter.env.
+        assert f'Environment="ADAPTER_BACKEND_CONFIG={root / "adapter.yaml"}"' in text
 
     def test_install_does_not_start_or_enable(self, home, capsys, monkeypatch):
         """install только ставит юнит: start/enable не вызываются."""

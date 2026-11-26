@@ -193,6 +193,55 @@ class TestRenderLaunchdPlist:
         text = templates.render_launchd_plist("/usr/bin/adapter&test", "/root")
         assert "&amp;" in text
 
+    def test_interpreter_prefixes_program_arguments(self):
+        """``interpreter`` — запуск backend-adapter.py интерпретатором (v1.0.3)."""
+        import plistlib
+
+        text = templates.render_launchd_plist(
+            "/repo/backend-adapter.py",
+            "/Users/test/.ba",
+            interpreter="/usr/bin/python3",
+        )
+        data = plistlib.loads(text.encode("utf-8"))
+        assert data["ProgramArguments"] == [
+            "/usr/bin/python3",
+            "/repo/backend-adapter.py",
+            "--root",
+            "/Users/test/.ba",
+        ]
+
+    def test_env_vars_block_is_valid_plist(self):
+        """EnvironmentVariables — валидный plist-словарь (v1.0.3).
+
+        Без ``ADAPTER_BACKEND_CONFIG`` агент падал на ``[FATAL] ... is not
+        set``; значения plist побеждают ``adapter.env`` (``setdefault``).
+        """
+        import plistlib
+
+        env = {
+            "ADAPTER_BACKEND_CONFIG": "/Users/test/.ba/adapter.yaml",
+            "ADAPTER_DETACH_ENABLE": "0",
+        }
+        text = templates.render_launchd_plist("/bin/adapter", "/Users/test/.ba", env_vars=env)
+        data = plistlib.loads(text.encode("utf-8"))
+        assert data["EnvironmentVariables"] == env
+
+    def test_no_env_vars_block_by_default(self):
+        import plistlib
+
+        text = templates.render_launchd_plist("/bin/adapter", "/root")
+        assert "EnvironmentVariables" not in plistlib.loads(text.encode("utf-8"))
+
+    def test_env_vars_escaped_and_sorted(self):
+        """XML-спецсимволы в значениях экранируются, ключи отсортированы."""
+        import plistlib
+
+        env = {"ZZ": "/path/with&special", "AA": "1"}
+        text = templates.render_launchd_plist("/bin/adapter", "/root", env_vars=env)
+        assert "&amp;" in text
+        assert text.find("<key>AA</key>") < text.find("<key>ZZ</key>")
+        assert plistlib.loads(text.encode("utf-8"))["EnvironmentVariables"] == env
+
 
 class TestRenderLaunchdPlistFull:
     """render_launchd_plist_full — полный plist с инлайн env-переменными."""
@@ -314,6 +363,23 @@ class TestRenderSystemdUnit:
         """Путь с пробелом берётся в кавычки."""
         text = templates.render_systemd_unit("/opt/my app/adapter", "/home/u/.ba")
         assert 'ExecStart="/opt/my app/adapter" --root /home/u/.ba' in text
+
+    def test_config_env_set_by_unit(self):
+        """Юнит сам задаёт ADAPTER_BACKEND_CONFIG — не зависит от adapter.env."""
+        text = templates.render_systemd_unit("/bin/adapter", "/home/u/.ba")
+        assert 'Environment="ADAPTER_BACKEND_CONFIG=/home/u/.ba/adapter.yaml"\n' in text
+
+    def test_interpreter_in_exec_start(self):
+        """``interpreter`` — запуск backend-adapter.py интерпретатором (v1.0.3)."""
+        text = templates.render_systemd_unit(
+            "/repo/backend-adapter.py", "/home/u/.ba", interpreter="/usr/bin/python3"
+        )
+        assert "ExecStart=/usr/bin/python3 /repo/backend-adapter.py --root /home/u/.ba\n" in text
+
+    def test_config_env_escaped(self):
+        """``%`` и кавычка в пути дома экранируются в Environment=."""
+        text = templates.render_systemd_unit("/bin/adapter", "/opt/100%/my ba")
+        assert "Environment=\"ADAPTER_BACKEND_CONFIG=/opt/100%%/my ba/adapter.yaml\"\n" in text
 
 
 class TestEscapePlistString:

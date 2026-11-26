@@ -31,6 +31,10 @@ WorkingDirectory=/home/USERNAME/.ba
 ExecStart=/home/USERNAME/.local/bin/backend-adapter --root /home/USERNAME/.ba
 # detach (двойной форк) несовместим с надзором systemd — выключаем явно.
 Environment=ADAPTER_DETACH_ENABLE=0
+# Путь к adapter.yaml задаёт сам юнит: значения Environment= попадают в
+# окружение раньше adapter.env (там всё ставится через setdefault) и потому
+# побеждают файл. Без этого сервис зависел бы от содержимого adapter.env.
+Environment="ADAPTER_BACKEND_CONFIG=/home/USERNAME/.ba/adapter.yaml"
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

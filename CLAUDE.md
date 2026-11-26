@@ -67,9 +67,16 @@ This file provides guidance to [CC] () when working with code in this repository
   через `tail`, Linux — journald через `journalctl`; флаги `-n`/`-f` только
   с `logs`), `uninstall` (остановить, снять регистрацию/отключить, удалить
   plist/юнит и его `.bak`; дом не трогает, идемпотентно); дефолт — `install`.
-  Все настройки (включая токены) остаются в `<root>/adapter.env` — в
-  plist/юните их нет; systemd-юнит жёстко ставит
-  `ADAPTER_DETACH_ENABLE=0`. **macOS:** `load` = `launchctl bootstrap` +
+  Токены остаются в `<root>/adapter.env` — в plist/юните их нет; зато
+  **оба** артефакта жёстко задают `ADAPTER_DETACH_ENABLE=0` и
+  `ADAPTER_BACKEND_CONFIG=<root>/adapter.yaml` (v1.0.3): эти значения
+  попадают в окружение раньше `adapter.env` (`setdefault`) и потому
+  побеждают файл — без них агент падал на пустом `ADAPTER_BACKEND_CONFIG`
+  либо делал двойной форк вне надзора. Бинарник для plist/юнита выбирается
+  по принципу «тот, которым выполнена команда» (frozen → `.py` +
+  интерпретатор → консольная команда → `<root>` → `PATH`) и проверяется
+  пробой `--help`; бинарник без `--root` (до v0.9.13) — `[FATAL]`.
+  **macOS:** `load` = `launchctl bootstrap` +
   `kickstart -p` (при `RunAtLoad=false` регистрация сама процесс не поднимает),
   `unload` = `bootout`, `status` разбирает `launchctl print`. Лог сервиса —
   **вне дома** (`~/Library/Logs/backend-adapter/adapter.log`): `<root>/log`
