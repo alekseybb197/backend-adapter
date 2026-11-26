@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v1.0.1
+"""[CC] <-> [OI]-backend adapter v1.0.2
 — changelog: ../changelog.md"""
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 # КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
 # от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
 # Формулировка дублируется в README.md первой строкой вводного blockquote;
@@ -100,6 +100,20 @@ from backend_adapter import state_store
 
 
 if __name__ == "__main__":
+    # Построчная буферизация консоли (v1.0.2). Когда stdout — НЕ терминал
+    # (launchd с StandardOutPath, systemd/journald, docker logs, обычный
+    # pipe), Python буферизует его блоками по 8 КБ: лог сервиса остаётся
+    # пустым, пока процесс жив, и `--launchd logs -f` / `journalctl -f` не
+    # показывают ничего до выхода процесса. Наблюдаемость — исходная цель
+    # проекта (ADR-001), поэтому оба потока переводим в построчный режим:
+    # строка появляется в файле/журнале сразу. Ошибки глотаем: stdout может
+    # быть объектом без reconfigure (подмена в тестах) или None (pythonw).
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is not None:
+            with contextlib.suppress(OSError, ValueError):
+                _reconfigure(line_buffering=True)
+
     # Detach (double fork) — только отделение от консоли. PID-файл пишется
     # НИЖЕ, при любом запуске (не только в detach): он нужен, чтобы
     # манипулировать процессом без консоли (контейнер, служба). Порядок

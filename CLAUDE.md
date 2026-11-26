@@ -56,7 +56,27 @@ This file provides guidance to [CC] () when working with code in this repository
   подключается. `--install`/`--check` без `--root` автопоиск не используют
   (их цель всегда `~/.ba`). Подстановки — через `setdefault` (**явный env
   побеждает**); повторный `--install` существующий файл уводит в `<файл>.bak`
-  и перезаписывает свежим. `cli_args.py` —
+  и перезаписывает свежим.
+  **Автозапуск без root (v1.0.2):** `--launchd <подкоманда>` (macOS,
+  `~/Library/LaunchAgents`) и `--systemd <подкоманда>` (Linux,
+  `~/.config/systemd/user/`) — user-level сервис для **уже размеченного**
+  дома: `install`/`unit-install` только кладут plist/юнит (не включают и не
+  запускают), `load`/`start`, `unload`/`stop`, `status`, `plist`/`unit`,
+  `logs` (последние 20 строк, `-n/--lines N` — глубина, `-f/--follow` —
+  слежение до Ctrl-C; macOS читает `~/Library/Logs/backend-adapter/adapter.log`
+  через `tail`, Linux — journald через `journalctl`; флаги `-n`/`-f` только
+  с `logs`), `uninstall` (остановить, снять регистрацию/отключить, удалить
+  plist/юнит и его `.bak`; дом не трогает, идемпотентно); дефолт — `install`.
+  Все настройки (включая токены) остаются в `<root>/adapter.env` — в
+  plist/юните их нет; systemd-юнит жёстко ставит
+  `ADAPTER_DETACH_ENABLE=0`. **macOS:** `load` = `launchctl bootstrap` +
+  `kickstart -p` (при `RunAtLoad=false` регистрация сама процесс не поднимает),
+  `unload` = `bootout`, `status` разбирает `launchctl print`. Лог сервиса —
+  **вне дома** (`~/Library/Logs/backend-adapter/adapter.log`): `<root>/log`
+  принадлежит работающему адаптеру; plist указывает на него
+  `StandardOutPath`/`StandardErrorPath` (иначе launchd уводит вывод в
+  `/dev/null`). Обёртки — `scripts/install-launchd.sh`,
+  `scripts/install-systemd.sh`. `cli_args.py` —
   лист DAG (stdlib + `templates` + `env_check`). Справка/версия нужны внешним
   потребителям (`install.sh`, `scripts/build-binaries.sh`, CI) вместо запуска
   бинарника ради разбора `[FATAL]`.
@@ -84,6 +104,11 @@ This file provides guidance to [CC] () when working with code in this repository
 - Каналы логов (детали — `docs/logging.md`): консольные debug-логи безусловны
   и обрезаются до `ADAPTER_LOG_TRIM` (v0.9.13, переименован из
   `ADAPTER_DEBUG_TRIM`, который больше не читается; дефолт `1000`);
+  **консоль построчно буферизуется** (v1.0.2, `sys.stdout.reconfigure(
+  line_buffering=True)` в `__main__`): при перенаправлении stdout в файл
+  (launchd `StandardOutPath`, journald, `docker logs`, pipe) Python иначе
+  держит блок ~8 КБ, и лог сервиса пуст, пока процесс жив — `--launchd logs
+  -f`/`journalctl -f` показывали бы пустоту;
   файловая запись гейтится
   `ADAPTER_DEBUG_ENABLE` (`session-*.log` — полные строки, `*.jsonl` — trace,
   `*.parts` — дампы; все три — одним флагом, v0.9.10). Корень данных —

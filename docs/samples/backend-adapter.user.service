@@ -1,0 +1,41 @@
+# ============================================================
+# backend-adapter.user.service — пример USER-LEVEL systemd-юнита (Linux)
+# ============================================================
+# Справочный образец. Автоматический вариант — `backend-adapter --systemd
+# install` (или scripts/install-systemd.sh), который генерирует такой юнит
+# под ваш путь к бинарнику и дом. Здесь — ручной вариант для чтения/правки.
+#
+# Отличие от системного `backend-adapter.service` (docs/samples/,
+# install.sh --service): этот юнит ставится в ~/.config/systemd/user,
+# работает под ТЕКУЩИМ пользователем и НЕ требует root.
+#
+# Все настройки (включая токены) берутся из <root>/adapter.env по подходу
+# --root — в юнит они НЕ вписываются. Замените /home/USERNAME на свой
+# домашний путь перед установкой.
+#
+# Установка:
+#   cp backend-adapter.user.service ~/.config/systemd/user/backend-adapter.service
+#   systemctl --user daemon-reload
+#   systemctl --user start backend-adapter.service
+#   systemctl --user enable backend-adapter.service   # автозагрузка
+# ============================================================
+
+[Unit]
+Description=backend-adapter proxy (Anthropic <-> OpenAI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/USERNAME/.ba
+ExecStart=/home/USERNAME/.local/bin/backend-adapter --root /home/USERNAME/.ba
+# detach (двойной форк) несовместим с надзором systemd — выключаем явно.
+Environment=ADAPTER_DETACH_ENABLE=0
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backend-adapter
+
+[Install]
+WantedBy=default.target

@@ -462,3 +462,569 @@ class TestCheck:
         assert ei.value.code == 2
         out = capsys.readouterr().out
         assert "[FATAL]" in out and "--check" in out
+
+
+class TestLaunchd:
+    """--launchd (v1.0.2): управление launchd-агентом macOS.
+
+    plist пишется в ``~/Library/LaunchAgents`` — тесты подменяют HOME на
+    ``tmp_path``. Подкоманды ``load``/``unload``/``status`` зовут ``launchctl``
+    и здесь не проверяются (на CI его нет); проверяем разбор argv и
+    генерацию/установку plist, дом не трогается у ``plist-install``.
+    """
+
+    @pytest.fixture
+    def home(self, tmp_path, clean_env, monkeypatch):
+        """HOME → tmp_path: plist ляжет в tmp_path/Library/LaunchAgents."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return tmp_path
+
+    @staticmethod
+    def _plist(home):
+        return home / "Library" / "LaunchAgents" / "com.user.backend-adapter.plist"
+
+    def test_unknown_action_is_fatal(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "bogus"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_incompatible_with_install(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--install"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_incompatible_with_check(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--check"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_bare_flag_defaults_to_install(self, home, capsys):
+        """--launchd без подкоманды (так зовёт install.sh) = install."""
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        # install размечает дом и ставит plist.
+        assert (root / "adapter.env").is_file()
+        assert self._plist(home).is_file()
+
+    def test_install_writes_plist_with_root(self, home, capsys):
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        text = self._plist(home).read_text(encoding="utf-8")
+        assert "--root" in text and str(root) in text
+        # Токенов в plist нет — только путь к дому (--root подход).
+        assert "ADAPTER_BACKEND_KEY" not in text
+
+    def test_plist_install_requires_marked_home(self, home, capsys):
+        root = home / ".ba"
+        root.mkdir()
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                ["--launchd", "plist-install", "--root", str(root)], "9.9.9"
+            )
+        assert ei.value.code == 1
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "--install" in out
+        assert not self._plist(home).exists()
+
+    def test_plist_install_does_not_touch_home(self, home, capsys):
+        """Главная гарантия: готовый дом не переразмечается."""
+        root = home / ".ba"
+        root.mkdir()
+        env_path = root / "adapter.env"
+        env_path.write_text("export ADAPTER_PROXY_PORT=4242\n", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                ["--launchd", "plist-install", "--root", str(root)], "9.9.9"
+            )
+        assert ei.value.code == 0
+        # adapter.env не тронут, .bak не появился, шаблоны не досозданы.
+        assert env_path.read_text(encoding="utf-8") == "export ADAPTER_PROXY_PORT=4242\n"
+        assert not (root / "adapter.env.bak").exists()
+        assert not (root / "adapter.yaml").exists()
+        # plist при этом установлен.
+        assert self._plist(home).is_file()
+
+    def test_existing_plist_backed_up(self, home, capsys):
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        plist = self._plist(home)
+        plist.write_text("old plist\n", encoding="utf-8")
+        capsys.readouterr()
+
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert (home / "Library" / "LaunchAgents" / "com.user.backend-adapter.plist.bak").read_text(
+            encoding="utf-8"
+        ) == "old plist\n"
+        assert "[WARN]" in capsys.readouterr().out
+
+    def test_install_writes_log_path_to_plist(self, home, capsys):
+        """launchd без StandardOutPath теряет вывод — plist задаёт файл лога.
+
+        Лог сервиса живёт **вне** дома (``~/Library/Logs/backend-adapter``):
+        ``<root>/log`` — каталог данных работающего адаптера, смешивать туда
+        вывод launchd нельзя.
+        """
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        text = self._plist(home).read_text(encoding="utf-8")
+        log_path = str(home / "Library" / "Logs" / "backend-adapter" / "adapter.log")
+        assert "<key>StandardOutPath</key>" in text
+        assert "<key>StandardErrorPath</key>" in text
+        assert text.count(log_path) == 2
+        # Каталог лога создан заранее — launchd не создаёт его сам.
+        assert (home / "Library" / "Logs" / "backend-adapter").is_dir()
+        # Домашний log/ сервисным логом не засоряется.
+        assert not (root / "log" / "adapter.log").exists()
+
+    def test_logs_tail_default_depth(self, home, capsys, monkeypatch):
+        """logs по умолчанию — tail последних 20 строк, без -F."""
+        root = home / ".ba"
+        log_dir = home / "Library" / "Logs" / "backend-adapter"
+        log_dir.mkdir(parents=True)
+        log = log_dir / "adapter.log"
+        log.write_text("line\n", encoding="utf-8")
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            import subprocess as sp
+
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "logs", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert calls == [["tail", "-n20", str(log)]]
+
+    def test_logs_custom_depth_and_follow(self, home, capsys, monkeypatch):
+        root = home / ".ba"
+        log_dir = home / "Library" / "Logs" / "backend-adapter"
+        log_dir.mkdir(parents=True)
+        log = log_dir / "adapter.log"
+        log.write_text("line\n", encoding="utf-8")
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            import subprocess as sp
+
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                ["--launchd", "logs", "-n", "5", "-f", "--root", str(root)], "9.9.9"
+            )
+        assert ei.value.code == 0
+        assert calls == [["tail", "-n5", "-F", str(log)]]
+
+    def test_logs_missing_file_warns(self, home, capsys, monkeypatch):
+        root = home / ".ba"
+        root.mkdir()
+        called = []
+        monkeypatch.setattr(cli_args.subprocess, "run", lambda *a, **k: called.append(a))
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "logs", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        out = capsys.readouterr().out
+        assert "[WARN]" in out and "adapter.log" in out
+        assert not called
+
+    def test_load_bootstraps_and_kickstarts(self, home, capsys, monkeypatch):
+        """load = bootstrap (регистрация) + kickstart -p (реальный запуск).
+
+        ``RunAtLoad=false`` в plist означает, что одна регистрация процесса не
+        поднимает — без ``kickstart`` агент остался бы ``not running``.
+        """
+        import subprocess as sp
+
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        capsys.readouterr()
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[:2] == ["launchctl", "print"]:
+                return sp.CompletedProcess(cmd, 113, "", "Could not find service")
+            if cmd[:2] == ["launchctl", "kickstart"]:
+                return sp.CompletedProcess(cmd, 0, "4242\n", "")
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "load", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        verbs = [c[1] for c in calls]
+        assert verbs == ["print", "bootstrap", "kickstart"]
+        assert calls[1][2].startswith("gui/")
+        assert calls[1][3] == str(self._plist(home))
+        assert calls[2] == ["launchctl", "kickstart", "-p", calls[1][2] + "/com.user.backend-adapter"]
+        assert "4242" in capsys.readouterr().out
+
+    def test_load_skips_bootstrap_when_registered(self, home, capsys, monkeypatch):
+        """Уже зарегистрированный агент: bootstrap не повторяется (rc 5), стартует kickstart."""
+        import subprocess as sp
+
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        capsys.readouterr()
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return sp.CompletedProcess(cmd, 0, "7\n", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "load", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert [c[1] for c in calls] == ["print", "kickstart"]
+
+    def test_load_requires_plist(self, home, capsys):
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "load", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 1
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_uninstall_removes_plist_and_backup(self, home, capsys, monkeypatch):
+        """uninstall: bootout + удаление plist и .bak, дом не тронут."""
+        import subprocess as sp
+
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        plist = self._plist(home)
+        plist.write_text("old plist\n", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        backup = plist.with_name(plist.name + ".bak")
+        assert plist.is_file() and backup.is_file()
+        env_before = (root / "adapter.env").read_text(encoding="utf-8")
+        capsys.readouterr()
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "uninstall", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert not plist.exists() and not backup.exists()
+        assert [c[1] for c in calls] == ["print", "bootout"]
+        # Дом (токены, конфиги) не тронут.
+        assert (root / "adapter.env").read_text(encoding="utf-8") == env_before
+        assert "Дом не изменён" in capsys.readouterr().out
+
+    def test_uninstall_when_not_installed_is_noop(self, home, capsys, monkeypatch):
+        """Повторный uninstall: агент не зарегистрирован, plist нет — чистый no-op."""
+        import subprocess as sp
+
+        root = home / ".ba"
+        root.mkdir()
+
+        def fake_run(cmd, *args, **kwargs):
+            return sp.CompletedProcess(cmd, 113, "", "Could not find service")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "uninstall", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        out = capsys.readouterr().out
+        assert "не был зарегистрирован" in out
+        assert "удалять нечего" in out
+
+
+class TestLogsFlags:
+    """-n/--lines и -f/--follow (v1.0.2) — только вместе с подкомандой logs."""
+
+    @pytest.fixture
+    def home(self, tmp_path, clean_env, monkeypatch):
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        return tmp_path
+
+    def test_lines_without_logs_is_fatal(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "status", "-n", "5"], "9.9.9")
+        assert ei.value.code == 2
+        assert "logs" in capsys.readouterr().out
+
+    def test_follow_without_service_flag_is_fatal(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["-f"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_lines_non_integer_is_fatal(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "logs", "-n", "abc"], "9.9.9")
+        assert ei.value.code == 2
+        assert "целое" in capsys.readouterr().out
+
+    def test_lines_non_positive_is_fatal(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "logs", "-n", "0"], "9.9.9")
+        assert ei.value.code == 2
+        assert "> 0" in capsys.readouterr().out
+
+    def test_lines_requires_value(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "logs", "-n"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+
+class TestSystemd:
+    """--systemd (v1.0.2): user-level systemd-юнит Linux (аналог --launchd).
+
+    Юнит пишется в ``$XDG_CONFIG_HOME/systemd/user`` — тесты подменяют
+    ``XDG_CONFIG_HOME`` на ``tmp_path``. Подкоманды ``start``/``stop``/``status``
+    зовут ``systemctl --user`` и здесь не проверяются (на CI/macOS его нет);
+    проверяем разбор argv и генерацию/установку юнита, дом не трогается у
+    ``unit-install``.
+    """
+
+    @pytest.fixture
+    def home(self, tmp_path, clean_env, monkeypatch):
+        """XDG_CONFIG_HOME → tmp_path: юнит ляжет в tmp_path/systemd/user."""
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+        return tmp_path
+
+    @staticmethod
+    def _unit(home):
+        return home / "systemd" / "user" / "backend-adapter.service"
+
+    def test_unknown_action_is_fatal(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "bogus"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_incompatible_with_install(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "install", "--install"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_incompatible_with_check(self, home, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "install", "--check"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_incompatible_with_launchd(self, home, capsys):
+        """Две системы инициализации в одном вызове — ошибка."""
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "install", "--launchd", "install"], "9.9.9")
+        assert ei.value.code == 2
+        assert "[FATAL]" in capsys.readouterr().out
+
+    def test_bare_flag_defaults_to_install(self, home, capsys):
+        """--systemd без подкоманды (так зовёт обёртка) = install."""
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert (root / "adapter.env").is_file()
+        assert self._unit(home).is_file()
+
+    def test_install_writes_unit_with_root(self, home, capsys):
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        text = self._unit(home).read_text(encoding="utf-8")
+        assert "--root" in text and str(root) in text
+        # Токенов в юните нет — только путь к дому (--root подход).
+        assert "ADAPTER_BACKEND_KEY" not in text
+        # Инвариант: detach выключен при надзоре systemd.
+        assert "ADAPTER_DETACH_ENABLE=0" in text
+
+    def test_install_does_not_start_or_enable(self, home, capsys, monkeypatch):
+        """install только ставит юнит: start/enable не вызываются."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            import subprocess as sp
+
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/bin/" + name)
+        root = home / ".ba"
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        # Разрешён только daemon-reload; start/enable — нет.
+        flat = [" ".join(c) for c in calls]
+        assert any("daemon-reload" in c for c in flat)
+        assert not any(" start" in c for c in flat)
+        assert not any("enable" in c for c in flat)
+
+    def test_unit_install_requires_marked_home(self, home, capsys):
+        root = home / ".ba"
+        root.mkdir()
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                ["--systemd", "unit-install", "--root", str(root)], "9.9.9"
+            )
+        assert ei.value.code == 1
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "--install" in out
+        assert not self._unit(home).exists()
+
+    def test_unit_install_does_not_touch_home(self, home, capsys):
+        """Главная гарантия: готовый дом не переразмечается."""
+        root = home / ".ba"
+        root.mkdir()
+        env_path = root / "adapter.env"
+        env_path.write_text("export ADAPTER_PROXY_PORT=4242\n", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(
+                ["--systemd", "unit-install", "--root", str(root)], "9.9.9"
+            )
+        assert ei.value.code == 0
+        assert env_path.read_text(encoding="utf-8") == "export ADAPTER_PROXY_PORT=4242\n"
+        assert not (root / "adapter.env.bak").exists()
+        assert not (root / "adapter.yaml").exists()
+        assert self._unit(home).is_file()
+
+    def test_existing_unit_backed_up(self, home, capsys):
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        unit = self._unit(home)
+        unit.write_text("old unit\n", encoding="utf-8")
+        capsys.readouterr()
+
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert (home / "systemd" / "user" / "backend-adapter.service.bak").read_text(
+            encoding="utf-8"
+        ) == "old unit\n"
+        assert "[WARN]" in capsys.readouterr().out
+
+    def test_logs_journalctl_default_depth(self, home, capsys, monkeypatch):
+        """logs читает journald: journalctl --user -u <unit> -n20."""
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            import subprocess as sp
+
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/bin/" + name)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "logs"], "9.9.9")
+        assert ei.value.code == 0
+        assert calls == [
+            [
+                "journalctl",
+                "--user",
+                "-u",
+                "backend-adapter.service",
+                "--no-pager",
+                "-n20",
+            ]
+        ]
+
+    def test_logs_journalctl_custom_depth_and_follow(self, home, capsys, monkeypatch):
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            import subprocess as sp
+
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/bin/" + name)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "logs", "--lines", "200", "--follow"], "9.9.9")
+        assert ei.value.code == 0
+        assert calls[0][-2:] == ["-n200", "-f"]
+
+    def test_logs_requires_journalctl(self, home, capsys, monkeypatch):
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: None)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "logs"], "9.9.9")
+        assert ei.value.code == 1
+        assert "journalctl" in capsys.readouterr().out
+
+    def test_uninstall_disables_and_removes_unit(self, home, capsys, monkeypatch):
+        """uninstall: disable --now, удаление юнита и .bak, дом не тронут."""
+        import subprocess as sp
+
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        unit = self._unit(home)
+        unit.write_text("old unit\n", encoding="utf-8")
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        backup = unit.with_name(unit.name + ".bak")
+        assert unit.is_file() and backup.is_file()
+        env_before = (root / "adapter.env").read_text(encoding="utf-8")
+        capsys.readouterr()
+
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/bin/" + name)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "uninstall", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert not unit.exists() and not backup.exists()
+        flat = [" ".join(c) for c in calls]
+        assert any("disable --now backend-adapter.service" in c for c in flat)
+        assert any("daemon-reload" in c for c in flat)
+        assert (root / "adapter.env").read_text(encoding="utf-8") == env_before
+        assert "Дом не изменён" in capsys.readouterr().out
+
+    def test_uninstall_without_systemctl_still_removes_files(self, home, capsys, monkeypatch):
+        """Без systemctl файлы юнита всё равно убираются, остановка — WARN."""
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--systemd", "install", "--root", str(root)], "9.9.9")
+        unit = self._unit(home)
+        assert unit.is_file()
+        capsys.readouterr()
+
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: None)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--systemd", "uninstall", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert not unit.exists()
+        out = capsys.readouterr().out
+        assert "[WARN]" in out and "systemctl" in out

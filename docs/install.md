@@ -1,6 +1,6 @@
 # Установка — backend-adapter
 
-> **backend-adapter** (v1.0.1) — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **backend-adapter** (v1.0.2) — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM, который
 > реализует **[OI]-совместимый API** (`/v1/chat/completions`), но некорректно
 > обрабатывает протокол Anthropic Messages API.
@@ -249,7 +249,8 @@ backend-adapter/
 │   │   ├── sample.adapter.env   #   Полный пример env (все переменные адаптера)
 │   │   ├── sample.adapter.yaml  #   Пример YAML-конфига бэкендов
 │   │   ├── sample.tariffs.yaml  #   Пример тарифов моделей (--install копирует в дом)
-│   │   ├── backend-adapter.service      #   systemd unit (Linux, из исходников)
+│   │   ├── backend-adapter.service      #   системный systemd unit (root, install.sh --service)
+│   │   ├── backend-adapter.user.service #   user-level systemd unit (--systemd, без root)
 │   │   └── com.user.backend-adapter.plist  # launchd (macOS, из исходников)
 │   ├── claude_code/             # Локальные настройки клиента [CC] (не для продакшена)
 │   ├── qwen-code/               # Локальные настройки клиента QwenCode (не для продакшена)
@@ -966,7 +967,7 @@ python3 backend-adapter.py
 
 ```
 ======================================================================
-Backend-Adapter v1.0.1
+Backend-Adapter v1.0.2
 Listening:  http://127.0.0.1:9999
 Logs:       file logging off (ADAPTER_DEBUG_ENABLE=0); console debug always on
 Models:     strict validation
@@ -1227,11 +1228,207 @@ journalctl --user -u backend-adapter --since "1 hour ago"
 | PID-файл вручную | systemd сам знает PID (адаптер пишет файл в обоих режимах) |
 | Подходит для тестов | **подходит для продакшена** |
 
+#### User-level юнит через `--systemd` (без root) — аналог launchd
+
+Если root не нужен и достаточно сервиса **текущего пользователя**, используйте
+`--systemd` — Linux-аналог `--launchd`. Юнит ставится в
+`~/.config/systemd/user/backend-adapter.service` (или `$XDG_CONFIG_HOME`), а
+все настройки, включая токены, остаются в `~/.ba/adapter.env` (права 0600) и
+**в юнит не попадают**. Это отличается от системного `--service`
+(`/etc/systemd/system`, отдельный пользователь, root).
+
+```bash
+# Установить юнит (разметит дом, если нужно). Запуск — отдельно.
+backend-adapter --systemd install
+
+# Дом уже размечен — поставить только юнит, не трогая adapter.env/adapter.yaml
+backend-adapter --systemd unit-install
+
+# Управление
+backend-adapter --systemd start      # запустить сервис
+backend-adapter --systemd stop       # остановить сервис
+backend-adapter --systemd status     # статус + процесс
+backend-adapter --systemd unit       # показать содержимое юнита
+
+# Логи сервиса из journald (v1.0.2)
+backend-adapter --systemd logs           # последние 20 строк
+backend-adapter --systemd logs -n 200    # последние 200 строк
+backend-adapter --systemd logs -f        # следить в консоли до Ctrl-C
+backend-adapter --systemd logs -n 50 -f  # глубина + слежение
+
+# Удалить сервис (v1.0.2): остановить, отключить, убрать юнит; дом не трогает
+backend-adapter --systemd uninstall
+```
+
+**Через install-systemd.sh:**
+
+```bash
+scripts/install-systemd.sh install
+scripts/install-systemd.sh unit-install
+scripts/install-systemd.sh start | stop | status | unit
+scripts/install-systemd.sh logs [-n N] [-f]
+scripts/install-systemd.sh uninstall
+```
+
+`--systemd logs` читает логи из **journald** (юнит пишет в
+`StandardOutput=journal`): `journalctl --user -u backend-adapter.service`.
+По умолчанию выводит последние 20 строк; `-n/--lines <N>` меняет глубину,
+`-f/--follow` не завершается после вывода, а следит за логом в консоли до
+Ctrl-C. Флаги `-n`/`-f` допустимы только с `logs` (`[FATAL]`, иначе exit 2).
+Нужен `journalctl` в `PATH` (есть в любой системе с systemd). Строки попадают
+в журнал сразу: адаптер включает построчную буферизацию stdout/stderr, так
+что `logs -f` работает на живом сервисе (подробнее — раздел macOS выше).
+
+`--systemd uninstall` — обратная операция к `install`: `systemctl --user
+disable --now` (остановить и выключить автозагрузку), затем удаление юнита и
+его `.bak`, затем `daemon-reload`. Дом (`adapter.env` с токенами, конфиги) **не
+трогается**; повторный вызов — чистый no-op. Без `systemctl` в `PATH` файлы
+юнита всё равно удаляются (остановка — `[WARN]`).
+
+Переменные окружения обёртки: `BA_ROOT` (`~/.ba`), `BA_BINARY`
+(`/usr/local/bin/backend-adapter`), `BA_SYSTEMD_UNIT` (путь к юниту).
+
+> `--systemd install` **только устанавливает** юнит: не включает автозагрузку
+> и не запускает сервис. Для автозапуска при входе:
+> `systemctl --user enable backend-adapter.service`. Чтобы сервис переживал
+> выход из системы (unattended-режим) — включите linger:
+> `loginctl enable-linger "$USER"`.
+>
+> `--systemd install` размечает дом: существующие `adapter.env`/`adapter.yaml`
+> уходят в `.bak` и перезаписываются шаблонами. Для готового дома используйте
+> `--systemd unit-install` — он только генерирует и кладёт юнит.
+
+Юнит содержит `Environment=ADAPTER_DETACH_ENABLE=0`: detach (двойной форк)
+несовместим с надзором systemd, а явная переменная побеждает `adapter.env`.
+
 ### 9.2 macOS — launchd
 
-На macOS вместо systemd используется **launchd**. Системный файл —
+На macOS вместо systemd используется **launchd**. Два варианта установки:
+**автоматический** (`--launchd install` или `install-launchd.sh`) и
+**ручной** (через `docs/samples/`).
+
+#### Способ 1: автоматический (`--root ~/.ba`) — рекомендуется
+
+После `--install` все настройки живут в `~/.ba/adapter.env`. Plist минимален —
+он содержит только путь к бинарнику и `--root ~/.ba`, а адаптер автоматически
+находит и загружает `adapter.env`, `adapter.yaml`, `tariffs.yaml`. Токены
+остаются в `~/.ba/adapter.env` (права 0600) и **не попадают в plist**.
+
+**Установка одной командой:**
+
+```bash
+# Бинарный (из релиза): размечает дом и ставит plist
+~/.local/bin/backend-adapter --launchd install
+
+# Или из исходников (Python)
+python backend-adapter.py --launchd install
+```
+
+Если дом `~/.ba` **уже размечен** (`--install` выполнен раньше) и его не
+хочется переразмечать, поставьте только plist — дом не изменится:
+
+```bash
+backend-adapter --launchd plist-install
+```
+
+**Через install-launchd.sh:**
+
+```bash
+# Установка (разметит дом, создаст plist, установит в ~/Library/LaunchAgents)
+scripts/install-launchd.sh install
+
+# Только plist для уже размеченного дома (дом не меняется)
+scripts/install-launchd.sh plist-install
+
+# Управление
+scripts/install-launchd.sh load      # зарегистрировать и запустить агент
+scripts/install-launchd.sh unload    # остановить и снять регистрацию
+scripts/install-launchd.sh status    # проверить статус
+scripts/install-launchd.sh plist     # показать содержимое plist
+
+# Логи агента (v1.0.2)
+scripts/install-launchd.sh logs          # последние 20 строк
+scripts/install-launchd.sh logs -n 200   # последние 200 строк
+scripts/install-launchd.sh logs -f       # следить в консоли до Ctrl-C
+
+# Удалить агент (v1.0.2): остановить, снять регистрацию, убрать plist
+scripts/install-launchd.sh uninstall
+```
+
+**`load` действительно запускает агент.** Плист генерируется с
+`RunAtLoad=false` (`install` обязан только устанавливать), поэтому `load`
+делает два шага: `launchctl bootstrap gui/<uid> <plist>` (регистрация) и
+`launchctl kickstart -p gui/<uid>/<label>` (старт). Если агент уже
+зарегистрирован, `bootstrap` пропускается — иначе launchd вернул бы ошибку
+«Input/output error». `unload` — это `launchctl bootout` (остановка и снятие
+регистрации одним шагом), `status` разбирает `launchctl print` (`state`,
+`pid`, `last exit code`), а не `launchctl list`.
+
+**Просмотр логов (`--launchd logs`).** launchd без `StandardOutPath`/
+`StandardErrorPath` отправляет вывод сервиса в `/dev/null` — консольных
+логов не остаётся вовсе. Поэтому генерируемый plist указывает оба ключа на
+`~/Library/Logs/backend-adapter/adapter.log` — **вне** `<root>`: каталог
+`<root>/log` принадлежит *работающему* адаптеру (`session-*.log`, `.err`,
+`*.parts`), и вывод launchd не должен смешиваться с ним. `--launchd logs`
+показывает хвост этого файла через `tail`:
+
+```bash
+backend-adapter --launchd logs           # последние 20 строк
+backend-adapter --launchd logs -n 200    # последние 200 строк
+backend-adapter --launchd logs -f        # следить до Ctrl-C (tail -F)
+backend-adapter --launchd logs -n 50 -f  # глубина + слежение
+```
+
+По умолчанию — последние 20 строк; `-n/--lines <N>` меняет глубину,
+`-f/--follow` не завершается после вывода, а следит за файлом до Ctrl-C
+(`tail -F` переживает пересоздание файла). Флаги `-n`/`-f` допустимы только
+с `logs` (`[FATAL]`, иначе exit 2).
+
+> **Лог пишется сразу (v1.0.2).** Когда stdout — не терминал (а под launchd
+> это файл), Python по умолчанию буферизует его блоками ~8 КБ, и файл
+> оставался бы пустым, пока процесс жив. Адаптер сам включает построчную
+> буферизацию (`sys.stdout.reconfigure(line_buffering=True)`), поэтому строки
+> видны в файле немедленно, а `logs -f` работает на живом сервисе. То же
+> касается journald на Linux и `docker logs` — внешний `PYTHONUNBUFFERED`
+> не нужен.
+
+> **Старые plist.** Если агент установлен **до v1.0.2**, его plist либо не
+> содержит `StandardOutPath`/`StandardErrorPath` (логов нет вовсе), либо
+> указывает их на `<root>/log/adapter.log` (лог сервиса смешан с логами
+> работающего адаптера). Перегенерируйте plist:
+> `backend-adapter --launchd plist-install` (дом не трогается), затем
+> `--launchd unload` + `--launchd load`.
+
+`--launchd uninstall` — обратная операция к `install`: `launchctl bootout`
+(если агент зарегистрирован), затем удаление plist и его `.bak`. Дом
+(`adapter.env` с токенами, конфиги) **не трогается**; повторный вызов —
+чистый no-op.
+
+> `--launchd install` размечает дом: существующие `adapter.env`/`adapter.yaml`
+> уходят в `.bak` и перезаписываются шаблонами. Для готового дома используйте
+> `--launchd plist-install` — он только генерирует и кладёт plist.
+
+**Переменные окружения (опционально):**
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `BA_ROOT` | `~/.ba` | Домашняя папка адаптера |
+| `BA_BINARY` | `~/.local/bin/backend-adapter` | Путь к бинарнику |
+| `BA_LAUNCHD_PLIST` | `~/Library/LaunchAgents/...` | Путь к plist-файлу |
+
+Готовый plist устанавливается в
+`~/Library/LaunchAgents/com.user.backend-adapter.plist`.
+
+#### Способ 2: ручной (из исходников)
+
+Системный файл —
 `com.user.backend-adapter.plist` (шаблон для запуска из исходников — в
 `docs/samples/`).
+
+> **Примечание:** в этом варианте все env-переменные (включая токены)
+> вписываются прямо в plist, так как launchd не читает env-файлы.
+> Рекомендуется первый способ, где секретные данные остаются в
+> `~/.ba/adapter.env` с правами 0600.
 
 **Минимальный набор env-переменных** в `<key>EnvironmentVariables</key>`:
 
@@ -1277,7 +1474,7 @@ launchctl list | grep com.user.backend-adapter
 pgrep -f backend-adapter.py
 
 # Посмотреть логи (StandardOutPath из plist)
-tail -f ~/tmp/adapter.log
+tail -f ~/Library/Logs/backend-adapter/adapter.log
 ```
 
 **Почему launchd, а не detach?**

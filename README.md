@@ -3,7 +3,7 @@
 > backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
 > backends for AI agents
 >
-> **v1.0.1** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v1.0.2** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
@@ -93,8 +93,10 @@ python3 backend-adapter.py --root ~/.ba       # запуск с настройк
 окружения всегда побеждают.
 
 Ключи CLI: `--version`/`-v`, `--help`/`-h`/`-?`, `--root <путь>`, `--install`,
-`--install --name/--base/--key` (только вместе), `--check` (подробности —
-[docs/install.md](docs/install.md) §4.5).
+`--install --name/--base/--key` (только вместе), `--check`, `--launchd`
+(macOS) и `--systemd` (Linux) — user-level автозапуск без root для готового
+дома, включая просмотр логов сервиса (`logs`, `-n/--lines N`, `-f/--follow`)
+(подробности — [docs/install.md](docs/install.md) §4.5 и §9).
 
 Подробная инструкция: [docs/install.md](docs/install.md)
 
@@ -147,8 +149,9 @@ backend-adapter/
 │   ├── model_usage.py          # Персистентный учёт использованных моделей, тарифы
 │   ├── probe_json.py           # JSON-результат опроса списка моделей в var/
 │   ├── cli.py                  # CLI-утилиты (runpy-трамплин команды backend-adapter)
-│   ├── cli_args.py             # Разбор argv: --version/--help/--root/--install/--check (v0.9.13)
-│   ├── templates.py            # Встроенные шаблоны дефолтов для --install (v0.9.12)
+│   ├── cli_args.py             # Разбор argv: --version/--help/--root/--install/--check,
+│   │                           #   --launchd/--systemd (user-level сервис, v1.0.2)
+│   ├── templates.py            # Встроенные шаблоны: дефолты --install, plist, systemd-юнит
 │   ├── artifact_tree*.py       # Генерация дерева артефактов (8 модулей)
 │   ├── artifact_refresh.py     # Фоновая дебаунсная отрисовка артефактов (v0.9.10)
 │   └── __init__.py             # Lazy-прокси глобалов config/logger/tracer на старте
@@ -156,7 +159,9 @@ backend-adapter/
 │   ├── samples/                # Примеры конфигов: sample.adapter.env (env-файл),
 │   │                           #   sample.adapter.yaml (YAML бэкендов),
 │   │                           #   sample.tariffs.yaml (тарифы моделей),
-│   │                           #   backend-adapter.service + com.user.backend-adapter.plist
+│   │                           #   backend-adapter.service (системный) +
+│   │                           #   backend-adapter.user.service (user-level) +
+│   │                           #   com.user.backend-adapter.plist
 │   │                           #   (шаблоны systemd/launchd для запуска из исходников)
 │   ├── claude_code/            # Локальные настройки клиента [CC] (settings/statusline)
 │   ├── qwen-code/              # Локальные настройки клиента QwenCode (settings)
