@@ -10,14 +10,17 @@
 # Plist минимален и не содержит чувствительных данных (токенов).
 #
 # Usage:
-#   install-launchd.sh [install | plist-install | load | unload | status | plist | logs | uninstall]
+#   install-launchd.sh [install | plist-install | load | unload | status | plist | logs
+#                       | plist-uninstall | uninstall [--yes]]
 #
-#   install        — разметить дом (если нужно) и поставить plist;
-#   plist-install  — только plist для уже размеченного дома (дом не меняется);
+#   install         — разметить дом (если нужно) и поставить plist;
+#   plist-install   — только plist для уже размеченного дома (дом не меняется);
 #   load/unload/status/plist — управление установленным plist;
 #   logs [-n N] [-f] — хвост лога агента (~/Library/Logs/backend-adapter/adapter.log):
 #                      по умолчанию последние 20 строк, -f — слежение до Ctrl-C;
-#   uninstall      — остановить агент, снять регистрацию и удалить plist (дом не трогает).
+#   plist-uninstall — остановить агент, снять регистрацию и удалить plist (дом НЕ трогает);
+#   uninstall       — ПОЛНОЕ удаление (v1.0.3): plist + дом (токены, конфиги)
+#                     + лог сервиса; спрашивает подтверждение, --yes — без вопроса.
 #
 # Переменные окружения (все опциональны):
 #   BA_ROOT              — домашняя папка (по умолчанию ~/.ba)
@@ -112,10 +115,18 @@ cmd_status() {
     "$binary" --launchd status --root "$ROOT"
 }
 
+cmd_plist_uninstall() {
+    local binary
+    binary="$(find_binary)" || die "backend-adapter не найден."
+    "$binary" --launchd plist-uninstall --root "$ROOT"
+}
+
+# uninstall — полное удаление. Флаги (например --yes) пробрасываются как есть:
+# подтверждение задаёт сам вызывающий, обёртка его не подставляет.
 cmd_uninstall() {
     local binary
     binary="$(find_binary)" || die "backend-adapter не найден."
-    "$binary" --launchd uninstall --root "$ROOT"
+    "$binary" --launchd uninstall --root "$ROOT" "$@"
 }
 
 cmd_plist() {
@@ -145,9 +156,10 @@ main() {
         status)         cmd_status ;;
         plist)          cmd_plist ;;
         logs)           shift; cmd_logs "$@" ;;
-        uninstall)      cmd_uninstall ;;
+        plist-uninstall) cmd_plist_uninstall ;;
+        uninstall)      shift; cmd_uninstall "$@" ;;
         -h|--help|help)
-            echo "Usage: $0 [install | plist-install | load | unload | status | plist | logs [-n N] [-f] | uninstall]"
+            echo "Usage: $0 [install | plist-install | load | unload | status | plist | logs [-n N] [-f] | plist-uninstall | uninstall [--yes]]"
             echo ""
             echo "Commands:"
             echo "  install        — Разметить дом (если нужно), сгенерировать и установить plist"
@@ -157,7 +169,9 @@ main() {
             echo "  status         — Показать статус агента"
             echo "  plist          — Показать содержимое plist"
             echo "  logs           — Хвост лога агента (по умолчанию 20 строк; -n N — глубина, -f — слежение)"
-            echo "  uninstall      — Остановить агент, снять регистрацию и удалить plist (дом не меняется)"
+            echo "  plist-uninstall — Остановить агент, снять регистрацию, удалить plist (дом НЕ трогает)"
+            echo "  uninstall      — ПОЛНОЕ удаление: plist + дом (токены, конфиги) + лог сервиса;"
+            echo "                   спрашивает подтверждение, --yes — без вопроса"
             echo ""
             echo "Environment:"
             echo "  BA_ROOT          — домашняя папка (default: ~/.ba)"

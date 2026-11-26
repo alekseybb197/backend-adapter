@@ -65,8 +65,13 @@ This file provides guidance to [CC] () when working with code in this repository
   `logs` (последние 20 строк, `-n/--lines N` — глубина, `-f/--follow` —
   слежение до Ctrl-C; macOS читает `~/Library/Logs/backend-adapter/adapter.log`
   через `tail`, Linux — journald через `journalctl`; флаги `-n`/`-f` только
-  с `logs`), `uninstall` (остановить, снять регистрацию/отключить, удалить
-  plist/юнит и его `.bak`; дом не трогает, идемпотентно); дефолт — `install`.
+  с `logs`), `plist-uninstall`/`unit-uninstall` (снять только сервис:
+  остановить, снять регистрацию/отключить, удалить plist/юнит и его `.bak`;
+  дом не трогает, идемпотентно) и `uninstall` (v1.0.3 — ПОЛНОЕ удаление:
+  сервис + дом целиком; на macOS ещё и лог сервиса, записи journald не
+  трогаются; спрашивает подтверждение, `--yes`/`-y` — без вопроса, без tty
+  без `--yes` — `[FATAL]`; отказ, если `--root` — `/`, `~` или каталог без
+  `adapter.env`/`adapter.yaml`); дефолт — `install`.
   Токены остаются в `<root>/adapter.env` — в plist/юните их нет; зато
   **оба** артефакта жёстко задают `ADAPTER_DETACH_ENABLE=0` и
   `ADAPTER_BACKEND_CONFIG=<root>/adapter.yaml` (v1.0.3): эти значения

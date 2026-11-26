@@ -1263,8 +1263,13 @@ backend-adapter --systemd logs -n 200    # последние 200 строк
 backend-adapter --systemd logs -f        # следить в консоли до Ctrl-C
 backend-adapter --systemd logs -n 50 -f  # глубина + слежение
 
-# Удалить сервис (v1.0.2): остановить, отключить, убрать юнит; дом не трогает
+# Удалить ТОЛЬКО сервис: остановить, отключить, убрать юнит; дом не трогает
+backend-adapter --systemd unit-uninstall
+
+# Полное удаление (v1.0.3): сервис + дом (токены, конфиги). Спрашивает
+# подтверждение; --yes — без вопроса (для неинтерактивных сценариев)
 backend-adapter --systemd uninstall
+backend-adapter --systemd uninstall --yes
 ```
 
 **Через install-systemd.sh:**
@@ -1274,7 +1279,8 @@ scripts/install-systemd.sh install
 scripts/install-systemd.sh unit-install
 scripts/install-systemd.sh start | stop | status | unit
 scripts/install-systemd.sh logs [-n N] [-f]
-scripts/install-systemd.sh uninstall
+scripts/install-systemd.sh unit-uninstall
+scripts/install-systemd.sh uninstall [--yes]
 ```
 
 `--systemd logs` читает логи из **journald** (юнит пишет в
@@ -1286,11 +1292,22 @@ Ctrl-C. Флаги `-n`/`-f` допустимы только с `logs` (`[FATAL]
 в журнал сразу: адаптер включает построчную буферизацию stdout/stderr, так
 что `logs -f` работает на живом сервисе (подробнее — раздел macOS выше).
 
-`--systemd uninstall` — обратная операция к `install`: `systemctl --user
+**Две операции удаления (v1.0.3).**
+
+`--systemd unit-uninstall` — удаляет **только сервис**: `systemctl --user
 disable --now` (остановить и выключить автозагрузку), затем удаление юнита и
 его `.bak`, затем `daemon-reload`. Дом (`adapter.env` с токенами, конфиги) **не
 трогается**; повторный вызов — чистый no-op. Без `systemctl` в `PATH` файлы
 юнита всё равно удаляются (остановка — `[WARN]`).
+
+`--systemd uninstall` — **полное удаление**: делает всё то же, что
+`unit-uninstall`, а затем стирает сам дом вместе с токенами и конфигами — это
+обратная операция к `install` целиком. Записи journald не удаляются. Перед
+удалением печатается план и запрашивается подтверждение; `--yes`
+(`-y`) пропускает вопрос, а без tty (CI, pipe) и без `--yes` команда
+завершается `[FATAL]`. Защита от ошибки: отказ, если `--root` указывает на `/`,
+домашний каталог или каталог без `adapter.env`/`adapter.yaml`.
+`--yes` допустим только с `uninstall`.
 
 Переменные окружения обёртки: `BA_ROOT` (`~/.ba`), `BA_BINARY`
 (`/usr/local/bin/backend-adapter`), `BA_SYSTEMD_UNIT` (путь к юниту).
@@ -1385,8 +1402,13 @@ scripts/install-launchd.sh logs          # последние 20 строк
 scripts/install-launchd.sh logs -n 200   # последние 200 строк
 scripts/install-launchd.sh logs -f       # следить в консоли до Ctrl-C
 
-# Удалить агент (v1.0.2): остановить, снять регистрацию, убрать plist
+# Удалить ТОЛЬКО агент: остановить, снять регистрацию, убрать plist; дом не трогает
+scripts/install-launchd.sh plist-uninstall
+
+# Полное удаление (v1.0.3): агент + дом (токены, конфиги) + лог сервиса;
+# спрашивает подтверждение, --yes — без вопроса
 scripts/install-launchd.sh uninstall
+scripts/install-launchd.sh uninstall --yes
 ```
 
 **`load` действительно запускает агент.** Плист генерируется с
@@ -1436,10 +1458,21 @@ backend-adapter --launchd logs -n 50 -f  # глубина + слежение
 > `backend-adapter --launchd plist-install` (дом не трогается), затем
 > `--launchd unload` + `--launchd load`.
 
-`--launchd uninstall` — обратная операция к `install`: `launchctl bootout`
+**Две операции удаления (v1.0.3).**
+
+`--launchd plist-uninstall` — удаляет **только агент**: `launchctl bootout`
 (если агент зарегистрирован), затем удаление plist и его `.bak`. Дом
 (`adapter.env` с токенами, конфиги) **не трогается**; повторный вызов —
-чистый no-op.
+чистый no-op. Это обратная операция к `plist-install`.
+
+`--launchd uninstall` — **полное удаление**: делает всё то же, что
+`plist-uninstall`, а затем стирает сам дом вместе с токенами и конфигами и
+**лог сервиса** (`~/Library/Logs/backend-adapter/`) — это обратная операция к
+`install` целиком. Перед удалением печатается план и запрашивается
+подтверждение; `--yes` (`-y`) пропускает вопрос, а без tty (CI, pipe) и без
+`--yes` команда завершается `[FATAL]`. Защита от ошибки: отказ, если `--root`
+указывает на `/`, домашний каталог или каталог без
+`adapter.env`/`adapter.yaml`. `--yes` допустим только с `uninstall`.
 
 > `--launchd install` размечает дом: существующие `adapter.env`/`adapter.yaml`
 > уходят в `.bak` и перезаписываются шаблонами. Для готового дома используйте
