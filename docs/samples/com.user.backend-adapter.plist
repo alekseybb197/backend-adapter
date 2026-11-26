@@ -3,47 +3,36 @@
   "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Минимальный вариант: подход через root. -->
+    <!-- Все настройки подхватываются из <root>/adapter.env автоматически. -->
+    <!-- ВАЖНО: launchd НЕ раскрывает ~ и переменные окружения — замените -->
+    <!-- /Users/USERNAME на свой домашний путь перед загрузкой агента. -->
+
     <key>Label</key>
     <string>com.user.backend-adapter</string>
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>~/backend-adapter/backend-adapter.py</string>
+        <string>/Users/USERNAME/.local/bin/backend-adapter</string>
+        <string>--root</string>
+        <string>/Users/USERNAME/.ba</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>~/backend-adapter</string>
-
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>ADAPTER_BACKEND_CONFIG</key>
-        <string>~/backend-adapter/sample.adapter.yaml</string>
-        <key>ADAPTER_PROXY_PORT</key>
-        <string>9999</string>
-        <key>ADAPTER_DEBUG_ENABLE</key>
-        <string>0</string>
-        <key>ADAPTER_DETACH_ENABLE</key>
-        <string>0</string>
-        <key>ADAPTER_STREAMING_ENABLE</key>
-        <string>1</string>
-        <key>ADAPTER_STREAM_INCLUDE_USAGE</key>
-        <string>1</string>
-        <key>ADAPTER_STRICT_MODELS</key>
-        <string>1</string>
-    </dict>
+    <string>/Users/USERNAME/.ba</string>
 
     <key>RunAtLoad</key>
-    <true/>
+    <false/>
 
     <key>KeepAlive</key>
     <false/>
 
+    <!-- Лог сервиса — вне дома: <root>/log принадлежит работающему адаптеру. -->
     <key>StandardOutPath</key>
-    <string>~/backend-adapter/adapter.log</string>
+    <string>/Users/USERNAME/Library/Logs/backend-adapter/adapter.log</string>
 
     <key>StandardErrorPath</key>
-    <string>~/backend-adapter/adapter.log</string>
+    <string>/Users/USERNAME/Library/Logs/backend-adapter/adapter.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>

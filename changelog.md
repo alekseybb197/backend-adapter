@@ -1,6 +1,133 @@
 # backend-adapter — history / changelog
 
 
+## v1.0.2 — автозапуск без root: `--launchd` (macOS) и `--systemd` (Linux)
+
+### 2026-11-24 User-level сервис для уже размеченного дома
+
+**Цель:** дать unattended-запуск адаптера как сервиса **текущего пользователя**,
+без root и без дублирования секретов в конфиге сервиса. Системный
+`install.sh --service` (root, `/etc/systemd/system`, отдельный пользователь)
+остаётся для продакшена; новая возможность — для личной машины.
+
+**Решение:**
+- **`--launchd <подкоманда>`** (macOS) — plist в `~/Library/LaunchAgents/`:
+  `install` (размечает дом при необходимости), `plist-install` (только plist,
+  дом не трогает), `load`/`unload`, `status`, `plist`; дефолт — `install`.
+- **`--systemd <подкоманда>`** (Linux) — user-level юнит в
+  `~/.config/systemd/user/backend-adapter.service` (`$XDG_CONFIG_HOME`):
+  `install`, `unit-install`, `start`/`stop`, `status`, `unit`; дефолт —
+  `install`. `WantedBy=default.target` (не `multi-user.target` системного).
+- **Подход `--root`:** plist/юнит минимальны — путь к бинарнику и `--root`;
+  все настройки, включая токены, остаются в `<root>/adapter.env` (0600) и
+  **в конфиг сервиса не попадают**.
+- **`install`/`unit-install` только ставят файл** — не включают автозагрузку
+  и не запускают сервис (запуск — отдельными `load`/`start`, автозагрузка —
+  `launchctl`/`systemctl enable`).
+- Юнит содержит `Environment=ADAPTER_DETACH_ENABLE=0`: двойной форк
+  несовместим с надзором systemd, явная переменная побеждает `adapter.env`.
+- Шаблоны — `templates.render_launchd_plist[_full]`, `render_systemd_unit`
+  (stdlib-only, из пакета, работают из бинарника); обёртки —
+  `scripts/install-launchd.sh`, `scripts/install-systemd.sh`; образцы —
+  `docs/samples/com.user.backend-adapter.plist`,
+  `docs/samples/backend-adapter.user.service`.
+
+**Следствия:** `--launchd`/`--systemd` несовместимы с `--install`, `--check`
+и друг с другом (`[FATAL]` exit 2). Повторная установка уводит существующий
+plist/юнит в `.bak`. Документация — `docs/install.md` §9.
+
+### 2026-11-24 Просмотр логов сервиса: `--launchd logs` / `--systemd logs`
+
+**Цель:** оба CLI управления сервисом должны позволять посмотреть лог
+поднятого сервиса, не вспоминая пути к файлам и не собирая команды
+`journalctl`/`tail` вручную.
+
+**Решение:**
+- Подкоманда **`logs`** в обеих семьях: `--launchd logs` и `--systemd logs`.
+  По умолчанию — **последние 20 строк**; `-n/--lines <N>` меняет глубину;
+  `-f/--follow` не завершается после вывода, а **следит за логом в консоли**
+  до Ctrl-C (отдельный процесс, Ctrl-C → чистый выход 0, без traceback).
+- **macOS:** launchd без `StandardOutPath`/`StandardErrorPath` отправляет
+  вывод сервиса в `/dev/null`, поэтому генерируемый plist указывает оба
+  ключа на `~/Library/Logs/backend-adapter/adapter.log` — **вне дома**:
+  `<root>/log` принадлежит работающему адаптеру (`session-*.log`, `.err`,
+  `*.parts`), и вывод launchd не должен с ним смешиваться. `logs` показывает
+  хвост этого файла через `tail` (`-F` в режиме слежения — переживает
+  пересоздание файла). Плист, поставленный до этой версии, логов не даст или
+  пишет их в дом — перегенерируйте `--launchd plist-install`.
+- **Linux:** источник лога — **journald** (`StandardOutput=journal` юнита):
+  `journalctl --user -u backend-adapter.service --no-pager -n<N> [-f]`;
+  при отсутствии `journalctl` в `PATH` — `[FATAL]` exit 1.
+- Флаги `-n`/`-f` допустимы **только** с `logs` (иначе `[FATAL]` exit 2);
+  нечисловая/неположительная глубина — `[FATAL]` exit 2. Обёртки
+  `scripts/install-launchd.sh` и `scripts/install-systemd.sh` получили
+  `logs [-n N] [-f]` как тонкий проброс в бинарник.
+
+**Следствия:** поведение самого сервиса не меняется. На macOS меняется
+**формат генерируемого plist** (добавлены пути лога) — это единственная
+правка установочного артефакта. Документация — `docs/install.md` §9.1/§9.2.
+
+### 2026-11-24 `load` действительно запускает; `uninstall` в обеих семьях
+
+**Цель:** `--launchd load` сообщал `[OK]`, но агент не стартовал
+(`RunAtLoad=false` + `KeepAlive=false`, а `launchctl load` на уже
+загруженном агенте печатает ошибку в stderr и при этом выходит с кодом 0);
+`status` печатал мусорный `};` (вывод `launchctl list` — целый JSON-словарь)
+и ложно ругался «процесс не найден»; не было способа снять сервис.
+
+**Решение:**
+- **`load` = `launchctl bootstrap` + `launchctl kickstart -p`.** Регистрация
+  и старт — разные операции launchd; `RunAtLoad=false` означает, что без
+  `kickstart` процесс не поднимется. Уже зарегистрированный агент
+  (`launchctl print` → rc 0) не перерегистрируется (иначе rc 5 «Input/output
+  error»), но всё равно получает `kickstart`. Печатается PID.
+- **`unload` = `launchctl bootout`** — остановка и снятие регистрации одним
+  шагом; повторный вызов — `[WARN]`, не ошибка.
+- **`status` разбирает `launchctl print`** (`state = running`, `pid = N`,
+  `last exit code = …`) вместо JSON-словаря `launchctl list`; показывает
+  пути plist и лога; не использует `pgrep -f "… <root>"` (argv рабочего
+  адаптера может не содержать `--root`, отсюда ложные «процесс не найден»).
+- **Новая подкоманда `uninstall`** у обеих семей: `--launchd uninstall` —
+  `bootout` (если зарегистрирован) + удаление plist и `<plist>.bak`;
+  `--systemd uninstall` — `systemctl --user disable --now` + удаление юнита
+  и `<unit>.bak` + `daemon-reload`. **Дом не трогается** (`adapter.env` с
+  токенами, конфиги остаются); повторный вызов — чистый no-op. Без
+  `systemctl` файлы юнита всё равно удаляются.
+- Обёртки `scripts/install-launchd.sh` и `scripts/install-systemd.sh`:
+  `load`/`unload`/`status`/`plist`/`logs`/`uninstall` — тонкий проброс в
+  бинарник (единственный источник правды о launchd/systemd); получили
+  `uninstall`.
+
+**Следствия:** `--launchd load` теперь реально стартует сервис; путь лога
+macOS-сервиса — вне дома. Документация — `docs/install.md` §9.1/§9.2,
+`docs/samples/com.user.backend-adapter.plist`.
+
+### 2026-11-25 Построчная буферизация консоли: лог сервиса не пуст
+
+**Цель:** проверочный запуск launchd-агента показал, что лог сервиса
+(`~/Library/Logs/backend-adapter/adapter.log`) остаётся **нулевого размера,
+пока процесс жив**: `launchctl print` — `state = running`, порты слушают, а
+`--launchd logs` пуст. Причина — не launchd: когда stdout **не терминал**
+(launchd `StandardOutPath`, `systemd`/journald, `docker logs`, обычный pipe),
+Python буферизует его блоками ~8 КБ. Содержимое появлялось только при
+выходе процесса, то есть `logs -f` и `journalctl -f` были бесполезны —
+в противоречии с ADR-001 (наблюдаемость — исходная цель проекта).
+
+**Решение:**
+- В `backend-adapter.py` (в `__main__`, до `_detach`) оба потока
+  переводятся в построчный режим: `sys.stdout.reconfigure(line_buffering=True)`
+  и то же для `sys.stderr`. Ошибки (`OSError`/`ValueError`) подавлены:
+  поток может быть подменён объектом без `reconfigure` или быть `None`.
+- Внешний `PYTHONUNBUFFERED=1` больше не требуется — поведение собственное
+  процесса, а не обязанность launchd/юнита/контейнера.
+
+**Следствия:** строки появляются в файле/журнале сразу после `print` — `logs`
+и `logs -f` работают на живом сервисе. Стоимость — `write` на строку (для
+объёма логов адаптера пренебрежимо). Покрыто
+`tests/test_manual_check.py::test_console_line_buffered_without_pythonunbuffered`
+(процесс запускается **без** `PYTHONUNBUFFERED` и обязан отдать баннер в pipe
+в течение 3 с).
+
 ## v1.0.1 — `adapter.yaml` через PyYAML; каталог и процесс ADR; предложения ADR-032–040
 
 ### 2026-10-12 Саммари ветки v1.0.1 (4 коммита между v1.0.0 и снятием WIP)

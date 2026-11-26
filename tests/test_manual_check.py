@@ -165,7 +165,10 @@ def _adapter_env(yaml_path: str, tariffs_path: str, proxy_port: int,
         if k.startswith("ADAPTER_") or k in ("FAKE_KEY",):
             del env[k]
     env.update({
-        "PYTHONUNBUFFERED": "1",  # шапка/консоль видна в pipe сразу
+        # Избыточно с v1.0.2 (процесс сам включает построчную буферизацию,
+        # см. test_console_line_buffered_without_pythonunbuffered), но пусть
+        # остальные тесты не зависят от этой правки.
+        "PYTHONUNBUFFERED": "1",
         "FAKE_KEY": "sk-fake",
         "ADAPTER_BACKEND_CONFIG": yaml_path,
         "ADAPTER_PROXY_PORT": str(proxy_port),
@@ -258,7 +261,7 @@ class TestManualAdapterProcess:
                 assert _wait_http(exp_port, "/metrics") == 200, \
                     f"экспортёр не поднялся на :{exp_port}"
                 out = ap.output
-                assert "Backend-Adapter v1.0.1" in out, out[:400]
+                assert "Backend-Adapter v1.0.2" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
                 # v0.9.9: старт создаёт обе подпапки корня данных — log/
@@ -562,6 +565,54 @@ class TestManualAdapterProcess:
                 content = open(os.path.join(log_dir, log_files[0]),
                                encoding="utf-8").read()
                 assert '"content": "hi"' in content, "в файле [BODY] обрезан"
+            finally:
+                ap.proc.terminate()
+                try:
+                    ap.proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    ap.proc.kill()
+        finally:
+            be.close()
+
+    def test_console_line_buffered_without_pythonunbuffered(self, tmp_path):
+        """Стартовый баннер виден в pipe СРАЗУ, без PYTHONUNBUFFERED=1.
+
+        Когда stdout не терминал (launchd StandardOutPath, journald, docker
+        logs, pipe), Python по умолчанию буферизует его блоками ~8 КБ: лог
+        сервиса оставался пустым, пока процесс жив, и ``--launchd logs -f`` /
+        ``journalctl -f`` ничего не показывали. Процесс обязан сам включать
+        построчную буферизацию (v1.0.2), не полагаясь на внешний env.
+        """
+        data_root = str(tmp_path / "data")
+        os.makedirs(data_root)
+
+        be = FakeBackend()
+        be.models_response = {"object": "list",
+                              "data": [{"id": "qwen-test", "object": "model"}]}
+        be.serve()
+        try:
+            yaml_path = str(tmp_path / "adapter.yaml")
+            with open(yaml_path, "w") as f:
+                f.write("backend:\n"
+                        "  - name: fake\n"
+                        f"    base: {be.base_url}\n"
+                        "    key: FAKE_KEY\n")
+            env = _adapter_env(yaml_path, "", _free_port(), _free_port(),
+                               _free_port(), data_root, debug_enable="0")
+            # Главное отличие от прочих тестов: внешняя буферизация не
+            # отключена — проверяем собственный режим процесса.
+            env.pop("PYTHONUNBUFFERED", None)
+            ap = _spawn(env)
+            try:
+                # Баннер печатается до опроса бэкендов; 3 с с запасом хватает,
+                # а буферизованный stdout за это время не отдал бы ни байта.
+                time.sleep(3)
+                assert ap.proc.poll() is None, "adapter упал при старте"
+                assert "Backend-Adapter" in ap.output, (
+                    "stdout буферизован блоками: в pipe ещё нет ни строки. "
+                    "Логи сервиса (launchd/systemd) будут пустыми до выхода.\n"
+                    + ap.output[:400]
+                )
             finally:
                 ap.proc.terminate()
                 try:

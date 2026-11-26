@@ -1,5 +1,5 @@
 """CLI-ключи адаптера: ``--version``, ``--help``, ``--root``, ``--install``,
-``--name``/``--base``/``--key``, ``--check``.
+``--name``/``--base``/``--key``, ``--check``, ``--launchd``, ``--systemd``.
 
 До v0.9.11 у адаптера не было CLI вообще: ``backend-adapter.py`` не читал
 ``sys.argv``, а версия печаталась безусловно стартовым баннером. Из-за этого
@@ -50,6 +50,7 @@ env → ``[FATAL]`` + ``sys.exit(1)``) и импорт ``config`` (парсит 
 
 import os
 import shutil
+import subprocess
 import sys
 
 from . import env_check, templates
@@ -58,6 +59,31 @@ from . import env_check, templates
 # «вопросительный» вариант, привычный по Windows-утилитам).
 _VERSION_FLAGS = ("-v", "--version")
 _HELP_FLAGS = ("-h", "--help", "-?")
+_LAUNCHD_FLAG = "--launchd"
+# install — разметить дом + plist; plist-install — только plist для уже
+# готового дома (дом не трогает); остальные — управление установленным plist.
+_LAUNCHD_ACTIONS = frozenset(
+    {"install", "plist-install", "load", "unload", "status", "plist", "logs", "uninstall"}
+)
+# Действие по умолчанию, если подкоманда опущена (--launchd --root ...):
+# так вызывают install.sh и scripts/install-launchd.sh.
+_LAUNCHD_DEFAULT_ACTION = "install"
+
+# Linux-аналог launchd: user-level systemd-юнит (~/.config/systemd/user).
+# install — разметить дом + юнит (запуск отдельно, через start);
+# unit-install — только юнит для уже готового дома; остальные — управление.
+_SYSTEMD_FLAG = "--systemd"
+_SYSTEMD_ACTIONS = frozenset(
+    {"install", "unit-install", "start", "stop", "status", "unit", "logs", "uninstall"}
+)
+_SYSTEMD_DEFAULT_ACTION = "install"
+
+# Просмотр логов сервиса (v1.0.2): ``--launchd logs`` / ``--systemd logs``.
+# ``-n`` — глубина разового вывода (по умолчанию последние 20 строк),
+# ``-f`` — не завершаться, а следить за логом до Ctrl-C.
+_LOGS_DEFAULT_LINES = 20
+_LOGS_LINES_FLAGS = ("-n", "--lines")
+_LOGS_FOLLOW_FLAGS = ("-f", "--follow")
 
 # Домашняя папка адаптера по умолчанию: используется для --install без
 # --root (--root без аргумента — ошибка, см. parse_args).
@@ -68,6 +94,24 @@ _DEFAULT_ROOT = "~/.ba"
 _ENV_NAME = templates.ENV_NAME
 _YAML_NAME = templates.YAML_NAME
 _TARIFFS_NAME = templates.TARIFFS_NAME
+
+# Метка launchd-агента — в templates (там же, где рендерится plist); берём
+# оттуда, чтобы Label в коде и в шаблоне не разъехались.
+_LAUNCHD_LABEL = templates.LAUNCHD_LABEL
+# Имя user-level systemd-юнита — тоже в templates (там же, где рендерится).
+_SYSTEMD_UNIT_NAME = templates.SYSTEMD_UNIT_NAME
+
+
+def _plist_path() -> str:
+    """Путь к plist-файлу launchd-агента."""
+    return os.path.expanduser(os.path.join("~/Library/LaunchAgents", f"{_LAUNCHD_LABEL}.plist"))
+
+
+def _unit_path() -> str:
+    """Путь к user-level systemd-юниту: ``$XDG_CONFIG_HOME`` или ``~/.config``."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "systemd", "user", _SYSTEMD_UNIT_NAME)
+
 
 _HELP_TEXT = """\
 backend-adapter — [AN] Messages <-> [OI]-compatible backends for AI agents
@@ -104,6 +148,46 @@ Options:
                      и живое окружение: типы значений (int/bool), устаревшие
                      переменные, структуру adapter.yaml/tariffs.yaml.
                      Завершает работу: код 1 при ошибках, иначе 0.
+  --launchd <подкоманда>
+                     Управление launchd-агентом для macOS. Подкоманды:
+                     install — разметить дом и сгенерировать plist (по
+                     умолчанию, если подкоманда опущена);
+                     plist-install — только сгенерировать и установить plist
+                     для УЖЕ размеченного дома (дом не трогает, не
+                     переразмечает adapter.env/adapter.yaml);
+                     load — зарегистрировать агент и запустить его
+                     (launchctl bootstrap + kickstart);
+                     unload — остановить агент и снять регистрацию
+                     (launchctl bootout);
+                     status — проверить статус агента;
+                     plist — вывести содержимое plist на stdout;
+                     logs — показать последние строки лога агента
+                     (~/Library/Logs/backend-adapter/adapter.log);
+                     см. -n/-f ниже;
+                     uninstall — остановить агент, снять регистрацию и удалить
+                     plist (дом не трогает).
+                     Все подкоманды принимают --root (по умолчанию ~/.ba).
+  --systemd <подкоманда>
+                     Управление user-level systemd-юнитом для Linux (аналог
+                     --launchd; без root). Подкоманды:
+                     install — разметить дом и установить юнит в
+                     ~/.config/systemd/user (по умолчанию, если подкоманда
+                     опущена); автозапуск НЕ включается и не запускается;
+                     unit-install — только установить юнит для УЖЕ
+                     размеченного дома (дом не трогает);
+                     start — запустить сервис (systemctl --user start);
+                     stop — остановить сервис (systemctl --user stop);
+                     status — проверить статус сервиса;
+                     unit — вывести содержимое юнита на stdout;
+                     logs — показать логи сервиса из journald
+                     (journalctl --user -u backend-adapter.service); см. -n/-f;
+                     uninstall — остановить и отключить сервис, удалить юнит
+                     (дом не трогает).
+                     Все подкоманды принимают --root (по умолчанию ~/.ba).
+  -n, --lines <N>    Сколько последних строк лога вывести (только с logs;
+                     по умолчанию 20).
+  -f, --follow       Не завершаться после вывода, а следить за логом сервиса
+                     в консоли до Ctrl-C (только с logs).
 
 Без ключей адаптер стартует как обычно (нужен ADAPTER_BACKEND_CONFIG).
 """
@@ -129,10 +213,38 @@ def parse_args(argv: list[str], version: str) -> None:
     и ``sys.exit(2)``. ``--check`` (v0.9.13) — офлайн-диагностика конфигов
     дома: завершает работу кодом ``env_check.run_check`` (1 при ошибках,
     иначе 0); несовместим с ``--install`` и ``--name/--base/--key``.
+
+    ``--launchd [подкоманда]`` (v1.0.2) — управление launchd-агентом.
+    Несовместим с ``--check``, ``--install``, ``--name``/``--base``/``--key``.
+    Подкоманда опциональна: без неё (``--launchd --root ...``) — ``install``.
+    ``install`` размечает дом и ставит plist; ``plist-install`` — только plist
+    для уже размеченного дома (дом не трогает).
+
+    ``--systemd [подкоманда]`` (v1.0.2) — Linux-аналог: user-level systemd-юнит
+    (``~/.config/systemd/user``). Те же правила совместимости и опциональная
+    подкоманда (дефолт ``install``). ``install`` размечает дом и ставит юнит,
+    но **не** включает автозапуск и не стартует сервис; ``unit-install`` —
+    только юнит для уже размеченного дома; ``start``/``stop``/``status``/``unit``
+    — управление.
+
+    Подкоманда ``logs`` (v1.0.2) у обеих систем печатает хвост лога сервиса:
+    ``--launchd`` читает ``~/Library/Logs/backend-adapter/adapter.log``,
+    ``--systemd`` — ``journalctl --user -u backend-adapter.service``. Глубина —
+    ``-n/--lines`` (по умолчанию ``_LOGS_DEFAULT_LINES``), режим наблюдения —
+    ``-f/--follow`` (процесс живёт до Ctrl-C). ``-n``/``-f`` без ``logs`` —
+    ``[FATAL]`` exit 2.
+
+    Подкоманда ``uninstall`` (v1.0.2) у обеих систем удаляет установочный
+    артефакт сервиса (plist/юнит и его ``.bak``), предварительно остановив
+    и сняв регистрацию; дом не трогается.
     """
     root: str | None = None
     install = False
     check = False
+    launchd_action: str | None = None
+    systemd_action: str | None = None
+    logs_lines = _LOGS_DEFAULT_LINES
+    logs_follow = False
     name: str | None = None
     base: str | None = None
     key: str | None = None
@@ -149,6 +261,51 @@ def parse_args(argv: list[str], version: str) -> None:
             install = True
         elif arg == "--check":
             check = True
+        elif arg == _LAUNCHD_FLAG:
+            # Подкоманда опциональна: ``--launchd`` без неё (или с другим
+            # ключом следом — ``--launchd --root ...``) = install. Так
+            # вызывают install.sh и scripts/install-launchd.sh.
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                launchd_action = argv[i]
+                if launchd_action not in _LAUNCHD_ACTIONS:
+                    print(
+                        f"[FATAL] --launchd: неизвестная подкоманда {launchd_action!r}. "
+                        f"Допустимые: {', '.join(sorted(_LAUNCHD_ACTIONS))}."
+                    )
+                    sys.exit(2)
+            else:
+                launchd_action = _LAUNCHD_DEFAULT_ACTION
+        elif arg == _SYSTEMD_FLAG:
+            # Подкоманда опциональна, как у --launchd: без неё (или с ключом
+            # следом — --systemd --root ...) = install.
+            if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                systemd_action = argv[i]
+                if systemd_action not in _SYSTEMD_ACTIONS:
+                    print(
+                        f"[FATAL] --systemd: неизвестная подкоманда {systemd_action!r}. "
+                        f"Допустимые: {', '.join(sorted(_SYSTEMD_ACTIONS))}."
+                    )
+                    sys.exit(2)
+            else:
+                systemd_action = _SYSTEMD_DEFAULT_ACTION
+        elif arg in _LOGS_LINES_FLAGS:
+            i += 1
+            if i >= len(argv):
+                print(f"[FATAL] {arg} требует число строк лога.")
+                sys.exit(2)
+            raw = argv[i]
+            try:
+                logs_lines = int(raw)
+            except ValueError:
+                print(f"[FATAL] {arg}: ожидается целое число, получено {raw!r}.")
+                sys.exit(2)
+            if logs_lines <= 0:
+                print(f"[FATAL] {arg}: глубина лога должна быть > 0, получено {logs_lines}.")
+                sys.exit(2)
+        elif arg in _LOGS_FOLLOW_FLAGS:
+            logs_follow = True
         elif arg == "--root":
             i += 1
             if i >= len(argv):
@@ -201,8 +358,51 @@ def parse_args(argv: list[str], version: str) -> None:
             )
             sys.exit(2)
 
+    # --launchd несовместим с --check, --install и --name/--base/--key.
+    if launchd_action and check:
+        print("[FATAL] --launchd и --check несовместимы.")
+        sys.exit(2)
+    if launchd_action and install:
+        print("[FATAL] --launchd и --install несовместимы.")
+        sys.exit(2)
+    if launchd_action and given:
+        print(f"[FATAL] --launchd несовместим с {'/'.join(given)}.")
+        sys.exit(2)
+
+    # --systemd — те же правила совместимости, что и у --launchd, плюс
+    # взаимоисключение с самим --launchd (две разные системы инициализации).
+    if systemd_action and check:
+        print("[FATAL] --systemd и --check несовместимы.")
+        sys.exit(2)
+    if systemd_action and install:
+        print("[FATAL] --systemd и --install несовместимы.")
+        sys.exit(2)
+    if systemd_action and given:
+        print(f"[FATAL] --systemd несовместим с {'/'.join(given)}.")
+        sys.exit(2)
+    if systemd_action and launchd_action:
+        print("[FATAL] --systemd и --launchd несовместимы.")
+        sys.exit(2)
+
+    # -n/-f осмысленны только с подкомандой logs (v1.0.2): глубина и слежение
+    # относятся к просмотру лога, у остальных подкоманд смысла не имеют.
+    viewing_logs = launchd_action == "logs" or systemd_action == "logs"
+    if not viewing_logs and (logs_lines != _LOGS_DEFAULT_LINES or logs_follow):
+        owner = "launchd" if launchd_action else ("systemd" if systemd_action else None)
+        if owner is not None:
+            print(f"[FATAL] -n/-f допустимы только с --{owner} logs.")
+        else:
+            print("[FATAL] -n/-f допустимы только с --launchd logs или --systemd logs.")
+        sys.exit(2)
+
     if check:
         sys.exit(env_check.run_check(_resolve_root(root)))
+    if launchd_action:
+        _dispatch_launchd(launchd_action, _resolve_root(root), lines=logs_lines, follow=logs_follow)
+        sys.exit(0)
+    if systemd_action:
+        _dispatch_systemd(systemd_action, _resolve_root(root), lines=logs_lines, follow=logs_follow)
+        sys.exit(0)
     if install:
         _install_home(_resolve_root(root), name=name, base=base, key_env=key)
         sys.exit(0)
@@ -348,3 +548,622 @@ def _write_template(path: str, content: str, *, mode: int | None = None, hint: s
     if mode is not None:
         os.chmod(path, mode)
     print(f"[OK]   {path} — создан{hint}.")
+
+
+def _dispatch_launchd(action: str, root: str, *, lines: int, follow: bool) -> None:
+    """Перенаправить подкоманду ``--launchd`` к нужной функции."""
+    if action == "logs":
+        _launchd_logs(root, lines=lines, follow=follow)
+        return
+    dispatch = {
+        "install": _launchd_install,
+        "plist-install": _launchd_plist_install,
+        "load": _launchd_load,
+        "unload": _launchd_unload,
+        "status": _launchd_status,
+        "plist": _launchd_plist,
+        "uninstall": _launchd_uninstall,
+    }
+    func = dispatch.get(action)
+    if func is None:
+        print(f"[FATAL] --launchd: неизвестная подкоманда {action!r}.")
+        sys.exit(2)
+    func(root)
+
+
+def _home_is_marked(root: str) -> bool:
+    """Дом размечен? Признак — ``adapter.env`` (его кладёт ``--install``)."""
+    return os.path.isfile(os.path.join(root, _ENV_NAME))
+
+
+def _find_binary(root: str) -> str:
+    """Найти бинарник backend-adapter для plist.
+
+    Сначала ``<root>/backend-adapter.py`` (запуск из исходников в доме), затем
+    ``backend-adapter`` в ``PATH`` (standalone-бинарник). Не найдено — путь
+    по умолчанию ``<root>/backend-adapter.py`` и ``[WARN]``: plist всё равно
+    запишется, но пользователь предупреждён.
+    """
+    candidate = os.path.join(root, "backend-adapter.py")
+    if os.path.isfile(candidate):
+        return candidate
+    found = shutil.which("backend-adapter")
+    if found:
+        return found
+    print(f"[WARN] Бинарник не найден: {candidate}")
+    print("       Убедитесь, что backend-adapter в PATH, или укажите --root.")
+    return candidate
+
+
+def _service_log_path() -> str:
+    """Файл, куда launchd пишет stdout/stderr агента.
+
+    Путь — ``~/Library/Logs/backend-adapter/adapter.log`` (тот же каталог, что
+    у ``install.sh``), а **не** ``<root>/log``: в доме живут логи *работающего*
+    адаптера (``session-*.log``, ``.err``, ``*.parts``), и складывать туда
+    вывод сервиса значило бы смешивать два разных источника в одном каталоге
+    данных.
+
+    launchd без ``StandardOutPath``/``StandardErrorPath`` отправляет вывод
+    сервиса в ``/dev/null`` — логов не остаётся вовсе. Поэтому генерируемый
+    plist всегда задаёт этот файл, а ``--launchd logs`` читает его (``tail``).
+    """
+    return os.path.expanduser(os.path.join("~/Library/Logs", "backend-adapter", "adapter.log"))
+
+
+def _write_launchd_plist(root: str) -> str:
+    """Сгенерировать plist под ``root`` и записать в ``~/Library/LaunchAgents``.
+
+    Минимальный plist (``--root`` подход: настройки берутся из
+    ``<root>/adapter.env``, токены в plist не попадают). Вывод агента
+    направляется в ``~/Library/Logs/backend-adapter/adapter.log`` (иначе
+    launchd его теряет) — этот же файл читает ``--launchd logs``. Прежний
+    plist, если был, сохраняется рядом как ``<plist>.bak``. Возвращает путь
+    plist.
+    """
+    binary_path = _find_binary(root)
+    log_path = _service_log_path()
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    plist_content = templates.render_launchd_plist(
+        binary_path,
+        root,
+        keep_alive=False,
+        run_at_load=False,
+        standard_out_path=log_path,
+        standard_error_path=log_path,
+    )
+
+    plist_path = _plist_path()
+    os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+    if os.path.exists(plist_path):
+        backup = plist_path + ".bak"
+        try:
+            shutil.copy2(plist_path, backup)
+            print(f"[WARN] {plist_path} уже существует — прежняя копия в {backup}.")
+        except OSError as e:
+            print(f"[WARN] Прежний plist не скопирован в {backup}: {e} — перезаписан.")
+
+    with open(plist_path, "w", encoding="utf-8", newline="") as f:
+        f.write(plist_content)
+    os.chmod(plist_path, 0o644)
+    return plist_path
+
+
+def _launchd_install(root: str) -> None:
+    """Разметить дом (если нужно) и установить launchd-агент.
+
+    Если дом не размечен — вызывает ``_install_home`` автоматически. Затем
+    генерирует и ставит минимальный plist (``--root <root>``) в
+    ``~/Library/LaunchAgents``. Выводит инструкции для ``launchctl``.
+    """
+    if not _home_is_marked(root):
+        _install_home(root)
+
+    plist_path = _write_launchd_plist(root)
+
+    print(f"[OK]   launchd-агент установлен: {plist_path}")
+    print("       Запустить: backend-adapter --launchd load")
+    print("       Остановить: backend-adapter --launchd unload")
+
+
+def _launchd_plist_install(root: str) -> None:
+    """Установить plist для УЖЕ размеченного дома, не трогая сам дом.
+
+    В отличие от ``install`` не размечает дом и не перезаписывает
+    ``adapter.env``/``adapter.yaml`` (их правки остаются как есть). Если дом
+    не размечен (нет ``adapter.env``) — ``[FATAL]`` с подсказкой сначала
+    выполнить ``--install``: без ``adapter.env`` агенту нечего загружать.
+    """
+    if not _home_is_marked(root):
+        print(f"[FATAL] Дом не размечен: {root} (нет {_ENV_NAME}).")
+        print(f"       Сначала разметьте дом: backend-adapter --install --root {root}")
+        print("       Либо используйте --launchd install (разметит дом и поставит plist).")
+        sys.exit(1)
+
+    plist_path = _write_launchd_plist(root)
+
+    print(f"[OK]   launchd-агент установлен: {plist_path}")
+    print(f"       Дом не изменён: {root}")
+    print("       Запустить: backend-adapter --launchd load")
+
+
+def _launchd_target() -> str:
+    """Адрес агента в launchd: ``gui/<uid>/<label>`` (сессия текущего юзера)."""
+    return f"gui/{os.getuid()}/{_LAUNCHD_LABEL}"
+
+
+def _launchd_loaded() -> bool:
+    """Агент зарегистрирован в launchd? ``launchctl print`` → rc 0 (иначе 113)."""
+    result = subprocess.run(
+        ["launchctl", "print", _launchd_target()],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _launchd_load(root: str) -> None:
+    """Зарегистрировать и **запустить** launchd-агент.
+
+    Два шага, потому что это разные операции launchd: ``bootstrap`` только
+    регистрирует агент, а стартует его ``kickstart``. Плист генерируется с
+    ``RunAtLoad=false`` (иначе агент поднимался бы при каждом входе, а
+    ``install`` обязан только устанавливать), поэтому без ``kickstart``
+    команда ``load`` ничего бы не запускала — процесс оставался бы в
+    состоянии ``not running``.
+    """
+    plist_path = _plist_path()
+    if not os.path.isfile(plist_path):
+        print(f"[FATAL] Plist не найден: {plist_path}")
+        print("       Сначала выполните: backend-adapter --launchd install")
+        sys.exit(1)
+
+    domain = f"gui/{os.getuid()}"
+    if _launchd_loaded():
+        # Уже зарегистрирован: bootstrap вернул бы «Input/output error» (5).
+        # Регистрация есть — остаётся запустить.
+        print(f"[OK]   Агент уже зарегистрирован: {_LAUNCHD_LABEL}")
+    else:
+        result = subprocess.run(
+            ["launchctl", "bootstrap", domain, plist_path],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"[FATAL] Не удалось зарегистрировать агент: {result.stderr.strip()}")
+            print(f"       Попробуйте: launchctl bootstrap {domain} {plist_path}")
+            sys.exit(1)
+        print(f"[OK]   Агент зарегистрирован: {plist_path}")
+
+    result = subprocess.run(
+        ["launchctl", "kickstart", "-p", _launchd_target()],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[FATAL] Не удалось запустить агент: {result.stderr.strip()}")
+        print("       Логи: backend-adapter --launchd logs")
+        sys.exit(1)
+    pid = result.stdout.strip()
+    print(f"[OK]   Агент запущен{': PID ' + pid if pid else ''}")
+    print("       Логи: backend-adapter --launchd logs -f")
+
+
+def _launchd_unload(root: str) -> None:
+    """Остановить агент и снять его регистрацию (``launchctl bootout``).
+
+    ``bootout`` останавливает процесс и выгружает агент одним шагом; повторный
+    вызов на уже выгруженном агенте даёт ненулевой код — это не ошибка.
+    """
+    del root
+    if not _launchd_loaded():
+        print("[WARN] Агент не зарегистрирован — останавливать нечего.")
+        return
+
+    result = subprocess.run(
+        ["launchctl", "bootout", _launchd_target()],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[WARN] Не удалось выгрузить агент: {result.stderr.strip()}")
+        return
+    print(f"[OK]   Агент остановлен: {_LAUNCHD_LABEL}")
+
+
+def _launchd_status(root: str) -> None:
+    """Проверить статус launchd-агента: регистрация, состояние, PID, лог.
+
+    Состояние берётся из ``launchctl print`` (машиночитаемые строки
+    ``state = running`` / ``pid = N``), а не из ``launchctl list`` — тот
+    печатает целый JSON-словарь, из которого человеку нужны две строки.
+    """
+    plist_path = _plist_path()
+    log_path = _service_log_path()
+
+    if not os.path.isfile(plist_path):
+        print(f"[FATAL] Plist не найден: {plist_path}")
+        print("       Сначала выполните: backend-adapter --launchd install")
+        sys.exit(1)
+
+    result = subprocess.run(
+        ["launchctl", "print", _launchd_target()],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("[WARN] Агент не зарегистрирован (запустите: backend-adapter --launchd load)")
+        return
+
+    fields: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, sep, value = line.strip().partition(" = ")
+        if sep:
+            fields[key] = value
+
+    state = fields.get("state", "unknown")
+    pid = fields.get("pid")
+    if state == "running" and pid:
+        print(f"[OK]   Агент работает: {_LAUNCHD_LABEL} (PID {pid})")
+    else:
+        print(f"[WARN] Агент зарегистрирован, но не работает (state: {state})")
+        last_exit = fields.get("last exit code")
+        if last_exit and last_exit != "(never exited)":
+            print(f"       Последний код выхода: {last_exit}")
+        print("       Запустить: backend-adapter --launchd load")
+        print("       Причина — в логе: backend-adapter --launchd logs -n 50")
+
+    print(f"       Plist: {plist_path}")
+    if os.path.isfile(log_path):
+        print(f"       Лог:   {log_path}")
+    else:
+        print(f"       Лог:   {log_path} (ещё не создан — сервис не стартовал)")
+
+
+def _launchd_plist(root: str) -> None:
+    """Вывести содержимое plist на stdout."""
+    plist_path = _plist_path()
+    if not os.path.isfile(plist_path):
+        print(f"[FATAL] Plist не найден: {plist_path}")
+        print("       Сначала выполните: backend-adapter --launchd install")
+        sys.exit(1)
+    with open(plist_path, encoding="utf-8") as f:
+        print(f.read(), end="")
+
+
+def _launchd_uninstall(root: str) -> None:
+    """Удалить launchd-агент: остановить, снять регистрацию, убрать plist.
+
+    Дом (``<root>``) не трогается: ``adapter.env`` с токенами и конфиги
+    остаются на месте. Удаляется только установочный артефакт сервиса.
+    Каждый шаг терпит отсутствие объекта, поэтому повторный вызов — чистый
+    no-op. Бэкапы ``<plist>.bak``, оставленные повторными ``install``, тоже
+    убираются: это тот же артефакт сервиса.
+    """
+    plist_path = _plist_path()
+
+    if _launchd_loaded():
+        result = subprocess.run(
+            ["launchctl", "bootout", _launchd_target()],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            print(f"[WARN] Не удалось выгрузить агент: {result.stderr.strip()}")
+        else:
+            print(f"[OK]   Агент остановлен: {_LAUNCHD_LABEL}")
+    else:
+        print("[OK]   Агент не был зарегистрирован — пропущено.")
+
+    removed = False
+    for path in (plist_path, plist_path + ".bak"):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"[OK]   Удалён файл: {path}")
+                removed = True
+            except OSError as e:
+                print(f"[WARN] Не удалось удалить {path}: {e}")
+    if not removed:
+        print(f"[OK]   Plist не найден ({plist_path}) — удалять нечего.")
+
+    print(f"       Дом не изменён: {root}")
+
+
+def _run_log_viewer(cmd: list[str], *, follow: bool, hint: str) -> None:
+    """Запустить просмотрщик лога, наследуя консоль (``tail``/``journalctl``).
+
+    Вывод не перехватывается: строки идут прямо в терминал, включая режим
+    наблюдения (``-f``). Ctrl-C в режиме наблюдения — штатный способ выйти:
+    ``KeyboardInterrupt`` (его получает и дочерний процесс в той же группе)
+    гасится без traceback. ``hint`` — подсказка при ненулевом коде возврата.
+    """
+    try:
+        result = subprocess.run(cmd)
+    except KeyboardInterrupt:
+        # Наблюдение остановлено пользователем — это не ошибка.
+        print()
+        sys.exit(0)
+    if result.returncode not in (0, 1):
+        print(f"[WARN] Не удалось прочитать лог (код {result.returncode}).")
+        print(f"       {hint}")
+    elif result.returncode == 1 and not follow:
+        # Код 1 у tail/journalctl — «файла/записей нет»: подскажем, что делать.
+        print(f"[WARN] {hint}")
+
+
+def _launchd_logs(root: str, *, lines: int, follow: bool) -> None:
+    """Показать хвост лога launchd-агента.
+
+    ``lines`` — глубина разового вывода; ``follow`` — не завершаться, а
+    следить за файлом до Ctrl-C. Файл
+    (``~/Library/Logs/backend-adapter/adapter.log``) задан в plist как
+    ``StandardOutPath``/``StandardErrorPath`` (см. ``_service_log_path``).
+    """
+    del root  # путь лога от дома не зависит
+    log_path = _service_log_path()
+    if not os.path.isfile(log_path):
+        print(f"[WARN] Лог-файл не найден: {log_path}")
+        print("       Сервис ещё не запускался (или агент установлен старым plist).")
+        print("       Запуск: backend-adapter --launchd load")
+        return
+
+    cmd = ["tail", f"-n{lines}"]
+    if follow:
+        # -F переживает пересоздание файла (агент может перезапуститься).
+        cmd.append("-F")
+    cmd.append(log_path)
+    _run_log_viewer(
+        cmd,
+        follow=follow,
+        hint=f"Лог сервиса: {log_path} (запуск: backend-adapter --launchd load)",
+    )
+
+
+# ── systemd (Linux, user-level) — аналог --launchd ──────────────────────
+# User-level юнит (~/.config/systemd/user): без root, настройки из дома
+# (--root), токены в юнит не попадают. Отдельно от системного юнита
+# install.sh --service (/etc/systemd/system) — это другой уровень.
+
+
+def _dispatch_systemd(action: str, root: str, *, lines: int, follow: bool) -> None:
+    """Перенаправить подкоманду ``--systemd`` к нужной функции."""
+    if action == "logs":
+        _systemd_logs(root, lines=lines, follow=follow)
+        return
+    dispatch = {
+        "install": _systemd_install,
+        "unit-install": _systemd_unit_install,
+        "start": _systemd_start,
+        "stop": _systemd_stop,
+        "status": _systemd_status,
+        "unit": _systemd_unit,
+        "uninstall": _systemd_uninstall,
+    }
+    func = dispatch.get(action)
+    if func is None:
+        print(f"[FATAL] --systemd: неизвестная подкоманда {action!r}.")
+        sys.exit(2)
+    func(root)
+
+
+def _require_systemctl() -> None:
+    """``systemctl`` обязателен для управления сервисом; иначе ``[FATAL]``."""
+    if shutil.which("systemctl") is None:
+        print("[FATAL] systemctl не найден — управление systemd недоступно.")
+        print("       Установите systemd или используйте другой способ запуска.")
+        sys.exit(1)
+
+
+def _systemctl_user(*args: str) -> subprocess.CompletedProcess[str]:
+    """Вызвать ``systemctl --user <args>`` и вернуть результат."""
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _systemd_reload() -> None:
+    """``systemctl --user daemon-reload`` — best-effort.
+
+    Юнит-файл уже записан, это главное. Если ``systemctl`` нет (не-systemd
+    хост, контейнер) или reload не удался — ``[WARN]``, но не фатал: файл
+    установлен, пользователь разберётся с инициализацией сам.
+    """
+    if shutil.which("systemctl") is None:
+        print("[WARN] systemctl не найден — daemon-reload пропущен.")
+        return
+    result = _systemctl_user("daemon-reload")
+    if result.returncode != 0:
+        print(f"[WARN] daemon-reload не удался: {result.stderr.strip()}")
+
+
+def _write_systemd_unit(root: str) -> str:
+    """Сгенерировать user-level юнит под ``root`` и записать его.
+
+    Минимальный юнит (``--root`` подход: настройки из ``<root>/adapter.env``,
+    токены в юнит не попадают). Прежний юнит, если был, сохраняется рядом как
+    ``<unit>.bak``. Возвращает путь юнита.
+    """
+    binary_path = _find_binary(root)
+    unit_content = templates.render_systemd_unit(binary_path, root)
+
+    unit_path = _unit_path()
+    os.makedirs(os.path.dirname(unit_path), exist_ok=True)
+    if os.path.exists(unit_path):
+        backup = unit_path + ".bak"
+        try:
+            shutil.copy2(unit_path, backup)
+            print(f"[WARN] {unit_path} уже существует — прежняя копия в {backup}.")
+        except OSError as e:
+            print(f"[WARN] Прежний юнит не скопирован в {backup}: {e} — перезаписан.")
+
+    with open(unit_path, "w", encoding="utf-8", newline="") as f:
+        f.write(unit_content)
+    os.chmod(unit_path, 0o644)
+    return unit_path
+
+
+def _systemd_install(root: str) -> None:
+    """Разметить дом (если нужно) и установить user-level systemd-юнит.
+
+    Только установка: юнит записывается и регистрируется (``daemon-reload``),
+    но автозапуск НЕ включается и сервис НЕ стартует — запуск отдельной
+    подкомандой ``start`` (и ``systemctl --user enable`` для автозагрузки).
+    """
+    if not _home_is_marked(root):
+        _install_home(root)
+
+    unit_path = _write_systemd_unit(root)
+    _systemd_reload()
+
+    print(f"[OK]   systemd-юнит установлен: {unit_path}")
+    print("       Запустить: backend-adapter --systemd start")
+    print("       Автозагрузка: systemctl --user enable backend-adapter.service")
+    print("       Остановить: backend-adapter --systemd stop")
+
+
+def _systemd_unit_install(root: str) -> None:
+    """Установить юнит для УЖЕ размеченного дома, не трогая сам дом.
+
+    В отличие от ``install`` не размечает дом и не перезаписывает
+    ``adapter.env``/``adapter.yaml``. Если дом не размечен (нет
+    ``adapter.env``) — ``[FATAL]`` с подсказкой сначала выполнить ``--install``.
+    """
+    if not _home_is_marked(root):
+        print(f"[FATAL] Дом не размечен: {root} (нет {_ENV_NAME}).")
+        print(f"       Сначала разметьте дом: backend-adapter --install --root {root}")
+        print("       Либо используйте --systemd install (разметит дом и поставит юнит).")
+        sys.exit(1)
+
+    unit_path = _write_systemd_unit(root)
+    _systemd_reload()
+
+    print(f"[OK]   systemd-юнит установлен: {unit_path}")
+    print(f"       Дом не изменён: {root}")
+    print("       Запустить: backend-adapter --systemd start")
+
+
+def _systemd_start(root: str) -> None:
+    """Запустить сервис (``systemctl --user start``)."""
+    _require_systemctl()
+    result = _systemctl_user("start", _SYSTEMD_UNIT_NAME)
+    if result.returncode != 0:
+        print(f"[FATAL] Не удалось запустить сервис: {result.stderr.strip()}")
+        print("       Сначала установите юнит: backend-adapter --systemd install")
+        sys.exit(1)
+    print(f"[OK]   Сервис запущен: {_SYSTEMD_UNIT_NAME}")
+
+
+def _systemd_stop(root: str) -> None:
+    """Остановить сервис (``systemctl --user stop``)."""
+    _require_systemctl()
+    result = _systemctl_user("stop", _SYSTEMD_UNIT_NAME)
+    if result.returncode != 0:
+        print(f"[WARN] Не удалось остановить сервис: {result.stderr.strip()}")
+        return
+    print(f"[OK]   Сервис остановлен: {_SYSTEMD_UNIT_NAME}")
+
+
+def _systemd_status(root: str) -> None:
+    """Проверить статус сервиса и процесса."""
+    _require_systemctl()
+
+    # status печатает отчёт и во встроенном формате, и в exit-код (0 — активен).
+    result = _systemctl_user("status", "--no-pager", _SYSTEMD_UNIT_NAME)
+    output = (result.stdout or result.stderr).strip()
+    if output:
+        print(output)
+    if result.returncode == 0:
+        print(f"[OK]   Сервис активен: {_SYSTEMD_UNIT_NAME}")
+    else:
+        print("[WARN] Сервис не активен (запустите: backend-adapter --systemd start)")
+
+    # Проверка процесса — по аргументу --root (как у --launchd).
+    result = subprocess.run(
+        ["pgrep", "-f", rf"backend-adapter.*{root}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        pids = result.stdout.strip().split("\n")
+        print(f"[OK]   Процесс запущен (PID: {', '.join(pids)})")
+    else:
+        print("[WARN] Процесс backend-adapter не найден.")
+
+
+def _systemd_unit(root: str) -> None:
+    """Вывести содержимое установленного юнита на stdout."""
+    unit_path = _unit_path()
+    if not os.path.isfile(unit_path):
+        print(f"[FATAL] Юнит не найден: {unit_path}")
+        print("       Сначала выполните: backend-adapter --systemd install")
+        sys.exit(1)
+    with open(unit_path, encoding="utf-8") as f:
+        print(f.read(), end="")
+
+
+def _systemd_uninstall(root: str) -> None:
+    """Удалить user-level systemd-юнит: остановить, отключить, убрать файл.
+
+    Дом (``<root>``) не трогается: ``adapter.env`` с токенами и конфиги
+    остаются на месте. Удаляется только установочный артефакт сервиса.
+    Каждый шаг терпит отсутствие объекта, поэтому повторный вызов — чистый
+    no-op. Бэкапы ``<unit>.bak``, оставленные повторными ``install``, тоже
+    убираются: это тот же артефакт сервиса.
+    """
+    unit_path = _unit_path()
+
+    if shutil.which("systemctl") is not None:
+        # disable --now = выключить автозагрузку и остановить сервис одним шагом.
+        result = _systemctl_user("disable", "--now", _SYSTEMD_UNIT_NAME)
+        if result.returncode != 0:
+            print(f"[WARN] Не удалось остановить/отключить сервис: {result.stderr.strip()}")
+        else:
+            print(f"[OK]   Сервис остановлен и отключён: {_SYSTEMD_UNIT_NAME}")
+    else:
+        print("[WARN] systemctl не найден — остановка/отключение пропущены.")
+
+    removed = False
+    for path in (unit_path, unit_path + ".bak"):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"[OK]   Удалён файл: {path}")
+                removed = True
+            except OSError as e:
+                print(f"[WARN] Не удалось удалить {path}: {e}")
+    if not removed:
+        print(f"[OK]   Юнит не найден ({unit_path}) — удалять нечего.")
+
+    if shutil.which("systemctl") is not None:
+        _systemctl_user("daemon-reload")
+
+    print(f"       Дом не изменён: {root}")
+
+
+def _systemd_logs(root: str, *, lines: int, follow: bool) -> None:
+    """Показать логи сервиса из journald (``journalctl --user -u <unit>``).
+
+    Юнит пишет вывод в journal (``StandardOutput=journal``), поэтому источник
+    лога — journald, а не файл: работают ротация и таймстампы. ``lines`` —
+    глубина разового вывода (``-n``), ``follow`` — наблюдение до Ctrl-C
+    (``-f``). ``journalctl`` обязателен — иначе ``[FATAL]``.
+    """
+    if shutil.which("journalctl") is None:
+        print("[FATAL] journalctl не найден — просмотр логов journald недоступен.")
+        print("       Установите systemd или смотрите вывод процесса вручную.")
+        sys.exit(1)
+
+    cmd = ["journalctl", "--user", "-u", _SYSTEMD_UNIT_NAME, "--no-pager", f"-n{lines}"]
+    if follow:
+        cmd.append("-f")
+    _run_log_viewer(
+        cmd,
+        follow=follow,
+        hint=(
+            f"Лог сервиса: journalctl --user -u {_SYSTEMD_UNIT_NAME} "
+            "(запуск: backend-adapter --systemd start)"
+        ),
+    )

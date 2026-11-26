@@ -39,6 +39,25 @@ def test_embedded_yaml_ends_with_newline():
     assert templates.SAMPLE_TARIFFS_YAML.endswith("\n")
 
 
+def test_sample_plist_is_valid():
+    """Образец plist (docs/samples) должен парситься plistlib и содержать
+    абсолютный путь к бинарнику в ProgramArguments.
+
+    Сторож от двух ошибок: (1) ``--`` внутри XML-комментария делает файл
+    невалидным; (2) launchd НЕ раскрывает ``~`` — путь с ``~`` не запустится.
+    """
+    import plistlib
+
+    path = _SAMPLES / "com.user.backend-adapter.plist"
+    if not path.is_file():
+        pytest.skip("docs/samples/com.user.backend-adapter.plist недоступен")
+    data = plistlib.loads(path.read_bytes())
+    prog = data["ProgramArguments"]
+    assert prog, "ProgramArguments пуст"
+    assert not prog[0].startswith("~"), "launchd не раскрывает ~ в путях"
+    assert prog[0].startswith("/"), "нужен абсолютный путь к бинарнику"
+
+
 class TestRenderEnv:
     def test_contains_absolute_paths_from_root(self, tmp_path):
         root = str(tmp_path / "home")
@@ -91,3 +110,235 @@ class TestRenderAdapterYaml:
         """Поле key — имя переменной, а не сам токен (ср. SAMPLE_ADAPTER_YAML)."""
         text = templates.render_adapter_yaml("n", "http://b", "ADAPTER_ENV_NAME")
         assert "key: ADAPTER_ENV_NAME" in text
+
+
+class TestRenderLaunchdPlist:
+    """render_launchd_plist — минимальный plist с --root подходом."""
+
+    def test_contains_label(self):
+        text = templates.render_launchd_plist("/usr/local/bin/backend-adapter", "/Users/test/.ba")
+        assert f"<string>{templates.LAUNCHD_LABEL}</string>" in text
+
+    def test_contains_root_argument(self):
+        text = templates.render_launchd_plist("/usr/local/bin/adapter", "/Users/test/.ba")
+        assert "<string>--root</string>" in text
+        assert "<string>/Users/test/.ba</string>" in text
+
+    def test_program_arguments_is_valid_plist(self):
+        """Сторож: ProgramArguments должен парситься plistlib, первый элемент —
+        ровно путь к бинарнику. Регрессия ``[4:]`` калечила ``<string>`` →
+        ``ring>`` (терялось начало пути)."""
+        import plistlib
+
+        text = templates.render_launchd_plist("/usr/local/bin/backend-adapter", "/Users/test/.ba")
+        data = plistlib.loads(text.encode("utf-8"))
+        assert data["ProgramArguments"] == [
+            "/usr/local/bin/backend-adapter",
+            "--root",
+            "/Users/test/.ba",
+        ]
+
+    def test_program_arguments_without_root(self):
+        """Без root в ProgramArguments ровно один элемент — путь к бинарнику."""
+        import plistlib
+
+        text = templates.render_launchd_plist("/bin/adapter")
+        data = plistlib.loads(text.encode("utf-8"))
+        assert data["ProgramArguments"] == ["/bin/adapter"]
+
+    def test_contains_working_directory(self):
+        text = templates.render_launchd_plist("/usr/bin/python3", "/home/user/.ba")
+        assert "<key>WorkingDirectory</key>" in text
+        assert "<string>/home/user/.ba</string>" in text
+
+    def test_no_root_without_root_param(self):
+        """Без root — нет --root и WorkingDirectory в plist."""
+        text = templates.render_launchd_plist("/usr/local/bin/backend-adapter")
+        assert "--root" not in text
+        assert "WorkingDirectory" not in text
+
+    def test_log_paths(self, tmp_path):
+        """StandardOutPath / StandardErrorPath появляются при задании путей."""
+        out = str(tmp_path / "log" / "stdout.log")
+        err = str(tmp_path / "log" / "stderr.log")
+        text = templates.render_launchd_plist(
+            "/usr/local/bin/adapter",
+            "/Users/test/.ba",
+            standard_out_path=out,
+            standard_error_path=err,
+        )
+        assert f"<string>{out}</string>" in text
+        assert "<key>StandardOutPath</key>" in text
+        assert "<key>StandardErrorPath</key>" in text
+
+    def test_default_flags(self):
+        """По умолчанию KeepAlive=false, RunAtLoad=false."""
+        text = templates.render_launchd_plist("/bin/adapter", "/root")
+        assert "<false/>" in text
+
+    def test_keep_alive_true(self):
+        assert "<true/>" in templates.render_launchd_plist("/bin/adapter", "/root", keep_alive=True)
+
+    def test_run_at_load_true(self):
+        text = templates.render_launchd_plist("/bin/adapter", "/root", run_at_load=True)
+        # два true: RunAtLoad и KeepAlive (по умолчанию False — false)
+        assert "<true/>" in text
+
+    def test_process_type_background(self):
+        text = templates.render_launchd_plist("/bin/adapter", "/root")
+        assert "<string>Background</string>" in text
+
+    def test_xml_escape_special_chars(self):
+        """Путь с & должен быть экранирован в XML."""
+        text = templates.render_launchd_plist("/usr/bin/adapter&test", "/root")
+        assert "&amp;" in text
+
+
+class TestRenderLaunchdPlistFull:
+    """render_launchd_plist_full — полный plist с инлайн env-переменными."""
+
+    def test_contains_env_vars(self):
+        env = {"ADAPTER_BACKEND_CONFIG": "/custom/adapter.yaml", "ADAPTER_DETACH_ENABLE": "1"}
+        text = templates.render_launchd_plist_full(
+            "/usr/local/bin/adapter",
+            "/Users/test/.ba",
+            env_vars=env,
+        )
+        assert "<key>ADAPTER_BACKEND_CONFIG</key>" in text
+        assert "<string>/custom/adapter.yaml</string>" in text
+        assert "<key>ADAPTER_DETACH_ENABLE</key>" in text
+        assert "<string>1</string>" in text
+
+    def test_default_env_vars(self):
+        text = templates.render_launchd_plist_full("/bin/adapter", "/root")
+        assert "ADAPTER_BACKEND_CONFIG" in text
+        assert "ADAPTER_DETACH_ENABLE" in text
+
+    def test_contains_root_argument(self):
+        text = templates.render_launchd_plist_full("/usr/local/bin/adapter", "/Users/test/.ba")
+        assert "<string>--root</string>" in text
+        assert "<string>/Users/test/.ba</string>" in text
+
+    def test_contains_working_directory(self):
+        text = templates.render_launchd_plist_full("/bin/adapter", "/custom/root")
+        assert "<key>WorkingDirectory</key>" in text
+        assert "<string>/custom/root</string>" in text
+
+    def test_log_paths(self, tmp_path):
+        out = str(tmp_path / "log" / "out.log")
+        err = str(tmp_path / "log" / "err.log")
+        text = templates.render_launchd_plist_full(
+            "/bin/adapter",
+            "/root",
+            standard_out_path=out,
+            standard_error_path=err,
+        )
+        assert f"<string>{out}</string>" in text
+        assert "<key>StandardOutPath</key>" in text
+
+    def test_keep_alive_true_by_default(self):
+        text = templates.render_launchd_plist_full("/bin/adapter", "/root")
+        # keep_alive по умолчанию True — должен быть true
+        assert "<true/>" in text
+
+    def test_env_vars_sorted(self):
+        env = {"ZZ_LAST": "z", "AA_FIRST": "a", "MM_MID": "m"}
+        text = templates.render_launchd_plist_full("/bin/adapter", "/root", env_vars=env)
+        aa_pos = text.find("AA_FIRST")
+        mm_pos = text.find("MM_MID")
+        zz_pos = text.find("ZZ_LAST")
+        assert aa_pos < mm_pos < zz_pos
+
+    def test_xml_escape_in_env_values(self):
+        """Value с & должен быть экранирован."""
+        env = {"ADAPTER_BACKEND_CONFIG": "/path/with&special.yaml"}
+        text = templates.render_launchd_plist_full("/bin/adapter", "/root", env_vars=env)
+        assert "&amp;" in text
+
+
+class TestRenderSystemdUnit:
+    """render_systemd_unit — user-level юнит с --root подходом (Linux)."""
+
+    def test_sections(self):
+        text = templates.render_systemd_unit("/usr/local/bin/backend-adapter", "/home/u/.ba")
+        assert text.startswith("[Unit]\n")
+        assert "[Service]\n" in text
+        assert "[Install]\n" in text
+        assert text.endswith("\n")
+
+    def test_exec_start_has_root(self):
+        text = templates.render_systemd_unit("/usr/local/bin/adapter", "/home/u/.ba")
+        assert "ExecStart=/usr/local/bin/adapter --root /home/u/.ba\n" in text
+
+    def test_working_directory_is_root(self):
+        text = templates.render_systemd_unit("/bin/adapter", "/custom/root")
+        assert "WorkingDirectory=/custom/root\n" in text
+
+    def test_detach_disabled(self):
+        """Environment=ADAPTER_DETACH_ENABLE=0 — обязательный инвариант."""
+        text = templates.render_systemd_unit("/bin/adapter", "/root")
+        assert "Environment=ADAPTER_DETACH_ENABLE=0\n" in text
+
+    def test_restart_on_failure(self):
+        text = templates.render_systemd_unit("/bin/adapter", "/root")
+        assert "Restart=on-failure\n" in text
+        assert "RestartSec=5\n" in text
+
+    def test_restart_can_be_disabled(self):
+        text = templates.render_systemd_unit("/bin/adapter", "/root", restart=False)
+        assert "Restart=on-failure" not in text
+        assert "RestartSec=" not in text
+
+    def test_wanted_by_default_target(self):
+        """User-level юнит: default.target (не multi-user.target системного)."""
+        text = templates.render_systemd_unit("/bin/adapter", "/root")
+        assert "WantedBy=default.target\n" in text
+
+    def test_stdout_to_journal(self):
+        text = templates.render_systemd_unit("/bin/adapter", "/root")
+        assert "StandardOutput=journal\n" in text
+        assert "StandardError=journal\n" in text
+
+    def test_no_token_in_unit(self):
+        """Токенов в юните нет — только путь к дому (--root подход)."""
+        text = templates.render_systemd_unit("/bin/adapter", "/root")
+        assert "ADAPTER_BACKEND_KEY" not in text
+
+    def test_percent_escaped(self):
+        """``%`` — спецификатор systemd: удваивается, чтобы не раскрывался."""
+        text = templates.render_systemd_unit("/opt/100%/adapter", "/root")
+        assert "/opt/100%%/adapter" in text
+        assert "/opt/100%/adapter" not in text
+
+    def test_spaces_quoted(self):
+        """Путь с пробелом берётся в кавычки."""
+        text = templates.render_systemd_unit("/opt/my app/adapter", "/home/u/.ba")
+        assert 'ExecStart="/opt/my app/adapter" --root /home/u/.ba' in text
+
+
+class TestEscapePlistString:
+    """_escape_plist_string — XML-экранирование специальных символов."""
+
+    def test_normal_string(self):
+        assert templates._escape_plist_string("hello") == "hello"
+
+    def test_ampersand(self):
+        assert templates._escape_plist_string("a&b") == "a&amp;b"
+
+    def test_lt(self):
+        assert templates._escape_plist_string("a<b") == "a&lt;b"
+
+    def test_gt(self):
+        assert templates._escape_plist_string("a>b") == "a&gt;b"
+
+    def test_apostrophe(self):
+        assert templates._escape_plist_string("it's") == "it&apos;s"
+
+    def test_quote(self):
+        assert templates._escape_plist_string('say "hi"') == "say &quot;hi&quot;"
+
+    def test_all_special_chars(self):
+        # Тестовая строка: < > & ' "
+        s = '<>&\'"'
+        result = templates._escape_plist_string(s)
+        assert result == "&lt;&gt;&amp;&apos;&quot;"

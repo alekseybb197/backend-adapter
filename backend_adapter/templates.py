@@ -41,6 +41,15 @@ TARIFFS_NAME = "tariffs.yaml"
 # adapter.env (см. render_env / render_adapter_yaml).
 DEFAULT_KEY_ENV = "ADAPTER_BACKEND_KEY_LLM_SERVICE"
 
+# Имя метки (Label) для launchd-агентов macOS. Используется и в коде,
+# и в docs/samples/ — любая правка должна попасть в оба места.
+LAUNCHD_LABEL = "com.user.backend-adapter"
+
+# Имя user-level systemd-юнита Linux (аналог launchd-агента): кладётся в
+# ~/.config/systemd/user/. Отдельно от системного юнита install.sh --service
+# (/etc/systemd/system) — это разные уровни с разными правами.
+SYSTEMD_UNIT_NAME = "backend-adapter.service"
+
 
 SAMPLE_ADAPTER_YAML = """\
 # ============================================================
@@ -237,3 +246,274 @@ export ADAPTER_DETACH_ENABLE=0
 export ADAPTER_PIDFILE='adapter.pid'
 # export ADAPTER_STATE='state.yaml'
 """
+
+
+def render_launchd_plist(
+    binary_path: str,
+    root: str | None = None,
+    *,
+    keep_alive: bool = False,
+    run_at_load: bool = False,
+    standard_out_path: str | None = None,
+    standard_error_path: str | None = None,
+) -> str:
+    """Содержимое plist для launchd-агента backend-adapter.
+
+    Минимальный вариант с ``--root`` — все настройки подхватываются из
+    ``adapter.env`` домашней папки автоматически (см. ``_apply_home``).
+
+    Параметры:
+        binary_path: абсолютный путь к бинарнику или к ``backend-adapter.py``.
+        root: домашняя папка (обычно ``~/.ba``). Если задана, передаётся
+              ``--root <root>`` — адаптер сам найдёт и загрузит ``adapter.env``,
+              ``adapter.yaml``, ``tariffs.yaml``.
+        keep_alive: ``True`` — авто-перезапуск при падении (продакшен).
+        run_at_load: ``True`` — запуск сразу после загрузки (по умолчанию ``False``,
+                     чтобы пользователь успил заполнить ``adapter.env`` перед стартом).
+        standard_out_path: путь файла для stdout (если ``None`` — логи в system log).
+        standard_error_path: путь файла для stderr (если ``None`` — логи в system log).
+
+    Возвращает: строку XML plist (не заканчивается хвостовым ``\\n``,
+                вызывающий может добавить при записи файла).
+    """
+    binary_xml = _escape_plist_string(binary_path)
+
+    if root is not None:
+        root_escaped = _escape_plist_string(root)
+        args = [
+            f"<string>{binary_xml}</string>",
+            "<string>--root</string>",
+            f"<string>{root_escaped}</string>",
+        ]
+    else:
+        args = [f"<string>{binary_xml}</string>"]
+    # Как в render_launchd_plist_full: элементы через отступ, без ведущего \n.
+    extra_args_xml = "\n        ".join(args)
+
+    extra_env = ""
+    if standard_out_path and standard_error_path:
+        out_escaped = _escape_plist_string(standard_out_path)
+        err_escaped = _escape_plist_string(standard_error_path)
+        extra_env = f"""
+    <key>StandardOutPath</key>
+    <string>{out_escaped}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{err_escaped}</string>"""
+
+    if root is not None:
+        root_escaped = _escape_plist_string(root)
+        extra_env += f"""
+
+    <key>WorkingDirectory</key>
+    <string>{root_escaped}</string>"""
+
+    ka_bool = "true" if keep_alive else "false"
+    ral_bool = "true" if run_at_load else "false"
+
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        {extra_args_xml}
+    </array>
+
+    <key>RunAtLoad</key>
+    <{ral_bool}/>
+
+    <key>KeepAlive</key>
+    <{ka_bool}/>
+
+    <key>ProcessType</key>
+    <string>Background</string>{extra_env}
+</dict>
+</plist>
+"""
+
+
+def render_launchd_plist_full(
+    binary_path: str,
+    root: str,
+    *,
+    env_vars: dict[str, str] | None = None,
+    keep_alive: bool = True,
+    run_at_load: bool = False,
+    standard_out_path: str | None = None,
+    standard_error_path: str | None = None,
+) -> str:
+    """Полный plist для launchd-агента с инлайн env-переменными.
+
+    Используется, когда нужно задать конкретные значения прямо в plist
+    (например, для systemd-подобного окружения, где env-файл недоступен).
+
+    Параметры:
+        binary_path: абсолютный путь к бинарнику.
+        root: домашняя папка (используется как WorkingDirectory).
+        env_vars: словарь ``KEY -> VALUE`` для ``EnvironmentVariables``.
+                  Если ``None`` — используется минимальный набор (только
+                  ``ADAPTER_BACKEND_CONFIG`` и ``ADAPTER_DETACH_ENABLE=0``).
+        keep_alive: авто-перезапуск при падении.
+        run_at_load: запуск сразу после загрузки.
+        standard_out_path / standard_error_path: пути логов.
+
+    Возвращает: строку XML plist.
+    """
+    if env_vars is None:
+        env_vars = {
+            "ADAPTER_BACKEND_CONFIG": os.path.join(root, YAML_NAME),
+            "ADAPTER_DETACH_ENABLE": "0",
+        }
+
+    binary_xml = _escape_plist_string(binary_path)
+    root_escaped = _escape_plist_string(root)
+
+    # Генерируем XML для EnvironmentVariables
+    env_xml_parts = [
+        "\n        ".join(
+            f"<key>{_escape_plist_string(k)}</key>\n        <string>{_escape_plist_string(v)}</string>"
+            for k, v in sorted(env_vars.items())
+        )
+    ]
+    extra_args_xml = "\n        ".join(
+        [
+            f"<string>{binary_xml}</string>",
+            "<string>--root</string>",
+            f"<string>{root_escaped}</string>",
+        ]
+    )
+
+    extra_env = ""
+    if standard_out_path and standard_error_path:
+        out_escaped = _escape_plist_string(standard_out_path)
+        err_escaped = _escape_plist_string(standard_error_path)
+        extra_env = f"""
+    <key>StandardOutPath</key>
+    <string>{out_escaped}</string>
+
+    <key>StandardErrorPath</key>
+    <string>{err_escaped}</string>"""
+
+    ka_bool = "true" if keep_alive else "false"
+    ral_bool = "true" if run_at_load else "false"
+
+    return f"""\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        {extra_args_xml}
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{root_escaped}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        {env_xml_parts[0]}
+    </dict>
+
+    <key>RunAtLoad</key>
+    <{ral_bool}/>
+
+    <key>KeepAlive</key>
+    <{ka_bool}/>
+
+    <key>ProcessType</key>
+    <string>Background</string>{extra_env}
+</dict>
+</plist>
+"""
+
+
+def render_systemd_unit(
+    binary_path: str,
+    root: str,
+    *,
+    restart: bool = True,
+    restart_sec: int = 5,
+) -> str:
+    """Содержимое user-level systemd-юнита backend-adapter (Linux).
+
+    Аналог ``render_launchd_plist``: минимальный юнит с подходом ``--root``.
+    Агент запускает бинарник как ``<binary> --root <root>``; все настройки
+    (включая токены) берутся из ``<root>/adapter.env`` и **в юнит не
+    попадают**. Ставится в ``~/.config/systemd/user/`` (user-level, без root).
+
+    ``ADAPTER_DETACH_ENABLE=0`` задаётся через ``Environment=``: detach
+    (двойной форк) несовместим с надзором systemd, а явная переменная
+    окружения побеждает ``adapter.env`` (там она кладётся через ``setdefault``).
+
+    Параметры:
+        binary_path: абсолютный путь к бинарнику или к ``backend-adapter.py``.
+        root: домашняя папка (обычно ``~/.ba``); одновременно
+              ``WorkingDirectory`` и аргумент ``--root``.
+        restart: ``True`` — ``Restart=on-failure`` (авто-перезапуск).
+        restart_sec: пауза перед перезапуском, секунд.
+
+    Возвращает: строку unit-файла (заканчивается ``\\n``).
+    """
+    exec_start = f"{_quote_systemd_arg(binary_path)} --root {_quote_systemd_arg(root)}"
+    restart_lines = f"Restart=on-failure\nRestartSec={restart_sec}\n" if restart else ""
+
+    return f"""\
+[Unit]
+Description=backend-adapter proxy (Anthropic <-> OpenAI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={_quote_systemd_arg(root)}
+ExecStart={exec_start}
+Environment=ADAPTER_DETACH_ENABLE=0
+{restart_lines}StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=backend-adapter
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def _quote_systemd_arg(s: str) -> str:
+    """Экранировать аргумент ExecStart/WorkingDirectory для systemd.
+
+    ``%`` в unit-файлах — спецификатор (``%h``, ``%i``): удваивается, чтобы
+    путь с процентом не раскрывался. Значения со спецсимволами (пробел, ``$``,
+    кавычки, обратный слэш) берутся в двойные кавычки с экранированием —
+    systemd разбирает строку ExecStart shell-подобным парсером, где ``$``
+    раскрывает переменную (удваивается в ``$$``). Простые пути остаются как
+    есть.
+    """
+    s = s.replace("%", "%%")
+    if any(c in s for c in ' \t"\\$'):
+        escaped = s.replace("\\", "\\\\").replace('"', '\\"').replace("$", "$$")
+        return f'"{escaped}"'
+    return s
+
+
+def _escape_plist_string(s: str) -> str:
+    """Экранировать специальные символы для XML plist-строк.
+
+    Поддерживает только обязательные символы XML-escape: <, >, &, ', ".
+    """
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("'", "&apos;")
+        .replace('"', "&quot;")
+    )
