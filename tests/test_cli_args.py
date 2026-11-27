@@ -11,6 +11,7 @@
 """
 
 import os
+import pathlib
 
 import pytest
 
@@ -1174,7 +1175,6 @@ class TestLogsFlags:
         assert "[FATAL]" in capsys.readouterr().out
 
 
-
 class TestServiceLogCommands:
     """logs-clear / log-rotate / log-rotate-remove (v1.0.3, ADR-041).
 
@@ -1258,14 +1258,21 @@ class TestServiceLogCommands:
         assert "[WARN]" in capsys.readouterr().out
 
     def test_logs_clear_never_truncates(self, home, env, monkeypatch):
-        """Файл удаляется, а не обнуляется: truncate под launchd даёт NUL."""
-        inode = env["log"].stat().st_ino
-        monkeypatch.setattr(cli_args, "_launchd_fields", lambda: None)
-        with pytest.raises(SystemExit):
-            cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
-        assert not env["log"].exists()
-        env["log"].write_text("new\n", encoding="utf-8")
-        assert env["log"].stat().st_ino != inode
+        """Файл удаляется, а не обнуляется: truncate под launchd даёт NUL.
+
+        Признак удаления — открытый до вызова дескриптор после команды
+        указывает на unlinked inode (``st_nlink == 0``). Сравнение номеров
+        inode ненадёжно: tmpfs переиспользует их сразу (падало в CI).
+        """
+        fd = os.open(env["log"], os.O_RDONLY)
+        try:
+            monkeypatch.setattr(cli_args, "_launchd_fields", lambda: None)
+            with pytest.raises(SystemExit):
+                cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
+            assert not env["log"].exists()
+            assert os.fstat(fd).st_nlink == 0
+        finally:
+            os.close(fd)
 
     # ── log-rotate ──────────────────────────────────────────────────────
     def test_log_rotate_installs_conf(self, home, env, capsys, monkeypatch):
@@ -1291,7 +1298,7 @@ class TestServiceLogCommands:
             import subprocess as sp
 
             if cmd[:3] == ["sudo", "install", "-m"]:
-                captured["content"] = open(cmd[-2], encoding="utf-8").read()
+                captured["content"] = pathlib.Path(cmd[-2]).read_text(encoding="utf-8")
             return sp.CompletedProcess(cmd, 0, "", "")
 
         monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
@@ -1397,6 +1404,7 @@ class TestServiceLogCommands:
             cli_args.parse_args(["--launchd", "uninstall", "--root", str(root)], "9.9.9")
         assert ei.value.code == 0
         assert not any(c[0] == "sudo" for c in env["calls"])
+
 
 class TestSystemd:
     """--systemd (v1.0.2): user-level systemd-юнит Linux (аналог --launchd).

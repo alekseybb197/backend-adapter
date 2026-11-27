@@ -14,6 +14,13 @@ import pytest
 
 from backend_adapter import service_log, templates
 
+try:  # fcntl есть не на всех платформах; на Windows модуль — no-op
+    import fcntl
+except ImportError:  # pragma: no cover — Windows
+    fcntl = None  # type: ignore[assignment]
+
+_HAS_F_GETPATH = fcntl is not None and hasattr(fcntl, "F_GETPATH")
+
 
 @pytest.fixture
 def isolated_signal(monkeypatch):
@@ -24,21 +31,43 @@ def isolated_signal(monkeypatch):
 
 @pytest.fixture
 def launchd_env(monkeypatch, tmp_path):
-    """Процесс «под launchd», stdout — реальный файл (F_GETPATH вернёт путь)."""
+    """Процесс «под launchd», путь лога известен (``fd_log_path`` подменён).
+
+    Настоящий ``fd_log_path`` опирается на macOS-специфичный ``F_GETPATH``;
+    на Linux он возвращает ``None``, поэтому для проверки логики установки
+    обработчика путь задаётся напрямую — тест не зависит от платформы.
+    """
     monkeypatch.setenv("XPC_SERVICE_NAME", templates.LAUNCHD_LABEL)
     path = tmp_path / "adapter.log"
     path.write_text("", encoding="utf-8")
+    monkeypatch.setattr(service_log, "fd_log_path", lambda fd: str(path))
     with open(path, "a", encoding="utf-8") as f:
         monkeypatch.setattr("sys.stdout", f)
         yield path
 
 
 class TestFdLogPath:
+    @pytest.mark.skipif(not _HAS_F_GETPATH, reason="F_GETPATH есть только на macOS")
     def test_regular_file_returns_path(self, tmp_path):
         path = tmp_path / "a.log"
         path.write_text("", encoding="utf-8")
         with open(path, "a", encoding="utf-8") as f:
             assert service_log.fd_log_path(f.fileno()) == str(path.resolve())
+
+    def test_decodes_nul_terminated_path(self, monkeypatch):
+        """Путь — C-строка с NUL: декодируется без зависимости от платформы."""
+        if fcntl is None:  # pragma: no cover — Windows
+            pytest.skip("fcntl недоступен")
+        monkeypatch.setattr(fcntl, "F_GETPATH", 50, raising=False)
+        monkeypatch.setattr(fcntl, "fcntl", lambda fd, cmd, buf: b"/tmp/x.log\0junk")
+        assert service_log.fd_log_path(1) == "/tmp/x.log"
+
+    def test_non_bytes_result_returns_none(self, monkeypatch):
+        if fcntl is None:  # pragma: no cover — Windows
+            pytest.skip("fcntl недоступен")
+        monkeypatch.setattr(fcntl, "F_GETPATH", 50, raising=False)
+        monkeypatch.setattr(fcntl, "fcntl", lambda fd, cmd, buf: 0)
+        assert service_log.fd_log_path(1) is None
 
     def test_invalid_fd_returns_none(self):
         assert service_log.fd_log_path(10_000) is None
@@ -146,11 +175,18 @@ class TestClearLog:
         assert service_log.clear_log(str(tmp_path / "absent.log")) is False
 
     def test_does_not_truncate_while_file_exists(self, tmp_path):
-        """Файл именно удаляется: truncate под launchd оставляет NUL-дырки."""
+        """Файл именно удаляется: truncate под launchd оставляет NUL-дырки.
+
+        Открытый дескриптор после ``clear_log`` указывает на unlinked inode
+        (``st_nlink == 0``) — значит файл удалён, а не обнулён. Проверка не
+        зависит от переиспользования номеров inode (на tmpfs возможно).
+        """
         path = tmp_path / "adapter.log"
         path.write_text("x" * 100, encoding="utf-8")
-        inode_before = path.stat().st_ino
-        service_log.clear_log(str(path))
-        path.write_text("new", encoding="utf-8")
-        # Новый файл — новый inode: старый удалён, а не обнулён.
-        assert path.stat().st_ino != inode_before
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            assert service_log.clear_log(str(path)) is True
+            assert not path.exists()
+            assert os.fstat(fd).st_nlink == 0
+        finally:
+            os.close(fd)
