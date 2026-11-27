@@ -1,8 +1,8 @@
 ---
 paths:
   - "backend-adapter.py"
-  - "backend_adapter/{__init__,daemon,shutdown,cli}.py"
-  - "tests/test_{daemon,shutdown,manual_check}.py"
+  - "backend_adapter/{__init__,daemon,shutdown,cli,service_log}.py"
+  - "tests/test_{daemon,shutdown,manual_check,service_log}.py"
   - "docs/architecture.md"
 ---
 

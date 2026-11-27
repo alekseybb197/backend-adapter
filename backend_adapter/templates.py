@@ -518,6 +518,69 @@ WantedBy=default.target
 """
 
 
+def render_newsyslog_conf(
+    log_path: str,
+    *,
+    owner_group: str,
+    pid_file: str | None = None,
+    mode: int = 0o600,
+    count: int = 5,
+    size_kb: int = 1024,
+    when: str = "*",
+    flags: str = "BZ",
+    signal_number: int = 1,
+) -> str:
+    """Строка конфига newsyslog (macOS) для лога сервиса — ADR-041.
+
+    Формат ``newsyslog.conf(5)``::
+
+        logfile  [owner:group]  mode  count  size  when  flags  [/pid_file] [sig_num]
+
+    Значения по умолчанию — 5 архивов по 1 МБ, только по размеру
+    (``when = *``: newsyslog запускается раз в час в :30 и решает по размеру),
+    сжатие gzip (``Z``) и без служебного сообщения в новом файле (``B``).
+
+    ``pid_file`` задаёт PID, которому шлётся ``signal_number`` (по умолчанию
+    ``1`` — ``SIGHUP``): адаптер по нему переоткрывает лог
+    (``service_log.install_hup_handler``). Без pid-файла newsyslog не смог бы
+    никого уведомить, и писатель продолжил бы писать в переименованный файл —
+    поэтому ``pid_file=None`` добавляет флаг ``N`` и выбрасывает номер
+    сигнала. «Не сигналить» номером ``0`` невозможно: newsyslog отвергает
+    такой конфиг (``illegal signal number``).
+
+    Возвращает текст конфига (заканчивается ``\\n``); пути с пробелом или
+    решёткой не поддерживаются форматом — ``ValueError``.
+    """
+    for name, path in (("log_path", log_path), ("pid_file", pid_file)):
+        if path is not None and any(c.isspace() for c in path):
+            raise ValueError(f"{name}: newsyslog не поддерживает пробелы в пути: {path!r}")
+    if pid_file is None:
+        flags = flags if "N" in flags else flags + "N"
+    log_escaped = _escape_newsyslog_path(log_path)
+    fields = [
+        log_escaped,
+        owner_group,
+        f"{mode:03o}",
+        str(count),
+        str(size_kb),
+        when,
+        flags,
+    ]
+    if pid_file is not None:
+        fields += [_escape_newsyslog_path(pid_file), str(signal_number)]
+    header = (
+        "# backend-adapter service log — ADR-041.\n"
+        "# Установлен командой: backend-adapter --launchd log-rotate\n"
+        "# Снять: backend-adapter --launchd log-rotate-remove\n"
+    )
+    return header + "  ".join(fields) + "\n"
+
+
+def _escape_newsyslog_path(path: str) -> str:
+    """Экранировать ``#`` в пути: в newsyslog.conf он начинает комментарий."""
+    return path.replace("#", "\\#")
+
+
 def _quote_systemd_env(key: str, value: str) -> str:
     """Собрать одно присваивание ``Environment=`` с безопасным значением.
 

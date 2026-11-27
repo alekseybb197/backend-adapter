@@ -16,6 +16,18 @@ v0.9.0 — `<бэкенд>.models.json`, см. ниже).
 Отдельно в `var/` лежит **PID-файл** `adapter.pid` (пишется при любом запуске,
 v0.9.5, `daemon.py`) — не лог, а служебный артефакт для управления процессом.
 
+**Лог сервиса (под launchd/systemd).** Всё выше — логи *процесса адаптера*,
+которые он пишет сам. Когда адаптер работает под надзором (launchd/systemd),
+консольный вывод (stdout/stderr) забирает супервизор: на macOS — в файл
+`~/Library/Logs/backend-adapter/adapter.log` (**вне** `<ADAPTER_DATA_ROOT>`,
+plist задаёт `StandardOutPath`/`StandardErrorPath`), на Linux — в journald.
+Этот файл — не канал `redact`-контроля адаптера, а сырой вывод процесса; его
+путь, очистка и ротация — вне `ADAPTER_DATA_ROOT`. Под launchd файл никем не
+ограничен в росте, поэтому v1.0.3 (ADR-041) даёт `--launchd logs-clear`
+(удаление + перезапуск агента) и `--launchd log-rotate` (newsyslog: ротация
+по размеру + SIGHUP-переоткрытие через `service_log.py`). Подробности —
+`docs/install.md` §9.2.
+
 ---
 
 ## Направление данных

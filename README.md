@@ -3,7 +3,7 @@
 > backend router and endpoint adapter: [AN] Messages <-> [OI]-compatible
 > backends for AI agents
 >
-> **v1.0.2** — HTTP-прокси-адаптер, позволяющий работать агентам с
+> **v1.0.3** — HTTP-прокси-адаптер, позволяющий работать агентам с
 > **Anthropic-совместимым API** (**[CC]**, **QwenCode**) через бэкенд LLM,
 > который реализует **[OI]-совместимый API** (`/v1/chat/completions`), но
 > некорректно реализует протокол Anthropic Messages API.
@@ -95,8 +95,14 @@ python3 backend-adapter.py --root ~/.ba       # запуск с настройк
 Ключи CLI: `--version`/`-v`, `--help`/`-h`/`-?`, `--root <путь>`, `--install`,
 `--install --name/--base/--key` (только вместе), `--check`, `--launchd`
 (macOS) и `--systemd` (Linux) — user-level автозапуск без root для готового
-дома, включая просмотр логов сервиса (`logs`, `-n/--lines N`, `-f/--follow`)
-(подробности — [docs/install.md](docs/install.md) §4.5 и §9).
+дома: установка (`install`/`plist-install`/`unit-install`), управление
+(`load`/`unload`/`start`/`stop`/`status`), логи (`logs`, `-n/--lines N`,
+`-f/--follow`; на macOS ещё `logs-clear` — очистка файла лога, `log-rotate`/
+`log-rotate-remove` — ротация через newsyslog) и удаление —
+`plist-uninstall`/`unit-uninstall` (только сервис) либо `uninstall`
+(сервис + дом, с подтверждением / `--yes`).
+Сквозной порядок «установка → сервис → удаление» — [docs/install.md](docs/install.md)
+§9.0; детали — §4.5 и §9.
 
 Подробная инструкция: [docs/install.md](docs/install.md)
 

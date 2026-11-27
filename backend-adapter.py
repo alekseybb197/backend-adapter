@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""[CC] <-> [OI]-backend adapter v1.0.2
+"""[CC] <-> [OI]-backend adapter v1.0.3
 — changelog: ../changelog.md"""
 
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 # КОНСТАНТНОЕ определение инструмента (v0.9.9): назначение адаптера не меняется
 # от фичи к фиче, поэтому перечисление возможностей здесь не поддерживается.
 # Формулировка дублируется в README.md первой строкой вводного blockquote;
@@ -313,6 +313,15 @@ if __name__ == "__main__":
     from backend_adapter.shutdown import graceful_shutdown, install_signal_handlers
 
     install_signal_handlers(graceful=True)
+
+    # SIGHUP = переоткрыть лог сервиса (v1.0.3, ADR-041). Под launchd stdout
+    # — файл, открытый один раз при старте; newsyslog ротирует его и шлёт
+    # SIGHUP, чтобы процесс переоткрыл путь и не писал в переименованный
+    # архив. Обработчик ставится ТОЛЬКО под launchd (XPC_SERVICE_NAME):
+    # в терминале SIGHUP сохраняет обычный смысл — завершение (ADR-026).
+    from backend_adapter.service_log import install_hup_handler
+
+    install_hup_handler()
 
     def _finish():
         # Финальный этап вежливого завершения: остановить фоновую проверку

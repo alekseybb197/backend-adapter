@@ -408,3 +408,71 @@ class TestEscapePlistString:
         s = '<>&\'"'
         result = templates._escape_plist_string(s)
         assert result == "&lt;&gt;&amp;&apos;&quot;"
+
+
+class TestRenderNewsyslogConf:
+    """render_newsyslog_conf — строка ротации лога сервиса (ADR-041)."""
+
+    def _fields(self, text):
+        """Поля последней (некомментарной) строки конфига."""
+        line = [ln for ln in text.splitlines() if ln and not ln.startswith("#")][-1]
+        return line.split()
+
+    def test_full_line_with_pidfile(self):
+        text = templates.render_newsyslog_conf(
+            "/Users/u/Library/Logs/backend-adapter/adapter.log",
+            owner_group="501:20",
+            pid_file="/Users/u/.ba/var/adapter.pid",
+        )
+        assert self._fields(text) == [
+            "/Users/u/Library/Logs/backend-adapter/adapter.log",
+            "501:20",
+            "600",
+            "5",
+            "1024",
+            "*",
+            "BZ",
+            "/Users/u/.ba/var/adapter.pid",
+            "1",
+        ]
+
+    def test_header_documents_commands(self):
+        text = templates.render_newsyslog_conf("/tmp/a.log", owner_group="0:0")
+        assert "--launchd log-rotate" in text
+        assert "--launchd log-rotate-remove" in text
+        assert text.endswith("\n")
+
+    def test_without_pidfile_adds_N_and_drops_signal(self):
+        """Без PID newsyslog не смог бы уведомить процесс — только флаг N."""
+        fields = self._fields(templates.render_newsyslog_conf("/tmp/a.log", owner_group="0:0"))
+        assert "N" in fields[6]
+        assert fields[-1] == fields[6]  # номера сигнала нет
+
+    def test_never_uses_signal_zero(self):
+        """`0` newsyslog отвергает: «illegal signal number»."""
+        for pid in (None, "/tmp/a.pid"):
+            text = templates.render_newsyslog_conf("/tmp/a.log", owner_group="0:0", pid_file=pid)
+            assert self._fields(text)[-1] != "0"
+
+    def test_custom_policy(self):
+        fields = self._fields(
+            templates.render_newsyslog_conf(
+                "/tmp/a.log", owner_group="0:0", count=3, size_kb=50, flags="Z"
+            )
+        )
+        assert fields[3] == "3" and fields[4] == "50"
+        assert "N" in fields[6] and "Z" in fields[6]
+
+    def test_mode_is_octal(self):
+        fields = self._fields(
+            templates.render_newsyslog_conf("/tmp/a.log", owner_group="0:0", mode=0o640)
+        )
+        assert fields[2] == "640"
+
+    def test_space_in_path_is_rejected(self):
+        with pytest.raises(ValueError):
+            templates.render_newsyslog_conf("/tmp/my log.log", owner_group="0:0")
+
+    def test_hash_in_path_escaped(self):
+        fields = self._fields(templates.render_newsyslog_conf("/tmp/a#b.log", owner_group="0:0"))
+        assert fields[0] == "/tmp/a\\#b.log"

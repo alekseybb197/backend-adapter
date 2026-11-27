@@ -261,7 +261,7 @@ class TestManualAdapterProcess:
                 assert _wait_http(exp_port, "/metrics") == 200, \
                     f"экспортёр не поднялся на :{exp_port}"
                 out = ap.output
-                assert "Backend-Adapter v1.0.2" in out, out[:400]
+                assert "Backend-Adapter v1.0.3" in out, out[:400]
                 assert "[INIT] Probing backend 'fake'" in out, out[:400]
                 assert "[WEBUI]" in out and "root:" in out, out[:400]
                 # v0.9.9: старт создаёт обе подпапки корня данных — log/

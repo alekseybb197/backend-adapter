@@ -58,7 +58,7 @@ import sys
 import tempfile
 import time
 
-from . import env_check, templates
+from . import env_check, service_log, templates
 
 # Ключи версии и справки (синонимы: короткий/длинный; -? — исторический
 # «вопросительный» вариант, привычный по Windows-утилитам).
@@ -76,6 +76,9 @@ _LAUNCHD_ACTIONS = frozenset(
         "status",
         "plist",
         "logs",
+        "logs-clear",
+        "log-rotate",
+        "log-rotate-remove",
         "plist-uninstall",
         "uninstall",
     }
@@ -107,6 +110,11 @@ _SYSTEMD_DEFAULT_ACTION = "install"
 # ``-n`` — глубина разового вывода (по умолчанию последние 20 строк),
 # ``-f`` — не завершаться, а следить за логом до Ctrl-C.
 _LOGS_DEFAULT_LINES = 20
+
+# Ротация лога сервиса (v1.0.3, ADR-041): конфиг newsyslog кладётся в
+# /etc/newsyslog.d — это системный каталог, запись требует sudo.
+_NEWSYSLOG_DIR = "/etc/newsyslog.d"
+_NEWSYSLOG_CONF_NAME = "backend-adapter.conf"
 _LOGS_LINES_FLAGS = ("-n", "--lines")
 _LOGS_FOLLOW_FLAGS = ("-f", "--follow")
 
@@ -193,10 +201,18 @@ Options:
                      logs — показать последние строки лога агента
                      (~/Library/Logs/backend-adapter/adapter.log);
                      см. -n/-f ниже;
+                     logs-clear — очистить лог агента (файл удаляется;
+                     работающий агент ПЕРЕЗАПУСКАЕТСЯ, иначе место не
+                     освободится — см. ADR-041);
+                     log-rotate — поставить ротацию лога через newsyslog
+                     (/etc/newsyslog.d, требует sudo); по умолчанию 5
+                     архивов по 1 МБ, сжатие gzip, по факту размера;
+                     log-rotate-remove — снять конфиг ротации (требует sudo);
                      plist-uninstall — остановить агент, снять регистрацию и
                      удалить plist (дом НЕ трогает);
                      uninstall — ПОЛНОЕ удаление: plist + дом целиком
-                     (adapter.env с токенами, конфиги) + лог сервиса.
+                     (adapter.env с токенами, конфиги) + лог сервиса +
+                     конфиг ротации, если он был установлен.
                      Спрашивает подтверждение; для скриптов добавьте --yes.
                      Все подкоманды принимают --root (по умолчанию ~/.ba).
   --systemd <подкоманда>
@@ -270,6 +286,15 @@ def parse_args(argv: list[str], version: str) -> None:
     ``-n/--lines`` (по умолчанию ``_LOGS_DEFAULT_LINES``), режим наблюдения —
     ``-f/--follow`` (процесс живёт до Ctrl-C). ``-n``/``-f`` без ``logs`` —
     ``[FATAL]`` exit 2.
+
+    Подкоманды лога сервиса (v1.0.3, ADR-041). ``logs-clear`` удаляет файл
+    лога (``truncate`` под launchd оставляет NUL-дырку, см.
+    ``service_log``), а работающий агент перезапускает: без этого fd живого
+    процесса держал бы удалённый inode. ``log-rotate`` ставит конфиг
+    newsyslog в ``/etc/newsyslog.d`` (запись через ``sudo``, предварительно
+    проверенный dry-run'ом без root), ``log-rotate-remove`` его снимает.
+    Обе требуют размеченного дома с живым PID-файлом: без PID newsyslog не
+    смог бы уведомить агент о ротации.
 
     Подкоманды удаления (v1.0.3). ``plist-uninstall``/``unit-uninstall``
     удаляют только установочный артефакт сервиса (plist/юнит и его ``.bak``),
@@ -619,6 +644,9 @@ def _dispatch_launchd(
     if action == "logs":
         _launchd_logs(root, lines=lines, follow=follow)
         return
+    if action == "logs-clear":
+        _launchd_logs_clear(root)
+        return
     if action == "uninstall":
         _launchd_uninstall(root, assume_yes=assume_yes)
         return
@@ -629,6 +657,8 @@ def _dispatch_launchd(
         "unload": _launchd_unload,
         "status": _launchd_status,
         "plist": _launchd_plist,
+        "log-rotate": _launchd_log_rotate,
+        "log-rotate-remove": _launchd_log_rotate_remove,
         "plist-uninstall": _launchd_plist_uninstall,
     }
     func = dispatch.get(action)
@@ -830,17 +860,15 @@ def _find_binary(root: str) -> tuple[str, str | None]:
 def _service_log_path() -> str:
     """Файл, куда launchd пишет stdout/stderr агента.
 
-    Путь — ``~/Library/Logs/backend-adapter/adapter.log`` (тот же каталог, что
-    у ``install.sh``), а **не** ``<root>/log``: в доме живут логи *работающего*
-    адаптера (``session-*.log``, ``.err``, ``*.parts``), и складывать туда
-    вывод сервиса значило бы смешивать два разных источника в одном каталоге
-    данных.
+    Путь живёт в ``service_log`` (модуль поднимает его и выше — он нужен и
+    запущенному адаптеру для SIGHUP-переоткрытия, ADR-041). Здесь — только
+    делегат, чтобы у CLI и адаптера не разъехались два пути.
 
     launchd без ``StandardOutPath``/``StandardErrorPath`` отправляет вывод
     сервиса в ``/dev/null`` — логов не остаётся вовсе. Поэтому генерируемый
     plist всегда задаёт этот файл, а ``--launchd logs`` читает его (``tail``).
     """
-    return os.path.expanduser(os.path.join("~/Library/Logs", "backend-adapter", "adapter.log"))
+    return service_log.service_log_path()
 
 
 def _write_launchd_plist(root: str) -> str:
@@ -1215,8 +1243,6 @@ def _check_purge_root(root: str) -> None:
         print(f"[FATAL] Отказ: в {root} нет {_ENV_NAME} или {_YAML_NAME} — это не дом адаптера.")
         print("       Полное удаление стирает каталог целиком; укажите верный --root.")
         sys.exit(1)
-        print("       Полное удаление стирает каталог целиком; укажите верный --root.")
-        sys.exit(1)
 
 
 def _confirm_purge(root: str, extra: list[str], *, assume_yes: bool) -> None:
@@ -1264,6 +1290,21 @@ def _remove_path(path: str, *, errors: list[str]) -> bool:
     return True
 
 
+def _sudo_remove(path: str) -> bool:
+    """Удалить системный файл через ``sudo rm -f``; ``True`` при успехе.
+
+    ``-f`` делает операцию идемпотентной: файла нет — код 0, ошибки нет.
+    Вызывается только когда файл существует (``uninstall`` не должен
+    требовать пароля, если ротация не ставилась).
+    """
+    result = subprocess.run(["sudo", "rm", "-f", path])
+    if result.returncode != 0:
+        print(f"[WARN] Не удалось удалить {path} (код {result.returncode}).")
+        return False
+    print(f"[OK]   Удалён: {path}")
+    return True
+
+
 def _purge_paths(paths: list[str], *, empty_ok: str) -> list[str]:
     """Удалить перечисленные пути; вернуть список тех, что не удались."""
     errors: list[str] = []
@@ -1284,12 +1325,13 @@ def _is_inside(parent: str, child: str) -> bool:
 
 
 def _launchd_uninstall(root: str, *, assume_yes: bool = False) -> None:
-    """Полное удаление (macOS): plist + дом + лог сервиса.
+    """Полное удаление (macOS): plist + дом + лог сервиса + конфиг ротации.
 
     Обратная операция к ``install``: сначала ``plist-uninstall`` (остановить
-    агент, снять регистрацию, убрать plist), затем дом ``<root>`` целиком и
-    каталог сервисного лога ``~/Library/Logs/backend-adapter/``. Требует
-    подтверждения (``assume_yes`` — флаг ``--yes``).
+    агент, снять регистрацию, убрать plist), затем дом ``<root>`` целиком,
+    каталог сервисного лога ``~/Library/Logs/backend-adapter/`` и, если он
+    ставился, конфиг ротации ``/etc/newsyslog.d/backend-adapter.conf``.
+    Требует подтверждения (``assume_yes`` — флаг ``--yes``).
     """
     log_dir = os.path.dirname(_service_log_path())
     # Лог вне дома; если root случайно указывает внутрь каталога лога или
@@ -1297,10 +1339,18 @@ def _launchd_uninstall(root: str, *, assume_yes: bool = False) -> None:
     if _is_inside(root, log_dir) or _is_inside(log_dir, root):
         log_dir = ""
     _check_purge_root(root)
+    conf_path = _newsyslog_conf_path()
     extra = [f"лог сервиса: {log_dir}"] if log_dir else []
+    if os.path.exists(conf_path):
+        extra.append(f"конфиг ротации: {conf_path}")
     _confirm_purge(root, extra, assume_yes=assume_yes)
 
     _launchd_plist_uninstall(root)
+    # Конфиг ротации живёт в /etc: без снятия он остался бы правилом на
+    # несуществующий файл. Через sudo и только если он установлен —
+    # `uninstall` без ротации не должен требовать пароля.
+    if os.path.exists(conf_path) and not _sudo_remove(conf_path):
+        print(f"[WARN] Конфиг ротации не удалён: {conf_path}")
     sources = [root] + ([log_dir] if log_dir else [])
     errors = _purge_paths(sources, empty_ok="Дом и лог сервиса")
     if errors:
@@ -1357,6 +1407,242 @@ def _launchd_logs(root: str, *, lines: int, follow: bool) -> None:
         follow=follow,
         hint=f"Лог сервиса: {log_path} (запуск: backend-adapter --launchd load)",
     )
+
+
+# ── Лог сервиса: очистка и ротация (v1.0.3, ADR-041) ────────────────────
+# Лог сервиса — stdout/stderr процесса под launchd
+# (~/Library/Logs/backend-adapter/adapter.log). launchd держит его открытым и
+# сам не ротирует. Две команды закрывают обе стороны проблемы:
+# ``logs-clear`` — разовая очистка, ``log-rotate`` — постоянная политика
+# через штатный newsyslog macOS. Механика (truncate портит файл, SIGHUP
+# переоткрытие) — в ``service_log`` и docs/adr/041.
+
+
+def _launchd_logs_clear(root: str) -> None:
+    """Очистить лог сервиса: удалить файл; работающий агент перезапустить.
+
+    ``truncate`` не используется: fd launchd открыт без ``O_APPEND``, и
+    писатель со своим смещением оставляет в файле NUL-дырку (замерено
+    160–490 байт) — см. ADR-041. Файл удаляется; но пока жив старый процесс,
+    его fd держит удалённый inode, и место не освобождается, поэтому
+    работающий агент перезапускается (``kickstart -k``). Перезапуск рвёт
+    in-flight запросы — это осознанный компромисс, о нём сообщаем.
+
+    Остановленный (или незарегистрированный) агент: файл просто удаляется,
+    ничего не поднимается. Файла нет — ``[WARN]`` и код 0 (идемпотентно).
+    """
+    del root  # путь лога от дома не зависит
+    log_path = _service_log_path()
+    try:
+        removed = service_log.clear_log(log_path)
+    except OSError as e:
+        print(f"[FATAL] Не удалось удалить лог {log_path}: {e}")
+        sys.exit(1)
+    if not removed:
+        print(f"[WARN] Лог-файл не найден: {log_path} — очищать нечего.")
+    else:
+        print(f"[OK]   Лог удалён: {log_path}")
+
+    fields = _launchd_fields()
+    if not fields:
+        if removed:
+            print("       Агент не зарегистрирован — файл создастся при следующем запуске.")
+        return
+    if fields.get("state") != "running":
+        print(
+            f"       Агент не работает (state: {fields.get('state', 'unknown')}) — перезапуск не нужен."
+        )
+        return
+
+    # Живой процесс держит fd удалённого файла — без перезапуска место не
+    # освободится, а новые строки шли бы в невидимый inode.
+    result = subprocess.run(
+        ["launchctl", "kickstart", "-k", "-p", _launchd_target()],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print(f"[WARN] Лог удалён, но агент не перезапущен: {result.stderr.strip()}")
+        print("       Остановите и запустите вручную: --launchd unload && --launchd load")
+        return
+    pid = _wait_launchd_running(_LOAD_SETTLE_TIMEOUT, _LOAD_SETTLE_STEP)
+    if pid is None:
+        print("[WARN] Агент перезапущен, но процесс не поднялся — см. --launchd logs.")
+        return
+    print(f"[OK]   Агент перезапущен с чистым логом: PID {pid}")
+
+
+def _service_pidfile(root: str) -> str:
+    """PID-файл работающего агента по настройкам дома (без правки окружения).
+
+    newsyslog получает PID из файла и шлёт ему SIGHUP. Путь считает сам
+    адаптер (``daemon._pidfile_path``: ``<ADAPTER_DATA_ROOT>/var/<basename>``),
+    поэтому его нельзя угадывать: дом вправе задать другой корень данных в
+    ``adapter.env``. Здесь настройки дома читаются в **отдельный** словарь
+    (не в ``os.environ`` — CLI не должен менять своё окружение): явное
+    значение окружения побеждает файл, как и при обычном применении дома.
+    """
+    values: dict[str, str] = {}
+    try:
+        with open(os.path.join(root, _ENV_NAME), encoding="utf-8") as f:
+            values = env_check.parse_env_text(f.read())
+    except OSError:
+        pass
+    data_root = (
+        os.environ.get("ADAPTER_DATA_ROOT", "").strip()
+        or values.get("ADAPTER_DATA_ROOT", "").strip()
+        or root
+    )
+    name = (
+        os.environ.get("ADAPTER_PIDFILE", "").strip()
+        or values.get("ADAPTER_PIDFILE", "").strip()
+        or "adapter.pid"
+    )
+    return os.path.join(os.path.expanduser(data_root), "var", os.path.basename(name))
+
+
+def _newsyslog_conf_path() -> str:
+    """Путь конфига ротации в системном каталоге newsyslog."""
+    return os.path.join(_NEWSYSLOG_DIR, _NEWSYSLOG_CONF_NAME)
+
+
+def _read_pid(pidfile: str) -> int | None:
+    """Прочитать PID из файла и проверить, что процесс жив (``kill -0``)."""
+    try:
+        with open(pidfile, encoding="utf-8") as f:
+            pid = int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        return pid  # процесс существует, но наш — чужой: сигнал не понадобится
+    return pid
+
+
+def _owner_group() -> str:
+    """``uid:gid`` владельца лога — архив создаётся с этими же правами."""
+    return f"{os.getuid()}:{os.getgid()}"
+
+
+def _run_newsyslog_dry_run(conf_path: str) -> bool:
+    """Проверить конфиг newsyslog без root и без изменения файлов.
+
+    ``newsyslog -r -n -f <conf>`` снимает требование root, ничего не
+    ротирует (``-n``) и печатает план. Код 0 — конфиг разобран; иначе в
+    ``/etc`` его класть нельзя. Утилиты нет — считаем проверку пройденной с
+    ``[WARN]``: ставим конфиг, но предупреждаем (на Linux этой команды нет
+    вовсе — но ``log-rotate`` и задуман для macOS).
+    """
+    if shutil.which("newsyslog") is None:
+        print("[WARN] newsyslog не найден — проверка конфига пропущена.")
+        return True
+    result = subprocess.run(
+        ["newsyslog", "-r", "-n", "-f", conf_path],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True
+    detail = (result.stderr or result.stdout).strip()
+    print(f"[FATAL] newsyslog отверг конфиг (код {result.returncode}): {detail}")
+    return False
+
+
+def _sudo_install(source: str, target: str, *, mode: str = "644") -> bool:
+    """Установить файл в системный каталог через ``sudo install``.
+
+    ``sudo`` наследует терминал: пароль спрашивает он сам (без ``-n`` —
+    команда интерактивна по замыслу). Отказ или ошибка — ``[FATAL]`` с
+    подсказкой; временный файл удаляет вызывающий (``with``).
+    """
+    result = subprocess.run(["sudo", "install", "-m", mode, source, target])
+    if result.returncode != 0:
+        print(
+            "[FATAL] Не удалось установить "
+            f"{target} (код {result.returncode}). Нужны права root: команда "
+            "запускает sudo."
+        )
+        return False
+    return True
+
+
+def _launchd_log_rotate(root: str) -> None:
+    """Поставить ротацию лога сервиса через newsyslog (macOS, ADR-041).
+
+    Порядок: проверить дом и plist → резолвить PID-файл и убедиться, что
+    агент жив (без PID newsyslog не смог бы уведомить процесс, и тот писал
+    бы в переименованный файл) → сгенерировать конфиг → проверить его
+    dry-run'ом **без root** → установить через ``sudo install`` в
+    ``/etc/newsyslog.d``. Демон newsyslog (``com.apple.newsyslog``, раз в час
+    в :30) применит конфиг сам; перезапуск демона не нужен.
+    """
+    if not _home_is_marked(root):
+        print(f"[FATAL] Дом не размечен: {root} (нет {_ENV_NAME}).")
+        print(f"       Сначала: backend-adapter --launchd install --root {root}")
+        sys.exit(1)
+    if not os.path.isfile(_plist_path()):
+        print(f"[FATAL] Plist не найден: {_plist_path()}")
+        print("       Сначала выполните: backend-adapter --launchd install")
+        sys.exit(1)
+
+    log_path = _service_log_path()
+    if not os.path.isfile(log_path):
+        print(f"[FATAL] Лог сервиса не найден: {log_path}")
+        print("       Сервис ещё не запускался — запустите его и повторите:")
+        print("       backend-adapter --launchd load")
+        sys.exit(1)
+    pidfile = _service_pidfile(root)
+    if _read_pid(pidfile) is None:
+        print(f"[FATAL] PID-файл агента не найден или процесс не жив: {pidfile}")
+        print("       Без PID newsyslog не сможет уведомить адаптер о ротации,")
+        print("       и тот продолжит писать в переименованный файл.")
+        print("       Перезапустите сервис (--launchd load) и повторите.")
+        sys.exit(1)
+
+    count, size_kb = 5, 1024
+    content = templates.render_newsyslog_conf(
+        log_path,
+        owner_group=_owner_group(),
+        pid_file=pidfile,
+        count=count,
+        size_kb=size_kb,
+    )
+    conf_path = _newsyslog_conf_path()
+    fd, tmp_path = tempfile.mkstemp(prefix="backend-adapter-newsyslog-", suffix=".conf")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        if not _run_newsyslog_dry_run(tmp_path):
+            print("       Конфиг не установлен (в /etc ничего не изменено).")
+            sys.exit(1)
+        if not _sudo_install(tmp_path, conf_path):
+            sys.exit(1)
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(tmp_path)
+
+    print(f"[OK]   Ротация лога настроена: {conf_path}")
+    print(f"       Лог: {log_path}")
+    print(f"       Политика: {count} архивов по {size_kb} КБ, gzip, только по размеру.")
+    print("       Проверяет демон newsyslog (раз в час в :30).")
+    print("       Снять: backend-adapter --launchd log-rotate-remove")
+
+
+def _launchd_log_rotate_remove(root: str) -> None:
+    """Снять конфиг ротации лога (``/etc/newsyslog.d``, через ``sudo``)."""
+    del root  # путь конфига от дома не зависит
+    conf_path = _newsyslog_conf_path()
+    result = subprocess.run(["sudo", "rm", "-f", conf_path])
+    if result.returncode != 0:
+        print(f"[FATAL] Не удалось удалить {conf_path} (код {result.returncode}).")
+        sys.exit(1)
+    print(f"[OK]   Конфиг ротации снят: {conf_path}")
+    print("       Уже ротированные архивы (adapter.log.0.gz …) не удаляются.")
 
 
 # ── systemd (Linux, user-level) — аналог --launchd ──────────────────────

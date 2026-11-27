@@ -1174,6 +1174,230 @@ class TestLogsFlags:
         assert "[FATAL]" in capsys.readouterr().out
 
 
+
+class TestServiceLogCommands:
+    """logs-clear / log-rotate / log-rotate-remove (v1.0.3, ADR-041).
+
+    Лог сервиса живёт вне дома (``~/Library/Logs/backend-adapter``), а конфиг
+    ротации — в системном ``/etc/newsyslog.d``. Оба пути подменяются: тест не
+    трогает ни настоящий лог, ни ``/etc`` и не зовёт ``sudo``.
+    """
+
+    @pytest.fixture
+    def home(self, tmp_path, clean_env, fake_binary, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        return tmp_path
+
+    @pytest.fixture
+    def env(self, home, monkeypatch):
+        """Подменённые пути лога/конфига и запись вызовов subprocess."""
+        log_dir = home / "Library" / "Logs" / "backend-adapter"
+        log_dir.mkdir(parents=True)
+        log = log_dir / "adapter.log"
+        log.write_text("old\n", encoding="utf-8")
+        etc = home / "etc"
+        etc.mkdir()
+        monkeypatch.setattr(cli_args, "_NEWSYSLOG_DIR", str(etc))
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            import subprocess as sp
+
+            calls.append(list(cmd))
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        return {"log": log, "conf": etc / "backend-adapter.conf", "calls": calls}
+
+    def _marked_home(self, home, *, data_root=None):
+        """Размеченный дом с plist; PID-файл по умолчанию указывает на us."""
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        var = (data_root or root) / "var"
+        var.mkdir(parents=True, exist_ok=True)
+        (var / "adapter.pid").write_text(str(os.getpid()), encoding="utf-8")
+        return root
+
+    # ── logs-clear ──────────────────────────────────────────────────────
+    def test_logs_clear_removes_file_when_agent_stopped(self, home, env, capsys, monkeypatch):
+        monkeypatch.setattr(cli_args, "_launchd_fields", lambda: {"state": "not running"})
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
+        assert ei.value.code == 0
+        assert not env["log"].exists()
+        out = capsys.readouterr().out
+        assert "[OK]" in out and "перезапуск не нужен" in out
+        # Остановленный агент не перезапускается.
+        assert not any("kickstart" in c for c in env["calls"])
+
+    def test_logs_clear_restarts_running_agent(self, home, env, capsys, monkeypatch):
+        monkeypatch.setattr(cli_args, "_launchd_fields", lambda: {"state": "running", "pid": "1"})
+        monkeypatch.setattr(cli_args, "_wait_launchd_running", lambda t, s: "4242")
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
+        assert ei.value.code == 0
+        assert not env["log"].exists()
+        kick = [c for c in env["calls"] if "kickstart" in c][0]
+        assert "-k" in kick
+        assert "PID 4242" in capsys.readouterr().out
+
+    def test_logs_clear_unregistered_agent(self, home, env, capsys, monkeypatch):
+        monkeypatch.setattr(cli_args, "_launchd_fields", lambda: None)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
+        assert ei.value.code == 0
+        assert not env["log"].exists()
+
+    def test_logs_clear_missing_file_warns(self, home, env, capsys, monkeypatch):
+        env["log"].unlink()
+        monkeypatch.setattr(cli_args, "_launchd_fields", lambda: {"state": "not running"})
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
+        assert ei.value.code == 0
+        assert "[WARN]" in capsys.readouterr().out
+
+    def test_logs_clear_never_truncates(self, home, env, monkeypatch):
+        """Файл удаляется, а не обнуляется: truncate под launchd даёт NUL."""
+        inode = env["log"].stat().st_ino
+        monkeypatch.setattr(cli_args, "_launchd_fields", lambda: None)
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "logs-clear"], "9.9.9")
+        assert not env["log"].exists()
+        env["log"].write_text("new\n", encoding="utf-8")
+        assert env["log"].stat().st_ino != inode
+
+    # ── log-rotate ──────────────────────────────────────────────────────
+    def test_log_rotate_installs_conf(self, home, env, capsys, monkeypatch):
+        root = self._marked_home(home)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/sbin/newsyslog")
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        # Сначала dry-run без root, затем sudo install.
+        dry = [c for c in env["calls"] if "newsyslog" in c][0]
+        assert "-r" in dry and "-n" in dry
+        install = [c for c in env["calls"] if c[:3] == ["sudo", "install", "-m"]][0]
+        assert install[-1] == str(env["conf"])
+        out = capsys.readouterr().out
+        assert "[OK]" in out and "Ротация лога настроена" in out
+
+    def test_log_rotate_conf_points_to_pidfile(self, home, env, monkeypatch):
+        root = self._marked_home(home)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/sbin/newsyslog")
+        captured = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            import subprocess as sp
+
+            if cmd[:3] == ["sudo", "install", "-m"]:
+                captured["content"] = open(cmd[-2], encoding="utf-8").read()
+            return sp.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert str(root / "var" / "adapter.pid") in captured["content"]
+        assert str(env["log"]) in captured["content"]
+
+    def test_log_rotate_refuses_without_pidfile(self, home, env, capsys):
+        root = home / ".ba"
+        with pytest.raises(SystemExit):
+            cli_args.parse_args(["--launchd", "install", "--root", str(root)], "9.9.9")
+        (root / "var").mkdir(exist_ok=True)
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 1
+        out = capsys.readouterr().out
+        assert "[FATAL]" in out and "PID" in out
+        assert not env["conf"].exists()
+
+    def test_log_rotate_refuses_unmarked_home(self, home, env, capsys):
+        root = home / "plain"
+        root.mkdir()
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 1
+        assert "не размечен" in capsys.readouterr().out
+
+    def test_log_rotate_refuses_without_log_file(self, home, env, capsys, monkeypatch):
+        root = self._marked_home(home)
+        env["log"].unlink()
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 1
+        assert "Лог сервиса не найден" in capsys.readouterr().out
+
+    def test_log_rotate_aborts_on_failed_dry_run(self, home, env, capsys, monkeypatch):
+        root = self._marked_home(home)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: "/usr/sbin/newsyslog")
+
+        def fake_run(cmd, *args, **kwargs):
+            import subprocess as sp
+
+            rc = 1 if cmd[0] == "newsyslog" else 0
+            return sp.CompletedProcess(cmd, rc, "", "bad config")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fake_run)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 1
+        out = capsys.readouterr().out
+        assert "отверг конфиг" in out
+        # В /etc ничего не попало: sudo install не вызывался.
+        assert not env["conf"].exists()
+
+    def test_log_rotate_without_newsyslog_warns_but_installs(self, home, env, capsys, monkeypatch):
+        root = self._marked_home(home)
+        monkeypatch.setattr(cli_args.shutil, "which", lambda name: None)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        out = capsys.readouterr().out
+        assert "newsyslog не найден" in out
+        assert any(c[:3] == ["sudo", "install", "-m"] for c in env["calls"])
+
+    # ── log-rotate-remove ───────────────────────────────────────────────
+    def test_log_rotate_remove_calls_sudo_rm(self, home, env, capsys):
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate-remove"], "9.9.9")
+        assert ei.value.code == 0
+        assert ["sudo", "rm", "-f", str(env["conf"])] in env["calls"]
+        assert "снят" in capsys.readouterr().out
+
+    def test_log_rotate_remove_failure_is_fatal(self, home, env, capsys, monkeypatch):
+        def fail(cmd, *a, **k):
+            import subprocess as sp
+
+            return sp.CompletedProcess(cmd, 1, "", "denied")
+
+        monkeypatch.setattr(cli_args.subprocess, "run", fail)
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "log-rotate-remove"], "9.9.9")
+        assert ei.value.code == 1
+        assert "[FATAL]" in capsys.readouterr().out
+
+    # ── uninstall ───────────────────────────────────────────────────────
+    def test_uninstall_removes_rotate_conf(self, home, env, capsys, monkeypatch):
+        root = self._marked_home(home)
+        env["conf"].write_text("# rotation\n", encoding="utf-8")
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "uninstall", "--yes", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert ["sudo", "rm", "-f", str(env["conf"])] in env["calls"]
+        assert not root.exists()
+
+    def test_uninstall_without_rotate_conf_needs_no_sudo(self, home, env, capsys, monkeypatch):
+        root = self._marked_home(home)
+        monkeypatch.setattr(cli_args.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
+        with pytest.raises(SystemExit) as ei:
+            cli_args.parse_args(["--launchd", "uninstall", "--root", str(root)], "9.9.9")
+        assert ei.value.code == 0
+        assert not any(c[0] == "sudo" for c in env["calls"])
+
 class TestSystemd:
     """--systemd (v1.0.2): user-level systemd-юнит Linux (аналог --launchd).
 
