@@ -14,14 +14,18 @@
 # user-level юнит в ~/.config/systemd/user, без root, для текущего пользователя.
 #
 # Usage:
-#   install-systemd.sh [install | unit-install | start | stop | status | unit | logs | uninstall]
+#   install-systemd.sh [install | unit-install | start | stop | status | unit | logs
+#                       | unit-uninstall | uninstall [--yes]]
 #
 #   install        — разметить дом (если нужно) и поставить юнит;
 #   unit-install   — только юнит для уже размеченного дома (дом не меняется);
 #   start/stop/status/unit — управление установленным юнитом;
 #   logs [-n N] [-f] — логи сервиса из journald: по умолчанию последние
 #                      20 строк, -f — слежение до Ctrl-C;
-#   uninstall      — остановить и отключить сервис, удалить юнит (дом не трогает).
+#   unit-uninstall — остановить и отключить сервис, удалить юнит (дом НЕ трогает);
+#   uninstall      — ПОЛНОЕ удаление (v1.0.3): юнит + дом (токены, конфиги);
+#                    спрашивает подтверждение, --yes — без вопроса.
+#                    Записи journald не удаляются.
 #
 # Переменные окружения (все опциональны):
 #   BA_ROOT          — домашняя папка (по умолчанию ~/.ba)
@@ -141,10 +145,18 @@ cmd_logs() {
     "$binary" --systemd logs --root "$ROOT" "$@"
 }
 
+cmd_unit_uninstall() {
+    local binary
+    binary="$(find_binary)" || die "backend-adapter не найден."
+    "$binary" --systemd unit-uninstall --root "$ROOT"
+}
+
+# uninstall — полное удаление. Флаги (например --yes) пробрасываются как есть:
+# подтверждение задаёт сам вызывающий, обёртка его не подставляет.
 cmd_uninstall() {
     local binary
     binary="$(find_binary)" || die "backend-adapter не найден."
-    "$binary" --systemd uninstall --root "$ROOT"
+    "$binary" --systemd uninstall --root "$ROOT" "$@"
 }
 
 # --- Точка входа ---
@@ -159,9 +171,10 @@ main() {
         status)         cmd_status ;;
         unit)           cmd_unit ;;
         logs)           shift; cmd_logs "$@" ;;
-        uninstall)      cmd_uninstall ;;
+        unit-uninstall) cmd_unit_uninstall ;;
+        uninstall)      shift; cmd_uninstall "$@" ;;
         -h|--help|help)
-            echo "Usage: $0 [install | unit-install | start | stop | status | unit | logs [-n N] [-f] | uninstall]"
+            echo "Usage: $0 [install | unit-install | start | stop | status | unit | logs [-n N] [-f] | unit-uninstall | uninstall [--yes]]"
             echo ""
             echo "Commands:"
             echo "  install        — Разметить дом (если нужно), установить юнит (запуск отдельно)"
@@ -171,7 +184,10 @@ main() {
             echo "  status         — Показать статус сервиса"
             echo "  unit           — Показать содержимое юнита"
             echo "  logs           — Логи сервиса из journald (по умолчанию 20 строк; -n N — глубина, -f — слежение)"
-            echo "  uninstall      — Остановить и отключить сервис, удалить юнит (дом не меняется)"
+            echo "  unit-uninstall — Остановить и отключить сервис, удалить юнит (дом НЕ трогает)"
+            echo "  uninstall      — ПОЛНОЕ удаление: юнит + дом (токены, конфиги);"
+            echo "                   спрашивает подтверждение, --yes — без вопроса;"
+            echo "                   записи journald не удаляются"
             echo ""
             echo "Environment:"
             echo "  BA_ROOT          — домашняя папка (default: ~/.ba)"

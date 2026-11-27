@@ -781,15 +781,21 @@ delete_install() {
 }
 
 # ── Install launchd service (macOS, current user) ──────────────────────
-# Delegates to backend-adapter --launchd install which generates a minimal
-# plist using the --root ~/.ba approach: the agent runs the binary with
+# Delegates to backend-adapter --launchd plist-install which generates a plist
+# using the --root <root> approach: the agent runs the binary with
 # --root <root>, and the adapter auto-discovers adapter.env, adapter.yaml,
 # tariffs.yaml from the home directory. No sensitive data (tokens) is stored
 # in the plist.
 #
-# Full plist variant (with inline env vars) is available via
-# templates.render_launchd_plist_full() — for users who want explicit control
-# without relying on adapter.env.
+# The plist does carry two service invariants in EnvironmentVariables
+# (v1.0.3): ADAPTER_BACKEND_CONFIG=<root>/adapter.yaml and
+# ADAPTER_DETACH_ENABLE=0 — without them the agent fails on a missing config
+# or detaches out of launchd's supervision. Values in the plist win over
+# adapter.env (they are in the environment before the file is read).
+#
+# The binary written into the plist is the one running this command
+# (sys.executable of the frozen build), so the agent always uses the freshly
+# installed version.
 install_launchd() {
   if [[ "$(uname -s)" != "Darwin" ]]; then
     return

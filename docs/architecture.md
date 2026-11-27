@@ -40,6 +40,10 @@ backend_adapter/
 ├── redact.py               ← secret masking (Bearer tokens, *_KEY, *_PAT, etc.)
 ├── session_log.py          ← per-session log file management with FIFO eviction
 ├── daemon.py               ← process detachment (double fork + stdio redirect)
+├── service_log.py          ← лог сервиса под launchd (v1.0.3, ADR-041): путь
+│                             ~/Library/Logs/backend-adapter/adapter.log (вне дома),
+│                             SIGHUP-переоткрытие после ротации (только под launchd),
+│                             очистка удалением файла. Лист DAG — stdlib + templates
 ├── webserver.py            ← WEBUI core: shared web server, endpoint registry/router,
 │                             WebContext, serve(), CLI (python -m backend_adapter.webserver)
 ├── model_usage.py          ← used-models table (см. §6.6): учёт моделей запросов +
@@ -1294,6 +1298,9 @@ backend-adapter.py
   ├── session_log.py     (no internal deps — PyYAML; session_settings читается
   │                       локально внутри logging_enabled)
   ├── daemon.py          (no internal deps — stdlib only)
+  ├── service_log.py     → templates (лист DAG: путь лога сервиса, SIGHUP-
+  │                       переоткрытие под launchd, очистка удалением файла —
+  │                       v1.0.3, ADR-041; вызывается backend-adapter.py)
   ├── artifact_refresh.py → config (лист DAG; artifact_tree импортирует
   │                       внутри функций — разрыв цикла session_log →
   │                       artifact_refresh → artifact_tree)
@@ -1333,7 +1340,7 @@ backend-adapter.py
 Entry point (WEBUI): `backend-adapter.py` импортирует `webserver.serve()`
 для daemon-потока WEBUI (см. §4.1). Вход CLI: `python -m backend_adapter.webserver`.
 
-**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `templates.py` (stdlib-only), `env_check.py` (stdlib + PyYAML + `env_validate`, вызывается до config), `cli_args.py` (stdlib + `templates` + `env_check`, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time** (or depend only on the stdlib-only `templates.py` and/or `env_check.py`), forming the dependency base. All other modules depend on at least one of these.
+**Key invariant**: `redact.py`, `session_log.py`, `daemon.py`, `config.py` (env var reads), `artifact_tree_common.py`, `templates.py` (stdlib-only), `env_check.py` (stdlib + PyYAML + `env_validate`, вызывается до config), `cli_args.py` (stdlib + `templates` + `env_check`, вызывается до config), `service_log.py` (stdlib + `templates`, вызывается до config), and `webserver.py` (endpoint imports only inside `serve()`) have **zero internal package dependencies at import time** (or depend only on the stdlib-only `templates.py` and/or `env_check.py`), forming the dependency base. All other modules depend on at least one of these.
 
 ---
 
@@ -1345,5 +1352,5 @@ All configuration via `ADAPTER_*` environment variables. See `docs/environment.m
 
 ## 12. Version
 
-Current: **v1.0.2** (see `backend-adapter.py`).
+Current: **v1.0.3** (see `backend-adapter.py`).
 Changelog: `changelog.md` (история версии — секция с её номером).

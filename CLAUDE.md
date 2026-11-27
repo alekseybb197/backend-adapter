@@ -65,11 +65,31 @@ This file provides guidance to [CC] () when working with code in this repository
   `logs` (последние 20 строк, `-n/--lines N` — глубина, `-f/--follow` —
   слежение до Ctrl-C; macOS читает `~/Library/Logs/backend-adapter/adapter.log`
   через `tail`, Linux — journald через `journalctl`; флаги `-n`/`-f` только
-  с `logs`), `uninstall` (остановить, снять регистрацию/отключить, удалить
-  plist/юнит и его `.bak`; дом не трогает, идемпотентно); дефолт — `install`.
-  Все настройки (включая токены) остаются в `<root>/adapter.env` — в
-  plist/юните их нет; systemd-юнит жёстко ставит
-  `ADAPTER_DETACH_ENABLE=0`. **macOS:** `load` = `launchctl bootstrap` +
+  с `logs`), `logs-clear` (v1.0.3, ADR-041: файл лога **удаляется**, а не
+  обнуляется — `truncate` под launchd оставляет NUL-дырки; работающий агент
+  перезапускается `kickstart -k`), `log-rotate`/`log-rotate-remove`
+  (v1.0.3, ADR-041: конфиг `/etc/newsyslog.d/backend-adapter.conf` через
+  `sudo install` — политика 5×1 МБ, gzip, по размеру; строка указывает
+  PID-файл агента и `SIGHUP`, чтобы `service_log.install_hup_handler`
+  переоткрыл лог; конфиг проверяется `newsyslog -r -n` без root; без живого
+  PID-файла — `[FATAL]`), `plist-uninstall`/`unit-uninstall` (снять только сервис:
+  остановить, снять регистрацию/отключить, удалить plist/юнит и его `.bak`;
+  дом не трогает, идемпотентно) и `uninstall` (v1.0.3 — ПОЛНОЕ удаление:
+  сервис + дом целиком; на macOS ещё и лог сервиса и конфиг ротации
+  newsyslog, если он ставился; записи journald не
+  трогаются; спрашивает подтверждение, `--yes`/`-y` — без вопроса, без tty
+  без `--yes` — `[FATAL]`; отказ, если `--root` — `/`, `~` или каталог без
+  `adapter.env`/`adapter.yaml`); дефолт — `install`.
+  Токены остаются в `<root>/adapter.env` — в plist/юните их нет; зато
+  **оба** артефакта жёстко задают `ADAPTER_DETACH_ENABLE=0` и
+  `ADAPTER_BACKEND_CONFIG=<root>/adapter.yaml` (v1.0.3): эти значения
+  попадают в окружение раньше `adapter.env` (`setdefault`) и потому
+  побеждают файл — без них агент падал на пустом `ADAPTER_BACKEND_CONFIG`
+  либо делал двойной форк вне надзора. Бинарник для plist/юнита выбирается
+  по принципу «тот, которым выполнена команда» (frozen → `.py` +
+  интерпретатор → консольная команда → `<root>` → `PATH`) и проверяется
+  пробой `--help`; бинарник без `--root` (до v0.9.13) — `[FATAL]`.
+  **macOS:** `load` = `launchctl bootstrap` +
   `kickstart -p` (при `RunAtLoad=false` регистрация сама процесс не поднимает),
   `unload` = `bootout`, `status` разбирает `launchctl print`. Лог сервиса —
   **вне дома** (`~/Library/Logs/backend-adapter/adapter.log`): `<root>/log`
@@ -121,6 +141,10 @@ This file provides guidance to [CC] () when working with code in this repository
   JSON-результат опроса списка моделей (`probe_json.py`), PID-файл (`daemon.py` —
   пишется при ЛЮБОМ запуске, не только в detach; удаляется при штатном
   завершении и через `atexit`), `model-usage.yaml`, `state.yaml`.
+  Отдельно от `ADAPTER_DATA_ROOT` — **лог сервиса** под надзором: macOS
+  `~/Library/Logs/backend-adapter/adapter.log` (plist `StandardOutPath`),
+  Linux — journald; чистится `--launchd logs-clear`, ротируется newsyslog
+  (`--launchd log-rotate`, v1.0.3, ADR-041, `service_log.py`).
 
 ## Принципы
 
@@ -199,9 +223,10 @@ Log/Parts и каскада больше нет (v0.9.10) — `*.parts`-дамп
 `session_log.py`, `daemon.py`, `config.py`, `artifact_tree_common.py`,
 `webserver.py` (эндпоинты импортирует только внутри `serve()`); все остальные
 модули зависят минимум от одного из них. `session_settings.py`,
-`session_registry.py`, `state_store.py`, `env_validate.py`, `templates.py` и
-`env_check.py` — листы DAG (`env_validate` и `templates` — stdlib-only;
-`cli_args` зависит только от `templates` + `env_check`, остальные импортируют
+`session_registry.py`, `state_store.py`, `env_validate.py`, `templates.py`,
+`env_check.py` и `service_log.py` — листы DAG (`env_validate` — stdlib-only;
+`templates` — stdlib; `cli_args` зависит только от `templates` + `env_check` +
+`service_log`, `service_log` — от `templates`, остальные импортируют
 только `config`; `env_check` — stdlib + PyYAML + `env_validate`).
 `cli_args.py` (v0.9.11) вызывается из `backend-adapter.py` **раньше**
 `env_validate`; режим `--check` (v0.9.13, `env_check.py`) уходит ещё раньше —

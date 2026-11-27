@@ -165,6 +165,7 @@ ADR-001…031 описывают решения v1.0.0. ADR-032…040 — пре
 | [038](038-proposal-stream-tool-call-fallback.md) | Распознавание `<tool_call>` в стриме ([прототип](proposals/038/)) | Предложено | пробел ADR-008 |
 | [039](039-proposal-log-retention.md) | Хранение `log/`: две политики | Предложено | неограниченный рост `log/` |
 | [040](040-proposal-webui-auth-csrf-host.md) | `Host`, `Origin`, basic auth, ключ прокси, маскирование | Предложено | CSRF, DNS rebinding, утечка `x-api-key` |
+| [041](041-service-log-rotation.md) | Ротация лога сервиса: newsyslog + SIGHUP; `logs-clear` | Действует (v1.0.3) | отсутствие владельца у лога сервиса (~21 МБ/сутки) |
 
 ## Снятые решения (отвергнутые альтернативы, подтверждённые историей)
 

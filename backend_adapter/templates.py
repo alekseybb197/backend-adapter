@@ -252,6 +252,8 @@ def render_launchd_plist(
     binary_path: str,
     root: str | None = None,
     *,
+    interpreter: str | None = None,
+    env_vars: dict[str, str] | None = None,
     keep_alive: bool = False,
     run_at_load: bool = False,
     standard_out_path: str | None = None,
@@ -267,26 +269,32 @@ def render_launchd_plist(
         root: домашняя папка (обычно ``~/.ba``). Если задана, передаётся
               ``--root <root>`` — адаптер сам найдёт и загрузит ``adapter.env``,
               ``adapter.yaml``, ``tariffs.yaml``.
+        interpreter: если задан, ``ProgramArguments`` = ``[interpreter,
+              binary_path, --root, root]``. Нужен для ``backend-adapter.py``:
+              скрипт запускается интерпретатором, а не как исполняемый файл
+              (launchd не умеет shebang-запуск «как в терминале»). Для
+              standalone-бинарника — ``None``.
+        env_vars: ``KEY -> VALUE`` для ``<key>EnvironmentVariables</key>``.
+              ``None`` — блока нет (все настройки только из ``adapter.env``).
+              Значения plist попадают в окружение процесса **до** чтения
+              ``adapter.env`` и потому побеждают файл (``setdefault``).
         keep_alive: ``True`` — авто-перезапуск при падении (продакшен).
         run_at_load: ``True`` — запуск сразу после загрузки (по умолчанию ``False``,
-                     чтобы пользователь успил заполнить ``adapter.env`` перед стартом).
+                     чтобы пользователь успел заполнить ``adapter.env`` перед стартом).
         standard_out_path: путь файла для stdout (если ``None`` — логи в system log).
         standard_error_path: путь файла для stderr (если ``None`` — логи в system log).
 
     Возвращает: строку XML plist (не заканчивается хвостовым ``\\n``,
                 вызывающий может добавить при записи файла).
     """
-    binary_xml = _escape_plist_string(binary_path)
+    prog = [interpreter, binary_path] if interpreter else [binary_path]
+    args = [f"<string>{_escape_plist_string(a)}</string>" for a in prog]
 
     if root is not None:
-        root_escaped = _escape_plist_string(root)
-        args = [
-            f"<string>{binary_xml}</string>",
+        args += [
             "<string>--root</string>",
-            f"<string>{root_escaped}</string>",
+            f"<string>{_escape_plist_string(root)}</string>",
         ]
-    else:
-        args = [f"<string>{binary_xml}</string>"]
     # Как в render_launchd_plist_full: элементы через отступ, без ведущего \n.
     extra_args_xml = "\n        ".join(args)
 
@@ -307,6 +315,19 @@ def render_launchd_plist(
 
     <key>WorkingDirectory</key>
     <string>{root_escaped}</string>"""
+
+    if env_vars:
+        env_xml = "\n        ".join(
+            f"<key>{_escape_plist_string(k)}</key>\n"
+            f"        <string>{_escape_plist_string(v)}</string>"
+            for k, v in sorted(env_vars.items())
+        )
+        extra_env += f"""
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        {env_xml}
+    </dict>"""
 
     ka_bool = "true" if keep_alive else "false"
     ral_bool = "true" if run_at_load else "false"
@@ -442,6 +463,7 @@ def render_systemd_unit(
     binary_path: str,
     root: str,
     *,
+    interpreter: str | None = None,
     restart: bool = True,
     restart_sec: int = 5,
 ) -> str:
@@ -460,12 +482,19 @@ def render_systemd_unit(
         binary_path: абсолютный путь к бинарнику или к ``backend-adapter.py``.
         root: домашняя папка (обычно ``~/.ba``); одновременно
               ``WorkingDirectory`` и аргумент ``--root``.
+        interpreter: если задан, ``ExecStart`` = ``interpreter binary --root
+              root`` — запуск ``backend-adapter.py`` из исходников (скрипт
+              зависит от установленного Python и пакета). Для
+              standalone-бинарника — ``None``.
         restart: ``True`` — ``Restart=on-failure`` (авто-перезапуск).
         restart_sec: пауза перед перезапуском, секунд.
 
     Возвращает: строку unit-файла (заканчивается ``\\n``).
     """
-    exec_start = f"{_quote_systemd_arg(binary_path)} --root {_quote_systemd_arg(root)}"
+    exec_parts = [binary_path] if interpreter is None else [interpreter, binary_path]
+    exec_parts += ["--root", root]
+    exec_start = " ".join(_quote_systemd_arg(part) for part in exec_parts)
+    config_env = _quote_systemd_env("ADAPTER_BACKEND_CONFIG", os.path.join(root, YAML_NAME))
     restart_lines = f"Restart=on-failure\nRestartSec={restart_sec}\n" if restart else ""
 
     return f"""\
@@ -479,6 +508,7 @@ Type=simple
 WorkingDirectory={_quote_systemd_arg(root)}
 ExecStart={exec_start}
 Environment=ADAPTER_DETACH_ENABLE=0
+Environment={config_env}
 {restart_lines}StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=backend-adapter
@@ -486,6 +516,81 @@ SyslogIdentifier=backend-adapter
 [Install]
 WantedBy=default.target
 """
+
+
+def render_newsyslog_conf(
+    log_path: str,
+    *,
+    owner_group: str,
+    pid_file: str | None = None,
+    mode: int = 0o600,
+    count: int = 5,
+    size_kb: int = 1024,
+    when: str = "*",
+    flags: str = "BZ",
+    signal_number: int = 1,
+) -> str:
+    """Строка конфига newsyslog (macOS) для лога сервиса — ADR-041.
+
+    Формат ``newsyslog.conf(5)``::
+
+        logfile  [owner:group]  mode  count  size  when  flags  [/pid_file] [sig_num]
+
+    Значения по умолчанию — 5 архивов по 1 МБ, только по размеру
+    (``when = *``: newsyslog запускается раз в час в :30 и решает по размеру),
+    сжатие gzip (``Z``) и без служебного сообщения в новом файле (``B``).
+
+    ``pid_file`` задаёт PID, которому шлётся ``signal_number`` (по умолчанию
+    ``1`` — ``SIGHUP``): адаптер по нему переоткрывает лог
+    (``service_log.install_hup_handler``). Без pid-файла newsyslog не смог бы
+    никого уведомить, и писатель продолжил бы писать в переименованный файл —
+    поэтому ``pid_file=None`` добавляет флаг ``N`` и выбрасывает номер
+    сигнала. «Не сигналить» номером ``0`` невозможно: newsyslog отвергает
+    такой конфиг (``illegal signal number``).
+
+    Возвращает текст конфига (заканчивается ``\\n``); пути с пробелом или
+    решёткой не поддерживаются форматом — ``ValueError``.
+    """
+    for name, path in (("log_path", log_path), ("pid_file", pid_file)):
+        if path is not None and any(c.isspace() for c in path):
+            raise ValueError(f"{name}: newsyslog не поддерживает пробелы в пути: {path!r}")
+    if pid_file is None:
+        flags = flags if "N" in flags else flags + "N"
+    log_escaped = _escape_newsyslog_path(log_path)
+    fields = [
+        log_escaped,
+        owner_group,
+        f"{mode:03o}",
+        str(count),
+        str(size_kb),
+        when,
+        flags,
+    ]
+    if pid_file is not None:
+        fields += [_escape_newsyslog_path(pid_file), str(signal_number)]
+    header = (
+        "# backend-adapter service log — ADR-041.\n"
+        "# Установлен командой: backend-adapter --launchd log-rotate\n"
+        "# Снять: backend-adapter --launchd log-rotate-remove\n"
+    )
+    return header + "  ".join(fields) + "\n"
+
+
+def _escape_newsyslog_path(path: str) -> str:
+    """Экранировать ``#`` в пути: в newsyslog.conf он начинает комментарий."""
+    return path.replace("#", "\\#")
+
+
+def _quote_systemd_env(key: str, value: str) -> str:
+    """Собрать одно присваивание ``Environment=`` с безопасным значением.
+
+    Всё присваивание берётся в двойные кавычки: внутри них systemd не
+    раскрывает ``$`` и допускает пробелы. Спецификатор ``%`` раскрывается и
+    в ``Environment=``, поэтому удваивается; кавычка и обратный слэш
+    экранируются.
+    """
+    escaped = value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{key}={escaped}"'
 
 
 def _quote_systemd_arg(s: str) -> str:
